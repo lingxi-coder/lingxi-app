@@ -89,7 +89,7 @@ struct WorkflowsPage: View {
 
 // MARK: - Notifications
 struct NotificationsPage: View {
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     var body: some View {
         SettingsSection(label: "通知类型", footer: "所有通知通过系统通知中心，灵犀不会单独打扰你。") {
             SettingsRow(label: "工作流完成", sub: "AI 跑完多步任务时", chevron: false) { LXToggle(isOn: $store.notifs.workflows) }
@@ -139,7 +139,7 @@ struct PrivacyPage: View {
 
 // MARK: - Language
 struct LanguagePage: View {
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     @State private var follow = true
     var body: some View {
         VStack(spacing: 0) {
@@ -163,30 +163,152 @@ struct LanguagePage: View {
 
 // MARK: - Voice TTS
 struct VoicePage: View {
+    @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
-    @State private var apiKey = ""
+    @Bindable var store: SettingsStore
+    @State private var capability = VoiceCapabilityModel()
+
     var body: some View {
-        let preset = Presets.voice.first(where: { $0.id == store.voice.preset })
         VStack(spacing: 0) {
-            SettingsSection(label: "语音合成 TTS") {
-                RadioList(options: Presets.voice.map { .init(value: $0.id, label: $0.name, sub: $0.sub) },
-                          value: $store.voice.preset)
-            }
-            if let preset, preset.id != "system" {
-                SettingsSection(label: "API 配置", footer: "密钥仅本地存储。") {
-                    VStack { SettingsField(text: $apiKey, placeholder: "API Key (\(preset.name))") }
-                        .padding(.horizontal, 14).padding(.vertical, 12)
+            SettingsSection(label: "语音识别", footer: capability.effectiveRecognitionLabel) {
+                SettingsRow(label: "识别语言", chevron: false) {
+                    Picker("识别语言", selection: languageBinding) {
+                        ForEach(capability.languageOptions) { option in
+                            Text(option.title).tag(option.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 190)
+                }
+                SettingsRow(
+                    label: "当前选择",
+                    value: capability.selectedLanguageLabel,
+                    chevron: false
+                )
+                SettingsRow(
+                    label: "实际语言",
+                    value: capability.effectiveLanguageLabel,
+                    chevron: false
+                )
+                SettingsRow(label: "识别方式", chevron: false) {
+                    Picker("识别方式", selection: modeBinding) {
+                        ForEach(VoiceRecognitionMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 190)
+                }
+                SettingsRow(
+                    label: "生效方式",
+                    value: capability.effectiveRecognitionStatus.modeLabel,
+                    chevron: false,
+                    isLast: capability.effectiveRecognitionStatus.fallbackReason == nil
+                )
+                if let fallbackReason = capability.effectiveRecognitionStatus.fallbackReason {
+                    SettingsRow(
+                        label: "在线回退原因",
+                        sub: fallbackReason,
+                        value: "已回退",
+                        chevron: false,
+                        isLast: true
+                    )
                 }
             }
-            SettingsSection(label: "选项", footer: "自动播放：AI 回复完成后立即朗读。") {
-                SettingsRow(label: "语速", value: String(format: "%.1fx", store.voice.speed), chevron: false) {
-                    Slider(value: $store.voice.speed, in: 0.5...2, step: 0.1).frame(width: 110).tint(t.accent)
+
+            SettingsSection(label: "权限", footer: "语音识别与麦克风权限都会影响设备端和系统在线识别。") {
+                SettingsRow(
+                    label: "语音识别",
+                    sub: capability.speechPermission.detail,
+                    value: capability.speechPermission.label,
+                    valueColor: capability.speechAuthorization == .authorized ? t.ok : t.text3,
+                    chevron: false
+                )
+                SettingsRow(
+                    label: "麦克风",
+                    sub: capability.microphonePermission.detail,
+                    value: capability.microphonePermission.label,
+                    chevron: false,
+                    isLast: true
+                ) {
+                    Button("检查权限") {
+                        Task { await capability.requestPermissions() }
+                    }
                 }
-                SettingsRow(label: "自动播放回复", chevron: false, isLast: true) { LXToggle(isOn: $store.voice.autoPlay) }
+            }
+
+            SettingsSection(label: "系统语音 TTS", footer: "语音由 iOS 管理，不下载或模拟 Android 模型包。") {
+                SettingsRow(label: "声音", chevron: false) {
+                    Picker("声音", selection: voiceBinding) {
+                        ForEach(capability.voices) { voice in
+                            Text("\(voice.name) · \(voice.language)").tag(voice.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 190)
+                }
+                SettingsRow(
+                    label: "语速",
+                    value: capability.speed.formatted(.number.precision(.fractionLength(1))) + "x",
+                    chevron: false
+                ) {
+                    Slider(value: speedBinding, in: 0.5...2, step: 0.1)
+                        .frame(width: 110)
+                        .tint(t.accent)
+                }
+                SettingsRow(label: "自动播放回复", chevron: false) {
+                    LXToggle(isOn: autoPlayBinding)
+                }
+                SettingsRow(label: "试听", chevron: false, isLast: true) {
+                    Button(capability.isPreviewing ? "播放中…" : "播放示例") {
+                        Task { await capability.preview() }
+                    }
+                    .disabled(capability.isPreviewing)
+                }
+            }
+
+            if let error = capability.errorMessage {
+                BlurbText(text: error)
             }
         }
+        .task { capability.refreshCapabilities() }
     }
+
+    private var languageBinding: Binding<String> {
+        Binding(
+            get: { capability.language },
+            set: { value in
+                capability.setLanguage(value)
+                app.voiceLanguage = value
+            }
+        )
+    }
+
+    private var modeBinding: Binding<VoiceRecognitionMode> {
+        Binding(
+            get: { capability.mode },
+            set: { value in
+                capability.setMode(value)
+                app.voiceRecognitionMode = value.rawValue
+            }
+        )
+    }
+
+    private var voiceBinding: Binding<String> {
+        Binding(
+            get: { capability.selectedVoice?.id ?? "" },
+            set: capability.setVoice
+        )
+    }
+
+    private var speedBinding: Binding<Double> {
+        Binding(get: { capability.speed }, set: capability.setSpeed)
+    }
+
+    private var autoPlayBinding: Binding<Bool> {
+        Binding(get: { capability.autoPlay }, set: capability.setAutoPlay)
+    }
+
 }
 
 // MARK: - shared helper

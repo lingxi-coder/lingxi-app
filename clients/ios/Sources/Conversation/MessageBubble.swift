@@ -4,6 +4,7 @@ import SwiftUI
 struct MessageBubble: View {
     @Environment(\.theme) private var t
     let message: Message
+    var detail: ConversationMessageDetail? = nil
     /// When the most-recent AI reply is dimmed during voice flow ("上下文已记入").
     var dimmed: Bool = false
     /// Tapping the assistant bubble's share affordance surfaces the native share
@@ -33,7 +34,11 @@ struct MessageBubble: View {
                 AssistantAvatar()
                 VStack(alignment: .leading, spacing: 8) {
                     if let tag = message.tag { Pill(text: tag, color: t.accent) }
-                    AIText(markdown: message.text)
+                    if let detail, !detail.blocks.isEmpty {
+                        StructuredAIBlocks(detail: detail, fallback: message.text)
+                    } else {
+                        AIText(markdown: message.text)
+                    }
                     // Share affordance: surfaces the native chooser for this
                     // reply's text through the same ShareImpl the engine bridges
                     // onto `traits::SharingService` — so a bubble share and a
@@ -51,6 +56,98 @@ struct MessageBubble: View {
             .opacity(dimmed ? 0.4 : 1)
             .padding(.bottom, 26)
         }
+    }
+}
+
+private struct StructuredAIBlocks: View {
+    @Environment(\.theme) private var t
+    let detail: ConversationMessageDetail
+    let fallback: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(detail.blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case let .text(text):
+                    AIText(markdown: text)
+                case let .thinking(text, _):
+                    panel(title: "思考", body: text, icon: .brain)
+                case .redactedThinking:
+                    panel(title: "思考", body: "[已折叠的思考]", icon: .brain)
+                case let .compactBoundary(messagesBefore, messagesAfter, _):
+                    compactBoundary(before: messagesBefore, after: messagesAfter)
+                case let .toolUse(_, tool, inputSummary, _):
+                    panel(title: "调用工具 \(tool)", body: inputSummary, icon: .workflow)
+                case let .toolResult(_, tool, isError, summary, _, oldString, newString, filePath):
+                    VStack(alignment: .leading, spacing: 6) {
+                        panel(
+                            title: isError ? "工具 \(tool) 失败" : "工具 \(tool) 返回",
+                            body: summary,
+                            icon: isError ? .warning : .check
+                        )
+                        if let filePath, let oldString, let newString {
+                            diffPreview(path: filePath, oldString: oldString, newString: newString)
+                        }
+                    }
+                }
+            }
+        }
+        .overlay {
+            if detail.blocks.isEmpty && !fallback.isEmpty {
+                AIText(markdown: fallback)
+            }
+        }
+    }
+
+    private func panel(title: String, body: String, icon: LXIconName) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                LXIcon(name: icon, size: 12, color: t.text3, stroke: 1.7)
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(t.text3)
+            }
+            Text(body)
+                .font(.system(size: 12.5))
+                .foregroundColor(t.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .background(t.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+    }
+
+    private func compactBoundary(before: Int, after: Int) -> some View {
+        HStack(spacing: 8) {
+            LXIcon(name: .workflow, size: 12, color: t.text3, stroke: 1.7)
+            Text("对话已压缩 \(before) → \(after)")
+                .font(.system(size: 12))
+                .foregroundColor(t.text3)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(t.surface)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(t.border, lineWidth: 0.5))
+    }
+
+    private func diffPreview(path: String, oldString: String, newString: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(path)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundColor(t.text4)
+            Text("- \(oldString)\n+ \(newString)")
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundColor(t.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .background(t.windowBg.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
     }
 }
 

@@ -1,10 +1,11 @@
 import SwiftUI
 
 struct AppearancePage: View {
-    @EnvironmentObject private var app: AppState
+    @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
 
     var body: some View {
+        @Bindable var app = app
         VStack(spacing: 0) {
             SettingsSection(label: "主题") {
                 RadioList(options: [

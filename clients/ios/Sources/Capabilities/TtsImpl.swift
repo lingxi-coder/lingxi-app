@@ -20,11 +20,20 @@ import Foundation
 
         func synthesize(text: String, voice: String?) async throws -> TtsAudioFfi {
             let utterance = AVSpeechUtterance(string: text)
-            if let voice, let v = AVSpeechSynthesisVoice(identifier: voice) {
+            let defaults = UserDefaults.standard
+            let configuredVoice = defaults.string(forKey: "systemVoiceIdentifier")
+            let configuredLanguage = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
+                configuredLanguage: defaults.string(forKey: "voiceLanguage"),
+                currentLocale: .autoupdatingCurrent
+            )
+            if let identifier = voice ?? configuredVoice,
+               let v = AVSpeechSynthesisVoice(identifier: identifier) {
                 utterance.voice = v
-            } else if let v = AVSpeechSynthesisVoice(language: Locale.current.identifier) {
+            } else if let v = AVSpeechSynthesisVoice(language: configuredLanguage) {
                 utterance.voice = v
             }
+            let speed = defaults.object(forKey: "voiceSpeed") == nil ? 1 : defaults.double(forKey: "voiceSpeed")
+            utterance.rate = VoiceCapabilityModel.utteranceRate(from: speed)
 
             return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<TtsAudioFfi, Error>) in
                 let collector = PcmCollector()

@@ -22,10 +22,8 @@ import Foundation
         func startRecording(sampleRateHz: UInt32, format: String) async throws {
             try await requestMicAuthorization()
 
-            let session = AVAudioSession.sharedInstance()
             do {
-                try session.setCategory(.playAndRecord, mode: .default)
-                try session.setActive(true)
+                try await VoiceAudioSessionCoordinator.shared.activate(.recording)
             } catch {
                 throw VoiceFfiError.Other(message: "audio session: \(error.localizedDescription)")
             }
@@ -43,28 +41,24 @@ import Foundation
                 guard rec.record() else {
                     throw VoiceFfiError.Other(message: "recorder failed to start")
                 }
-                lock.lock()
-                recorder = rec
-                fileURL = url
-                lock.unlock()
+                store(recorder: rec, fileURL: url)
             } catch let e as VoiceFfiError {
+                try? FileManager.default.removeItem(at: url)
+                await VoiceAudioSessionCoordinator.shared.deactivate(.recording)
                 throw e
             } catch {
+                try? FileManager.default.removeItem(at: url)
+                await VoiceAudioSessionCoordinator.shared.deactivate(.recording)
                 throw VoiceFfiError.Other(message: error.localizedDescription)
             }
         }
 
         func stopRecording() async throws -> VoiceRecordingFfi {
-            lock.lock()
-            let rec = recorder
-            let url = fileURL
-            recorder = nil
-            fileURL = nil
-            lock.unlock()
+            let (rec, url) = takeRecorder()
 
             guard let rec, let url else { throw VoiceFfiError.NotRecording }
             rec.stop()
-            try? AVAudioSession.sharedInstance().setActive(false)
+            await VoiceAudioSessionCoordinator.shared.deactivate(.recording)
 
             do {
                 let data = try Data(contentsOf: url)
@@ -76,15 +70,34 @@ import Foundation
         }
 
         func isRecording() async -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            return recorder?.isRecording ?? false
+            recordingState()
         }
 
         private func requestMicAuthorization() async throws {
-            let granted: Bool = await withCheckedContinuation { cont in
-                AVAudioSession.sharedInstance().requestRecordPermission { cont.resume(returning: $0) }
-            }
+            let granted = await AVAudioApplication.requestRecordPermission()
             guard granted else { throw VoiceFfiError.PermissionDenied }
+        }
+
+        private func store(recorder: AVAudioRecorder, fileURL: URL) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.recorder = recorder
+            self.fileURL = fileURL
+        }
+
+        private func takeRecorder() -> (AVAudioRecorder?, URL?) {
+            lock.lock()
+            defer { lock.unlock() }
+            let current = (recorder, fileURL)
+            recorder = nil
+            fileURL = nil
+            return current
+        }
+
+        private func recordingState() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return recorder?.isRecording ?? false
         }
     }
 #endif

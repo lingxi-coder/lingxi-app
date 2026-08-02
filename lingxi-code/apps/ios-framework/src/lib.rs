@@ -53,6 +53,8 @@
 
 use std::sync::Arc;
 #[cfg(feature = "uniffi")]
+use std::sync::{Mutex as StdMutex, OnceLock};
+#[cfg(feature = "uniffi")]
 use traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
 use traits::{CameraControl, SharingService, VoiceRecorder};
 // `Platform` is named only inside the `cfg(target_os = "ios")` constructor body;
@@ -67,7 +69,9 @@ use traits::Platform;
 // the shared host.
 #[cfg(feature = "uniffi")]
 pub use engine_mobile::{
-    ClientEventListener, MobileConfig, MobileEngineError, MobileEngineHandle, PermissionRequestSink,
+    ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
+    MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
+    PermissionRequestSink, ProviderConnectionTestDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -92,7 +96,7 @@ pub struct PlatformImpls {
 /// Mobile Linux runtime mode exposed to the iOS host.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MobileLinuxRuntimeModeFfi {
     Legacy,
     MobileLinux,
@@ -101,7 +105,7 @@ pub enum MobileLinuxRuntimeModeFfi {
 /// FFI carrier for iOS mobile-linux configuration.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IosMobileLinuxConfigFfi {
     /// Legacy unavailable stub vs mobile-linux backend selection.
     pub mode: MobileLinuxRuntimeModeFfi,
@@ -122,6 +126,42 @@ pub struct IosMobileLinuxConfigFfi {
     /// only when its digest matches the build-pinned
     /// `LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256`.
     pub authorization_file: Option<String>,
+}
+
+/// iOS-provided multi-provider configuration for the mobile engine.
+///
+/// The JSON strings contain non-secret provider/routing settings only. API
+/// keys are sent separately through `SetProviderCredential` and persist in the
+/// injected secure storage implementation.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct IosProviderConfigFfi {
+    /// JSON object matching the shared `settings.providers` schema.
+    pub provider_profiles_json: String,
+    /// Optional JSON value matching the shared `settings.routing` schema.
+    pub routing_json: Option<String>,
+}
+
+/// Compact launch configuration for the extended iOS engine constructor.
+///
+/// This additive carrier keeps project scoping, provider configuration, and
+/// mobile-linux settings marshaled together without breaking the legacy flat
+/// `build_ios_engine` entry point.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct IosEngineLaunchConfigFfi {
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub app_sandbox_root: String,
+    /// Optional managed Project workspace. When present it must resolve to
+    /// `<app_sandbox_root>/(P|p)rojects/<lowercase UUID>/workspace`; global
+    /// `.lingxi` state continues to live under `app_sandbox_root`.
+    pub project_cwd: Option<String>,
+    pub provider_config: Option<IosProviderConfigFfi>,
+    pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
 }
 
 /// FFI rootfs lifecycle state.
@@ -477,6 +517,96 @@ fn default_workspace_host_path(app_sandbox_root: &str) -> std::path::PathBuf {
 }
 
 #[cfg(feature = "uniffi")]
+fn is_lowercase_uuid(value: &str) -> bool {
+    if value.len() != 36 || value != value.to_ascii_lowercase() {
+        return false;
+    }
+    value.chars().enumerate().all(|(index, character)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            character == '-'
+        } else {
+            character.is_ascii_hexdigit()
+        }
+    })
+}
+
+#[cfg(feature = "uniffi")]
+fn ios_project_cwd(
+    app_sandbox_root: &str,
+    project_cwd: Option<&str>,
+) -> Result<std::path::PathBuf, MobileEngineError> {
+    let app_root = std::path::Path::new(app_sandbox_root)
+        .canonicalize()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("iOS app sandbox root is unavailable: {error}"))
+        })?;
+    let Some(project_cwd) = project_cwd else {
+        return Ok(app_root);
+    };
+    let workspace = std::path::Path::new(project_cwd)
+        .canonicalize()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("iOS Project workspace is unavailable: {error}"))
+        })?;
+    let relative = workspace.strip_prefix(&app_root).map_err(|_| {
+        MobileEngineError::Internal(
+            "iOS Project workspace must remain inside the app sandbox".to_string(),
+        )
+    })?;
+    let components: Vec<_> = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect();
+    let valid = components.len() == 3
+        && matches!(components[0], "Projects" | "projects")
+        && is_lowercase_uuid(components[1])
+        && components[2] == "workspace"
+        && workspace.is_dir();
+    if !valid {
+        return Err(MobileEngineError::Internal(
+            "iOS Project workspace must match appSandboxRoot/Projects/<lowercase UUID>/workspace"
+                .to_string(),
+        ));
+    }
+    Ok(workspace)
+}
+
+#[cfg(feature = "uniffi")]
+fn ios_mobile_config_from_launch_config(
+    config: &IosEngineLaunchConfigFfi,
+) -> Result<MobileConfig, MobileEngineError> {
+    let cwd = ios_project_cwd(&config.app_sandbox_root, config.project_cwd.as_deref())?;
+    let mut cfg = MobileConfig {
+        cwd,
+        lingxi_home: std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
+        // P0.2: production injects the real LINGXI.md hierarchy provider so the
+        // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
+        // its system prompt and `fire_instructions_loaded()` fires over them.
+        memory_provider: Some(orchestrator::prompt::real_provider()),
+        ..MobileConfig::default()
+    };
+    if !config.api_base.is_empty() {
+        cfg.api_base = config.api_base.clone();
+    }
+    cfg.api_key = config.api_key.clone();
+    if !config.model.is_empty() {
+        cfg.default_model = config.model.clone();
+    }
+    if let Some(provider_config) = &config.provider_config {
+        let (profiles, routing) = engine_mobile::parse_mobile_provider_config_json(
+            &provider_config.provider_profiles_json,
+            provider_config.routing_json.as_deref(),
+        )?;
+        cfg.provider_profiles = profiles;
+        cfg.routing = routing;
+    }
+    Ok(cfg)
+}
+
+#[cfg(feature = "uniffi")]
 fn validate_mobile_linux_workspace_config(
     app_sandbox_root: &str,
     config: &IosMobileLinuxConfigFfi,
@@ -486,19 +616,24 @@ fn validate_mobile_linux_workspace_config(
     } else {
         std::path::PathBuf::from(&config.workspace_host_path)
     };
-    if !workspace_host_path.is_absolute() {
-        return Err(MobileLinuxOperationFfiError::InvalidRequest {
-            message: "workspace_host_path must be absolute".to_string(),
-        });
-    }
-    let sandbox_root = std::path::PathBuf::from(app_sandbox_root);
-    let managed_root = std::path::PathBuf::from(&config.managed_root);
-    let lingxi_root = sandbox_root.join(branding::DOT_DIR);
+    let workspace_host_path =
+        resolve_mobile_linux_security_path(&workspace_host_path, "workspace_host_path")?;
+    let sandbox_root = resolve_mobile_linux_security_path(
+        std::path::Path::new(app_sandbox_root),
+        "app_sandbox_root",
+    )?;
+    let managed_root = resolve_mobile_linux_security_path(
+        std::path::Path::new(&config.managed_root),
+        "managed_root",
+    )?;
+    let lingxi_root =
+        resolve_mobile_linux_security_path(&sandbox_root.join(branding::DOT_DIR), ".lingxi root")?;
 
     if workspace_host_path == sandbox_root
         || workspace_host_path.starts_with(&managed_root)
         || managed_root.starts_with(&workspace_host_path)
         || workspace_host_path.starts_with(&lingxi_root)
+        || lingxi_root.starts_with(&workspace_host_path)
     {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
             message: "workspace_host_path may not target app root, managed_root, or .lingxi"
@@ -506,11 +641,7 @@ fn validate_mobile_linux_workspace_config(
         });
     }
 
-    let workspace_text = workspace_host_path.to_string_lossy();
-    if workspace_text.contains("/providers")
-        || workspace_text.contains("/provider")
-        || workspace_text.contains("/Library/Preferences")
-    {
+    if mobile_linux_path_contains_protected_config_subtree(&workspace_host_path) {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
             message: "workspace_host_path may not target provider/config subtrees".to_string(),
         });
@@ -532,6 +663,141 @@ fn validate_mobile_linux_workspace_config(
     }
 
     Ok((workspace_host_path, stable_workspace_id))
+}
+
+#[cfg(feature = "uniffi")]
+fn resolve_mobile_linux_security_path(
+    path: &std::path::Path,
+    field: &str,
+) -> Result<std::path::PathBuf, MobileLinuxOperationFfiError> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return Err(MobileLinuxOperationFfiError::InvalidRequest {
+            message: format!("{field} must be absolute"),
+        });
+    }
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(MobileLinuxOperationFfiError::InvalidRequest {
+                    message: format!("{field} may not contain parent traversal"),
+                });
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    // `canonicalize` requires the final path to exist, but first launch often
+    // validates a workspace before creating it. Resolve the deepest existing
+    // ancestor so any symlink already present in the path is still collapsed,
+    // then append the missing suffix without reintroducing `..` components.
+    let mut existing = normalized.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = existing.file_name() else {
+                    return Err(MobileLinuxOperationFfiError::InvalidRequest {
+                        message: format!("{field} has no resolvable ancestor"),
+                    });
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return Err(MobileLinuxOperationFfiError::InvalidRequest {
+                        message: format!("{field} has no resolvable ancestor"),
+                    });
+                };
+                existing = parent;
+            }
+            Err(error) => {
+                return Err(MobileLinuxOperationFfiError::InvalidRequest {
+                    message: format!("{field} cannot be resolved safely: {error}"),
+                });
+            }
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn mobile_linux_path_contains_protected_config_subtree(path: &std::path::Path) -> bool {
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => {
+                Some(value.to_string_lossy().to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect();
+    components
+        .iter()
+        .any(|component| matches!(component.as_str(), ".lingxi" | "provider" | "providers"))
+        || components
+            .windows(2)
+            .any(|pair| pair[0] == "library" && pair[1] == "preferences")
+}
+
+#[cfg(feature = "uniffi")]
+fn infer_mobile_linux_app_sandbox_root(
+    config: &IosMobileLinuxConfigFfi,
+) -> Result<std::path::PathBuf, MobileLinuxOperationFfiError> {
+    let managed_root = resolve_mobile_linux_security_path(
+        std::path::Path::new(&config.managed_root),
+        "managed_root",
+    )?;
+
+    let managed_components: Vec<_> = managed_root.components().collect();
+    for index in 0..managed_components.len().saturating_sub(1) {
+        let is_application_support = matches!(
+            (managed_components[index], managed_components[index + 1]),
+            (std::path::Component::Normal(first), std::path::Component::Normal(second))
+                if first == "Library" && second == "Application Support"
+        );
+        if is_application_support {
+            let mut app_root = std::path::PathBuf::new();
+            for component in &managed_components[..index] {
+                app_root.push(component.as_os_str());
+            }
+            if app_root.is_absolute() {
+                return Ok(app_root);
+            }
+        }
+    }
+
+    if config.workspace_host_path.trim().is_empty() {
+        return managed_root
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| MobileLinuxOperationFfiError::InvalidRequest {
+                message: "managed_root does not identify an app sandbox".to_string(),
+            });
+    }
+    let workspace_host_path = resolve_mobile_linux_security_path(
+        std::path::Path::new(&config.workspace_host_path),
+        "workspace_host_path",
+    )?;
+
+    let common_root = managed_root
+        .ancestors()
+        .find(|ancestor| workspace_host_path.starts_with(ancestor))
+        .filter(|ancestor| ancestor.parent().is_some())
+        .ok_or_else(|| MobileLinuxOperationFfiError::InvalidRequest {
+            message: "managed_root and workspace_host_path do not identify an app sandbox"
+                .to_string(),
+        })?;
+    Ok(common_root.to_path_buf())
 }
 
 #[cfg(feature = "uniffi")]
@@ -618,40 +884,58 @@ fn ios_mobile_linux_status_from_config(
                 last_error: Some("legacy unavailable backend selected".to_string()),
             }
         }
-        Some(cfg) => {
-            let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
-            let (state, message) = if auth_present {
-                (
-                    MobileLinuxRootfsStateFfi::Unsupported,
-                    "authorization present, but iSH runtime is not linked in this build",
-                )
-            } else {
-                (
-                    MobileLinuxRootfsStateFfi::BlockedByLicense,
-                    "missing additional written authorization for PRoot/iSH redistribution",
-                )
-            };
-            MobileLinuxStatusFfi {
-                state,
-                backend: "ios-ish".to_string(),
-                mode: MobileLinuxRuntimeModeFfi::MobileLinux,
-                platform: "ios".to_string(),
-                abi: cfg.abi.clone(),
-                version: Some(cfg.rootfs_version.clone()),
-                managed_root: Some(cfg.managed_root.clone()),
-                active_root: None,
-                staged_root: None,
-                archive_sha256: cfg.archive_sha256.clone(),
-                installed_size_bytes: None,
-                writable_guest_paths: vec![
-                    "/root".to_string(),
-                    "/tmp".to_string(),
-                    "/var/tmp".to_string(),
-                    "/workspace".to_string(),
-                ],
-                last_error: Some(message.to_string()),
+        Some(cfg) => match ios_mobile_linux_runtime(Some(cfg)) {
+            Some(runtime) => {
+                let probe_rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("ios mobile-linux status runtime");
+                match probe_rt.block_on(runtime.rootfs_status()) {
+                    Ok(status) => status_to_ffi(status),
+                    Err(error) => fallback_ios_mobile_linux_status(cfg, Some(error.to_string())),
+                }
             }
-        }
+            None => fallback_ios_mobile_linux_status(cfg, None),
+        },
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn fallback_ios_mobile_linux_status(
+    cfg: &IosMobileLinuxConfigFfi,
+    override_error: Option<String>,
+) -> MobileLinuxStatusFfi {
+    let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
+    let (state, message) = if auth_present {
+        (
+            MobileLinuxRootfsStateFfi::Unsupported,
+            "authorization present, but iSH runtime is not linked in this build",
+        )
+    } else {
+        (
+            MobileLinuxRootfsStateFfi::BlockedByLicense,
+            "missing additional written authorization for PRoot/iSH redistribution",
+        )
+    };
+    MobileLinuxStatusFfi {
+        state,
+        backend: "ios-ish".to_string(),
+        mode: MobileLinuxRuntimeModeFfi::MobileLinux,
+        platform: "ios".to_string(),
+        abi: cfg.abi.clone(),
+        version: Some(cfg.rootfs_version.clone()),
+        managed_root: Some(cfg.managed_root.clone()),
+        active_root: None,
+        staged_root: None,
+        archive_sha256: cfg.archive_sha256.clone(),
+        installed_size_bytes: None,
+        writable_guest_paths: vec![
+            "/root".to_string(),
+            "/tmp".to_string(),
+            "/var/tmp".to_string(),
+            "/workspace".to_string(),
+        ],
+        last_error: Some(override_error.unwrap_or_else(|| message.to_string())),
     }
 }
 
@@ -662,6 +946,9 @@ fn ios_mobile_linux_runtime(
     let cfg = config?;
     if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
         return None;
+    }
+    if let Some(runtime) = linked_ios_mobile_linux_runtime(cfg) {
+        return Some(runtime);
     }
     let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
     let runtime = if auth_present {
@@ -682,6 +969,18 @@ fn ios_mobile_linux_runtime(
         )
     };
     Some(Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>)
+}
+
+#[cfg(feature = "uniffi")]
+fn linked_ios_mobile_linux_runtime(
+    _cfg: &IosMobileLinuxConfigFfi,
+) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
+    // August 2, 2026: this repository does not contain a concrete iOS
+    // `MobileLinuxRuntime` implementation (only AndroidProotRuntime plus the
+    // unavailable iSH bridge object). Keep the seam explicit so a future
+    // linkable iOS backend can be injected here without changing the exported
+    // handle/state architecture on either side of the FFI boundary.
+    None
 }
 
 #[cfg(feature = "uniffi")]
@@ -1846,6 +2145,100 @@ impl traits::TextToSpeech for IosTtsBridge {
 /// returns [`MobileEngineError::PlatformUnavailable`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn build_ios_cron_store(
+    app_sandbox_root: String,
+    project_cwd: Option<String>,
+) -> Result<Arc<MobileCronStoreHandle>, MobileEngineError> {
+    use platform_posix_minimal::{PosixClock, PosixFileSystem};
+
+    let cwd = ios_project_cwd(&app_sandbox_root, project_cwd.as_deref())?;
+    let app_root = std::path::Path::new(&app_sandbox_root)
+        .canonicalize()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("iOS app sandbox root is unavailable: {error}"))
+        })?;
+    Ok(Arc::new(MobileCronStoreHandle::new(
+        cwd,
+        Arc::new(PosixFileSystem::new(app_root)),
+        Arc::new(PosixClock::new()),
+    )))
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Swift callback.
+pub fn build_ios_engine_with_config(
+    config: IosEngineLaunchConfigFfi,
+    listener: Box<dyn IosEventListener>,
+    stt: Box<dyn IosStt>,
+    tts: Box<dyn IosTts>,
+    camera: Box<dyn IosCamera>,
+    share: Box<dyn IosShare>,
+    voice: Box<dyn IosVoice>,
+    notifications: Box<dyn IosNotification>,
+    clipboard: Box<dyn IosClipboard>,
+    permissions: Box<dyn IosPermissionSink>,
+    secure_storage: Option<Box<dyn IosSecureStorage>>,
+) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
+    #[cfg(target_os = "ios")]
+    {
+        use platform_ios::{IosPlatform, IosPlatformInputs};
+
+        let cfg = ios_mobile_config_from_launch_config(&config)?;
+        let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
+            Some(mobile_linux) => {
+                validate_mobile_linux_workspace_config(&config.app_sandbox_root, mobile_linux)
+                    .map_err(|error| MobileEngineError::Internal(error.to_string()))?
+            }
+            None => (
+                default_workspace_host_path(&config.app_sandbox_root),
+                "default".to_string(),
+            ),
+        };
+        let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
+            app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
+            camera: Arc::new(IosCameraBridge { inner: camera }),
+            voice: Arc::new(IosVoiceBridge { inner: voice }),
+            share: Arc::new(IosShareBridge { inner: share }),
+            stt: Some(Arc::new(IosSttBridge { inner: stt })),
+            tts: Some(Arc::new(IosTtsBridge { inner: tts })),
+            notifications: Some(Arc::new(IosNotificationBridge {
+                inner: notifications,
+            })),
+            clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
+            secure_storage: secure_storage.map(|s| {
+                Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
+            }),
+            mobile_linux: ios_mobile_linux_runtime(config.mobile_linux.as_ref()),
+            workspace_host_path: Some(workspace_host_path),
+            stable_workspace_id: Some(stable_workspace_id),
+        }));
+        let permission_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(IosPermissionSinkBridge { inner: permissions });
+        engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (
+            config,
+            listener,
+            stt,
+            tts,
+            camera,
+            share,
+            voice,
+            notifications,
+            clipboard,
+            permissions,
+            secure_storage,
+        );
+        Err(MobileEngineError::PlatformUnavailable)
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
 #[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Swift callback.
 pub fn build_ios_engine(
     api_base: String,
@@ -1864,77 +2257,27 @@ pub fn build_ios_engine(
     mobile_linux: Option<IosMobileLinuxConfigFfi>,
     secure_storage: Option<Box<dyn IosSecureStorage>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
-    let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
-    #[cfg(target_os = "ios")]
-    {
-        use platform_ios::{IosPlatform, IosPlatformInputs};
-        let mut cfg = MobileConfig {
-            cwd: std::path::PathBuf::from(&app_sandbox_root),
-            lingxi_home: std::path::PathBuf::from(&app_sandbox_root).join(branding::DOT_DIR),
-            // P0.2: production injects the real LINGXI.md hierarchy provider so the
-            // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
-            // its system prompt and `fire_instructions_loaded()` fires over them.
-            memory_provider: Some(orchestrator::prompt::real_provider()),
-            ..MobileConfig::default()
-        };
-        if !api_base.is_empty() {
-            cfg.api_base = api_base;
-        }
-        cfg.api_key = api_key;
-        if !model.is_empty() {
-            cfg.default_model = model;
-        }
-        let (workspace_host_path, stable_workspace_id) = match mobile_linux.as_ref() {
-            Some(config) => validate_mobile_linux_workspace_config(&app_sandbox_root, config)
-                .map_err(|error| MobileEngineError::Internal(error.to_string()))?,
-            None => (
-                default_workspace_host_path(&app_sandbox_root),
-                "default".to_string(),
-            ),
-        };
-        let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
-            app_sandbox_root: std::path::PathBuf::from(app_sandbox_root),
-            camera: Arc::new(IosCameraBridge { inner: camera }),
-            voice: Arc::new(IosVoiceBridge { inner: voice }),
-            share: Arc::new(IosShareBridge { inner: share }),
-            stt: Some(Arc::new(IosSttBridge { inner: stt })),
-            tts: Some(Arc::new(IosTtsBridge { inner: tts })),
-            notifications: Some(Arc::new(IosNotificationBridge {
-                inner: notifications,
-            })),
-            clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
-            secure_storage: secure_storage.map(|s| {
-                Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
-            }),
-            mobile_linux: ios_mobile_linux_runtime(mobile_linux.as_ref()),
-            workspace_host_path: Some(workspace_host_path),
-            stable_workspace_id: Some(stable_workspace_id),
-        }));
-        let permission_sink: Arc<dyn PermissionRequestSink> =
-            Arc::new(IosPermissionSinkBridge { inner: permissions });
-        engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
-    }
-    #[cfg(not(target_os = "ios"))]
-    {
-        let _ = (
+    build_ios_engine_with_config(
+        IosEngineLaunchConfigFfi {
             api_base,
             api_key,
             model,
             app_sandbox_root,
-            listener,
-            stt,
-            tts,
-            camera,
-            share,
-            voice,
-            notifications,
-            clipboard,
-            permissions,
+            project_cwd: None,
+            provider_config: None,
             mobile_linux,
-            secure_storage,
-        );
-        Err(MobileEngineError::PlatformUnavailable)
-    }
+        },
+        listener,
+        stt,
+        tts,
+        camera,
+        share,
+        voice,
+        notifications,
+        clipboard,
+        permissions,
+        secure_storage,
+    )
 }
 
 /// Probe the iOS mobile-linux bridge without constructing the full engine.
@@ -2067,6 +2410,16 @@ impl IosMobileLinuxRuntimeHandle {
 pub fn create_ios_mobile_linux_runtime(
     config: IosMobileLinuxConfigFfi,
 ) -> Result<Arc<IosMobileLinuxRuntimeHandle>, MobileLinuxOperationFfiError> {
+    if matches!(config.mode, MobileLinuxRuntimeModeFfi::Legacy) {
+        return Err(MobileLinuxOperationFfiError::Unavailable {
+            message: "legacy unavailable backend selected".to_string(),
+        });
+    }
+    let app_sandbox_root = infer_mobile_linux_app_sandbox_root(&config)?;
+    let _ = validate_mobile_linux_workspace_config(
+        app_sandbox_root.to_string_lossy().as_ref(),
+        &config,
+    )?;
     let runtime =
         probe_runtime(Some(&config)).ok_or_else(|| MobileLinuxOperationFfiError::Unavailable {
             message: "legacy unavailable backend selected".to_string(),
@@ -2338,13 +2691,46 @@ impl IosMobileLinuxRuntimeHandle {
 }
 
 #[cfg(feature = "uniffi")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IosMobileLinuxCompatKey {
+    config: IosMobileLinuxConfigFfi,
+    authorization_verified: bool,
+}
+
+#[cfg(feature = "uniffi")]
+static IOS_MOBILE_LINUX_COMPAT_HANDLES: OnceLock<
+    StdMutex<std::collections::HashMap<IosMobileLinuxCompatKey, Arc<IosMobileLinuxRuntimeHandle>>>,
+> = OnceLock::new();
+
+#[cfg(feature = "uniffi")]
 fn compat_handle(
     config: Option<IosMobileLinuxConfigFfi>,
 ) -> Result<Arc<IosMobileLinuxRuntimeHandle>, MobileLinuxOperationFfiError> {
     let config = config.ok_or_else(|| MobileLinuxOperationFfiError::Unavailable {
         message: "legacy unavailable backend selected".to_string(),
     })?;
-    create_ios_mobile_linux_runtime(config)
+    // The free functions below are retained for source compatibility. PTY and
+    // task operations are stateful, so those calls must resolve to the same
+    // process-lifetime handle for a given workspace/configuration.
+    let handles = IOS_MOBILE_LINUX_COMPAT_HANDLES
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    let key = IosMobileLinuxCompatKey {
+        authorization_verified: mobile_linux_authorization_verified(
+            config.authorization_file.as_ref(),
+        ),
+        config: config.clone(),
+    };
+    let mut handles = handles
+        .lock()
+        .map_err(|_| MobileLinuxOperationFfiError::Io {
+            message: "iOS mobile-linux compatibility handle cache is poisoned".to_string(),
+        })?;
+    if let Some(handle) = handles.get(&key) {
+        return Ok(handle.clone());
+    }
+    let handle = create_ios_mobile_linux_runtime(config)?;
+    handles.insert(key, handle.clone());
+    Ok(handle)
 }
 
 /// Boot the selected iOS mobile-linux runtime.
@@ -2802,6 +3188,68 @@ mod tests {
     }
 
     #[test]
+    fn mobile_linux_handle_reuses_one_runtime_instance_for_multiple_calls() {
+        let handle = super::create_ios_mobile_linux_runtime(super::IosMobileLinuxConfigFfi {
+            mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+            managed_root: "/tmp/mobile-linux".to_string(),
+            workspace_host_path: "/tmp/workspaces/default".to_string(),
+            stable_workspace_id: "default".to_string(),
+            abi: "arm64".to_string(),
+            rootfs_version: "v1".to_string(),
+            archive_sha256: None,
+            authorization_file: None,
+        })
+        .expect("handle");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        let first = rt.block_on(handle.status()).expect("first status");
+        let second = rt.block_on(handle.status()).expect("second status");
+        assert_eq!(first.last_error, second.last_error);
+        assert_eq!(first.backend, second.backend);
+
+        let err = rt
+            .block_on(handle.open_pty(super::MobileLinuxPtyOpenRequestFfi {
+                command: "/bin/sh".to_string(),
+                args: vec![],
+                cwd: Some("/workspace/default".to_string()),
+                env: std::collections::HashMap::new(),
+                cols: 80,
+                rows: 24,
+                mounts: vec![],
+            }))
+            .expect_err("pty must fail closed without a linked iOS runtime");
+
+        assert!(matches!(
+            err,
+            super::MobileLinuxOperationFfiError::LicenseBlocked { .. }
+                | super::MobileLinuxOperationFfiError::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn mobile_linux_compat_functions_reuse_handle_for_same_config() {
+        let config = super::IosMobileLinuxConfigFfi {
+            mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+            managed_root: "/tmp/mobile-linux-compat".to_string(),
+            workspace_host_path: "/tmp/workspaces/compat".to_string(),
+            stable_workspace_id: "compat".to_string(),
+            abi: "arm64".to_string(),
+            rootfs_version: "v1".to_string(),
+            archive_sha256: None,
+            authorization_file: None,
+        };
+
+        let first = super::compat_handle(Some(config.clone())).expect("first compat handle");
+        let second = super::compat_handle(Some(config)).expect("second compat handle");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
     fn mobile_linux_workspace_id_rejects_guest_path_components() {
         let config = super::IosMobileLinuxConfigFfi {
             mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
@@ -2818,5 +3266,246 @@ mod tests {
             super::validate_mobile_linux_workspace_config("/tmp/lingxi-app", &config),
             Err(super::MobileLinuxOperationFfiError::InvalidRequest { .. })
         ));
+    }
+
+    #[test]
+    fn mobile_linux_workspace_rejects_parent_traversal_into_protected_roots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_root = temp.path().join("app");
+        let managed_root = app_root.join("mobile-linux");
+        std::fs::create_dir_all(app_root.join(".lingxi")).expect("create protected root");
+        std::fs::create_dir_all(&managed_root).expect("create managed root");
+
+        for workspace_host_path in [
+            app_root.join("workspaces/default/../.."),
+            app_root.join("workspaces/default/../../.lingxi/state"),
+            app_root.join("workspaces/default/../../mobile-linux/rootfs"),
+            app_root.join("workspaces/default/../../providers/credentials"),
+        ] {
+            let config = super::IosMobileLinuxConfigFfi {
+                mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+                managed_root: managed_root.to_string_lossy().into_owned(),
+                workspace_host_path: workspace_host_path.to_string_lossy().into_owned(),
+                stable_workspace_id: "default".to_string(),
+                abi: "arm64".to_string(),
+                rootfs_version: "v1".to_string(),
+                archive_sha256: None,
+                authorization_file: None,
+            };
+
+            assert!(matches!(
+                super::validate_mobile_linux_workspace_config(
+                    app_root.to_str().expect("utf8 app root"),
+                    &config
+                ),
+                Err(super::MobileLinuxOperationFfiError::InvalidRequest { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mobile_linux_workspace_rejects_symlink_aliases_to_protected_roots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_root = temp.path().join("app");
+        let managed_root = app_root.join("mobile-linux");
+        let providers_root = app_root.join("providers");
+        let aliases_root = app_root.join("workspaces");
+        std::fs::create_dir_all(app_root.join(".lingxi")).expect("create lingxi root");
+        std::fs::create_dir_all(&managed_root).expect("create managed root");
+        std::fs::create_dir_all(&providers_root).expect("create providers root");
+        std::fs::create_dir_all(&aliases_root).expect("create aliases root");
+
+        for (name, destination) in [
+            ("lingxi-link", app_root.join(".lingxi")),
+            ("managed-link", managed_root.clone()),
+            ("provider-link", providers_root),
+        ] {
+            let alias = aliases_root.join(name);
+            std::os::unix::fs::symlink(destination, &alias).expect("create protected alias");
+            let config = super::IosMobileLinuxConfigFfi {
+                mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+                managed_root: managed_root.to_string_lossy().into_owned(),
+                workspace_host_path: alias.join("workspace").to_string_lossy().into_owned(),
+                stable_workspace_id: "default".to_string(),
+                abi: "arm64".to_string(),
+                rootfs_version: "v1".to_string(),
+                archive_sha256: None,
+                authorization_file: None,
+            };
+
+            assert!(matches!(
+                super::validate_mobile_linux_workspace_config(
+                    app_root.to_str().expect("utf8 app root"),
+                    &config
+                ),
+                Err(super::MobileLinuxOperationFfiError::InvalidRequest { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn standalone_mobile_linux_runtime_applies_workspace_boundary_validation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_root = temp.path().join("app");
+        let managed_root = app_root.join("mobile-linux");
+        std::fs::create_dir_all(app_root.join(".lingxi")).expect("create protected root");
+        std::fs::create_dir_all(&managed_root).expect("create managed root");
+        let config = super::IosMobileLinuxConfigFfi {
+            mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+            managed_root: managed_root.to_string_lossy().into_owned(),
+            workspace_host_path: app_root
+                .join("workspaces/default/../../.lingxi/state")
+                .to_string_lossy()
+                .into_owned(),
+            stable_workspace_id: "default".to_string(),
+            abi: "arm64".to_string(),
+            rootfs_version: "v1".to_string(),
+            archive_sha256: None,
+            authorization_file: None,
+        };
+
+        assert!(matches!(
+            super::create_ios_mobile_linux_runtime(config),
+            Err(super::MobileLinuxOperationFfiError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn ios_project_cwd_accepts_only_managed_workspace_shape() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lingxi-ios-project-{nonce}"));
+        let project_id = "12345678-1234-4abc-8def-1234567890ab";
+        let workspace = root.join("Projects").join(project_id).join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create project fixture");
+
+        let legacy = super::ios_project_cwd(root.to_str().expect("utf8"), None)
+            .expect("missing project cwd preserves the legacy sandbox root");
+        assert_eq!(legacy, root.canonicalize().expect("canonical root"));
+
+        let resolved = super::ios_project_cwd(
+            root.to_str().expect("utf8"),
+            Some(workspace.to_str().expect("utf8")),
+        )
+        .expect("managed project workspace is accepted");
+        assert_eq!(
+            resolved,
+            workspace.canonicalize().expect("canonical workspace")
+        );
+
+        let malformed = root.join("Projects").join("user-name").join("workspace");
+        std::fs::create_dir_all(&malformed).expect("create malformed fixture");
+        assert!(
+            super::ios_project_cwd(
+                root.to_str().expect("utf8"),
+                Some(malformed.to_str().expect("utf8")),
+            )
+            .is_err(),
+            "user-controlled names must never become project directories"
+        );
+
+        let outside = std::env::temp_dir().join(format!("lingxi-ios-outside-project-{nonce}"));
+        std::fs::create_dir_all(&outside).expect("create outside fixture");
+        assert!(
+            super::ios_project_cwd(
+                root.to_str().expect("utf8"),
+                Some(outside.to_str().expect("utf8")),
+            )
+            .is_err(),
+            "workspace must stay under the app sandbox"
+        );
+    }
+
+    #[test]
+    fn ios_launch_config_parses_provider_json_and_project_scope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_id = "12345678-1234-4abc-8def-1234567890ab";
+        let workspace = temp
+            .path()
+            .join("Projects")
+            .join(project_id)
+            .join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+            api_base: "https://example.invalid".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "claude-test".to_string(),
+            app_sandbox_root: temp.path().to_string_lossy().into_owned(),
+            project_cwd: Some(workspace.to_string_lossy().into_owned()),
+            provider_config: Some(super::IosProviderConfigFfi {
+                provider_profiles_json:
+                    r#"{"openai":{"baseUrl":"https://api.openai.com/v1","wireApi":"responses"}}"#
+                        .to_string(),
+                routing_json: Some(r#"{"default":"openai"}"#.to_string()),
+            }),
+            mobile_linux: None,
+        })
+        .expect("launch config");
+
+        assert_eq!(
+            cfg.cwd,
+            workspace.canonicalize().expect("canonical workspace")
+        );
+        assert_eq!(cfg.api_base, "https://example.invalid");
+        assert_eq!(cfg.api_key, "sk-test");
+        assert_eq!(cfg.default_model, "claude-test");
+        assert_eq!(
+            cfg.lingxi_home,
+            temp.path().join(branding::DOT_DIR),
+            "global state remains rooted at the sandbox"
+        );
+        let providers = cfg.provider_profiles.expect("provider profiles");
+        assert!(providers.contains_key("openai"));
+        assert_eq!(
+            cfg.routing.expect("routing"),
+            serde_json::json!({ "default": "openai" })
+        );
+    }
+
+    #[tokio::test]
+    async fn build_ios_cron_store_round_trips_without_engine() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_id = "12345678-1234-4abc-8def-1234567890ab";
+        let workspace = temp
+            .path()
+            .join("Projects")
+            .join(project_id)
+            .join("workspace");
+        std::fs::create_dir_all(temp.path().join(branding::DOT_DIR)).expect("state dir");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let store = super::build_ios_cron_store(
+            temp.path().to_string_lossy().into_owned(),
+            Some(workspace.to_string_lossy().into_owned()),
+        )
+        .expect("build cron store");
+
+        let created = store
+            .create("* * * * *".to_string(), "hello".to_string(), false)
+            .await
+            .expect("one-shot creation");
+        let updated = store
+            .update(
+                created.id.clone(),
+                "*/15 * * * *".to_string(),
+                "updated".to_string(),
+                true,
+            )
+            .await
+            .expect("recurring update");
+        let due = store
+            .due_occurrences(updated.next_fire_ms.expect("next fire").saturating_add(1))
+            .await;
+        assert_eq!(vec![created.id.clone()], vec![due[0].task_id.clone()]);
+        assert_eq!(
+            Some(updated.next_fire_ms.expect("next fire")),
+            store.next_fire_time().await
+        );
+        assert!(store.delete(created.id).await);
+        assert!(store.list().await.is_empty());
     }
 }

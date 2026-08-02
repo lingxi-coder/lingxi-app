@@ -1,115 +1,129 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
-// MARK: - Drawer (slide-in left panel)
+/// The real workspace drawer. Projects and scheduled tasks come from their
+/// repositories; presets remain creation choices and are never rendered as
+/// persisted rows.
 struct Drawer: View {
     @Environment(\.theme) private var t
-    @Binding var activeWs: String
+    @Bindable var projectStore: ProjectStore
+    @Bindable var cronRepository: CronRepository
     @Binding var activeSession: String
+
+    let source: any ConversationSource
     let onClose: () -> Void
     let openSettings: () -> Void
-    /// The conversation source — drives REAL session history (`engineSessions`)
-    /// and the resume/new-chat actions. The drawer reads `source.model` for the
-    /// live session list (an `@ObservedObject`) and calls `source.resumeSession`
-    /// / `source.startNewConversation` on the user's choice.
-    let source: any ConversationSource
-    /// Triggered when the user picks the REAL engine session `uuid` (so the
-    /// parent can mirror the selection into its own `activeSession` state). The
-    /// drawer also drives `source.resumeSession` itself; this lets RootView keep
-    /// its title-bar / @AppStorage in sync.
-    let onSelectEngineSession: (String) -> Void
-    /// Triggered for "New chat" so the parent can reset its own session state in
-    /// step with `source.startNewConversation`.
-    let onNewChat: () -> Void
+    let openTerminal: () -> Void
+    let openCron: (String?, String?) -> Void
+    let onSelectProject: (String?) -> Void
+    let onSelectSession: (String?, String) -> Void
+    let onNewChat: (String?) -> Void
 
     @ObservedObject private var convo: ConversationModel
+    @State private var section: Section = .chats
+    @State private var query = ""
+    @State private var openProjects = Set<String>()
+    @State private var createProjectName = ""
+    @State private var showCreateAlert = false
+    @State private var showFolderPicker = false
+    @State private var pickerMode: FolderPickerMode = .importProject
+    @FocusState private var searchFocused: Bool
 
-    init(activeWs: Binding<String>,
-         activeSession: Binding<String>,
-         source: any ConversationSource,
-         onClose: @escaping () -> Void,
-         openSettings: @escaping () -> Void,
-         onSelectEngineSession: @escaping (String) -> Void,
-         onNewChat: @escaping () -> Void) {
-        self._activeWs = activeWs
-        self._activeSession = activeSession
+    private enum Section: String { case chats, projects, crons }
+    private enum FolderPickerMode { case importProject, reauthorize(String) }
+
+    init(
+        projectStore: ProjectStore,
+        cronRepository: CronRepository,
+        activeSession: Binding<String>,
+        source: any ConversationSource,
+        onClose: @escaping () -> Void,
+        openSettings: @escaping () -> Void,
+        openTerminal: @escaping () -> Void,
+        openCron: @escaping (String?, String?) -> Void,
+        onSelectProject: @escaping (String?) -> Void,
+        onSelectSession: @escaping (String?, String) -> Void,
+        onNewChat: @escaping (String?) -> Void
+    ) {
+        self.projectStore = projectStore
+        self.cronRepository = cronRepository
+        _activeSession = activeSession
         self.source = source
         self.onClose = onClose
         self.openSettings = openSettings
-        self.onSelectEngineSession = onSelectEngineSession
+        self.openTerminal = openTerminal
+        self.openCron = openCron
+        self.onSelectProject = onSelectProject
+        self.onSelectSession = onSelectSession
         self.onNewChat = onNewChat
-        self.convo = source.model
+        convo = source.model
     }
 
-    private enum Section: String { case chats, projects, crons }
-    @State private var section: Section = .chats
-    @State private var openProjects: Set<String> = ["p1"]
-    /// The live drawer search query (real `TextField` — was a static label). It
-    /// filters the chats / projects / crons lists below by a case-insensitive
-    /// substring over the visible fields.
-    @State private var query: String = ""
-    @FocusState private var searchFocused: Bool
-
-    /// REAL engine sessions, newest-first, filtered by the search query. When
-    /// non-empty the chats section renders these in place of the mock chats; when
-    /// empty (engine unavailable / no history) the drawer falls back to MockData.
     private var engineSessions: [EngineSession] {
         convo.engineSessions.filter { matches($0.title, $0.relativeTime) }
     }
-    /// True when the engine has reported real history — drives the chats section
-    /// between the real list and the MockData fallback.
-    private var hasEngineSessions: Bool { !convo.engineSessions.isEmpty }
 
-    /// `s` trimmed + lowercased contains the trimmed query (empty query ⇒ match
-    /// everything). The shared predicate every section filter runs through.
-    private func matches(_ haystacks: String...) -> Bool {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return true }
-        return haystacks.contains { $0.lowercased().contains(q) }
-    }
-
-    private var chats: [Chat] {
-        MockData.chats.filter { $0.wsId == activeWs && matches($0.title, $0.preview, $0.activity) }
-    }
-    /// A project matches when its own name/desc match OR any of its sessions do;
-    /// when only sessions match we still show the project (so the row is reachable).
-    private var projects: [Project] {
-        MockData.projects.filter { p in
-            p.wsId == activeWs &&
-            (matches(p.name, p.desc) || p.sessions.contains { matches($0.title, $0.preview, $0.activity) })
+    private var projects: [ProjectSnapshot] {
+        projectStore.projects.filter { project in
+            matches(project.record.name, project.record.syncState.label)
+                || project.sessions.contains { matches($0.title, $0.relativeTime) }
         }
     }
-    private var crons: [Cron] {
-        MockData.crons.filter { $0.wsId == activeWs && matches($0.title, $0.cron, $0.next, $0.desc) }
+
+    private var cronTasks: [CronScopedTask] {
+        cronRepository.state.tasks.filter {
+            matches($0.scope.projectName, $0.task.prompt, $0.task.cron, $0.task.human)
+        }
     }
 
-    /// True while the user is actively searching — drives the "no results" copy.
-    private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var searching: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var projectOperationInFlight: Bool {
+        projectStore.operation != nil
+    }
 
     var body: some View {
         ZStack(alignment: .leading) {
-            Color.black.opacity(0.4)
-                .ignoresSafeArea()
-                .onTapGesture { onClose() }
+            Button(action: onClose) { Color.black.opacity(0.4).ignoresSafeArea() }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭抽屉")
 
             panel
-                .frame(width: 320)
+                .frame(width: 330)
                 .frame(maxHeight: .infinity)
                 .background(t.sidebarBg)
                 .overlay(Rectangle().frame(width: 0.5).foregroundColor(t.border), alignment: .trailing)
                 .shadow(color: .black.opacity(0.3), radius: 15, x: 8)
                 .transition(.move(edge: .leading))
-                // Refresh the REAL session catalog when the drawer opens so the
-                // chats list reflects sessions created since the last pull. A
-                // no-op on the mock; the engine re-submits `ListSessions`.
-                .onAppear { source.listSessions() }
+                .onAppear {
+                    source.listSessions()
+                    if let active = projectStore.activeProjectId { openProjects.insert(active) }
+                    Task { await cronRepository.refresh() }
+                }
         }
+        .alert("新建本地项目", isPresented: $showCreateAlert) {
+            TextField("项目名称", text: $createProjectName)
+            Button("创建") { createInternalProject() }
+                .disabled(createProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("工作区会保存在 App 管理目录中。")
+        }
+        .fileImporter(
+            isPresented: $showFolderPicker,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false,
+            onCompletion: handleFolderSelection
+        )
     }
 
     private var panel: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: 54) // status bar offset
+            Color.clear.frame(height: 54)
             header
-            workspacePills
+            scopePills
             searchBar
             sectionTabs
             sectionBody
@@ -118,10 +132,13 @@ struct Drawer: View {
         }
     }
 
-    // MARK: header
     private var header: some View {
-        HStack(spacing: 10) {
-            Text("灵犀").font(.system(size: 17, weight: .bold)).foregroundColor(t.text)
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("灵犀").font(.system(size: 17, weight: .bold)).foregroundColor(t.text)
+                Text(projectStore.activeProject?.record.name ?? "全局会话")
+                    .font(.caption).foregroundColor(t.text4).lineLimit(1)
+            }
             Spacer()
             Button(action: onClose) {
                 LXIcon(name: .x, size: 20, color: t.text3, stroke: 1.8).frame(width: 36, height: 36)
@@ -131,21 +148,12 @@ struct Drawer: View {
         .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 12)
     }
 
-    // MARK: workspace pills
-    private var workspacePills: some View {
+    private var scopePills: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(MockData.workspaces) { w in
-                    let active = w.id == activeWs
-                    Button { activeWs = w.id } label: {
-                        HStack(spacing: 5) { Text(w.icon); Text(w.name) }
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(active ? w.color : t.text3)
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background(active ? w.color.tint(0.20) : t.surface)
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(active ? w.color.tint(0.35) : t.border, lineWidth: 0.5))
-                    }
+                scopePill(id: nil, name: "全局", icon: "◎")
+                ForEach(projectStore.projects) { project in
+                    scopePill(id: project.id, name: project.record.name, icon: "◇")
                 }
             }
             .padding(.horizontal, 18)
@@ -153,27 +161,38 @@ struct Drawer: View {
         .padding(.bottom, 12)
     }
 
+    private func scopePill(id: String?, name: String, icon: String) -> some View {
+        let active = projectStore.activeProjectId == id
+        return Button {
+            onSelectProject(id)
+        } label: {
+            HStack(spacing: 5) { Text(icon); Text(name).lineLimit(1) }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(active ? t.accent : t.text3)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(active ? t.accent.opacity(0.16) : t.surface)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(active ? t.accent.opacity(0.4) : t.border, lineWidth: 0.5))
+        }
+        .accessibilityIdentifier(id == nil ? "drawer.scope.global" : "drawer.scope.project.\(name)")
+        .accessibilityValue(active ? "当前项目" : "")
+    }
+
     private var searchBar: some View {
         HStack(spacing: 8) {
             LXIcon(name: .search, size: 16, color: t.text4, stroke: 2)
-                .accessibilityHidden(true)
-            TextField("", text: $query,
-                      prompt: Text("搜索会话").foregroundColor(t.text4))
+            TextField("搜索会话、项目或定时任务", text: $query)
                 .font(.scaledSystem(14, relativeTo: .subheadline))
                 .foregroundColor(t.text)
                 .focused($searchFocused)
                 .submitLabel(.search)
                 .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .accessibilityLabel("搜索会话")
             if !query.isEmpty {
                 Button {
                     query = ""
                     searchFocused = false
                 } label: {
-                    LXIcon(name: .x, size: 14, color: t.text4, stroke: 2)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+                    LXIcon(name: .x, size: 14, color: t.text4, stroke: 2).frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("清除搜索")
@@ -186,12 +205,11 @@ struct Drawer: View {
         .padding(.horizontal, 18).padding(.bottom, 14)
     }
 
-    // MARK: section tabs
     private var sectionTabs: some View {
         HStack(spacing: 4) {
-            tab(.chats, .message, "对话", hasEngineSessions ? engineSessions.count : chats.count)
+            tab(.chats, .message, "对话", engineSessions.count)
             tab(.projects, .folder, "项目", projects.count)
-            tab(.crons, .clock, "定时", crons.count)
+            tab(.crons, .clock, "定时", cronTasks.count)
         }
         .padding(.horizontal, 14).padding(.bottom, 8)
     }
@@ -202,29 +220,26 @@ struct Drawer: View {
             HStack(spacing: 5) {
                 LXIcon(name: icon, size: 14, color: active ? t.text : t.text3, stroke: 1.8)
                 Text(label).font(.system(size: 13, weight: active ? .semibold : .medium))
-                    .foregroundColor(active ? t.text : t.text3)
-                Text("\(count)").font(.system(size: 10.5, weight: .semibold))
-                    .foregroundColor(active ? t.accent : t.text4)
+                Text("\(count)").font(.system(size: 10.5, weight: .semibold)).foregroundColor(active ? t.accent : t.text4)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 4).padding(.vertical, 9)
+            .foregroundColor(active ? t.text : t.text3)
+            .frame(maxWidth: .infinity).padding(.vertical, 9)
             .background(active ? t.surfaceActive : .clear)
             .clipShape(RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(active ? t.border : .clear, lineWidth: 0.5))
         }
+        .accessibilityIdentifier("drawer.tab.\(id.rawValue)")
     }
 
-    // MARK: section body
     private var sectionBody: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
-                if currentSectionEmpty && searching {
-                    noResults
+            VStack(alignment: .leading, spacing: 6) {
+                if currentSectionEmpty {
+                    emptyState
                 } else {
                     switch section {
-                    case .chats:    chatsSection
+                    case .chats: chatsSection
                     case .projects: projectsSection
-                    case .crons:    cronsSection
+                    case .crons: cronsSection
                     }
                 }
             }
@@ -233,317 +248,304 @@ struct Drawer: View {
         .frame(maxHeight: .infinity)
     }
 
-    /// True when the active section has no rows under the current filter.
     private var currentSectionEmpty: Bool {
         switch section {
-        case .chats:    return hasEngineSessions ? engineSessions.isEmpty : chats.isEmpty
-        case .projects: return projects.isEmpty
-        case .crons:    return crons.isEmpty
+        case .chats: engineSessions.isEmpty
+        case .projects: projects.isEmpty
+        case .crons: cronTasks.isEmpty
         }
     }
 
-    /// A centered "no results" line shown when a search matches nothing in the
-    /// active section (so the section doesn't render an empty body / lone "新建").
-    private var noResults: some View {
-        VStack(spacing: 8) {
-            LXIcon(name: .search, size: 22, color: t.text4, stroke: 1.8)
-                .accessibilityHidden(true)
-            Text("未找到与“\(query.trimmingCharacters(in: .whitespaces))”匹配的结果")
-                .font(.system(size: 13))
-                .foregroundColor(t.text4)
-                .multilineTextAlignment(.center)
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            LXIcon(name: searching ? .search : section == .projects ? .folder : section == .crons ? .clock : .message,
+                   size: 24, color: t.text4, stroke: 1.8)
+            Text(searching ? "没有匹配结果" : emptyCopy)
+                .font(.system(size: 13)).foregroundColor(t.text4).multilineTextAlignment(.center)
+            if !searching, section == .chats { newChatButton(projectID: projectStore.activeProjectId) }
+            if !searching, section == .projects {
+                projectCreationMenu
+            }
+            if !searching, section == .crons {
+                dashedButton("新建定时任务") {
+                    openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
+                }
+            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 40).padding(.horizontal, 16)
+        .frame(maxWidth: .infinity).padding(.top, 38).padding(.horizontal, 10)
     }
 
-    @ViewBuilder
+    private var emptyCopy: String {
+        switch section {
+        case .chats: return "当前作用域暂无会话"
+        case .projects: return "还没有真实项目工作区"
+        case .crons: return "还没有定时任务"
+        }
+    }
+
     private var chatsSection: some View {
-        if hasEngineSessions {
-            engineSessionsSection
-        } else {
-            mockChatsSection
+        VStack(spacing: 2) {
+            if !searching { newChatButton(projectID: projectStore.activeProjectId) }
+            ForEach(engineSessions) { session in
+                sessionButton(session.id, title: session.title, subtitle: "\(session.relativeTime) · \(session.messageCount) 条", projectID: projectStore.activeProjectId)
+            }
         }
     }
 
-    /// REAL engine history: a "New chat" affordance + one row per resumable
-    /// session (newest-first, already filtered). Tapping a row resumes it; "New
-    /// chat" starts a fresh session. Shown only when the engine has reported
-    /// sessions (otherwise the mock list renders).
-    private var engineSessionsSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if !searching { newChatButton }
-            ForEach(engineSessions) { s in engineSessionRow(s) }
-        }
-        .padding(.top, 4)
-    }
-
-    /// "New chat" — submits `NewSession` (resets the transcript on
-    /// `SessionStarted`) and lets the parent mirror the reset, then closes.
-    private var newChatButton: some View {
+    private func newChatButton(projectID: String?) -> some View {
         Button {
-            source.startNewConversation()
-            onNewChat()
+            onNewChat(projectID)
             onClose()
         } label: {
-            HStack(spacing: 8) {
-                LXIcon(name: .plus, size: 14, color: t.accent, stroke: 2)
-                Text("新对话").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.accent)
-                Spacer()
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(t.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+            Label("新对话", systemImage: "square.and.pencil")
+                .font(.system(size: 13.5, weight: .medium)).foregroundColor(t.accent)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                .background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10))
         }
-        .accessibilityLabel("新对话")
-        .padding(.horizontal, 2).padding(.bottom, 8)
-    }
-
-    private func engineSessionRow(_ s: EngineSession) -> some View {
-        let active = s.id == convo.activeSessionId
-        return Button {
-            // Resume on the source AND select locally (so the UI reflects the
-            // choice even if engine-side resume is still a follow-up).
-            source.resumeSession(s.id)
-            onSelectEngineSession(s.id)
-            onClose()
-        } label: {
-            ZStack(alignment: .leading) {
-                if active { Capsule().fill(t.accent).frame(width: 2.5).padding(.vertical, 12) }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(s.title).font(.scaledSystem(14, weight: active ? .semibold : .medium, relativeTo: .subheadline))
-                        .foregroundColor(active ? t.text : t.text2).lineLimit(1)
-                    Text("\(s.relativeTime) · \(s.messageCount) 条").font(.scaledSystem(12, relativeTo: .caption))
-                        .foregroundColor(t.text4).lineLimit(1)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(active ? t.surfaceActive : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-        }
-        .accessibilityLabel("\(s.title)，\(s.messageCount) 条消息，\(s.relativeTime)")
-        .padding(.bottom, 2)
-    }
-
-    private var mockChatsSection: some View {
-        let grouped = Dictionary(grouping: chats, by: { $0.group })
-        let order = ["今天", "昨天", "本周"]
-        return VStack(alignment: .leading, spacing: 0) {
-            ForEach(order.filter { grouped[$0] != nil }, id: \.self) { group in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(group.uppercased())
-                        .font(.system(size: 11, weight: .semibold)).tracking(0.6)
-                        .foregroundColor(t.text4)
-                        .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
-                    ForEach(grouped[group] ?? []) { s in chatRow(s) }
-                }
-                .padding(.bottom, 8)
-            }
-            if !searching {
-                (Text("临时对话 30 天后自动归档 · ") + Text("转为项目").foregroundColor(t.accent))
-                    .font(.system(size: 11.5)).foregroundColor(t.text4).lineSpacing(4)
-                    .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 4)
-            }
-        }
-    }
-
-    private func chatRow(_ s: Chat) -> some View {
-        let active = s.id == activeSession
-        return Button { activeSession = s.id; onClose() } label: {
-            ZStack(alignment: .leading) {
-                if active { Capsule().fill(t.accent).frame(width: 2.5).padding(.vertical, 12) }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(s.title).font(.scaledSystem(14, weight: active ? .semibold : .medium, relativeTo: .subheadline))
-                        .foregroundColor(active ? t.text : t.text2).lineLimit(1)
-                    Text("\(s.activity) · \(s.preview)").font(.scaledSystem(12, relativeTo: .caption))
-                        .foregroundColor(t.text4).lineLimit(1)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(active ? t.surfaceActive : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-        }
-        .padding(.bottom, 2)
     }
 
     private var projectsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(projects) { p in projectRow(p) }
-            if !searching { dashedButton("新建项目") }
+        VStack(spacing: 6) {
+            ForEach(projects) { project in projectCard(project) }
+            if !searching {
+                projectCreationMenu
+            }
         }
-        .padding(.top, 4)
     }
 
-    private func projectRow(_ p: Project) -> some View {
-        // While searching, auto-expand matched projects so the matching session
-        // is visible, and narrow the session list to the matches (the project
-        // name/desc matching still shows all its sessions).
-        let nameMatches = matches(p.name, p.desc)
-        let visibleSessions = searching && !nameMatches
-            ? p.sessions.filter { matches($0.title, $0.preview, $0.activity) }
-            : p.sessions
-        let isOpen = searching ? true : openProjects.contains(p.id)
-        let hasActive = p.sessions.contains { $0.id == activeSession }
-        return VStack(alignment: .leading, spacing: 2) {
+    private var projectCreationMenu: some View {
+        Menu {
+            Button("新建本地项目") {
+                createProjectName = ""
+                showCreateAlert = true
+            }
+            Button("导入外部文件夹") {
+                pickerMode = .importProject
+                showFolderPicker = true
+            }
+        } label: {
+            Label("新建或导入项目", systemImage: "plus")
+                .font(.system(size: 13)).foregroundColor(t.text3)
+                .frame(maxWidth: .infinity).padding(11)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("drawer.project.create")
+    }
+
+    private func projectCard(_ project: ProjectSnapshot) -> some View {
+        let active = project.id == projectStore.activeProjectId
+        let expanded = searching || openProjects.contains(project.id)
+        let conflicts = projectStore.conflicts.filter { $0.projectId == project.id }
+        return VStack(alignment: .leading, spacing: 4) {
             Button {
-                if openProjects.contains(p.id) { openProjects.remove(p.id) } else { openProjects.insert(p.id) }
+                if !active { onSelectProject(project.id) }
+                if expanded { openProjects.remove(project.id) } else { openProjects.insert(project.id) }
             } label: {
                 HStack(spacing: 10) {
                     LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 2)
-                        .rotationEffect(.degrees(isOpen ? 90 : 0))
-                        .accessibilityHidden(true)
-                    projectIcon(p)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    LXIcon(name: .folder, size: 17, color: active ? t.accent : t.text3, stroke: 1.8)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(p.name).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text).lineLimit(1)
-                        Text(p.desc).font(.system(size: 11.5)).foregroundColor(t.text4).lineLimit(1)
+                        Text(project.record.name).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text)
+                        Text(project.record.syncState.label).font(.caption).foregroundColor(syncColor(project.record.syncState))
                     }
                     Spacer()
-                    Text("\(p.sessions.count)").font(.system(size: 11, weight: .medium)).foregroundColor(t.text4)
+                    Text("\(project.sessions.count)").font(.caption).foregroundColor(t.text4)
                 }
-                .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(hasActive && !isOpen ? t.surfaceActive : .clear)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(10).background(active ? t.surfaceActive : .clear).clipShape(RoundedRectangle(cornerRadius: 10))
             }
-            .accessibilityLabel("\(p.name)，\(p.sessions.count) 个会话")
-            .accessibilityHint(isOpen ? "收起项目" : "展开项目")
-            if isOpen {
-                ZStack(alignment: .leading) {
-                    Rectangle().fill(t.border).frame(width: 1).padding(.vertical, 4).padding(.leading, 22)
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(visibleSessions) { s in sessionRow(p, s) }
-                        if !searching {
-                            HStack(spacing: 5) {
-                                LXIcon(name: .plus, size: 11, color: t.text4, stroke: 2)
-                                Text("新会话").font(.system(size: 12.5)).foregroundColor(t.text4)
-                            }
-                            .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 7)
-                        }
+            if expanded {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(project.sessions.filter { matches($0.title, $0.relativeTime) }) { session in
+                        sessionButton(session.sessionId, title: session.title,
+                                      subtitle: "\(session.relativeTime) · \(session.messageCount) 条", projectID: project.id)
                     }
-                    .padding(.leading, 22)
+                    Button {
+                        onNewChat(project.id)
+                        onClose()
+                    } label: {
+                        Label("项目新会话", systemImage: "plus").font(.caption).foregroundColor(t.text3).padding(8)
+                    }
+                    projectActions(project)
+                    if !conflicts.isEmpty { conflictActions(project, count: conflicts.count) }
                 }
+                .padding(.leading, 26)
             }
         }
     }
 
-    private func projectIcon(_ p: Project) -> some View {
-        Text(p.icon).font(.system(size: 13, weight: .bold)).foregroundColor(p.color)
-            .frame(width: 28, height: 28)
-            .background(p.color.mix(with: t.surface, amount: 0.18))
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(p.color.tint(0.28), lineWidth: 0.5))
+    private func projectActions(_ project: ProjectSnapshot) -> some View {
+        HStack(spacing: 8) {
+            if project.record.storageKind == .externalBookmarkMirror {
+                Button("导入更新") { projectStore.reimport(projectId: project.id) }
+                    .buttonStyle(.bordered)
+                Button("同步回目录") { projectStore.export(projectId: project.id) }
+                    .buttonStyle(.bordered)
+                if project.record.syncState == .authorizationLost {
+                    Button("重新授权") {
+                        pickerMode = .reauthorize(project.id)
+                        showFolderPicker = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .font(.caption)
+        .disabled(projectOperationInFlight)
     }
 
-    private func sessionRow(_ p: Project, _ s: ProjectSession) -> some View {
-        let active = s.id == activeSession
-        return Button { activeSession = s.id; onClose() } label: {
-            ZStack(alignment: .leading) {
-                if active { Capsule().fill(p.color).frame(width: 2.5).padding(.vertical, 8).offset(x: -3) }
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        if s.pinned { LXIcon(name: .pin, size: 11, color: p.color, stroke: 2.2) }
-                        Text(s.title).font(.system(size: 13.5, weight: active ? .semibold : .medium))
-                            .foregroundColor(active ? t.text : t.text2).lineLimit(1)
-                    }
-                    Text("\(s.activity) · \(s.msgs) 条").font(.system(size: 11.5)).foregroundColor(t.text4).lineLimit(1)
-                }
-                .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private func conflictActions(_ project: ProjectSnapshot, count: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("\(count) 个文件冲突").font(.caption).foregroundColor(t.danger)
+            HStack {
+                Button("保留设备版本") { projectStore.resolveConflicts(projectId: project.id, resolution: .keepInternal) }
+                Button("保留外部版本") { projectStore.resolveConflicts(projectId: project.id, resolution: .keepExternal) }
             }
-            .padding(.leading, 4)
-            .background(active ? t.surfaceActive : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .buttonStyle(.bordered)
+            .font(.caption)
+            .disabled(projectOperationInFlight)
+        }
+    }
+
+    private func sessionButton(_ id: String, title: String, subtitle: String, projectID: String?) -> some View {
+        let active = id == activeSession && projectID == projectStore.activeProjectId
+        return Button {
+            onSelectSession(projectID, id)
+            onClose()
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13.5, weight: active ? .semibold : .medium)).foregroundColor(active ? t.text : t.text2).lineLimit(1)
+                Text(subtitle).font(.caption).foregroundColor(t.text4).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(9)
+            .background(active ? t.surfaceActive : .clear).clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
 
     private var cronsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(crons) { c in cronCard(c) }
-            if !searching { dashedButton("新建定时任务") }
-        }
-        .padding(.top, 4)
-    }
-
-    private func cronCard(_ c: Cron) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Circle().fill(c.enabled ? t.accent : t.text4).frame(width: 8, height: 8)
-                    .overlay(c.enabled ? Circle().stroke(t.accent.tint(0.18), lineWidth: 3).scaleEffect(1.6) : nil)
-                Text(c.title).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text).lineLimit(1)
-                Spacer()
-                LXIcon(name: c.enabled ? .pause : .play, size: 13, color: t.text4, stroke: 1.8)
+        VStack(spacing: 8) {
+            ForEach(cronTasks) { scoped in
+                Button {
+                    openCron(scoped.scope.scopeID, scoped.task.id)
+                    onClose()
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Circle().fill(scoped.activeRun == nil ? t.accent : Color.orange).frame(width: 8, height: 8)
+                            Text(scoped.task.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? scoped.task.id)
+                                .font(.system(size: 14, weight: .semibold)).foregroundColor(t.text).lineLimit(1)
+                            Spacer()
+                            Text(scoped.scope.projectName).font(.caption).foregroundColor(t.text4)
+                        }
+                        Text(scoped.task.human).font(.system(size: 12, design: .monospaced)).foregroundColor(t.text3)
+                        Text(scoped.lastRun.map { "最近：\($0.status.label)" } ?? "尚未运行")
+                            .font(.caption).foregroundColor(t.text4)
+                    }
+                    .padding(12).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
             }
-            .padding(.bottom, 5)
-            Text(c.desc).font(.system(size: 12)).foregroundColor(t.text3).lineSpacing(2).padding(.bottom, 7)
-            HStack(spacing: 7) {
-                Text(c.cron).font(.system(size: 11, design: .monospaced)).fontWeight(.medium)
-                    .foregroundColor(t.text2)
-                    .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(t.surfaceActive).clipShape(RoundedRectangle(cornerRadius: 5))
-                Text("→").font(.system(size: 11, design: .monospaced)).foregroundColor(t.text4)
-                Text(c.next).font(.system(size: 11, design: .monospaced)).fontWeight(.medium)
-                    .foregroundColor(c.enabled ? t.accent : t.text4)
+            if !searching {
+                dashedButton("新建定时任务") {
+                    openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
+                }
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
-        .opacity(c.enabled ? 1 : 0.55)
     }
 
-    private func dashedButton(_ label: String) -> some View {
-        HStack(spacing: 6) {
-            LXIcon(name: .plus, size: 13, color: t.text3, stroke: 2)
-            Text(label).font(.system(size: 13)).foregroundColor(t.text3)
+    private func dashedButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: "plus")
+                .font(.system(size: 13)).foregroundColor(t.text3)
+                .frame(maxWidth: .infinity).padding(11)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
         }
-        .frame(maxWidth: .infinity)
-        .padding(11)
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4,3])))
-        .padding(.horizontal, 4).padding(.top, 10)
+        .buttonStyle(.plain)
     }
 
-    // MARK: shortcuts + account
     private var shortcuts: some View {
         HStack(spacing: 4) {
-            shortcut(.book, "知识库", 24)
-            shortcut(.brain, "记忆", 42)
+            Button(action: openTerminal) { shortcut(.workflow, "终端") }
+                .accessibilityIdentifier("drawer.shortcut.terminal")
+            Button { openCron(nil, nil) } label: { shortcut(.clock, "定时任务") }
+                .accessibilityIdentifier("drawer.shortcut.cron")
         }
         .padding(.horizontal, 12).padding(.top, 4)
         .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .top)
     }
 
-    private func shortcut(_ icon: LXIconName, _ label: String, _ count: Int) -> some View {
+    private func shortcut(_ icon: LXIconName, _ label: String) -> some View {
         HStack(spacing: 8) {
             LXIcon(name: icon, size: 15, color: t.text3, stroke: 1.7)
             Text(label).font(.system(size: 13.5, weight: .medium)).foregroundColor(t.text3)
-            Spacer()
-            Text("\(count)").font(.system(size: 11.5)).foregroundColor(t.text4)
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
+        .frame(maxWidth: .infinity).padding(.vertical, 11)
     }
 
     private var accountRow: some View {
-        VStack(spacing: 0) {
-            Button(action: openSettings) {
-                HStack(spacing: 12) {
-                    Circle().fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 36, height: 36)
-                        .overlay(Text("Y").font(.system(size: 14, weight: .semibold)).foregroundColor(.white))
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Yuxin Yang").font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
-                        Text("Pro · 5.5 / 8 段").font(.system(size: 11.5)).foregroundColor(t.text4)
-                    }
-                    Spacer()
-                    LXIcon(name: .cog, size: 18, color: t.text3, stroke: 1.6)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
+        Button(action: openSettings) {
+            HStack(spacing: 12) {
+                Circle().fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 36, height: 36)
+                    .overlay(LXIcon(name: .cog, size: 16, color: .white, stroke: 1.8))
+                Text("设置").font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
+                Spacer()
+                LXIcon(name: .chevronR, size: 14, color: t.text4, stroke: 1.7)
             }
+            .padding(.horizontal, 14).padding(.vertical, 10)
         }
+        .accessibilityIdentifier("drawer.settings")
         .padding(.horizontal, 12).padding(.vertical, 10)
         .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .top)
+    }
+
+    private func matches(_ haystacks: String...) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return needle.isEmpty || haystacks.contains { $0.lowercased().contains(needle) }
+    }
+
+    private func syncColor(_ state: ProjectSyncState) -> Color {
+        switch state {
+        case .synced, .localOnly: return t.ok
+        case .conflict, .error: return t.danger
+        case .authorizationLost: return .orange
+        case .changesPending, .syncing: return t.text3
+        }
+    }
+
+    private func createInternalProject() {
+        Task { @MainActor in
+            do {
+                let project = try await projectStore.createInternal(name: createProjectName)
+                onSelectProject(project.id)
+            } catch {
+                projectStore.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func handleFolderSelection(_ result: Result<[URL], Error>) {
+        guard case let .success(urls) = result, let url = urls.first else {
+            if case let .failure(error) = result { projectStore.errorMessage = error.localizedDescription }
+            return
+        }
+        switch pickerMode {
+        case .importProject:
+            Task { @MainActor in
+                do {
+                    let project = try await projectStore.importExternal(name: url.lastPathComponent, directoryURL: url)
+                    onSelectProject(project.id)
+                } catch {
+                    projectStore.errorMessage = error.localizedDescription
+                }
+            }
+        case .reauthorize(let projectID):
+            projectStore.reauthorize(projectId: projectID, directoryURL: url)
+        }
     }
 }

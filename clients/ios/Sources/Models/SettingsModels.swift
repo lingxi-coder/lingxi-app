@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 // MARK: - Settings domain models + mock data (verbatim from prototype)
 
@@ -206,28 +207,23 @@ enum Presets {
 
 // MARK: - Settings store (the prototype's useState block in SettingsSheet)
 
-enum ProviderKind { case llm, search, fetch
+enum ProviderKind: Hashable { case llm, search, fetch
     var title: String { self == .llm ? "LLM 提供商" : self == .search ? "联网搜索" : "网页抓取" }
     var presets: [ProviderPreset] { self == .llm ? Presets.llm : self == .search ? Presets.search : Presets.fetch }
     var idPrefix: String { self == .llm ? "l" : self == .search ? "s" : "f" }
 }
 
-final class SettingsStore: ObservableObject {
-    @Published var llmProviders: [GenericProvider] = [
-        .init(id: "p_ant", preset: "anthropic", name: "Anthropic", url: "https://api.anthropic.com",  key: "sk-ant-api03-••••••••7Hq2", model: "claude-sonnet-4-5", status: .connected, isDefault: true, enabled: true),
-        .init(id: "p_oai", preset: "openai",    name: "OpenAI",    url: "https://api.openai.com/v1",   key: "sk-proj-••••••••4nQ8",      model: "gpt-4o",            status: .idle,                     enabled: true),
-        .init(id: "p_dsk", preset: "deepseek",  name: "DeepSeek",  url: "https://api.deepseek.com/v1", key: "",                          model: "deepseek-chat",     status: .idle,                     enabled: false),
-    ]
-    @Published var searchProviders: [GenericProvider] = [
-        .init(id: "s_brv", preset: "brave",  name: "Brave",  url: "https://api.search.brave.com/res/v1", key: "BSA••••••a9Z", status: .connected, isDefault: true, enabled: true),
-        .init(id: "s_jin", preset: "tavily", name: "Tavily", url: "https://api.tavily.com", key: "", status: .idle, enabled: false),
-    ]
-    @Published var fetchProviders: [GenericProvider] = [
-        .init(id: "f_jin", preset: "jina", name: "Jina Reader", url: "https://r.jina.ai", key: "", status: .connected, isDefault: true, enabled: true),
-    ]
-    @Published var voice = VoiceConfig()
-    @Published var linuxRuntime = LinuxRuntimeState()
-    @Published var skills: [Skill] = [
+@MainActor
+@Observable
+final class SettingsStore {
+    /// Configured rows only. Presets remain a catalog but are never presented as
+    /// connected accounts until the real repository persists them.
+    var llmProviders: [GenericProvider] = []
+    var searchProviders: [GenericProvider] = []
+    var fetchProviders: [GenericProvider] = []
+    var voice = VoiceConfig()
+    var linuxRuntime = LinuxRuntimeState()
+    var skills: [Skill] = [
         .init(id: "sk1", name: "周报生成", author: "官方", desc: "聚合 Linear / GitHub / 日历自动出周报", triggers: ["每周五 17:00", "@周报"], enabled: true, builtin: true),
         .init(id: "sk2", name: "代码评审", author: "官方", desc: "对粘贴的 diff 给出严格 review", triggers: ["/review", "拖入 .diff"], enabled: true, builtin: true),
         .init(id: "sk3", name: "会议纪要", author: "官方", desc: "从语音/文本提取要点 + action item", triggers: ["会议结束后"], enabled: true, builtin: true),
@@ -235,21 +231,19 @@ final class SettingsStore: ObservableObject {
         .init(id: "sk5", name: "CSS Doctor", author: "社区 · @lin", desc: "诊断布局问题并给出修复", triggers: ["/css"], enabled: false, builtin: false),
         .init(id: "sk6", name: "英文润色", author: "我", desc: "中→英写作润色，保留原意", triggers: ["/polish"], enabled: true, builtin: false),
     ]
-    @Published var mcpServers: [MCPServer] = [
+    var mcpServers: [MCPServer] = [
         .init(id: "mcp1", name: "Filesystem",   url: "stdio://npx -y @modelcontextprotocol/server-filesystem", tools: 8,  status: .connected, enabled: true,  transport: "stdio"),
         .init(id: "mcp2", name: "GitHub",       url: "https://mcp.github.com",  tools: 14, status: .connected, enabled: true,  transport: "sse", auth: "oauth"),
         .init(id: "mcp3", name: "Linear",       url: "https://mcp.linear.app",  tools: 6,  status: .connected, enabled: true,  transport: "sse", auth: "oauth"),
         .init(id: "mcp4", name: "Notion",       url: "https://mcp.notion.com",  tools: 12, status: .idle,      enabled: false, transport: "sse", auth: "oauth"),
         .init(id: "mcp5", name: "Postgres (本地)", url: "stdio://uvx mcp-server-postgres", tools: 4, status: .error, enabled: true, transport: "stdio"),
     ]
-    @Published var dream = DreamConfig()
-    @Published var language = "zh-CN"
-    @Published var notifs = NotifConfig()
-    @Published var smartRouting = true
-    @Published var streamingDefault = true
-    @Published var bioLock = true
-    @Published var telemetry = false
-    @Published var autoUpdate = true
+    var dream = DreamConfig()
+    var language = "zh-CN"
+    var notifs = NotifConfig()
+    var bioLock = true
+    var telemetry = false
+    var autoUpdate = true
 
     // MARK: store access by kind
 

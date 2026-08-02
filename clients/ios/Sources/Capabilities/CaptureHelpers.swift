@@ -55,31 +55,131 @@ enum VoiceCaptureResult: Equatable {
     case failed(String)
 }
 
+enum VoiceCapturePhase: Equatable {
+    case idle
+    case listening
+    case finishing
+}
+
+/// Narrow session seam used by both hold-to-talk and Flow Mode. Keeping the
+/// lifecycle outside SwiftUI makes press/release/cancel behavior deterministic
+/// and lets tests prove that a cancelled recording never submits a transcript.
+@MainActor
+protocol VoiceTranscriptionSession: AnyObject {
+    func transcribe(language: String?) async throws -> String
+    func finishRecording()
+    func cancelRecognition()
+}
+
+#if canImport(Speech) && canImport(AVFoundation)
+    @MainActor
+    private final class SystemVoiceTranscriptionSession: VoiceTranscriptionSession {
+        private let implementation = SttImpl()
+
+        func transcribe(language: String?) async throws -> String {
+            try await implementation.transcribe(language: language)
+        }
+
+        func finishRecording() {
+            implementation.finishRecording()
+        }
+
+        func cancelRecognition() {
+            implementation.cancelRecognition()
+        }
+    }
+#endif
+
 /// Drives a single hold-to-talk transcription through the same `SttImpl`
 /// (`SFSpeechRecognizer` + mic tap) the engine bridges onto its STT seam.
 ///
-/// `SttImpl` already requests speech-recognition + microphone authorization
-/// before opening the tap (see `SttImpl.requestAuthorization`), so this helper
-/// just invokes it and maps the generated `SpeechFfiError` onto a UI-friendly
-/// result — exactly as Android's `VoiceCapture.transcribe` maps `SpeechFfiException`.
+/// `SttImpl` requests speech-recognition + microphone authorization before
+/// opening the tap. This helper owns the UI-facing press lifecycle and maps the
+/// generated `SpeechFfiError` onto a stable result.
 @MainActor
 final class VoiceCapture {
-    func transcribe(language: String? = nil) async -> VoiceCaptureResult {
+    typealias Completion = @MainActor (VoiceCaptureResult) -> Void
+
+    private struct ActiveCapture {
+        let id: UUID
+        let session: any VoiceTranscriptionSession
+        let task: Task<Void, Never>
+    }
+
+    private let makeSession: @MainActor () -> (any VoiceTranscriptionSession)?
+    private var activeCapture: ActiveCapture?
+    private(set) var phase: VoiceCapturePhase = .idle
+
+    init() {
         #if canImport(Speech) && canImport(AVFoundation)
-            do {
-                let text = try await SttImpl().transcribe(language: language)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return text.isEmpty ? .empty : .transcript(text)
-            } catch let error {
-                return mapError(error)
-            }
+            makeSession = { SystemVoiceTranscriptionSession() }
         #else
-            return .failed("speech unavailable on this platform")
+            makeSession = { nil }
         #endif
     }
 
+    /// Test-only seam is internal so the hosted XCTest target can inject a
+    /// deterministic recognizer without opening the microphone.
+    init(makeSession: @escaping @MainActor () -> any VoiceTranscriptionSession) {
+        self.makeSession = { makeSession() }
+    }
+
+    /// Begin opening the microphone immediately. A matching `finish()` ends the
+    /// audio request and lets Speech return its final result; `cancel()` tears the
+    /// whole session down and deliberately suppresses completion delivery.
+    func start(language: String? = nil, completion: @escaping Completion) {
+        cancel()
+        guard let session = makeSession() else {
+            completion(.failed("speech unavailable on this platform"))
+            return
+        }
+
+        let id = UUID()
+        phase = .listening
+        let task = Task { [weak self, session] in
+            let result: VoiceCaptureResult
+            do {
+                let text = try await session.transcribe(language: language)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                result = text.isEmpty ? .empty : .transcript(text)
+            } catch is CancellationError {
+                return
+            } catch {
+                result = Self.mapError(error)
+            }
+
+            guard !Task.isCancelled else { return }
+            self?.complete(id: id, result: result, completion: completion)
+        }
+        activeCapture = ActiveCapture(id: id, session: session, task: task)
+    }
+
+    func finish() {
+        guard phase == .listening, let activeCapture else { return }
+        phase = .finishing
+        activeCapture.session.finishRecording()
+    }
+
+    func cancel() {
+        guard let activeCapture else {
+            phase = .idle
+            return
+        }
+        self.activeCapture = nil
+        phase = .idle
+        activeCapture.session.cancelRecognition()
+        activeCapture.task.cancel()
+    }
+
+    private func complete(id: UUID, result: VoiceCaptureResult, completion: Completion) {
+        guard activeCapture?.id == id else { return }
+        activeCapture = nil
+        phase = .idle
+        completion(result)
+    }
+
     #if canImport(Speech) && canImport(AVFoundation)
-        private func mapError(_ error: Error) -> VoiceCaptureResult {
+        private static func mapError(_ error: Error) -> VoiceCaptureResult {
             guard let ffi = error as? SpeechFfiError else { return .failed("\(error)") }
             switch ffi {
             case .PermissionDenied:
@@ -93,6 +193,10 @@ final class VoiceCapture {
             case .Unavailable:
                 return .failed("speech recognizer unavailable")
             }
+        }
+    #else
+        private static func mapError(_ error: Error) -> VoiceCaptureResult {
+            .failed("\(error)")
         }
     #endif
 }

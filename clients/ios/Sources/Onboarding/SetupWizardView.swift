@@ -4,15 +4,15 @@ import SwiftUI
 //
 // Port of the prototype's `SetupWizard` (lingxi-iphone.html). A 5-step first-run
 // flow over the sci-fi orb backdrop: welcome → name the assistant (wake word) →
-// your name → enroll a voiceprint (optional, simulated) → pick a default model.
+// your name → choose native speech behavior → finish. Provider/model setup stays
+// in the real Provider settings flow, so onboarding never presents mock models.
 // On finish it writes the chosen values to `AppState` and marks `setupDone`, so
 // it only runs once (re-triggerable from Settings → 关于 → 重新观看引导).
 
 struct SetupWizardView: View {
-    @EnvironmentObject private var app: AppState
-    /// The shared conversation model — its `availableModels` / `activeModelId`
-    /// carry the engine's REAL model catalog (out-of-band). The model step renders
-    /// only these references; empty means the first `ModelList` has not landed.
+    @Environment(AppState.self) private var app
+    /// Kept in the initializer for source compatibility with the existing root;
+    /// model selection now belongs to the real Provider settings flow.
     @ObservedObject var convo: ConversationModel
     /// Commit the chosen model to the engine (`SetModel`) when it is a real id.
     var onSetModel: (String) -> Void = { _ in }
@@ -22,57 +22,15 @@ struct SetupWizardView: View {
 
     private static let total = 5
 
-    /// One model row, keeping the full provider-qualified selection reference.
-    private struct WizModel: Identifiable { let id: String; let name: String; let sub: String; let color: Color }
-    private struct WizModelSection: Identifiable {
-        let id: String
-        let name: String
-        let models: [WizModel]
-    }
-
-    /// Group only the curated references received from the engine. The wizard
-    /// never fills a section from the Provider's complete remote catalog.
-    private var wizardModelSections: [WizModelSection] {
-        ModelDisplay.sections(for: convo.availableModels).map { section in
-            WizModelSection(
-                id: section.providerId,
-                name: section.name,
-                models: section.models.map { item in
-                    WizModel(
-                        id: item.reference,
-                        name: item.name,
-                        sub: item.modelId,
-                        color: item.color)
-                })
-        }
-    }
-
-    private var wizardModels: [WizModel] {
-        wizardModelSections.flatMap(\.models)
-    }
-
-    /// The effective selection: the user's pick when it's in the catalog, else the
-    /// engine's active id, else the first row (keeps a valid default as the real
-    /// catalog arrives async during first-run).
-    private var selectedModelId: String {
-        if wizardModels.contains(where: { $0.id == modelId }) { return modelId }
-        if !convo.activeModelId.isEmpty { return convo.activeModelId }
-        return wizardModels.first?.id ?? modelId
-    }
-
     @State private var step = 0
     @State private var seeded = false
 
     // Editable copies, seeded from AppState on first appear.
     @State private var assistantName = "灵犀"
     @State private var userName = ""
-    @State private var modelId = ""
-
-    // Voiceprint enrollment simulation: idle | rec | done.
-    private enum VP { case idle, rec, done }
-    @State private var vp: VP = .idle
-    @State private var vpPct: Double = 0
-    @State private var vpTimer: Timer?
+    @State private var recognitionMode: VoiceRecognitionMode = .onDevice
+    @State private var voiceLanguage = VoiceCapabilityModel.automaticLanguageIdentifier
+    @State private var voiceCapability = VoiceCapabilityModel()
 
     @FocusState private var fieldFocused: Bool
 
@@ -103,11 +61,11 @@ struct SetupWizardView: View {
             seeded = true
             assistantName = app.assistantName
             userName = app.userName
-            modelId = app.defaultModelId
-            vp = app.voiceprint ? .done : .idle
-            vpPct = app.voiceprint ? 100 : 0
+            recognitionMode = VoiceRecognitionMode(rawValue: app.voiceRecognitionMode) ?? .onDevice
+            voiceLanguage = app.voiceLanguage
+            voiceCapability.setMode(recognitionMode)
+            voiceCapability.setLanguage(voiceLanguage)
         }
-        .onDisappear { vpTimer?.invalidate() }
     }
 
     // MARK: header — back chevron + segmented progress
@@ -212,109 +170,102 @@ struct SetupWizardView: View {
                 wizField(text: $userName, placeholder: "你的名字")
             }
         case 3:
-            voiceprintStep
+            voiceCapabilityStep
         default:
             VStack(spacing: 0) {
                 badge(.brain)
-                wizH("选择默认模型")
-                wizSub("随时可在对话中切换。不确定就先用推荐的主力模型。")
-                VStack(alignment: .leading, spacing: 14) {
-                    if wizardModelSections.isEmpty {
-                        Text("正在从引擎加载可用模型…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(okl: 0.68, 0.04, 280))
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 20)
-                    }
-                    ForEach(wizardModelSections) { section in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(section.name)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Color(okl: 0.68, 0.04, 280))
-                                .textCase(.uppercase)
-                                .padding(.leading, 4)
-                            ForEach(section.models) { model in
-                                modelRow(model)
-                            }
-                        }
-                    }
+                wizH("基础设置完成")
+                wizSub("进入应用后，请在「设置 → LLM 提供商」保存真实凭据并选择默认模型。")
+                VStack(alignment: .leading, spacing: 12) {
+                    completionRow("助手", assistantName)
+                    completionRow("称呼", userName)
+                    completionRow("语音", recognitionMode.title)
+                    completionRow("语言", VoiceCapabilityModel.displayName(for: voiceLanguage))
                 }
+                .padding(16)
+                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
+                .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.12), lineWidth: 0.5))
             }
         }
     }
 
-    private var voiceprintStep: some View {
+    private var voiceCapabilityStep: some View {
         VStack(spacing: 0) {
             badge(.mic)
-            wizH("录入你的声纹")
-            wizSub("让灵犀听声识人，只对你的声音响应、唤起属于你的记忆。可稍后在设置里完成。")
-            ZStack {
-                Circle().stroke(.white.opacity(0.1), lineWidth: 4).frame(width: 108, height: 108)
-                Circle().trim(from: 0, to: CGFloat(vpPct / 100))
-                    .stroke(Color(okl: 0.70, 0.19, 290), style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                    .frame(width: 108, height: 108)
-                    .rotationEffect(.degrees(-90))
-                    .shadow(color: Color(okl: 0.70, 0.19, 290, 0.7), radius: 4)
-                Button(action: startVoiceprint) {
-                    LXIcon(name: vp == .done ? .check : .mic, size: 34, color: .white, stroke: 2)
-                        .frame(width: 88, height: 88)
-                        .background {
-                            if vp == .done {
-                                LinearGradient(colors: [Color(okl: 0.70, 0.16, 150), Color(okl: 0.64, 0.16, 165)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            } else {
-                                LinearGradient(colors: [Color(okl: 0.66, 0.20, 270), Color(okl: 0.62, 0.21, 312)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            }
-                        }
-                        .clipShape(Circle())
-                        .shadow(color: Color(okl: 0.60, 0.20, 290, 0.4), radius: 10, y: 4)
+            wizH("选择语音识别方式")
+            wizSub("优先使用 iOS 设备端识别；当前语言不支持时会明确回退到系统识别。")
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("语言")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], spacing: 8) {
+                    voiceLanguageButton(
+                        "跟随系统",
+                        value: VoiceCapabilityModel.automaticLanguageIdentifier
+                    )
+                    voiceLanguageButton("中文", value: "zh-CN")
+                    voiceLanguageButton("English", value: "en-US")
+                    voiceLanguageButton("日本語", value: "ja-JP")
                 }
-                .disabled(vp == .rec)
-            }
-            .frame(width: 140, height: 140)
-            .padding(.top, 6)
-            Text(vpStatusText)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(vp == .done ? Color(okl: 0.74, 0.15, 155) : Color(okl: 0.78, 0.04, 280))
-                .padding(.top, 20)
-                .frame(minHeight: 22)
-            if vp != .done {
-                Text("「你好灵犀，我是\(userName.isEmpty ? "我" : userName)。」")
-                    .font(.system(size: 15)).italic()
-                    .foregroundColor(Color(okl: 0.86, 0.03, 280))
+                Text("识别方式")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
                     .padding(.top, 8)
+                ForEach(VoiceRecognitionMode.allCases) { mode in
+                    voiceModeButton(mode)
+                }
             }
+
+            Text(voiceCapability.effectiveRecognitionLabel)
+                .font(.footnote)
+                .foregroundStyle(
+                    recognitionMode == .onDevice && !voiceCapability.onDeviceAvailable
+                        ? Color.orange : Color(okl: 0.74, 0.10, 155)
+                )
+                .padding(.top, 18)
         }
     }
 
-    private var vpStatusText: String {
-        switch vp {
-        case .idle: return "轻点麦克风，朗读下面这句话"
-        case .rec:  return "正在聆听你的声音… \(Int(vpPct))%"
-        case .done: return "✓ 声纹已录入"
+    private func voiceLanguageButton(_ label: String, value: String) -> some View {
+        Button(label) {
+            voiceLanguage = value
+            voiceCapability.setLanguage(value)
         }
+        .buttonStyle(.bordered)
+        .tint(voiceLanguage == value ? Color(okl: 0.70, 0.18, 285) : .gray)
     }
 
-    private func modelRow(_ m: WizModel) -> some View {
-        let on = selectedModelId == m.id
-        return Button { modelId = m.id } label: {
-            HStack(spacing: 13) {
-                Circle().fill(m.color).frame(width: 10, height: 10).shadow(color: m.color, radius: 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(m.name).font(.system(size: 15.5, weight: .semibold)).foregroundColor(Color(okl: 0.95, 0.02, 285))
-                    Text(m.sub).font(.system(size: 12.5)).foregroundColor(Color(okl: 0.66, 0.03, 280)).lineLimit(1)
+    private func voiceModeButton(_ mode: VoiceRecognitionMode) -> some View {
+        Button {
+            recognitionMode = mode
+            voiceCapability.setMode(mode)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: recognitionMode == mode ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(recognitionMode == mode ? Color(okl: 0.70, 0.18, 285) : .gray)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(mode.title).font(.body.bold())
+                    Text(mode.detail).font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 0)
-                ZStack {
-                    Circle().stroke(on ? Color(okl: 0.70, 0.18, 285) : .white.opacity(0.25), lineWidth: 1.5)
-                        .frame(width: 22, height: 22)
-                    if on { Circle().fill(Color(okl: 0.66, 0.20, 288)).frame(width: 22, height: 22)
-                        LXIcon(name: .check, size: 13, color: .white, stroke: 3) }
-                }
+                Spacer()
             }
-            .padding(.horizontal, 16).padding(.vertical, 14)
-            .background(on ? Color(okl: 0.70, 0.18, 285, 0.16) : .white.opacity(0.04), in: RoundedRectangle(cornerRadius: 15))
-            .overlay(RoundedRectangle(cornerRadius: 15).stroke(on ? Color(okl: 0.70, 0.18, 285, 0.55) : .white.opacity(0.1), lineWidth: 1))
+            .padding(14)
+            .background(
+                .white.opacity(recognitionMode == mode ? 0.10 : 0.04),
+                in: RoundedRectangle(cornerRadius: 14)
+            )
         }
+        .buttonStyle(.plain)
+    }
+
+    private func completionRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(Color(okl: 0.68, 0.04, 280))
+            Spacer()
+            Text(value).foregroundStyle(Color(okl: 0.95, 0.02, 285)).bold()
+        }
+        .font(.subheadline)
     }
 
     // MARK: small building blocks
@@ -352,7 +303,7 @@ struct SetupWizardView: View {
     private var cta: String {
         switch step {
         case 0: return "开始设置"
-        case 3: return vp == .done ? "继续" : "稍后再说"
+        case 3: return "继续"
         case Self.total - 1: return "进入灵犀"
         default: return "继续"
         }
@@ -364,9 +315,7 @@ struct SetupWizardView: View {
         default: return false
         }
     }
-    private var skipLabel: String? {
-        (step == 3 && vp != .done) ? "跳过此步" : nil
-    }
+    private var skipLabel: String? { nil }
 
     // MARK: actions
     private func next() {
@@ -378,28 +327,11 @@ struct SetupWizardView: View {
         }
     }
     private func finish() {
-        let chosen = selectedModelId
         app.assistantName = assistantName.trimmingCharacters(in: .whitespaces)
         app.userName = userName.trimmingCharacters(in: .whitespaces)
-        app.voiceprint = (vp == .done)
+        app.voiceRecognitionMode = recognitionMode.rawValue
+        app.voiceLanguage = voiceLanguage
         app.setupDone = true
-        // When the engine's real catalog is present, commit the pick to it.
-        if !convo.availableModels.isEmpty {
-            app.defaultModelId = chosen
-            onSetModel(chosen)
-        }
         onDone()
-    }
-
-    private func startVoiceprint() {
-        guard vp != .rec else { return }
-        vp = .rec; vpPct = 0
-        let start = Date()
-        vpTimer?.invalidate()
-        vpTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { tmr in
-            let p = min(100, Date().timeIntervalSince(start) / 2.6 * 100)
-            vpPct = p
-            if p >= 100 { tmr.invalidate(); vp = .done }
-        }
     }
 }

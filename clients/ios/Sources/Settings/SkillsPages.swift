@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Skills (grouped by author)
 struct SkillsPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     let host: SettingsHost
 
     private let authorOrder = ["官方", "我", "社区 · @arxiv-fan", "社区 · @lin"]
@@ -54,7 +54,7 @@ struct SkillsPage: View {
 // MARK: - Skill detail
 struct SkillDetailPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     let host: SettingsHost
     let skillId: String
 

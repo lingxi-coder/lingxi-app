@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DreamPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
 
     @State private var orbPulse = false
     private let rose = Color(srgb: 0.809, 0.4552, 0.8891) // oklch(70% 0.18 320)

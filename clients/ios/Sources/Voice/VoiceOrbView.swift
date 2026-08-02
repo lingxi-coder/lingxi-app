@@ -207,7 +207,7 @@ struct OrbCanvas: View {
 // MARK: - VoiceOrb overlay
 
 struct VoiceOrbView: View {
-    @EnvironmentObject private var app: AppState
+    @Environment(AppState.self) private var app
     /// The REAL conversation model — its `messages` / `streaming` drive the orb's
     /// thinking→speaking captions exactly as they drive ChatView (the orb is just
     /// another view of the same live session).
@@ -221,10 +221,9 @@ struct VoiceOrbView: View {
     @State private var phase: OrbPhase = .idle
     @State private var userCaption = ""
     @State private var didSend = false
-    @State private var listenTask: Task<Void, Never>? = nil
     @State private var spokenForText = ""
     @State private var speaker = AVSpeechSynthesizer()
-    private let voiceCapture = VoiceCapture()
+    @State private var voiceCapture = VoiceCapture()
 
     @State private var typing = false
     @State private var draft = ""
@@ -289,7 +288,7 @@ struct VoiceOrbView: View {
     }
 
     private func teardown() {
-        listenTask?.cancel()
+        voiceCapture.cancel()
         onCancel()
         speaker.stopSpeaking(at: .immediate)
     }
@@ -329,17 +328,20 @@ struct VoiceOrbView: View {
     // MARK: real-voice driver
     /// Start a one-shot listen → send → (engine streams the reply) cycle.
     private func listen() {
+        if voiceCapture.phase == .listening {
+            voiceCapture.finish()
+            return
+        }
+        guard voiceCapture.phase != .finishing else { return }
+
         onCancel()
         speaker.stopSpeaking(at: .immediate)
-        listenTask?.cancel()
+        voiceCapture.cancel()
         userCaption = ""; didSend = false; phase = .listening
-        listenTask = Task {
-            let result = await voiceCapture.transcribe()
-            await MainActor.run {
-                switch result {
-                case .transcript(let text): submitTurn(text)
-                default: if phase == .listening { phase = .idle }
-                }
+        voiceCapture.start { result in
+            switch result {
+            case .transcript(let text): submitTurn(text)
+            default: if phase == .listening { phase = .idle }
             }
         }
     }
@@ -493,6 +495,7 @@ struct VoiceOrbView: View {
     private func submit() {
         let txt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !txt.isEmpty else { return }
+        voiceCapture.cancel()
         typing = false; draft = ""
         submitTurn(txt)
     }

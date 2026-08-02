@@ -100,6 +100,7 @@ struct SettingsRow<Trailing: View>: View {
             .padding(.horizontal, 14).padding(.vertical, 12)
             if !isLast { Rectangle().fill(t.border).frame(height: 0.5) }
         }
+        .contentShape(Rectangle())
     }
 }
 

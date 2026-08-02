@@ -230,6 +230,42 @@ private enum LinuxRuntimeBridge {
         #endif
     }
 
+    static func refreshTasks(mode: LinuxRuntimeMode) async -> Result<LinuxRuntimeTaskOperationResult, LinuxRuntimeTaskOperationFailure> {
+        #if targetEnvironment(simulator)
+            return .failure(LinuxRuntimeTaskOperationFailure(message: "iOS Simulator 不提供 Mobile Linux 运行时"))
+        #else
+        let cfg = config(for: mode)
+        do {
+            let handle = try await cache.handle(for: cfg)
+            let tasks = try await handle.listTasks().map(mapTask)
+            let message = tasks.isEmpty ? "当前没有 guest 后台任务" : "已刷新 \(tasks.count) 个 guest 任务"
+            return .success(LinuxRuntimeTaskOperationResult(tasks: tasks, message: message))
+        } catch {
+            return .failure(LinuxRuntimeTaskOperationFailure(message: String(describing: error)))
+        }
+        #endif
+    }
+
+    static func stopTask(
+        mode: LinuxRuntimeMode,
+        taskID: String
+    ) async -> Result<LinuxRuntimeTaskOperationResult, LinuxRuntimeTaskOperationFailure> {
+        #if targetEnvironment(simulator)
+            return .failure(LinuxRuntimeTaskOperationFailure(message: "iOS Simulator 不提供 Mobile Linux 运行时"))
+        #else
+        let cfg = config(for: mode)
+        do {
+            let handle = try await cache.handle(for: cfg)
+            let stopped = try await handle.killTask(taskId: taskID)
+            let tasks = try await handle.listTasks().map(mapTask)
+            let message = stopped.detail ?? "已停止任务 \(stopped.title)"
+            return .success(LinuxRuntimeTaskOperationResult(tasks: tasks, message: message))
+        } catch {
+            return .failure(LinuxRuntimeTaskOperationFailure(message: String(describing: error)))
+        }
+        #endif
+    }
+
     private static func map(
         mode: LinuxRuntimeMode,
         capability: MobileLinuxCapabilityFfi,
@@ -317,9 +353,31 @@ private enum LinuxRuntimeBridge {
     }
 }
 
+private struct LinuxRuntimeBridgeTaskOperator: LinuxRuntimeTaskOperating {
+    func refreshTasks(mode: LinuxRuntimeMode) async throws -> LinuxRuntimeTaskOperationResult {
+        switch await LinuxRuntimeBridge.refreshTasks(mode: mode) {
+        case .success(let result):
+            return result
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func stopTask(mode: LinuxRuntimeMode, taskID: String) async throws -> LinuxRuntimeTaskOperationResult {
+        switch await LinuxRuntimeBridge.stopTask(mode: mode, taskID: taskID) {
+        case .success(let result):
+            return result
+        case .failure(let error):
+            throw error
+        }
+    }
+}
+
 struct LinuxRuntimePage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
+    @State private var taskOperations = LinuxRuntimeTaskOperationsModel(adapter: LinuxRuntimeBridgeTaskOperator())
+    var onOpenTerminal: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -335,6 +393,10 @@ struct LinuxRuntimePage: View {
         }
         .task(id: store.linuxRuntime.selectedMode) {
             await run(.refresh, mode: store.linuxRuntime.selectedMode)
+        }
+        .onChange(of: taskOperations.errorMessage) { _, message in
+            guard let message, !message.isEmpty else { return }
+            store.linuxRuntime.lastActionMessage = message
         }
     }
 
@@ -415,56 +477,68 @@ struct LinuxRuntimePage: View {
     }
 
     private var terminalSection: some View {
-        SettingsSection(label: "终端骨架", footer: "当前只接入宿主桥与 UI 骨架。未授权或未链接时，执行会返回明确 unavailable / blocked 错误。") {
-            SettingsRow(label: "命令预览", sub: store.linuxRuntime.terminal.lastError ?? "使用 /bin/sh -lc 在 guest 中执行单条命令",
-                        chevron: false) {
-                EmptyView()
-            }
-            SettingsField(
-                text: Binding(
-                    get: { store.linuxRuntime.terminal.draftCommand },
-                    set: { store.linuxRuntime.terminal.draftCommand = $0 }
-                ),
-                placeholder: "python3 --version"
+        SettingsSection(label: "终端", footer: "终端使用当前项目的 guest workspace；运行时或 PTY 不可用时会显示修复入口，不会回退到其他目录。") {
+            FieldLabel(text: "初始命令")
+            SettingsField(text: Binding(
+                get: { store.linuxRuntime.terminal.draftCommand },
+                set: { store.linuxRuntime.terminal.draftCommand = $0 }
+            ), placeholder: "例如：python3 --version")
+                .padding(.bottom, 14)
+            SettingsRow(
+                label: "命令预览",
+                sub: normalizedDraftCommand ?? "未设置；打开后进入交互 shell",
+                value: normalizedDraftCommand == nil ? "交互 shell" : "将自动执行",
+                chevron: false
             )
-            .padding(.horizontal, 14)
-            .padding(.bottom, 12)
-            HStack(spacing: 8) {
-                Button("执行") {
-                    Task { await runCommandPreview() }
-                }
-                .disabled(store.linuxRuntime.busyAction != nil || store.linuxRuntime.terminal.draftCommand.isEmpty)
-                Button("清空") {
-                    store.linuxRuntime.terminal.lines.removeAll()
-                    store.linuxRuntime.terminal.lastError = nil
-                }
-                .disabled(store.linuxRuntime.terminal.lines.isEmpty && store.linuxRuntime.terminal.lastError == nil)
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 12)
-            ForEach(store.linuxRuntime.terminal.lines.prefix(4)) { line in
-                SettingsRow(
-                    label: line.source.uppercased(),
-                    sub: line.text,
-                    value: line.isError ? "错误" : "输出",
-                    valueColor: line.isError ? t.danger : t.text3,
-                    chevron: false,
-                    isLast: line.id == store.linuxRuntime.terminal.lines.prefix(4).last?.id
-                )
-            }
+            SettingsRow(
+                label: "打开全屏终端",
+                sub: store.linuxRuntime.canOpenTerminal
+                    ? "使用当前项目工作区"
+                    : "仍可打开并查看不可用原因与修复入口",
+                value: store.linuxRuntime.canOpenTerminal ? "可用" : "诊断",
+                chevron: true,
+                isLast: true,
+                onTap: onOpenTerminal
+            )
         }
     }
 
     private var tasksSection: some View {
-        SettingsSection(label: "任务骨架") {
+        SettingsSection(label: "任务") {
+            actionButtonRow(
+                label: "刷新任务列表",
+                buttonTitle: "刷新",
+                enabled: store.linuxRuntime.available && !taskOperations.isBusy,
+                busy: taskOperations.busyOperation == .refreshTasks,
+                isLast: store.linuxRuntime.tasks.isEmpty
+            ) {
+                Task { await refreshTasks() }
+            }
             if store.linuxRuntime.tasks.isEmpty {
-                SettingsRow(label: "当前任务", sub: "尚无 guest 后台任务；真实 iSH 接入后这里显示 task 列表与停止入口",
+                SettingsRow(label: "当前任务", sub: "当前没有 guest 后台任务",
                             value: "0", chevron: false, isLast: true)
             } else {
                 ForEach(Array(store.linuxRuntime.tasks.enumerated()), id: \.element.id) { index, task in
-                    SettingsRow(label: task.title, sub: task.detail,
-                                value: task.state.label, chevron: false,
-                                isLast: index == store.linuxRuntime.tasks.count - 1)
+                    SettingsRow(
+                        label: task.title,
+                        sub: task.detail,
+                        value: task.state.label,
+                        chevron: false,
+                        isLast: index == store.linuxRuntime.tasks.count - 1
+                    ) {
+                        if task.state == .running {
+                            if taskOperations.isStopping(task.id) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button("停止") {
+                                    Task { await stopTask(taskID: task.id) }
+                                }
+                                .font(.system(size: 12, weight: .medium))
+                            }
+                        } else {
+                            EmptyView()
+                        }
+                    }
                 }
             }
         }
@@ -493,8 +567,37 @@ struct LinuxRuntimePage: View {
                         sub: "iSH / fakefs 不是安全边界；真实边界仍是 iOS App 沙箱与宿主策略",
                         chevron: false)
             SettingsRow(icon: .stop, label: "停止当前任务",
-                        sub: "Phase-1 尚未接入真实后台进程句柄，因此没有可终止的 guest 任务",
-                        value: "未启用", chevron: false, isLast: true)
+                        sub: "仅对 runtime 当前已报告的 running task 开放停止；不伪造 boot/install/mount apply 操作",
+                        value: store.linuxRuntime.tasks.contains(where: { $0.state == .running }) ? "可用" : "空闲",
+                        chevron: false, isLast: true)
+        }
+    }
+
+    @ViewBuilder
+    private func actionButtonRow(
+        label: String,
+        buttonTitle: String,
+        enabled: Bool,
+        busy: Bool,
+        isLast: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        SettingsRow(
+            label: label,
+            sub: busy ? "执行中…" : (enabled ? buttonTitle : "当前不可用"),
+            chevron: false,
+            isLast: isLast
+        ) {
+            if busy {
+                ProgressView().controlSize(.small)
+            } else if enabled {
+                Button(buttonTitle, action: action)
+                    .font(.system(size: 12, weight: .medium))
+            } else {
+                Text("未启用")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(t.text4)
+            }
         }
     }
 
@@ -527,7 +630,8 @@ struct LinuxRuntimePage: View {
     @MainActor
     private func run(_ action: LinuxRuntimeAction, mode: LinuxRuntimeMode) async {
         guard store.linuxRuntime.selectedMode == mode,
-              store.linuxRuntime.busyAction == nil else { return }
+              store.linuxRuntime.busyAction == nil,
+              !taskOperations.isBusy else { return }
         store.linuxRuntime.busyAction = action
         let next: LinuxRuntimeState
         switch action {
@@ -548,26 +652,29 @@ struct LinuxRuntimePage: View {
         store.linuxRuntime = next
     }
 
+    private var normalizedDraftCommand: String? {
+        let trimmed = store.linuxRuntime.terminal.draftCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     @MainActor
-    private func runCommandPreview() async {
-        let command = store.linuxRuntime.terminal.draftCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !command.isEmpty else { return }
-        switch await LinuxRuntimeBridge.runCommand(mode: store.linuxRuntime.selectedMode, command: command) {
-        case .success(let line):
-            store.linuxRuntime.terminal.lastError = nil
-            store.linuxRuntime.terminal.lines.append(line)
-        case .failure(let error):
-            store.linuxRuntime.terminal.lastError = error.message
-            store.linuxRuntime.terminal.lines.append(
-                LinuxTerminalLine(
-                    streamID: "run-preview",
-                    source: "error",
-                    text: error.message,
-                    isError: true
-                )
-            )
+    private func refreshTasks() async {
+        guard !taskOperations.isBusy else { return }
+        if let result = await taskOperations.refreshTasks(mode: store.linuxRuntime.selectedMode) {
+            store.linuxRuntime.tasks = result.tasks
+            store.linuxRuntime.lastActionMessage = result.message
         }
     }
+
+    @MainActor
+    private func stopTask(taskID: String) async {
+        guard !taskOperations.isBusy else { return }
+        if let result = await taskOperations.stopTask(mode: store.linuxRuntime.selectedMode, taskID: taskID) {
+            store.linuxRuntime.tasks = result.tasks
+            store.linuxRuntime.lastActionMessage = result.message
+        }
+    }
+
 }
 
 private func formatBytes(_ bytes: UInt64) -> String {

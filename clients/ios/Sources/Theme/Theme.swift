@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 // MARK: - Theme environment
 //
@@ -18,52 +19,62 @@ extension EnvironmentValues {
     }
 }
 
-/// Global UI state — theme mode + accent override, persisted via @AppStorage.
-final class AppState: ObservableObject {
-    @AppStorage("theme") var themeRaw: String = "dark" {
-        willSet { objectWillChange.send() }
-    }
+/// Global UI state persisted in `UserDefaults` and shared through the iOS 17
+/// Observation environment. Keeping persistence here makes every mutation
+/// synchronous and testable without coupling the model to a SwiftUI view.
+@Observable
+@MainActor
+final class AppState {
+    @ObservationIgnored private let defaults: UserDefaults
+
+    var themeRaw: String { didSet { defaults.set(themeRaw, forKey: "theme") } }
     /// The selected accent oklch id (matches an `Accents.all` entry).
-    @AppStorage("accent") var accentId: String = "oklch(70% 0.18 268)" {
-        willSet { objectWillChange.send() }
-    }
-    @AppStorage("density") var density: String = "comfortable" {
-        willSet { objectWillChange.send() }
-    }
-    @AppStorage("fontSize") var fontSize: Double = 15 {
-        willSet { objectWillChange.send() }
-    }
+    var accentId: String { didSet { defaults.set(accentId, forKey: "accent") } }
+    var density: String { didSet { defaults.set(density, forKey: "density") } }
+    var fontSize: Double { didSet { defaults.set(fontSize, forKey: "fontSize") } }
 
     // MARK: First-run profile + onboarding (the prototype's `lx_settings` blob +
     // `lx_setup_done` flag). Persisted so the SetupWizard runs once and the
     // VoiceOrb / drawer / settings can read the chosen names.
     /// The assistant's wake-word name (prototype `assistantName`, default 灵犀).
-    @AppStorage("assistantName") var assistantName: String = "灵犀" {
-        willSet { objectWillChange.send() }
-    }
+    var assistantName: String { didSet { defaults.set(assistantName, forKey: "assistantName") } }
     /// How the assistant addresses the user (prototype `userName`).
-    @AppStorage("userName") var userName: String = "" {
-        willSet { objectWillChange.send() }
-    }
-    /// Whether a voiceprint was enrolled in onboarding (prototype `voiceprint`).
-    @AppStorage("voiceprint") var voiceprint: Bool = false {
-        willSet { objectWillChange.send() }
-    }
-    /// The default model id picked in onboarding (prototype `modelId`, mock id).
-    @AppStorage("defaultModelId") var defaultModelId: String = "lx-72b" {
-        willSet { objectWillChange.send() }
-    }
+    var userName: String { didSet { defaults.set(userName, forKey: "userName") } }
     /// Open FlowMode by default when entering voice (prototype `flowDefault`).
-    @AppStorage("flowDefault") var flowDefault: Bool = true {
-        willSet { objectWillChange.send() }
-    }
+    var flowDefault: Bool { didSet { defaults.set(flowDefault, forKey: "flowDefault") } }
     /// Show the pop-up text input inside FlowMode (prototype `inputDialog`).
-    @AppStorage("inputDialog") var inputDialog: Bool = true {
-        willSet { objectWillChange.send() }
-    }
+    var inputDialog: Bool { didSet { defaults.set(inputDialog, forKey: "inputDialog") } }
     /// Whether first-run setup is complete (prototype `lx_setup_done`).
-    @AppStorage("setupDone") var setupDone: Bool = false {
-        willSet { objectWillChange.send() }
+    var setupDone: Bool { didSet { defaults.set(setupDone, forKey: "setupDone") } }
+
+    /// The onboarding choice: prefer recognizer-enforced on-device STT when the
+    /// current locale supports it, otherwise allow the system network fallback.
+    var voiceRecognitionMode: String {
+        didSet { defaults.set(voiceRecognitionMode, forKey: "voiceRecognitionMode") }
+    }
+    var voiceLanguage: String { didSet { defaults.set(voiceLanguage, forKey: "voiceLanguage") } }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        themeRaw = defaults.string(forKey: "theme") ?? "dark"
+        accentId = defaults.string(forKey: "accent") ?? "oklch(70% 0.18 268)"
+        density = defaults.string(forKey: "density") ?? "comfortable"
+        fontSize = defaults.object(forKey: "fontSize") == nil ? 15 : defaults.double(forKey: "fontSize")
+        assistantName = defaults.string(forKey: "assistantName") ?? "灵犀"
+        userName = defaults.string(forKey: "userName") ?? ""
+        flowDefault = defaults.object(forKey: "flowDefault") == nil ? true : defaults.bool(forKey: "flowDefault")
+        inputDialog = defaults.object(forKey: "inputDialog") == nil ? true : defaults.bool(forKey: "inputDialog")
+        #if DEBUG
+            // UI tests use real app navigation with a deterministic local
+            // source; bypass only the first-run overlay for that process.
+            setupDone = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1"
+                || defaults.bool(forKey: "setupDone")
+        #else
+            setupDone = defaults.bool(forKey: "setupDone")
+        #endif
+        voiceRecognitionMode = defaults.string(forKey: "voiceRecognitionMode") ?? "on-device"
+        voiceLanguage = defaults.string(forKey: "voiceLanguage")
+            ?? VoiceCapabilityModel.automaticLanguageIdentifier
     }
 
     var isDark: Bool { themeRaw == "dark" }

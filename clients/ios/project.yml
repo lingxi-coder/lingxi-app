@@ -39,16 +39,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
-        INFOPLIST_KEY_UILaunchScreen_Generation: true
-        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: true
-        INFOPLIST_KEY_CFBundleDisplayName: 灵犀
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
-        INFOPLIST_KEY_NSMicrophoneUsageDescription: "灵犀使用麦克风进行语音心流输入。"
-        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "灵犀使用语音识别将你的语音转写为文本。"
-        INFOPLIST_KEY_NSCameraUsageDescription: "灵犀使用相机拍摄照片供模型分析。"
-        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "灵犀访问相册以选择图片供模型分析。"
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: Info.plist
         ENABLE_PREVIEWS: true
-        GENERATE_INFOPLIST_FILE: true
+        GENERATE_INFOPLIST_FILE: false
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
 
@@ -77,6 +71,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests
         GENERATE_INFOPLIST_FILE: true
 
+  LingxiCodeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: UITests
+    dependencies:
+      - target: LingxiCode
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.uitests
+        GENERATE_INFOPLIST_FILE: true
+
 # Run the unit tests under the app scheme so `xcodebuild -scheme LingxiCode test`
 # executes the engine round-trip suite.
 schemes:
@@ -85,9 +92,11 @@ schemes:
       targets:
         LingxiCode: all
         LingxiCodeTests: [test]
+        LingxiCodeUITests: [test]
     test:
       targets:
         - LingxiCodeTests
+        - LingxiCodeUITests
       gatherCoverageData: false
     run:
       config: Debug

@@ -286,31 +286,32 @@ done
 # foreign listener is lowered and handed to the engine. The function/types are
 # unchanged; this only forces the same one-time init UniFFI already runs for
 # async entrypoints. Idempotent: skipped if the call is already present.
-log "Forcing IosEventListener callback-vtable init in buildIosEngine…"
+log "Forcing IosEventListener callback-vtable init in engine constructors…"
 IOSF="${GEN_DIR}/ios_framework.swift"
 [[ -f "${IOSF}" ]] || { echo "ERROR: ${IOSF} missing after bindgen" >&2; exit 1; }
-if ! grep -qF 'func buildIosEngine' "${IOSF}"; then
-  echo "ERROR: buildIosEngine not found in ${IOSF}; bindgen output shape changed" >&2
-  exit 1
-fi
-if ! grep -q 'uniffiEnsureInitialized() // M10-P4: register IosEventListener vtable' "${IOSF}"; then
-  tmp="${IOSF}.initpatch"
-  awk '
-    # Match the generated signature line exactly, then inject the ensure-init
-    # call as the first body statement (4-space indent matches UniFFI output).
-    /^public func buildIosEngine\(/ {
-      print
-      print "    uniffiEnsureInitialized() // M10-P4: register IosEventListener vtable before lowering the foreign listener"
-      next
-    }
-    { print }
-  ' "${IOSF}" > "${tmp}"
-  grep -q 'uniffiEnsureInitialized() // M10-P4' "${tmp}" || {
-    echo "ERROR: failed to inject uniffiEnsureInitialized() into buildIosEngine" >&2
+for constructor in buildIosEngine buildIosEngineWithConfig; do
+  if ! grep -qF "func ${constructor}(" "${IOSF}"; then
+    echo "ERROR: ${constructor} not found in ${IOSF}; bindgen output shape changed" >&2
     exit 1
-  }
-  mv "${tmp}" "${IOSF}"
-fi
+  fi
+  marker="M10-P4:${constructor}"
+  if ! grep -qF "${marker}" "${IOSF}"; then
+    tmp="${IOSF}.initpatch"
+    awk -v signature="public func ${constructor}(" -v marker="${marker}" '
+      index($0, signature) == 1 {
+        print
+        print "    uniffiEnsureInitialized() // " marker " register IosEventListener vtable before lowering"
+        next
+      }
+      { print }
+    ' "${IOSF}" > "${tmp}"
+    grep -qF "${marker}" "${tmp}" || {
+      echo "ERROR: failed to inject uniffiEnsureInitialized() into ${constructor}" >&2
+      exit 1
+    }
+    mv "${tmp}" "${IOSF}"
+  fi
+done
 
 SWIFT_COUNT="$(find "${GEN_DIR}" -maxdepth 1 -type f -name '*.swift' -print | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }

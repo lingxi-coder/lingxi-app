@@ -3,7 +3,10 @@ import SwiftUI
 // MARK: - Provider list
 struct ProviderListPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @State private var repository = ProviderRepository.shared
+    @State private var retryMaxAttemptsText = ""
+    @State private var retryBackoffMsText = ""
+    @Bindable var store: SettingsStore
     let host: SettingsHost
     let kind: ProviderKind
 
@@ -16,7 +19,7 @@ struct ProviderListPage: View {
     }
 
     var body: some View {
-        let arr = store.providers(kind)
+        let arr = kind == .llm ? repository.legacyProviders() : [GenericProvider]()
         VStack(spacing: 0) {
             Text(blurb).font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
@@ -27,7 +30,7 @@ struct ProviderListPage: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 24)
                 }
                 ForEach(Array(arr.enumerated()), id: \.element.id) { i, p in
-                    let preset = store.preset(of: p, kind: kind)
+                    let preset = kind == .llm ? repository.preset(for: p.preset) : store.preset(of: p, kind: kind)
                     SettingsRow(
                         labelView: AnyView(HStack(spacing: 6) {
                             Text(p.name).font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
@@ -52,20 +55,127 @@ struct ProviderListPage: View {
                 }
             }
 
-            DashedAddButton(title: "添加\(kind.title)") { host.push(.providerPicker(.init(kind))) }
-                .padding(.bottom, 22)
+            if kind == .llm {
+                DashedAddButton(title: "添加\(kind.title)") { host.push(.providerPicker(.init(kind))) }
+                    .accessibilityIdentifier("provider.add")
+                    .padding(.bottom, 22)
+            } else {
+                unsupportedProviderNotice
+                    .padding(.bottom, 22)
+            }
 
             if kind == .llm {
-                EngineCredentialsSection()
-
-                SettingsSection(label: "高级",
-                                footer: "智能路由：根据任务类型自动选择最合适的模型（推理→Opus / 速度→Mini / 代码→Code）。流式响应：边生成边显示。") {
-                    SettingsRow(icon: .sparkle, iconColor: t.accent, label: "智能路由",
-                                sub: "自动在已启用提供商间调度", chevron: false) { LXToggle(isOn: $store.smartRouting) }
-                    SettingsRow(icon: .workflow, label: "流式响应", chevron: false, isLast: true) { LXToggle(isOn: $store.streamingDefault) }
-                }
+                routingSection
             }
         }
+        .onChange(of: repository.syncRevision) { _, _ in
+            if kind == .llm {
+                store.llmProviders = repository.legacyProviders()
+            } else if kind == .search {
+                store.searchProviders = []
+            } else {
+                store.fetchProviders = []
+            }
+        }
+        .task {
+            guard kind == .llm else { return }
+            retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
+            retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
+            store.llmProviders = repository.legacyProviders()
+            await repository.refreshCredentialStatus()
+        }
+    }
+
+    @ViewBuilder
+    private var routingSection: some View {
+        let snapshot = repository.makeLaunchSnapshot()
+        let candidates = repository.fallbackCandidates()
+        SettingsSection(
+            label: "路由与重试",
+            footer: "仅对默认模型生效。最大重试次数限制为 \(ProviderRoutingSettings.minRetryMaxAttempts)-\(ProviderRoutingSettings.maxRetryMaxAttempts)，退避范围为 \(ProviderRoutingSettings.minRetryBackoffMs)-\(ProviderRoutingSettings.maxRetryBackoffMs) ms。"
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                routeField(
+                    label: "默认模型",
+                    text: .constant(snapshot.defaultModelID ?? "未配置默认模型"),
+                    editable: false
+                )
+                routeField(
+                    label: "最大重试次数",
+                    text: $retryMaxAttemptsText
+                )
+                routeField(
+                    label: "退避毫秒",
+                    text: $retryBackoffMsText
+                )
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("默认模型 fallback 顺序")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(t.text2)
+                    if candidates.isEmpty {
+                        Text("启用至少一个非默认 Provider 并设置模型后，才能为默认模型配置 fallback。")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(t.text4)
+                    } else {
+                        ForEach(candidates) { candidate in
+                            fallbackRow(candidate)
+                        }
+                    }
+                }
+                if let message = repository.routingMessage {
+                    Text(message)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(repository.routingDirty ? t.text4 : t.text2)
+                }
+                Button {
+                    Task {
+                        let applied = await repository.applyRoutingChanges(
+                            retryMaxAttemptsText: retryMaxAttemptsText,
+                            retryBackoffMsText: retryBackoffMsText
+                        )
+                        if applied {
+                            retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
+                            retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
+                        }
+                    }
+                } label: {
+                    Text("应用路由并重连")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(hasPendingRoutingChanges ? t.accent : t.text4)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .disabled(!hasPendingRoutingChanges)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var hasPendingRoutingChanges: Bool {
+        repository.routingDirty ||
+            retryMaxAttemptsText.trimmingCharacters(in: .whitespacesAndNewlines)
+                != String(repository.routingSettings.retryMaxAttempts) ||
+            retryBackoffMsText.trimmingCharacters(in: .whitespacesAndNewlines)
+                != String(repository.routingSettings.retryBackoffMs)
+    }
+
+    private var unsupportedProviderNotice: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("尚未接入真实配置仓储")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundColor(t.text)
+            Text("iOS 当前版本只移除了原型卡片；\(kind.title) 会显示真实空状态，待对应后端与会话重连链路接入后再开放新增与编辑。")
+                .font(.system(size: 11.5))
+                .foregroundColor(t.text4)
+                .lineSpacing(4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(t.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
     }
 
     private func badge(_ text: String, _ color: Color) -> some View {
@@ -74,51 +184,147 @@ struct ProviderListPage: View {
             .padding(.horizontal, 6).padding(.vertical, 1)
             .background(color.tint(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
     }
+
+    @ViewBuilder
+    private func routeField(
+        label: String,
+        text: Binding<String>,
+        editable: Bool = true
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundColor(t.text2)
+            if editable {
+                SettingsField(text: text)
+            } else {
+                Text(text.wrappedValue)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundColor(t.text4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 11)
+                    .background(t.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+            }
+        }
+    }
+
+    private func fallbackRow(_ candidate: ProviderFallbackCandidate) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                repository.toggleFallbackProfile(candidate.profileID)
+            } label: {
+                Circle()
+                    .strokeBorder(candidate.selected ? t.accent : t.border, lineWidth: 1.5)
+                    .frame(width: 18, height: 18)
+                    .overlay(candidate.selected ? Circle().fill(t.accent).frame(width: 9, height: 9) : nil)
+            }
+            .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(candidate.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(t.text)
+                Text(candidate.modelID)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundColor(t.text4)
+            }
+            Spacer()
+            if candidate.selected {
+                HStack(spacing: 6) {
+                    Button {
+                        repository.moveFallbackProfile(candidate.profileID, by: -1)
+                    } label: {
+                        LXIcon(name: .chevronR, size: 12, color: t.text3, stroke: 1.7)
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled((candidate.order ?? 0) == 0)
+                    Button {
+                        repository.moveFallbackProfile(candidate.profileID, by: 1)
+                    } label: {
+                        LXIcon(name: .chevronR, size: 12, color: t.text3, stroke: 1.7)
+                            .rotationEffect(.degrees(90))
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled((candidate.order ?? 0) == repository.routingSettings.fallbackProfileIDs.count - 1)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(t.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+    }
 }
 
 // MARK: - Provider picker (preset list)
 struct ProviderPickerPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @State private var repository = ProviderRepository.shared
+    @Bindable var store: SettingsStore
     let host: SettingsHost
     let kind: ProviderKind
 
+    @ViewBuilder
     var body: some View {
-        VStack(spacing: 0) {
-            Text("选择一个预设 — 灵犀会自动预填 API 地址、Key 前缀和可用模型。")
-                .font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
-            SettingsSection {
-                ForEach(Array(kind.presets.enumerated()), id: \.element.id) { i, p in
-                    Button { add(p.id) } label: {
-                        VStack(spacing: 0) {
-                            HStack(spacing: 12) {
-                                Text(String(p.name.prefix(1)))
-                                    .font(.system(size: 14, weight: .bold)).foregroundColor(p.color)
-                                    .frame(width: 32, height: 32)
-                                    .background(p.color.mix(with: t.surface, amount: 0.18))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.color.tint(0.28), lineWidth: 0.5))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(p.name).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text)
-                                    Text(p.sub + (p.models.isEmpty ? "" : " · \(p.models.count) 模型"))
-                                        .font(.system(size: 11.5)).foregroundColor(t.text4)
+        if kind != .llm {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("此类别尚未开放新增。")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(t.text)
+                Text("联网搜索与网页抓取的真实 Provider 仓储还未在 iOS 侧接通，因此这里只保留空状态，不再提供原型预设卡片。")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(t.text4)
+                    .lineSpacing(4)
+            }
+        } else {
+            VStack(spacing: 0) {
+                Text("选择一个预设 — 灵犀会自动预填 API 地址、Key 前缀和可用模型。")
+                    .font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
+                SettingsSection {
+                    ForEach(Array(kind.presets.enumerated()), id: \.element.id) { i, p in
+                        Button { add(p.id) } label: {
+                            VStack(spacing: 0) {
+                                HStack(spacing: 12) {
+                                    Text(String(p.name.prefix(1)))
+                                        .font(.system(size: 14, weight: .bold)).foregroundColor(p.color)
+                                        .frame(width: 32, height: 32)
+                                        .background(p.color.mix(with: t.surface, amount: 0.18))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.color.tint(0.28), lineWidth: 0.5))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(p.name).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text)
+                                        Text(p.sub + (p.models.isEmpty ? "" : " · \(p.models.count) 模型"))
+                                            .font(.system(size: 11.5)).foregroundColor(t.text4)
+                                    }
+                                    Spacer()
+                                    LXIcon(name: .plus, size: 15, color: t.text4, stroke: 2)
                                 }
-                                Spacer()
-                                LXIcon(name: .plus, size: 15, color: t.text4, stroke: 2)
+                                .padding(.horizontal, 14).padding(.vertical, 12)
+                                if i < kind.presets.count - 1 { Rectangle().fill(t.border).frame(height: 0.5) }
                             }
-                            .padding(.horizontal, 14).padding(.vertical, 12)
-                            if i < kind.presets.count - 1 { Rectangle().fill(t.border).frame(height: 0.5) }
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
     }
 
     private func add(_ presetId: String) {
-        let id = store.addProvider(kind, presetId: presetId)
+        let id: String
+        if kind == .llm {
+            id = repository.addProfile(presetID: presetId)
+            store.llmProviders = repository.legacyProviders()
+        } else {
+            id = store.addProvider(kind, presetId: presetId)
+        }
         host.replaceTopTwo(with: [.providerList(.init(kind)), .providerEdit(.init(kind), id)])
     }
 }
@@ -126,90 +332,147 @@ struct ProviderPickerPage: View {
 // MARK: - Provider edit
 struct ProviderEditPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @State private var repository = ProviderRepository.shared
+    @Bindable var store: SettingsStore
     let host: SettingsHost
     let kind: ProviderKind
     let providerId: String
 
     @State private var showKey = false
 
+    @ViewBuilder
     var body: some View {
-        guard let editing = store.providers(kind).first(where: { $0.id == providerId }) else {
-            DispatchQueue.main.async { host.pop() }
-            return AnyView(EmptyView())
-        }
-        let preset = store.preset(of: editing, kind: kind)
-        return AnyView(VStack(spacing: 0) {
-            statusBanner(editing)
+        if kind != .llm {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("此类别尚未开放编辑。")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(t.text)
+                Text("为了移除模拟卡片，这里不再读取任何预置 Provider 状态。等待对应真实后端接入后再开放编辑。")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(t.text4)
+                    .lineSpacing(4)
+            }
+        } else if let editing = repository.state(for: providerId) {
+            let preset = repository.preset(for: editing.profile.presetID)
+            VStack(spacing: 0) {
+                statusBanner(editing)
 
             FieldLabel(text: "显示名称")
-            SettingsField(text: bind(\.name), mono: false).padding(.bottom, 14)
+            SettingsField(text: binding(\.name), mono: false).padding(.bottom, 14)
 
             FieldLabel(text: "API 地址")
-            SettingsField(text: bind(\.url), placeholder: preset.defaultUrl)
+            SettingsField(text: binding(\.baseURL), placeholder: preset.defaultUrl)
             FieldHint("默认 `\(preset.defaultUrl.isEmpty ? "—" : preset.defaultUrl)` · 可填代理 / 镜像")
 
             FieldLabel(text: "API Key")
             keyField(editing, preset)
-            FieldHint("密钥仅本地加密存储 · 从不上传到灵犀服务器")
+            FieldHint(editing.maskedCredentialSummary + " · 密钥永不写入普通偏好。")
 
-            if preset.needsCx {
-                FieldLabel(text: "Custom Search Engine ID (cx)")
-                SettingsField(text: bind(\.cx), placeholder: "0123456789abcdef:ghi")
-                FieldHint("在 Google Programmable Search 创建并粘贴搜索引擎 ID")
-            }
-
-            if kind == .llm && !preset.models.isEmpty { modelPicker(editing, preset) }
-            if kind == .llm && preset.models.isEmpty {
-                FieldLabel(text: "模型 ID")
-                SettingsField(text: bind(\.model), placeholder: "llama-3.3-70b").padding(.bottom, 14)
+            if !preset.models.isEmpty { modelPicker(editing, preset) }
+            FieldLabel(text: preset.models.isEmpty ? "模型 ID" : "自定义模型 ID")
+            SettingsField(
+                text: binding(\.modelID),
+                placeholder: preset.models.first ?? "llama-3.3-70b"
+            )
+            .padding(.bottom, 6)
+            if !preset.models.isEmpty {
+                FieldHint("可直接输入未列出的模型 ID；上方预设选择器会写回这个字段。")
             }
 
             SettingsSection {
                 SettingsRow(label: "启用", chevron: false) {
-                    LXToggle(isOn: Binding(get: { editing.enabled },
-                                           set: { v in store.update(kind, id: providerId) { $0.enabled = v } }))
+                    LXToggle(isOn: Binding(get: { editing.profile.enabled },
+                                           set: { v in repository.updateProfile(providerId) { $0.enabled = v } }))
                 }
                 SettingsRow(label: "设为默认", chevron: false, isLast: true,
-                            onTap: { store.setDefault(kind, id: providerId) }) {
-                    if editing.isDefault { LXIcon(name: .check, size: 16, color: t.accent, stroke: 2.2) }
+                            onTap: { repository.setDefaultProfile(providerId) }) {
+                    if editing.profile.isDefault { LXIcon(name: .check, size: 16, color: t.accent, stroke: 2.2) }
                     else { Text("未启用").font(.system(size: 12)).foregroundColor(t.text4) }
                 }
             }
 
-            Button { store.remove(kind, id: providerId); host.pop() } label: {
+            Button {
+                Task {
+                    await repository.removeProfile(providerId)
+                    store.llmProviders = repository.legacyProviders()
+                    host.pop()
+                }
+            } label: {
                 Text("移除此提供商").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.danger)
                     .frame(maxWidth: .infinity).padding(12)
                     .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
             }
             .padding(.top, 8)
-        })
+            .disabled(editing.operationInFlight || editing.connectionState == .testing)
+
+            Button {
+                Task {
+                    await repository.applyChanges(providerId)
+                    store.llmProviders = repository.legacyProviders()
+                }
+            } label: {
+                Text("应用并重连")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(12)
+                    .background(t.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 11))
+            }
+            .padding(.top, 10)
+            .disabled(editing.operationInFlight || editing.connectionState == .testing)
+            }
+            .task(id: repository.syncRevision) {
+                store.llmProviders = repository.legacyProviders()
+            }
+        } else {
+            EmptyView()
+                .task { host.pop() }
+        }
     }
 
-    // bind a provider field as a Binding<String>
-    private func bind(_ keyPath: WritableKeyPath<GenericProvider, String>) -> Binding<String> {
+    private func binding(_ keyPath: WritableKeyPath<ProviderStoredProfile, String>) -> Binding<String> {
         Binding(
-            get: { store.providers(kind).first(where: { $0.id == providerId })?[keyPath: keyPath] ?? "" },
-            set: { v in store.update(kind, id: providerId) { $0[keyPath: keyPath] = v } })
+            get: { repository.state(for: providerId)?.profile[keyPath: keyPath] ?? "" },
+            set: { value in
+                repository.updateProfile(providerId) { $0[keyPath: keyPath] = value }
+            }
+        )
     }
 
-    private func statusBanner(_ p: GenericProvider) -> some View {
-        let dot = p.status.dot(t)
+    private func statusBanner(_ p: ProviderProfileState) -> some View {
+        let dot = p.legacyStatus.dot(t)
         return HStack(spacing: 8) {
             Circle().fill(dot).frame(width: 8, height: 8)
                 .overlay(Circle().stroke(dot.tint(0.22), lineWidth: 3).scaleEffect(1.75))
-            Text(p.status.label).font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
-            Spacer()
-            Button {
-                store.update(kind, id: providerId) { $0.status = .testing }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
-                    store.update(kind, id: providerId) { $0.status = .connected }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(p.statusLabel).font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
+                if let detail = p.validationMessage ?? p.detailMessage {
+                    Text(detail).font(.system(size: 11.5)).foregroundColor(t.text4).lineLimit(2)
                 }
-            } label: {
-                Text("测试连接").font(.system(size: 12, weight: .medium)).foregroundColor(t.text2)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(t.border, lineWidth: 0.5))
+            }
+            Spacer()
+            HStack(spacing: 8) {
+                Button {
+                    Task {
+                        await repository.testConnection(providerId)
+                        store.llmProviders = repository.legacyProviders()
+                    }
+                } label: {
+                    Text("测试连接").font(.system(size: 12, weight: .medium)).foregroundColor(t.text2)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 7))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(t.border, lineWidth: 0.5))
+                }
+                .disabled(p.operationInFlight || p.connectionState == .testing)
+
+                if p.clearCredentialOnApply {
+                    Button("撤销清除") {
+                        repository.cancelCredentialClear(for: providerId)
+                    }
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(t.text3)
+                }
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -219,28 +482,44 @@ struct ProviderEditPage: View {
         .padding(.bottom, 18)
     }
 
-    private func keyField(_ p: GenericProvider, _ preset: ProviderPreset) -> some View {
+    private func keyField(_ p: ProviderProfileState, _ preset: ProviderPreset) -> some View {
         ZStack(alignment: .trailing) {
-            SettingsField(text: bind(\.key), placeholder: preset.keyPrefix + "...",
+            SettingsField(
+                text: Binding(
+                    get: { repository.state(for: providerId)?.pendingSecret ?? "" },
+                    set: { repository.stageSecret($0, for: providerId) }
+                ),
+                placeholder: p.clearCredentialOnApply ? "将在应用后删除" : (p.hasStoredCredential ? "已保存于安全存储" : preset.keyPrefix + "..."),
                           secure: !showKey, trailingPadding: 76)
             HStack(spacing: 2) {
                 Button { showKey.toggle() } label: {
                     Text(showKey ? "隐藏" : "显示").font(.system(size: 11, weight: .medium)).foregroundColor(t.text3)
                         .padding(.horizontal, 7).padding(.vertical, 5)
                 }
-                Button {} label: { LXIcon(name: .copy, size: 13, color: t.text3, stroke: 1.8).padding(.horizontal, 5) }
+                Button {
+                    if p.clearCredentialOnApply {
+                        repository.cancelCredentialClear(for: providerId)
+                    } else {
+                        repository.clearCredentialRequest(for: providerId)
+                    }
+                } label: {
+                    Text(p.clearCredentialOnApply ? "保留" : "清除")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(p.clearCredentialOnApply ? t.text3 : t.danger)
+                        .padding(.horizontal, 7).padding(.vertical, 5)
+                }
             }
             .padding(.trailing, 6)
         }
     }
 
-    private func modelPicker(_ p: GenericProvider, _ preset: ProviderPreset) -> some View {
+    private func modelPicker(_ p: ProviderProfileState, _ preset: ProviderPreset) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             FieldLabel(text: "默认模型")
             VStack(spacing: 0) {
                 ForEach(Array(preset.models.enumerated()), id: \.element) { i, m in
-                    let sel = p.model == m
-                    Button { store.update(kind, id: providerId) { $0.model = m } } label: {
+                    let sel = p.profile.modelID == m
+                    Button { repository.updateProfile(providerId) { $0.modelID = m } } label: {
                         VStack(spacing: 0) {
                             HStack(spacing: 10) {
                                 Circle().strokeBorder(sel ? preset.color : t.border, lineWidth: 1.5)
@@ -261,73 +540,4 @@ struct ProviderEditPage: View {
             .padding(.bottom, 14)
         }
     }
-}
-
-// MARK: - Engine credentials (SHIP-BLOCKER #1)
-
-/// The in-process engine's actual API credentials, persisted in the iOS Keychain
-/// (see `Keychain`). This is distinct from the visual "provider" cards above
-/// (which are prototype/display state): THIS is the key the engine reads at
-/// `EngineConfig.fromEnvironment` time to opt in and authenticate turns.
-///
-/// A non-empty key here is what flips the app from the mock conversation source
-/// to the real engine on next launch. A blank key clears the Keychain item and
-/// falls back to the mock. The base URL is optional (proxy / mirror); blank ⇒
-/// the Anthropic default. Both load from / save to the Keychain — never to the
-/// settings store, UserDefaults, or any log.
-struct EngineCredentialsSection: View {
-    @Environment(\.theme) private var t
-
-    /// Local editing buffers, seeded from the Keychain on appear and flushed back
-    /// on commit / disappear so a backgrounding mid-edit still persists.
-    @State private var apiKey: String = ""
-    @State private var apiBase: String = ""
-    @State private var showKey = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            FieldLabel(text: "引擎 API Key")
-            keyField()
-            FieldHint("驱动设备端引擎的真实密钥 · 仅存于本机钥匙串(Keychain)，从不上传 · 填入后下次启动即启用真实引擎，留空则回退到演示模式")
-
-            FieldLabel(text: "API 地址（可选）")
-            SettingsField(text: $apiBase, placeholder: "https://api.anthropic.com")
-                .onSubmit(persistBase)
-            FieldHint("默认 `https://api.anthropic.com` · 可填代理 / 镜像端点")
-        }
-        .padding(.bottom, 22)
-        .onAppear {
-            apiKey = Keychain.get(.apiKey) ?? ""
-            apiBase = Keychain.get(.apiBase) ?? ""
-        }
-        .onDisappear {
-            persistKey()
-            persistBase()
-        }
-    }
-
-    private func keyField() -> some View {
-        ZStack(alignment: .trailing) {
-            SettingsField(text: $apiKey, placeholder: "sk-ant-...",
-                          secure: !showKey, trailingPadding: 76)
-                .onSubmit(persistKey)
-            HStack(spacing: 2) {
-                Button { showKey.toggle() } label: {
-                    Text(showKey ? "隐藏" : "显示")
-                        .font(.system(size: 11, weight: .medium)).foregroundColor(t.text3)
-                        .padding(.horizontal, 7).padding(.vertical, 5)
-                }
-                Button { persistKey(); apiKey = ""; Keychain.clear(.apiKey) } label: {
-                    Text("清除").font(.system(size: 11, weight: .medium)).foregroundColor(t.danger)
-                        .padding(.horizontal, 7).padding(.vertical, 5)
-                }
-            }
-            .padding(.trailing, 6)
-        }
-    }
-
-    /// Persist the key buffer to the Keychain. A blank value clears the item.
-    private func persistKey() { Keychain.set(.apiKey, apiKey) }
-    /// Persist the base-URL buffer. A blank value clears the override.
-    private func persistBase() { Keychain.set(.apiBase, apiBase) }
 }

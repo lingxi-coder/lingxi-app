@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Page dispatcher
 struct SettingsPages: View {
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     let host: SettingsHost
     let page: SettingsPage
 
@@ -14,7 +14,7 @@ struct SettingsPages: View {
         case .providerPicker(let b):      ProviderPickerPage(store: store, host: host, kind: b.kind)
         case .providerEdit(let b, let id): ProviderEditPage(store: store, host: host, kind: b.kind, providerId: id)
         case .voice:                      VoicePage(store: store)
-        case .linuxRuntime:               LinuxRuntimePage(store: store)
+        case .linuxRuntime:               LinuxRuntimePage(store: store, onOpenTerminal: host.openTerminal)
         case .knowledge:                  KnowledgePage()
         case .memory:                     MemoryPage()
         case .workflows:                  WorkflowsPage()
@@ -34,9 +34,9 @@ struct SettingsPages: View {
 
 // MARK: - Main settings list
 struct MainSettingsPage: View {
-    @EnvironmentObject private var app: AppState
+    @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     let host: SettingsHost
 
     private let langMap = ["zh-CN": "简体中文", "zh-TW": "繁體中文", "en-US": "English", "ja-JP": "日本語"]
@@ -52,6 +52,7 @@ struct MainSettingsPage: View {
                 SettingsRow(icon: .sparkle, iconColor: Accents.color(for: "oklch(70% 0.18 268)"), label: "LLM 提供商",
                             sub: "默认: \(dl?.name ?? "未配置")", value: "\(store.llmProviders.filter{$0.enabled}.count) 个启用",
                             onTap: { host.push(.providerList(.init(.llm))) })
+                    .accessibilityIdentifier("settings.provider.llm")
                 SettingsRow(icon: .search, iconColor: Color(srgb: 0,0.7151,0.7672), label: "联网搜索",
                             sub: ds != nil ? "默认: \(ds!.name)" : "未配置", value: "\(store.searchProviders.filter{$0.enabled}.count) 个启用",
                             onTap: { host.push(.providerList(.init(.search))) })

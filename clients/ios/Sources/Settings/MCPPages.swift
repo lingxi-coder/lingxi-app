@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - MCP server list
 struct MCPListPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     let host: SettingsHost
 
     var body: some View {
@@ -65,7 +65,7 @@ struct MCPListPage: View {
 // MARK: - MCP edit
 struct MCPEditPage: View {
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     let host: SettingsHost
     let mcpId: String
 

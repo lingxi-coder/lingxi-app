@@ -1,0 +1,1232 @@
+import Foundation
+import Observation
+import SwiftUI
+
+typealias ProviderCommandSubmitter = (ClientCommand) async throws -> Void
+
+typealias ProviderConnectionTester = (ProviderLaunchProfile, String?) async throws -> ProviderConnectionTestResult
+
+typealias ProviderApplyReconnectHandler = (ProviderLaunchSnapshot) async throws -> Void
+
+enum ProviderConnectionTestResult: Equatable {
+    case success(message: String? = nil)
+    case failure(message: String)
+}
+
+enum ProviderProfileValidationError: LocalizedError, Equatable {
+    case missingName
+    case invalidBaseURL
+    case missingModel
+    case missingCredential
+
+    var errorDescription: String? {
+        switch self {
+        case .missingName:
+            return "显示名称不能为空。"
+        case .invalidBaseURL:
+            return "API 地址必须是 http 或 https URL。"
+        case .missingModel:
+            return "默认模型不能为空。"
+        case .missingCredential:
+            return "请先填写或保留一个可用的 API Key。"
+        }
+    }
+}
+
+private enum ProviderRepositoryOperationError: LocalizedError {
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .failed(let message): return message
+        }
+    }
+}
+
+enum ProviderCredentialState: Equatable {
+    case unknown
+    case configured
+    case missing
+}
+
+enum ProviderConnectionState: Equatable {
+    case idle
+    case testing
+    case connected
+    case failed
+}
+
+struct ProviderLaunchProfile: Equatable {
+    let id: String
+    let presetID: String
+    let providerType: String
+    let displayName: String
+    let baseURL: String
+    let modelID: String
+    let enabled: Bool
+    let isDefault: Bool
+    let apiKeyEnv: String
+
+    var qualifiedModelID: String {
+        "\(id)/\(modelID)"
+    }
+}
+
+struct ProviderLaunchSnapshot: Equatable {
+    let profiles: [ProviderLaunchProfile]
+    let providerProfilesJSON: String
+    let routingJSON: String
+    let defaultModelID: String?
+    let enabledProfileIDs: [String]
+}
+
+struct ProviderRoutingSettings: Codable, Equatable {
+    static let defaultRetryMaxAttempts = 10
+    static let defaultRetryBackoffMs = 500
+    static let minRetryMaxAttempts = 0
+    static let maxRetryMaxAttempts = 10
+    static let minRetryBackoffMs = 1
+    static let maxRetryBackoffMs = 60_000
+
+    var retryMaxAttempts: Int
+    var retryBackoffMs: Int
+    var fallbackProfileIDs: [String]
+
+    init(
+        retryMaxAttempts: Int = ProviderRoutingSettings.defaultRetryMaxAttempts,
+        retryBackoffMs: Int = ProviderRoutingSettings.defaultRetryBackoffMs,
+        fallbackProfileIDs: [String] = []
+    ) {
+        self.retryMaxAttempts = retryMaxAttempts
+        self.retryBackoffMs = retryBackoffMs
+        self.fallbackProfileIDs = fallbackProfileIDs
+    }
+}
+
+struct ProviderFallbackCandidate: Identifiable, Equatable {
+    let profileID: String
+    let name: String
+    let modelID: String
+    let selected: Bool
+    let order: Int?
+
+    var id: String { profileID }
+}
+
+struct ProviderStoredProfile: Codable, Equatable, Identifiable {
+    var id: String
+    var presetID: String
+    var name: String
+    var baseURL: String
+    var modelID: String
+    var enabled: Bool
+    var isDefault: Bool
+
+    init(
+        id: String,
+        presetID: String,
+        name: String,
+        baseURL: String,
+        modelID: String,
+        enabled: Bool,
+        isDefault: Bool
+    ) {
+        self.id = id
+        self.presetID = presetID
+        self.name = name
+        self.baseURL = baseURL
+        self.modelID = modelID
+        self.enabled = enabled
+        self.isDefault = isDefault
+    }
+}
+
+struct ProviderProfileState: Identifiable, Equatable {
+    var profile: ProviderStoredProfile
+    var credentialState: ProviderCredentialState = .unknown
+    var connectionState: ProviderConnectionState = .idle
+    var detailMessage: String? = nil
+    var pendingSecret: String = ""
+    var clearCredentialOnApply = false
+    var validationMessage: String? = nil
+    var operationInFlight = false
+    var hasLegacyAnthropicCredential = false
+
+    var id: String { profile.id }
+
+    var hasPendingSecret: Bool {
+        !pendingSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var hasStoredCredential: Bool {
+        if clearCredentialOnApply {
+            return false
+        }
+        return credentialState == .configured || hasLegacyAnthropicCredential
+    }
+
+    var effectiveHasCredential: Bool {
+        hasPendingSecret || hasStoredCredential
+    }
+
+    var statusLabel: String {
+        switch connectionState {
+        case .testing:
+            return "检测中…"
+        case .connected:
+            return "已连接"
+        case .failed:
+            return "连接失败"
+        case .idle:
+            if hasPendingSecret {
+                return "待应用"
+            }
+            if hasStoredCredential {
+                return "已配置"
+            }
+            return "未配置"
+        }
+    }
+
+    var legacyStatus: ConnStatus {
+        switch connectionState {
+        case .testing: return .testing
+        case .connected: return .connected
+        case .failed: return .error
+        case .idle:
+            return hasStoredCredential ? .connected : .idle
+        }
+    }
+
+    var maskedCredentialSummary: String {
+        if clearCredentialOnApply {
+            return "将于应用后清除"
+        }
+        if hasPendingSecret {
+            return "新密钥待应用"
+        }
+        if hasLegacyAnthropicCredential {
+            return "旧版密钥已迁移到本页"
+        }
+        if hasStoredCredential {
+            return "已保存于安全存储"
+        }
+        return "未配置"
+    }
+}
+
+private struct ProviderPersistenceEnvelope: Codable, Equatable {
+    var version: Int
+    var profiles: [ProviderStoredProfile]
+    var routing: ProviderRoutingSettings?
+}
+
+private enum PendingCredentialOperation: Equatable {
+    case list(providerIDs: [String])
+    case set(providerID: String)
+    case delete(providerID: String)
+
+    var providerIDs: [String] {
+        switch self {
+        case .list(let providerIDs): return providerIDs
+        case .set(let providerID), .delete(let providerID): return [providerID]
+        }
+    }
+}
+
+private struct ProviderPresetMetadata {
+    let providerType: String
+    let envVar: String
+}
+
+private enum ProviderRepositoryDefaults {
+    static let anthropicLegacyProfileID = "anthropic"
+    static let routingMobileEnabledProfilesKey = "mobileEnabledProfiles"
+}
+
+@MainActor
+@Observable
+final class ProviderRepository {
+    static let shared = ProviderRepository()
+
+    private let persistenceURL: URL
+    private let fileManager: FileManager
+    private let credentialOperationTimeout: Duration
+    private var pendingOperations: [UInt64: PendingCredentialOperation] = [:]
+    private var pendingCompletions: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var pendingTimeouts: [UInt64: Task<Void, Never>] = [:]
+    private var nextOperationID: UInt64 = 1
+    private var commandSubmitter: ProviderCommandSubmitter?
+    private var connectionTester: ProviderConnectionTester?
+    private var applyReconnectHandler: ProviderApplyReconnectHandler?
+    private var lastAppliedRoutingSettings: ProviderRoutingSettings
+
+    private(set) var profiles: [ProviderProfileState]
+    private(set) var routingSettings: ProviderRoutingSettings
+    private(set) var storageEncrypted = true
+    private(set) var lastRepositoryError: String? = nil
+    private(set) var routingMessage: String? = nil
+    private(set) var routingDirty = false
+    private(set) var syncRevision = 0
+
+    init(
+        persistenceURL: URL? = nil,
+        fileManager: FileManager = .default,
+        credentialOperationTimeout: Duration = .seconds(15)
+    ) {
+        let shouldMigrateLegacyCredential = persistenceURL == nil
+        let resolvedPersistenceURL = persistenceURL ?? Self.defaultPersistenceURL()
+        let loadedEnvelope = Self.loadEnvelope(from: resolvedPersistenceURL, fileManager: fileManager)
+        let initialRoutingSettings = loadedEnvelope?.routing ?? ProviderRoutingSettings()
+        self.persistenceURL = resolvedPersistenceURL
+        self.fileManager = fileManager
+        self.credentialOperationTimeout = credentialOperationTimeout
+        self.routingSettings = initialRoutingSettings
+        self.lastAppliedRoutingSettings = initialRoutingSettings
+        self.profiles = loadedEnvelope?.profiles.map {
+            ProviderProfileState(
+                profile: $0,
+                hasLegacyAnthropicCredential: false
+            )
+        } ?? []
+        if shouldMigrateLegacyCredential,
+           self.profiles.isEmpty,
+           let legacyProfile = Self.legacyAnthropicProfile() {
+            self.profiles = [legacyProfile]
+        }
+        normalizeDefaults()
+        sanitizeRoutingSettings(persist: false)
+    }
+
+    func configure(
+        submitCommand: ProviderCommandSubmitter?,
+        testConnection: ProviderConnectionTester? = nil,
+        applyReconnect: ProviderApplyReconnectHandler? = nil
+    ) {
+        if cancelPendingListOperations() {
+            bumpSyncRevision()
+        }
+        commandSubmitter = submitCommand
+        connectionTester = testConnection
+        applyReconnectHandler = applyReconnect
+    }
+
+    func handle(event: ClientEvent) {
+        guard case let .providerCredentialStatus(
+            operationId,
+            configuredProviderIds,
+            unavailableProviderIds,
+            storageEncrypted,
+            error
+        ) = event else {
+            return
+        }
+        guard let operation = pendingOperations.removeValue(forKey: operationId) else {
+            return
+        }
+        pendingTimeouts.removeValue(forKey: operationId)?.cancel()
+        self.storageEncrypted = storageEncrypted
+        let configured = Set(configuredProviderIds)
+        let unavailable = Set(unavailableProviderIds)
+        let operationFailure: String? = {
+            if let error { return error }
+            switch operation {
+            case .list:
+                return nil
+            case .set(let providerID):
+                if unavailable.contains(providerID) { return "安全存储不可用" }
+                if !configured.contains(providerID) {
+                    return "安全存储未确认密钥已保存。"
+                }
+                return nil
+            case .delete(let providerID):
+                if unavailable.contains(providerID) { return "安全存储不可用" }
+                if configured.contains(providerID) {
+                    return "安全存储仍报告该密钥存在。"
+                }
+                return nil
+            }
+        }()
+
+        switch operation {
+        case .list(let providerIDs):
+            for providerID in providerIDs {
+                guard let index = indexOfProfile(id: providerID) else { continue }
+                if unavailable.contains(providerID) {
+                    continue
+                }
+                profiles[index].credentialState = configured.contains(providerID) ? .configured : .missing
+                if configured.contains(providerID), profiles[index].connectionState == .idle {
+                    profiles[index].detailMessage = nil
+                }
+            }
+        case .set(let providerID):
+            guard let index = indexOfProfile(id: providerID) else { break }
+            if let operationFailure {
+                profiles[index].connectionState = .failed
+                profiles[index].detailMessage = operationFailure
+            } else {
+                profiles[index].credentialState = .configured
+                profiles[index].pendingSecret = ""
+                profiles[index].clearCredentialOnApply = false
+                profiles[index].detailMessage = "密钥已保存到安全存储。"
+            }
+        case .delete(let providerID):
+            guard let index = indexOfProfile(id: providerID) else { break }
+            if let operationFailure {
+                profiles[index].connectionState = .failed
+                profiles[index].detailMessage = operationFailure
+            } else {
+                profiles[index].credentialState = .missing
+                profiles[index].pendingSecret = ""
+                profiles[index].clearCredentialOnApply = false
+                profiles[index].hasLegacyAnthropicCredential = false
+                profiles[index].detailMessage = "密钥已从安全存储移除。"
+            }
+        }
+
+        clearOperationInFlightIfFinished(for: operation)
+
+        lastRepositoryError = operationFailure
+        if let continuation = pendingCompletions.removeValue(forKey: operationId) {
+            if let message = operationFailure {
+                continuation.resume(throwing: ProviderRepositoryOperationError.failed(message))
+            } else {
+                continuation.resume()
+            }
+        }
+        bumpSyncRevision()
+    }
+
+    func legacyProviders() -> [GenericProvider] {
+        profiles.map { state in
+            return GenericProvider(
+                id: state.id,
+                preset: state.profile.presetID,
+                name: state.profile.name,
+                url: state.profile.baseURL,
+                key: "",
+                model: state.profile.modelID,
+                status: state.legacyStatus,
+                isDefault: state.profile.isDefault,
+                enabled: state.profile.enabled
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.isDefault != rhs.isDefault {
+                return lhs.isDefault && !rhs.isDefault
+            }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    func state(for id: String) -> ProviderProfileState? {
+        profiles.first(where: { $0.id == id })
+    }
+
+    func preset(for presetID: String) -> ProviderPreset {
+        Presets.llm.first(where: { $0.id == presetID }) ?? Presets.llm[Presets.llm.count - 1]
+    }
+
+    func fallbackCandidates() -> [ProviderFallbackCandidate] {
+        let orderByProfileID = Dictionary(uniqueKeysWithValues: routingSettings.fallbackProfileIDs.enumerated().map { ($1, $0) })
+        return eligibleFallbackProfiles().map { profile in
+            ProviderFallbackCandidate(
+                profileID: profile.id,
+                name: profile.name,
+                modelID: profile.modelID,
+                selected: orderByProfileID[profile.id] != nil,
+                order: orderByProfileID[profile.id]
+            )
+        }
+    }
+
+    func setRetryMaxAttempts(_ value: Int) {
+        routingSettings.retryMaxAttempts = clampedRetryMaxAttempts(value)
+        sanitizeRoutingSettings()
+    }
+
+    func setRetryBackoffMs(_ value: Int) {
+        routingSettings.retryBackoffMs = clampedRetryBackoffMs(value)
+        sanitizeRoutingSettings()
+    }
+
+    func toggleFallbackProfile(_ profileID: String) {
+        if let index = routingSettings.fallbackProfileIDs.firstIndex(of: profileID) {
+            routingSettings.fallbackProfileIDs.remove(at: index)
+        } else if eligibleFallbackProfiles().contains(where: { $0.id == profileID }) {
+            routingSettings.fallbackProfileIDs.append(profileID)
+        }
+        sanitizeRoutingSettings()
+    }
+
+    func moveFallbackProfile(_ profileID: String, by delta: Int) {
+        guard let index = routingSettings.fallbackProfileIDs.firstIndex(of: profileID) else { return }
+        let targetIndex = index + delta
+        guard routingSettings.fallbackProfileIDs.indices.contains(targetIndex) else { return }
+        routingSettings.fallbackProfileIDs.swapAt(index, targetIndex)
+        sanitizeRoutingSettings()
+    }
+
+    func addProfile(presetID: String) -> String {
+        let preset = preset(for: presetID)
+        let newID = nextProfileID(for: presetID)
+        let defaultName: String
+        if newID == presetID {
+            defaultName = preset.name
+        } else {
+            let suffix = newID.replacingOccurrences(of: "\(presetID)-", with: "")
+            defaultName = "\(preset.name) \(suffix)"
+        }
+        let profile = ProviderStoredProfile(
+            id: newID,
+            presetID: presetID,
+            name: defaultName,
+            baseURL: preset.defaultUrl,
+            modelID: preset.models.first ?? "",
+            enabled: true,
+            isDefault: profiles.isEmpty
+        )
+        profiles.append(
+            ProviderProfileState(
+                profile: profile,
+                hasLegacyAnthropicCredential: false
+            )
+        )
+        normalizeDefaults()
+        persistProfiles()
+        return newID
+    }
+
+    func updateProfile(_ id: String, mutate: (inout ProviderStoredProfile) -> Void) {
+        guard let index = indexOfProfile(id: id) else { return }
+        mutate(&profiles[index].profile)
+        profiles[index].validationMessage = nil
+        if profiles[index].profile.isDefault, !profiles[index].profile.enabled {
+            profiles[index].profile.isDefault = false
+        }
+        normalizeDefaults()
+        sanitizeRoutingSettings(persist: false)
+        persistProfiles()
+    }
+
+    func setDefaultProfile(_ id: String) {
+        guard profiles.contains(where: { $0.id == id }) else { return }
+        for index in profiles.indices {
+            profiles[index].profile.isDefault = profiles[index].id == id
+            if profiles[index].profile.isDefault {
+                profiles[index].profile.enabled = true
+            }
+        }
+        sanitizeRoutingSettings(persist: false)
+        persistProfiles()
+    }
+
+    func stageSecret(_ secret: String, for id: String) {
+        guard let index = indexOfProfile(id: id) else { return }
+        profiles[index].pendingSecret = secret
+        if !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            profiles[index].clearCredentialOnApply = false
+        }
+        profiles[index].validationMessage = nil
+        profiles[index].detailMessage = nil
+        bumpSyncRevision()
+    }
+
+    func clearCredentialRequest(for id: String) {
+        guard let index = indexOfProfile(id: id) else { return }
+        profiles[index].pendingSecret = ""
+        profiles[index].clearCredentialOnApply = true
+        profiles[index].validationMessage = nil
+        profiles[index].detailMessage = "将在下次应用时从安全存储中清除。"
+        bumpSyncRevision()
+    }
+
+    func cancelCredentialClear(for id: String) {
+        guard let index = indexOfProfile(id: id) else { return }
+        profiles[index].clearCredentialOnApply = false
+        profiles[index].detailMessage = nil
+        bumpSyncRevision()
+    }
+
+    func refreshCredentialStatus() async {
+        let ids = profiles.map(\.id)
+        guard !ids.isEmpty else {
+            lastRepositoryError = nil
+            return
+        }
+        guard let commandSubmitter else {
+            return
+        }
+        cancelPendingListOperations()
+        let operationID = takeOperationID()
+        pendingOperations[operationID] = .list(providerIDs: ids)
+        setOperationInFlight(true, for: ids)
+        scheduleCredentialOperationTimeout(operationID)
+        do {
+            try await commandSubmitter(.listProviderCredentials(operationId: operationID, providerIds: ids))
+        } catch {
+            failCredentialOperation(operationID, error: error)
+            return
+        }
+        bumpSyncRevision()
+    }
+
+    func testConnection(_ id: String) async {
+        guard let index = indexOfProfile(id: id) else { return }
+        do {
+            let launchProfile = try validateAndBuildLaunchProfile(for: profiles[index])
+            profiles[index].validationMessage = nil
+            profiles[index].connectionState = .testing
+            profiles[index].detailMessage = nil
+            bumpSyncRevision()
+            guard let connectionTester else {
+                profiles[index].connectionState = .idle
+                profiles[index].detailMessage = "当前会话尚未接入连接测试回调。"
+                bumpSyncRevision()
+                return
+            }
+            let result = try await connectionTester(
+                launchProfile,
+                profiles[index].hasPendingSecret
+                    ? profiles[index].pendingSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+                    : nil
+            )
+            guard let currentIndex = indexOfProfile(id: id) else { return }
+            switch result {
+            case .success(let message):
+                profiles[currentIndex].connectionState = .connected
+                profiles[currentIndex].detailMessage = message ?? "连接测试成功。"
+            case .failure(let message):
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = message
+            }
+        } catch let error as ProviderProfileValidationError {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].validationMessage = error.errorDescription
+            }
+        } catch {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+            }
+        }
+        bumpSyncRevision()
+    }
+
+    func applyChanges(_ id: String) async {
+        guard let index = indexOfProfile(id: id) else { return }
+        do {
+            let isClearingCredential = profiles[index].clearCredentialOnApply
+            let launchProfile = try validateAndBuildLaunchProfile(for: profiles[index], allowDisabledWithoutCredential: true)
+            profiles[index].validationMessage = nil
+            persistProfiles()
+            mirrorLegacyAnthropicSettingsIfNeeded(for: launchProfile, state: profiles[index])
+
+            if isClearingCredential {
+                try await deleteCredentialIfPossible(for: launchProfile.id)
+                if let updatedIndex = indexOfProfile(id: id) {
+                    profiles[updatedIndex].profile.enabled = false
+                    profiles[updatedIndex].profile.isDefault = false
+                    normalizeDefaults()
+                    persistProfiles()
+                }
+            } else if let secret = effectiveSecret(for: profiles[index]) {
+                try await storeCredentialIfPossible(secret, for: launchProfile.id)
+            }
+
+            if let applyReconnectHandler {
+                try await applyReconnectHandler(makeLaunchSnapshot())
+                if let currentIndex = indexOfProfile(id: id) {
+                    profiles[currentIndex].detailMessage = "已应用配置并请求重连。"
+                }
+                lastAppliedRoutingSettings = routingSettings
+                routingDirty = false
+            } else if let currentIndex = indexOfProfile(id: id),
+                      profiles[currentIndex].detailMessage == nil {
+                profiles[currentIndex].detailMessage = "已保存配置。"
+            }
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].connectionState = .idle
+            }
+        } catch let error as ProviderProfileValidationError {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].validationMessage = error.errorDescription
+            }
+        } catch {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+            }
+            lastRepositoryError = error.localizedDescription
+        }
+        bumpSyncRevision()
+    }
+
+    @discardableResult
+    func applyRoutingChanges(
+        retryMaxAttemptsText: String,
+        retryBackoffMsText: String
+    ) async -> Bool {
+        do {
+            let validated = try validatedRoutingSettings(
+                retryMaxAttemptsText: retryMaxAttemptsText,
+                retryBackoffMsText: retryBackoffMsText
+            )
+            routingSettings.retryMaxAttempts = validated.retryMaxAttempts
+            routingSettings.retryBackoffMs = validated.retryBackoffMs
+            sanitizeRoutingSettings()
+            if let applyReconnectHandler {
+                try await applyReconnectHandler(makeLaunchSnapshot())
+                lastAppliedRoutingSettings = routingSettings
+                routingDirty = false
+                routingMessage = "已应用路由并请求重连。"
+            } else {
+                routingMessage = "已保存路由配置。"
+            }
+            bumpSyncRevision()
+            return true
+        } catch {
+            routingMessage = error.localizedDescription
+            lastRepositoryError = error.localizedDescription
+            bumpSyncRevision()
+            return false
+        }
+    }
+
+    func removeProfile(_ id: String) async {
+        guard let index = indexOfProfile(id: id) else { return }
+        let state = profiles[index]
+        let shouldDeleteCredential = commandSubmitter != nil || state.hasStoredCredential || state.clearCredentialOnApply
+        if shouldDeleteCredential {
+            do {
+                try await deleteCredentialIfPossible(for: state.id)
+            } catch {
+                guard let currentIndex = indexOfProfile(id: id) else { return }
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+                lastRepositoryError = error.localizedDescription
+                bumpSyncRevision()
+                return
+            }
+        }
+        if state.id == ProviderRepositoryDefaults.anthropicLegacyProfileID {
+            Keychain.clear(.apiBase)
+            Keychain.clear(.model)
+        }
+        guard let currentIndex = indexOfProfile(id: id) else { return }
+        profiles.remove(at: currentIndex)
+        normalizeDefaults()
+        sanitizeRoutingSettings(persist: false)
+        persistProfiles()
+    }
+
+    func makeLaunchSnapshot() -> ProviderLaunchSnapshot {
+        let launchProfiles = profiles
+            .map { state in
+                buildLaunchProfile(from: state.profile)
+            }
+            .sorted { lhs, rhs in
+                if lhs.isDefault != rhs.isDefault {
+                    return lhs.isDefault && !rhs.isDefault
+                }
+                return lhs.id < rhs.id
+            }
+        let enabledIDs = launchProfiles.filter(\.enabled).map(\.id)
+        let providerProfilesObject = Dictionary(uniqueKeysWithValues: launchProfiles.map { profile in
+            (
+                profile.id,
+                providerSettingsJSONValue(for: profile)
+            )
+        })
+        let providerProfilesJSON = Self.encodeJSONObject(providerProfilesObject) ?? "{}"
+        let defaultModelID = launchProfiles.first(where: { $0.isDefault && $0.enabled })?.qualifiedModelID
+        let routingJSON = Self.encodeJSONObject(
+            buildRoutingJSONObject(
+                enabledProfileIDs: enabledIDs,
+                defaultModelID: defaultModelID,
+                launchProfiles: launchProfiles
+            )
+        ) ?? "{}"
+        return ProviderLaunchSnapshot(
+            profiles: launchProfiles,
+            providerProfilesJSON: providerProfilesJSON,
+            routingJSON: routingJSON,
+            defaultModelID: defaultModelID,
+            enabledProfileIDs: enabledIDs
+        )
+    }
+
+    private func buildLaunchProfile(from profile: ProviderStoredProfile) -> ProviderLaunchProfile {
+        let metadata = metadata(for: profile.presetID)
+        return ProviderLaunchProfile(
+            id: profile.id,
+            presetID: profile.presetID,
+            providerType: metadata.providerType,
+            displayName: profile.name,
+            baseURL: profile.baseURL,
+            modelID: profile.modelID,
+            enabled: profile.enabled,
+            isDefault: profile.isDefault,
+            apiKeyEnv: metadata.envVar
+        )
+    }
+
+    private func validateAndBuildLaunchProfile(
+        for state: ProviderProfileState,
+        allowDisabledWithoutCredential: Bool = false
+    ) throws -> ProviderLaunchProfile {
+        let profile = state.profile
+        if profile.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ProviderProfileValidationError.missingName
+        }
+        guard let url = URL(string: profile.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host != nil
+        else {
+            throw ProviderProfileValidationError.invalidBaseURL
+        }
+        if profile.modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ProviderProfileValidationError.missingModel
+        }
+        if !state.clearCredentialOnApply,
+           profile.enabled || !allowDisabledWithoutCredential {
+            if effectiveSecret(for: state) == nil, !state.hasStoredCredential {
+                throw ProviderProfileValidationError.missingCredential
+            }
+        }
+        return buildLaunchProfile(from: profile)
+    }
+
+    private func effectiveSecret(for state: ProviderProfileState) -> String? {
+        if state.clearCredentialOnApply {
+            return nil
+        }
+        let trimmedPending = state.pendingSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPending.isEmpty {
+            return trimmedPending
+        }
+        if state.hasLegacyAnthropicCredential,
+           state.id == ProviderRepositoryDefaults.anthropicLegacyProfileID {
+            return Keychain.get(.apiKey)
+        }
+        return nil
+    }
+
+    private func storeCredentialIfPossible(_ secret: String, for providerID: String) async throws {
+        if let commandSubmitter {
+            let operationID = takeOperationID()
+            pendingOperations[operationID] = .set(providerID: providerID)
+            if let index = indexOfProfile(id: providerID) {
+                profiles[index].operationInFlight = true
+            }
+            try await awaitCredentialOperation(operationID) {
+                try await commandSubmitter(
+                    .setProviderCredential(
+                        operationId: operationID,
+                        providerId: providerID,
+                        credential: ProviderCredentialSecretDto(value: secret)
+                    )
+                )
+            }
+            return
+        }
+        if providerID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
+            guard Keychain.set(.apiKey, secret) else {
+                throw NSError(domain: "ProviderRepository", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "旧版 Keychain 密钥写入失败。",
+                ])
+            }
+            if let index = indexOfProfile(id: providerID) {
+                profiles[index].credentialState = .configured
+                profiles[index].pendingSecret = ""
+                profiles[index].hasLegacyAnthropicCredential = true
+                profiles[index].clearCredentialOnApply = false
+            }
+            return
+        }
+        throw NSError(domain: "ProviderRepository", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "当前会话尚未接入安全存储命令，无法保存此提供商密钥。",
+        ])
+    }
+
+    private func deleteCredentialIfPossible(for providerID: String) async throws {
+        if let commandSubmitter {
+            let operationID = takeOperationID()
+            pendingOperations[operationID] = .delete(providerID: providerID)
+            if let index = indexOfProfile(id: providerID) {
+                profiles[index].operationInFlight = true
+            }
+            try await awaitCredentialOperation(operationID) {
+                try await commandSubmitter(.deleteProviderCredential(operationId: operationID, providerId: providerID))
+            }
+            return
+        }
+        if providerID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
+            guard Keychain.clear(.apiKey) else {
+                throw NSError(domain: "ProviderRepository", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "旧版 Keychain 密钥删除失败。",
+                ])
+            }
+            if let index = indexOfProfile(id: providerID) {
+                profiles[index].credentialState = .missing
+                profiles[index].hasLegacyAnthropicCredential = false
+                profiles[index].clearCredentialOnApply = false
+            }
+            return
+        }
+        throw NSError(domain: "ProviderRepository", code: 4, userInfo: [
+            NSLocalizedDescriptionKey: "当前会话尚未接入安全存储命令，无法删除此提供商密钥。",
+        ])
+    }
+
+    private func mirrorLegacyAnthropicSettingsIfNeeded(for profile: ProviderLaunchProfile, state: ProviderProfileState) {
+        guard profile.id == ProviderRepositoryDefaults.anthropicLegacyProfileID else { return }
+        Keychain.set(.apiBase, profile.baseURL)
+        Keychain.set(.model, profile.modelID)
+        if state.clearCredentialOnApply {
+            Keychain.clear(.apiKey)
+        }
+    }
+
+    private func providerSettingsJSONValue(for profile: ProviderLaunchProfile) -> [String: Any] {
+        let presetModels = preset(for: profile.presetID).models
+        let models = ([profile.modelID] + presetModels)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .reduce(into: [String]()) { result, next in
+                if !result.contains(next) {
+                    result.append(next)
+                }
+            }
+        let modelObjects: [[String: Any]] = models.map { modelID in
+            ["id": modelID]
+        }
+        return [
+            "type": profile.providerType,
+            "baseUrl": profile.baseURL,
+            "apiKeyEnv": profile.apiKeyEnv,
+            "models": modelObjects,
+        ]
+    }
+
+    private func buildRoutingJSONObject(
+        enabledProfileIDs: [String],
+        defaultModelID: String?,
+        launchProfiles: [ProviderLaunchProfile]
+    ) -> [String: Any] {
+        var routing: [String: Any] = [
+            ProviderRepositoryDefaults.routingMobileEnabledProfilesKey: enabledProfileIDs,
+            "retry": [
+                "maxAttempts": routingSettings.retryMaxAttempts,
+                "backoffMs": routingSettings.retryBackoffMs,
+            ],
+        ]
+        guard let defaultModelID,
+              !defaultModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return routing
+        }
+        let launchProfilesByID = Dictionary(uniqueKeysWithValues: launchProfiles.map { ($0.id, $0) })
+        let fallbackTargets = routingSettings.fallbackProfileIDs.compactMap { profileID -> String? in
+            guard enabledProfileIDs.contains(profileID),
+                  let profile = launchProfilesByID[profileID]
+            else {
+                return nil
+            }
+            let modelID = profile.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            return modelID.isEmpty ? nil : "\(profile.id)/\(modelID)"
+        }
+        if !fallbackTargets.isEmpty {
+            routing["fallback"] = [defaultModelID: fallbackTargets]
+        }
+        return routing
+    }
+
+    private func metadata(for presetID: String) -> ProviderPresetMetadata {
+        switch presetID {
+        case "anthropic":
+            return .init(providerType: "anthropic", envVar: "ANTHROPIC_API_KEY")
+        case "google":
+            return .init(providerType: "gemini", envVar: "GEMINI_API_KEY")
+        case "openai":
+            return .init(providerType: "openai-responses", envVar: "OPENAI_API_KEY")
+        case "deepseek":
+            return .init(providerType: "openai", envVar: "DEEPSEEK_API_KEY")
+        case "kimi":
+            return .init(providerType: "openai", envVar: "MOONSHOT_API_KEY")
+        case "kimi-code":
+            return .init(providerType: "openai", envVar: "KIMI_API_KEY")
+        case "openrouter":
+            return .init(providerType: "openai", envVar: "OPENROUTER_API_KEY")
+        case "qwen":
+            return .init(providerType: "openai", envVar: "DASHSCOPE_API_KEY")
+        case "custom":
+            return .init(providerType: "openai", envVar: "CUSTOM_API_KEY")
+        default:
+            return .init(providerType: "openai", envVar: "CUSTOM_API_KEY")
+        }
+    }
+
+    private func indexOfProfile(id: String) -> Int? {
+        profiles.firstIndex(where: { $0.id == id })
+    }
+
+    private func normalizeDefaults() {
+        if profiles.isEmpty {
+            return
+        }
+        let defaultIndex = profiles.firstIndex(where: { $0.profile.isDefault && $0.profile.enabled })
+            ?? profiles.firstIndex(where: { $0.profile.enabled })
+        for index in profiles.indices {
+            profiles[index].profile.isDefault = index == defaultIndex
+        }
+        profiles.sort { lhs, rhs in
+            if lhs.profile.isDefault != rhs.profile.isDefault {
+                return lhs.profile.isDefault && !rhs.profile.isDefault
+            }
+            return lhs.profile.name.localizedStandardCompare(rhs.profile.name) == .orderedAscending
+        }
+        bumpSyncRevision()
+    }
+
+    private func sanitizeRoutingSettings(persist: Bool = true) {
+        routingSettings.retryMaxAttempts = clampedRetryMaxAttempts(routingSettings.retryMaxAttempts)
+        routingSettings.retryBackoffMs = clampedRetryBackoffMs(routingSettings.retryBackoffMs)
+        let eligibleProfileIDs = Set(eligibleFallbackProfiles().map(\.id))
+        var seen = Set<String>()
+        routingSettings.fallbackProfileIDs = routingSettings.fallbackProfileIDs.filter { profileID in
+            guard eligibleProfileIDs.contains(profileID), !seen.contains(profileID) else {
+                return false
+            }
+            seen.insert(profileID)
+            return true
+        }
+        routingDirty = routingSettings != lastAppliedRoutingSettings
+        if persist {
+            persistProfiles()
+        }
+    }
+
+    private func persistProfiles() {
+        do {
+            let directory = persistenceURL.deletingLastPathComponent()
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.withoutEscapingSlashes]
+            let data = try encoder.encode(
+                ProviderPersistenceEnvelope(version: 2, profiles: profiles.map(\.profile), routing: routingSettings)
+            )
+            try data.write(to: persistenceURL, options: [.atomic])
+            lastRepositoryError = nil
+        } catch {
+            lastRepositoryError = error.localizedDescription
+        }
+        bumpSyncRevision()
+    }
+
+    private func nextProfileID(for presetID: String) -> String {
+        if !profiles.contains(where: { $0.id == presetID }) {
+            return presetID
+        }
+        var suffix = 2
+        while profiles.contains(where: { $0.id == "\(presetID)-\(suffix)" }) {
+            suffix += 1
+        }
+        return "\(presetID)-\(suffix)"
+    }
+
+    private func takeOperationID() -> UInt64 {
+        defer { nextOperationID &+= 1 }
+        return nextOperationID
+    }
+
+    private func awaitCredentialOperation(
+        _ operationID: UInt64,
+        submit: @escaping @MainActor () async throws -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            pendingCompletions[operationID] = continuation
+            scheduleCredentialOperationTimeout(operationID)
+            Task { [weak self] in
+                do {
+                    try await submit()
+                } catch {
+                    self?.failCredentialOperation(operationID, error: error)
+                }
+            }
+        }
+    }
+
+    private func expireCredentialOperation(_ operationID: UInt64) {
+        failCredentialOperation(
+            operationID,
+            error: ProviderRepositoryOperationError.failed("安全存储操作超时")
+        )
+    }
+
+    private func failCredentialOperation(_ operationID: UInt64, error: Error) {
+        guard pendingOperations[operationID] != nil else { return }
+        pendingTimeouts.removeValue(forKey: operationID)?.cancel()
+        let operation = pendingOperations.removeValue(forKey: operationID)
+        if let operation {
+            clearOperationInFlightIfFinished(for: operation)
+        }
+        pendingCompletions.removeValue(forKey: operationID)?.resume(throwing: error)
+        lastRepositoryError = error.localizedDescription
+        bumpSyncRevision()
+    }
+
+    private func scheduleCredentialOperationTimeout(_ operationID: UInt64) {
+        let timeout = credentialOperationTimeout
+        pendingTimeouts[operationID]?.cancel()
+        pendingTimeouts[operationID] = Task { [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.expireCredentialOperation(operationID)
+        }
+    }
+
+    @discardableResult
+    private func cancelPendingListOperations() -> Bool {
+        let operationIDs = pendingOperations.compactMap { operationID, operation -> UInt64? in
+            if case .list = operation { return operationID }
+            return nil
+        }
+        for operationID in operationIDs {
+            pendingTimeouts.removeValue(forKey: operationID)?.cancel()
+            guard let operation = pendingOperations.removeValue(forKey: operationID) else { continue }
+            clearOperationInFlightIfFinished(for: operation)
+        }
+        return !operationIDs.isEmpty
+    }
+
+    private func setOperationInFlight(_ inFlight: Bool, for providerIDs: [String]) {
+        for providerID in providerIDs {
+            guard let index = indexOfProfile(id: providerID) else { continue }
+            profiles[index].operationInFlight = inFlight
+        }
+    }
+
+    private func clearOperationInFlightIfFinished(for operation: PendingCredentialOperation) {
+        for providerID in operation.providerIDs {
+            let stillPending = pendingOperations.values.contains { pending in
+                pending.providerIDs.contains(providerID)
+            }
+            if !stillPending, let index = indexOfProfile(id: providerID) {
+                profiles[index].operationInFlight = false
+            }
+        }
+    }
+
+    private func bumpSyncRevision() {
+        syncRevision &+= 1
+    }
+
+    private func eligibleFallbackProfiles() -> [ProviderStoredProfile] {
+        let defaultID = profiles.first(where: { $0.profile.isDefault && $0.profile.enabled })?.id
+        return profiles
+            .map(\.profile)
+            .filter { profile in
+                profile.enabled &&
+                    profile.id != defaultID &&
+                    !profile.modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+    }
+
+    private func validatedRoutingSettings(
+        retryMaxAttemptsText: String,
+        retryBackoffMsText: String
+    ) throws -> ProviderRoutingSettings {
+        let retryText = retryMaxAttemptsText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let backoffText = retryBackoffMsText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let retryMaxAttempts = Int(retryText),
+              ProviderRoutingSettings.minRetryMaxAttempts...ProviderRoutingSettings.maxRetryMaxAttempts ~= retryMaxAttempts
+        else {
+            throw ProviderRepositoryOperationError.failed(
+                "最大重试次数必须在 \(ProviderRoutingSettings.minRetryMaxAttempts)-\(ProviderRoutingSettings.maxRetryMaxAttempts) 之间。"
+            )
+        }
+        guard let retryBackoffMs = Int(backoffText),
+              ProviderRoutingSettings.minRetryBackoffMs...ProviderRoutingSettings.maxRetryBackoffMs ~= retryBackoffMs
+        else {
+            throw ProviderRepositoryOperationError.failed(
+                "重试退避必须在 \(ProviderRoutingSettings.minRetryBackoffMs)-\(ProviderRoutingSettings.maxRetryBackoffMs) ms 之间。"
+            )
+        }
+        return ProviderRoutingSettings(
+            retryMaxAttempts: retryMaxAttempts,
+            retryBackoffMs: retryBackoffMs,
+            fallbackProfileIDs: routingSettings.fallbackProfileIDs
+        )
+    }
+
+    private func clampedRetryMaxAttempts(_ value: Int) -> Int {
+        min(max(value, ProviderRoutingSettings.minRetryMaxAttempts), ProviderRoutingSettings.maxRetryMaxAttempts)
+    }
+
+    private func clampedRetryBackoffMs(_ value: Int) -> Int {
+        min(max(value, ProviderRoutingSettings.minRetryBackoffMs), ProviderRoutingSettings.maxRetryBackoffMs)
+    }
+
+    private static func loadEnvelope(from url: URL, fileManager: FileManager) -> ProviderPersistenceEnvelope? {
+        guard fileManager.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let envelope = try? JSONDecoder().decode(ProviderPersistenceEnvelope.self, from: data)
+        else {
+            return nil
+        }
+        return envelope
+    }
+
+    private static func legacyAnthropicProfile() -> ProviderProfileState? {
+        let legacyKey = Keychain.get(.apiKey)
+        let legacyBase = Keychain.get(.apiBase)
+        let legacyModel = Keychain.get(.model)
+        guard legacyKey != nil || legacyBase != nil || legacyModel != nil else {
+            return nil
+        }
+        let preset = Presets.llm.first(where: { $0.id == ProviderRepositoryDefaults.anthropicLegacyProfileID })
+        let profile = ProviderStoredProfile(
+            id: ProviderRepositoryDefaults.anthropicLegacyProfileID,
+            presetID: ProviderRepositoryDefaults.anthropicLegacyProfileID,
+            name: preset?.name ?? "Anthropic",
+            baseURL: legacyBase ?? preset?.defaultUrl ?? "https://api.anthropic.com",
+            modelID: legacyModel ?? preset?.models.first ?? "claude-sonnet-4-5",
+            enabled: true,
+            isDefault: true
+        )
+        return ProviderProfileState(
+            profile: profile,
+            credentialState: legacyKey == nil ? .unknown : .configured,
+            connectionState: .idle,
+            hasLegacyAnthropicCredential: legacyKey != nil
+        )
+    }
+
+    private static func defaultPersistenceURL() -> URL {
+        let fileManager = FileManager.default
+        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let base = appSupport ?? fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return base
+            .appendingPathComponent("LingxiCode", isDirectory: true)
+            .appendingPathComponent("provider-settings.json", isDirectory: false)
+    }
+
+    private static func encodeJSONObject(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let string = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        return string
+    }
+}

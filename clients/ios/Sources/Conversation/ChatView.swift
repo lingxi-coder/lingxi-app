@@ -2,8 +2,9 @@ import SwiftUI
 
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
-    @EnvironmentObject private var app: AppState
+    @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
+    @Environment(\.scenePhase) private var scenePhase
 
     let session: SessionRef
     let openDrawer: () -> Void
@@ -17,6 +18,7 @@ struct ChatView: View {
     /// published `model` and forwards user input to it — it no longer owns the
     /// transcript or the canned reply timer.
     let source: any ConversationSource
+    var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
 
     @State private var dotPulse = false
@@ -31,8 +33,9 @@ struct ChatView: View {
     @State private var attachment: ComposerAttachment? = nil
     // A transient affordance status line (permission denied / capture failed).
     @State private var captureStatus: String? = nil
+    @State private var voiceHoldWillCancel = false
 
-    private let voiceCapture = VoiceCapture()
+    @State private var voiceCapture = VoiceCapture()
     private let cameraCapture = CameraCapture()
 
     // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
@@ -46,13 +49,15 @@ struct ChatView: View {
          voiceActive: Binding<Bool>,
          onEnterFlow: @escaping () -> Void = {},
          draft: Binding<String>,
-         source: any ConversationSource) {
+         source: any ConversationSource,
+         onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
         self.session = session
         self.openDrawer = openDrawer
         self._voiceActive = voiceActive
         self.onEnterFlow = onEnterFlow
         self._draft = draft
         self.source = source
+        self.onOpenShellTask = onOpenShellTask
         self.convo = source.model
     }
 
@@ -94,6 +99,7 @@ struct ChatView: View {
                          onRemoveAttachment: { attachment = nil },
                          onMicHoldStart: startVoiceHold,
                          onMicHoldRelease: endVoiceHold,
+                         onMicHoldCancel: cancelVoiceHold,
                          onMicTap: onEnterFlow)
             }
 
@@ -118,12 +124,30 @@ struct ChatView: View {
             LongPressGesture(minimumDuration: 0.6)
                 .sequenced(before: DragGesture(minimumDistance: 0))
                 .onChanged { value in
-                    if case .second(true, _) = value {
-                        if !voiceActive { withAnimation(.easeOut(duration: 0.25)) { voiceActive = true } }
+                    if case let .second(true, drag) = value {
+                        if !voiceActive { startVoiceHold() }
+                        if let drag {
+                            voiceHoldWillCancel = VoiceHoldGesturePolicy.shouldCancel(
+                                verticalTranslation: drag.translation.height
+                            )
+                        }
                     }
                 }
-                .onEnded { _ in
-                    if voiceActive { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } }
+                .onEnded { value in
+                    let shouldCancel: Bool
+                    if case let .second(_, drag) = value, let drag {
+                        shouldCancel = VoiceHoldGesturePolicy.shouldCancel(
+                            verticalTranslation: drag.translation.height
+                        )
+                    } else {
+                        shouldCancel = voiceHoldWillCancel
+                    }
+                    voiceHoldWillCancel = false
+                    if shouldCancel {
+                        cancelVoiceHold()
+                    } else {
+                        endVoiceHold()
+                    }
                 }
         )
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
@@ -132,6 +156,10 @@ struct ChatView: View {
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
+        }
+        .onDisappear(perform: cancelVoiceHold)
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { cancelVoiceHold() }
         }
     }
 
@@ -167,8 +195,17 @@ struct ChatView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
                     if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
-                    ForEach(Array(convo.messages.enumerated()), id: \.element.id) { _, m in
-                        MessageBubble(message: m, onShare: shareMessage)
+                    ForEach(convo.items) { item in
+                        switch item {
+                        case let .message(message):
+                            MessageBubble(
+                                message: message,
+                                detail: convo.messageDetails[message.id],
+                                onShare: shareMessage
+                            )
+                        case let .run(run):
+                            ConversationExecutionRunCard(run: run, onOpenShellTask: onOpenShellTask)
+                        }
                     }
                     if convo.streaming { streamingRow }
                     // PR-4 item 3: a non-clean turn outcome (MaxTurns / Cancelled),
@@ -183,7 +220,7 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
-            .onChange(of: convo.messages.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: convo.items.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.streaming) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.error) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.notice) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
@@ -266,31 +303,45 @@ struct ChatView: View {
 
     // MARK: capability affordances (mirror Android RootScreen)
 
-    /// Mic press past the 0.6s threshold: enter the immersive voice flow (the
-    /// same overlay the hold-anywhere gesture shows).
+    /// Mic press past the 0.6s threshold opens the microphone immediately and
+    /// enters the immersive overlay. Duplicate gesture delivery is ignored.
     private func startVoiceHold() {
+        guard voiceCapture.phase == .idle else { return }
         captureStatus = nil
+        voiceHoldWillCancel = false
         withAnimation(.easeOut(duration: 0.25)) { voiceActive = true }
+        voiceCapture.start(completion: handleVoiceCaptureResult)
     }
 
-    /// Finger lift after a successful mic hold: dismiss the overlay and run a
-    /// one-shot STT capture, filling the composer draft with the transcript
-    /// (mirrors Android `onTranscript` → draft; gated on speech/mic auth inside
-    /// `SttImpl`).
+    /// Finger lift ends the request that has been recording since press-down;
+    /// Speech then emits its final transcript through the shared state machine.
     private func endVoiceHold() {
         withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
-        Task {
-            switch await voiceCapture.transcribe() {
-            case let .transcript(text):
-                draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? text : "\(draft) \(text)"
-            case .permissionDenied:
-                captureStatus = "需要麦克风与语音识别权限"
-            case .empty:
-                break
-            case let .failed(message):
-                captureStatus = "语音识别失败：\(message)"
-            }
+        voiceCapture.finish()
+    }
+
+    private func cancelVoiceHold() {
+        voiceHoldWillCancel = false
+        voiceCapture.cancel()
+        if voiceActive {
+            withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
+        }
+    }
+
+    private func handleVoiceCaptureResult(_ result: VoiceCaptureResult) {
+        if voiceActive {
+            withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
+        }
+        switch result {
+        case let .transcript(text):
+            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? text : "\(draft) \(text)"
+        case .permissionDenied:
+            captureStatus = "需要麦克风与语音识别权限"
+        case .empty:
+            break
+        case let .failed(message):
+            captureStatus = "语音识别失败：\(message)"
         }
     }
 

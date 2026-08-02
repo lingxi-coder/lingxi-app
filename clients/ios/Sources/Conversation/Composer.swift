@@ -1,5 +1,13 @@
 import SwiftUI
 
+enum VoiceHoldGesturePolicy {
+    static let upwardCancelThreshold: CGFloat = -72
+
+    static func shouldCancel(verticalTranslation: CGFloat) -> Bool {
+        verticalTranslation <= upwardCancelThreshold
+    }
+}
+
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
     @Environment(\.theme) private var t
@@ -32,6 +40,7 @@ struct Composer: View {
     // flow; the finger lift drives the STT transcription that fills the draft.
     var onMicHoldStart: () -> Void = {}
     var onMicHoldRelease: () -> Void = {}
+    var onMicHoldCancel: () -> Void = {}
 
     // A single TAP on the mic enters FlowMode (心流 voice orb) — mirrors the
     // prototype's `mic → openOrb`. The press-and-hold STT path is kept: a quick
@@ -40,6 +49,8 @@ struct Composer: View {
 
     @State private var modelOpen = false
     @State private var holding = false
+    @State private var cancellingHold = false
+    @State private var suppressMicTap = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,8 +92,13 @@ struct Composer: View {
                         .accessibilityLabel("停止")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Mic: TAP enters the FlowMode orb; press-and-hold runs STT.
-                        Button(action: onMicTap) {
-                            LXIcon(name: .mic, size: 18, color: holding ? t.accent : t.text2, stroke: 1.8)
+                        Button(action: handleMicTap) {
+                            LXIcon(
+                                name: cancellingHold ? .x : .mic,
+                                size: 18,
+                                color: holding ? (cancellingHold ? t.danger : t.accent) : t.text2,
+                                stroke: 1.8
+                            )
                                 .frame(width: 34, height: 34)
                         }
                         .simultaneousGesture(micHoldGesture)
@@ -120,17 +136,51 @@ struct Composer: View {
         LongPressGesture(minimumDuration: 0.6)
             .sequenced(before: DragGesture(minimumDistance: 0))
             .onChanged { value in
-                if case .second(true, _) = value, !holding {
-                    holding = true
-                    onMicHoldStart()
+                if case let .second(true, drag) = value {
+                    if !holding {
+                        holding = true
+                        cancellingHold = false
+                        suppressMicTap = true
+                        onMicHoldStart()
+                    }
+                    if let drag {
+                        cancellingHold = VoiceHoldGesturePolicy.shouldCancel(
+                            verticalTranslation: drag.translation.height
+                        )
+                    }
                 }
             }
-            .onEnded { _ in
+            .onEnded { value in
                 if holding {
+                    let shouldCancel: Bool
+                    if case let .second(_, drag) = value, let drag {
+                        shouldCancel = VoiceHoldGesturePolicy.shouldCancel(
+                            verticalTranslation: drag.translation.height
+                        )
+                    } else {
+                        shouldCancel = cancellingHold
+                    }
                     holding = false
-                    onMicHoldRelease()
+                    cancellingHold = false
+                    if shouldCancel {
+                        onMicHoldCancel()
+                    } else {
+                        onMicHoldRelease()
+                    }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(150))
+                        suppressMicTap = false
+                    }
                 }
             }
+    }
+
+    private func handleMicTap() {
+        guard !suppressMicTap else {
+            suppressMicTap = false
+            return
+        }
+        onMicTap()
     }
 
     /// One picker row derived from a real engine model reference.

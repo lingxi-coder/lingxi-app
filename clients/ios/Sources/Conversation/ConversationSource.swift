@@ -122,6 +122,12 @@ enum TurnNotice: Equatable {
 final class ConversationModel: ObservableObject {
     /// The full visible transcript (user + assistant turns).
     @Published var messages: [Message]
+    /// The chat surface's ordered render list: plain messages plus per-turn
+    /// execution traces / shell cards. `messages` remains the compatibility
+    /// transcript used by voice/setup surfaces.
+    @Published var items: [ConversationRenderItem]
+    /// Structured block payload for assistant bubbles keyed by `Message.id`.
+    @Published var messageDetails: [UUID: ConversationMessageDetail] = [:]
     /// True while a turn is in flight (drives the streaming dots row + gates
     /// overlapping sends and the Send→Stop swap, PR-4 items 1 & 2).
     @Published var streaming: Bool = false
@@ -153,6 +159,10 @@ final class ConversationModel: ObservableObject {
     /// Real resumable sessions from the engine (`SessionList.sessions` lowered).
     /// Empty ⇒ the drawer falls back to the mock session lists.
     @Published var engineSessions: [EngineSession] = []
+    /// Distinguishes an authoritative empty `SessionList` from the initial
+    /// not-yet-loaded state. Project persistence must never treat the latter as
+    /// a command to erase its cached session index.
+    @Published var engineSessionsLoaded: Bool = false
     /// The engine session id currently driving the connection — set by
     /// `SessionStarted` / `SessionResumed`. Empty until the engine reports one.
     @Published var activeSessionId: String = ""
@@ -176,9 +186,10 @@ final class ConversationModel: ObservableObject {
         @Published var pendingPermissions: [PendingPermission] = []
     #endif
 
-    init(messages: [Message] = MockData.messagesDefault,
+    init(messages: [Message] = [],
          model: ModelOption = MockData.models[0]) {
         self.messages = messages
+        self.items = messages.map(ConversationRenderItem.message)
         self.model = model
     }
 }
@@ -227,6 +238,10 @@ protocol ConversationSource: AnyObject {
     /// (`ModelList`) populates before the first send (SHIP-BLOCKER #2). A no-op on
     /// the mock; idempotent on the engine.
     func warmUp()
+    /// Build the backing engine and surface construction failures to callers.
+    /// Project switching uses this before committing the new workspace so a
+    /// failed engine rebuild can roll back atomically.
+    func prepare() async throws
     /// Ask the engine for its real resumable-session catalog (submit
     /// `ClientCommand.listSessions`). The reply (`SessionList`) lands out-of-band
     /// on the listener and populates `model.engineSessions`. A no-op on the mock
@@ -251,6 +266,15 @@ protocol ConversationSource: AnyObject {
         /// Resolve a parked permission request by denying it: submit
         /// `DenyPermission{requestId}` and pop the head of the queue.
         func denyPermission(_ requestId: UInt64)
+        /// Submit a non-turn command such as secure Provider credential CRUD.
+        func submitEngineCommand(_ command: ClientCommand) async throws
+        /// Exercise the engine's token-free Provider model-list probe.
+        func testProviderConnection(
+            profile: ProviderLaunchProfile,
+            credentialOverride: String?
+        ) async throws -> ProviderConnectionTestResult
+        /// Observe out-of-band engine events without duplicating the listener.
+        func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?)
     #endif
 }
 
@@ -259,6 +283,7 @@ protocol ConversationSource: AnyObject {
 /// is a no-op by default; the engine source may override to refresh state.
 extension ConversationSource {
     func warmUp() {}
+    func prepare() async throws {}
     func handleForeground() {}
     /// Default session ops for sources with no engine catalog (the mock): no-ops,
     /// so the mock keeps its canned drawer lists and ignores resume requests.
@@ -273,6 +298,14 @@ extension ConversationSource {
     extension ConversationSource {
         func approvePermission(_ requestId: UInt64, _ response: PermissionResponseDto) {}
         func denyPermission(_ requestId: UInt64) {}
+        func submitEngineCommand(_ command: ClientCommand) async throws {}
+        func testProviderConnection(
+            profile: ProviderLaunchProfile,
+            credentialOverride: String?
+        ) async throws -> ProviderConnectionTestResult {
+            .failure(message: "当前预览环境没有可用的 Provider 引擎。")
+        }
+        func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {}
     }
 #endif
 
@@ -283,30 +316,62 @@ extension ConversationSource {
 /// otherwise the canned mock. Falling back to the mock keeps the app usable in
 /// preview / no-key environments.
 ///
-/// Opt-in (any one suffices), in priority order:
-///   1. A key stored in the Keychain (SHIP-BLOCKER #1) — the shipped-app path: a
-///      user pasting their key in Settings is enough, no env needed.
-///   2. `LINGXI_USE_ENGINE=1` in the environment (dev/CI explicit opt-in).
-///   3. `ANTHROPIC_API_KEY` present in the environment (dev convenience).
+/// With the FFI linked, shipped builds always use the real in-process engine —
+/// even keyless — so missing provider credentials surface as real engine errors
+/// rather than silently falling back to canned data. The mock remains only for
+/// preview / no-FFI environments.
 @MainActor
 enum ConversationSourceFactory {
-    static func make() -> any ConversationSource {
+    struct LaunchOptions {
+        var projectCwd: String? = nil
+        var providerConfigured: Bool = false
+        var providerProfilesJson: String? = nil
+        var providerRoutingJson: String? = nil
+        var defaultModelID: String? = nil
+        var mobileLinux: TerminalRuntimeConfig? = nil
+    }
+
+    static func make(
+        projectCwd: String? = nil,
+        providerConfigured: Bool = false,
+        providerProfilesJson: String? = nil,
+        providerRoutingJson: String? = nil,
+        defaultModelID: String? = nil,
+        mobileLinux: TerminalRuntimeConfig? = nil
+    ) -> any ConversationSource {
+        make(options: LaunchOptions(
+            projectCwd: projectCwd,
+            providerConfigured: providerConfigured,
+            providerProfilesJson: providerProfilesJson,
+            providerRoutingJson: providerRoutingJson,
+            defaultModelID: defaultModelID,
+            mobileLinux: mobileLinux))
+    }
+
+    static func make(options: LaunchOptions = .init()) -> any ConversationSource {
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
+                return MockConversationSource.uiTestFixture()
+            }
+        #endif
         #if canImport(engine_mobileFFI)
             let env = ProcessInfo.processInfo.environment
-            let hasKeychainKey = !(Keychain.get(.apiKey) ?? "").isEmpty
-            let optedIn = hasKeychainKey
-                || env["LINGXI_USE_ENGINE"] == "1"
-                || !(env["ANTHROPIC_API_KEY"] ?? "").isEmpty
-            if optedIn {
+            let isPreview = env["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
+            if !isPreview {
                 let root = appSandboxRoot()
                 // SHIP-BLOCKER #2: NEVER seed the engine with a branded mock id
                 // ("lx-72b" → Anthropic 400). Use the user's last-picked real model
                 // from the Keychain when set; otherwise pass "" so `buildIosEngine`
                 // falls back to `MobileConfig.default_model` (a real Anthropic wire
                 // id). `fromEnvironment` still lets `LINGXI_MODEL` override for dev.
-                let storedModel = Keychain.get(.model) ?? ""
+                let storedModel = options.defaultModelID ?? Keychain.get(.model) ?? ""
                 let config = EngineConfig.fromEnvironment(
-                    appSandboxRoot: root, model: storedModel)
+                    appSandboxRoot: root,
+                    model: storedModel,
+                    projectCwd: options.projectCwd,
+                    providerProfilesJson: options.providerProfilesJson,
+                    providerRoutingJson: options.providerRoutingJson,
+                    mobileLinux: options.mobileLinux)
                 return EngineConversationSource(config: config)
             }
         #endif
@@ -334,15 +399,65 @@ enum ConversationSourceFactory {
 /// user message, show streaming dots, then append a fixed assistant reply.
 @MainActor
 final class MockConversationSource: ConversationSource {
-    let model = ConversationModel()
+    let model = ConversationModel(messages: MockData.messagesDefault)
 
     /// Bumped on cancel / new-chat so an in-flight canned reply timer no-ops when
     /// it fires (the mock's analog of the engine's cancel token).
     private var turnToken = 0
 
+    #if DEBUG
+        static func uiTestFixture() -> MockConversationSource {
+            let source = MockConversationSource()
+            let shell = ConversationShellCard(
+                sessionId: "ui-session",
+                turnId: 1,
+                taskId: "ui-shell",
+                command: "pwd",
+                cwd: "/workspace/ui-test",
+                stdout: "/workspace/ui-test\n",
+                stderr: "",
+                exitCode: 0,
+                durationMs: 42,
+                status: .completed,
+                truncated: false
+            )
+            let run = ConversationExecutionRun(
+                id: "ui-run",
+                sessionId: "ui-session",
+                turnId: 1,
+                status: .completed,
+                reasoning: "检查当前项目工作区。",
+                tools: [
+                    ConversationToolTrace(
+                        id: "ui-shell",
+                        tool: "shell",
+                        status: .completed,
+                        inputSummary: "pwd",
+                        outputSummary: "Shell 完成",
+                        elapsedMs: 42
+                    ),
+                ],
+                shellCards: [shell],
+                usage: ConversationUsageSnapshot(
+                    inputTokens: 12,
+                    outputTokens: 8,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0
+                )
+            )
+            source.model.messages = []
+            source.model.items = [.run(run)]
+            source.model.messageDetails = [:]
+            source.model.isNew = false
+            return source
+        }
+    #endif
+
     func startNewConversation() {
         turnToken &+= 1
         model.messages = []
+        model.items = []
+        model.messageDetails = [:]
         model.streaming = false
         model.isNew = true
         model.statusLine = nil
@@ -355,13 +470,17 @@ final class MockConversationSource: ConversationSource {
         guard !model.streaming else { return }
         model.isNew = false
         model.notice = nil
-        model.messages.append(Message(role: .user, text: text))
+        let message = Message(role: .user, text: text)
+        model.messages.append(message)
+        model.items.append(.message(message))
         model.streaming = true
         turnToken &+= 1
         let token = turnToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
             guard let self, self.turnToken == token else { return }
-            self.model.messages.append(Message(role: .ai, tag: "思考了 8 秒", text: "已记入。继续追问。"))
+            let reply = Message(role: .ai, tag: "思考了 8 秒", text: "已记入。继续追问。")
+            self.model.messages.append(reply)
+            self.model.items.append(.message(reply))
             self.model.streaming = false
         }
     }
@@ -392,6 +511,8 @@ final class MockConversationSource: ConversationSource {
     func openSession(_ session: SessionRef) {
         turnToken &+= 1
         model.messages = MockData.messagesDefault
+        model.items = MockData.messagesDefault.map(ConversationRenderItem.message)
+        model.messageDetails = [:]
         model.streaming = false
         model.isNew = false
         model.statusLine = nil
@@ -419,6 +540,10 @@ final class MockConversationSource: ConversationSource {
         var apiKey: String
         var model: String
         var appSandboxRoot: String
+        var projectCwd: String?
+        var providerProfilesJson: String?
+        var providerRoutingJson: String?
+        var mobileLinux: TerminalRuntimeConfig?
 
         /// Resolve the engine credentials. The API key (and optional base URL)
         /// come from the iOS Keychain FIRST (SHIP-BLOCKER #1 — a shipped app has no
@@ -427,7 +552,11 @@ final class MockConversationSource: ConversationSource {
         /// dev run. An empty key is valid (turns 401 at run time, slash commands
         /// still work) and keeps the mock fallback in `make()`.
         static func fromEnvironment(appSandboxRoot: String,
-                                    model: String) -> EngineConfig {
+                                    model: String,
+                                    projectCwd: String? = nil,
+                                    providerProfilesJson: String? = nil,
+                                    providerRoutingJson: String? = nil,
+                                    mobileLinux: TerminalRuntimeConfig? = nil) -> EngineConfig {
             let env = ProcessInfo.processInfo.environment
             // Key: env override (dev) > Keychain (shipped) > empty.
             let key = nonEmpty(env["ANTHROPIC_API_KEY"])
@@ -445,7 +574,11 @@ final class MockConversationSource: ConversationSource {
                 apiBase: base,
                 apiKey: key,
                 model: nonEmpty(env["LINGXI_MODEL"]) ?? model,
-                appSandboxRoot: appSandboxRoot
+                appSandboxRoot: appSandboxRoot,
+                projectCwd: projectCwd,
+                providerProfilesJson: providerProfilesJson,
+                providerRoutingJson: providerRoutingJson,
+                mobileLinux: mobileLinux
             )
         }
 
@@ -466,31 +599,71 @@ final class MockConversationSource: ConversationSource {
     /// `ToolUse*` / `TurnEnded` back through the listener.
     @MainActor
     final class EngineConversationSource: ConversationSource {
+        typealias HandleBuilder = @MainActor (
+            _ config: IosEngineLaunchConfigFfi,
+            _ listener: IosEventListener,
+            _ permissions: IosPermissionSink
+        ) throws -> MobileEngineHandle
+
         let model: ConversationModel
 
         private let config: EngineConfig
+        private let handleBuilder: HandleBuilder
         private var handle: MobileEngineHandle?
+        /// One shared bootstrap attempt for every entry point that needs the
+        /// engine. Keeping the task on the main actor prevents two callers that
+        /// interleave at an async submit from constructing competing handles.
+        private var handleBuildTask: Task<MobileEngineHandle, Error>?
+        private var handleBuildAttemptID: UInt64 = 0
         private var listener: EngineListener?
         /// The permission sink registered with the engine (SHIP-BLOCKER #3). Held so
         /// it outlives `ensureHandle`; Rust calls `onRequest` on it when a tool needs
         /// approval.
         private var permissionSink: EnginePermissionSink?
+        private var externalEventHandler: ((ClientEvent) -> Void)?
         /// Index into `model.messages` of the assistant message currently being
         /// streamed (deltas append into it). `nil` between turns.
         private var streamingIndex: Int?
+        /// The matching render-list slot for the in-flight assistant message.
+        private var streamingItemIndex: Int?
         /// Monotonic per-turn correlator, also passed as the engine `turnId` so a
         /// `cancel` narrows to the exact in-flight turn. `nil` between turns.
         private var currentTurnId: UInt64?
         private var nextTurnId: UInt64 = 1
+        /// Session-scoped event guard. Increment whenever the visible session
+        /// changes so late events from an abandoned session/turn are ignored.
+        private var sessionEpoch: UInt64 = 1
+        private var activeTurnEpoch: UInt64?
+        /// Cancelled / abandoned turns whose matching terminal event has not yet
+        /// arrived. While non-empty, a newer prompt is DEFERRED instead of being
+        /// submitted, so old/new event streams can never overlap on uncorrelated
+        /// protocol variants.
+        private var quarantinedTurnIds: [UInt64] = []
+        /// A locally-rendered user prompt waiting for the quarantined turn's
+        /// terminal event before it is actually submitted to the engine.
+        private var pendingPrompt: PendingPrompt?
+        private var activeRunItemIndex: Int?
+        private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
 
-        init(config: EngineConfig) {
+        private struct PendingPrompt: Equatable {
+            let text: String
+            let turnId: UInt64
+        }
+
+        init(
+            config: EngineConfig,
+            handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle
+        ) {
             self.config = config
+            self.handleBuilder = handleBuilder
             // Seed the chip from the mock catalog only as a placeholder until the
             // engine's `ModelList` lands (SHIP-BLOCKER #2). The REAL active model is
             // `activeModelId`, set below from the (possibly empty) configured id and
             // then authoritatively replaced by `ModelList.current` / `ModelChanged`.
-            self.model = ConversationModel(model: MockData.models.first(where: { $0.id == config.model })
-                ?? MockData.models[0])
+            self.model = ConversationModel(
+                messages: [],
+                model: MockData.models.first(where: { $0.id == config.model })
+                    ?? MockData.models[0])
             // Out-of-band model state: the configured id (empty ⇒ engine default,
             // filled by the first `ModelList`). Never a branded mock id here.
             self.model.activeModelId = config.model
@@ -499,6 +672,7 @@ final class MockConversationSource: ConversationSource {
         // MARK: ConversationSource
 
         func startNewConversation() {
+            let turnIdToCancel = inFlightTurnForSessionSwitch()
             // Reset the local transcript immediately so the UI reflects a fresh
             // chat without waiting for the engine round-trip. The engine confirms
             // with `SessionStarted` (which re-resets + adopts the new id); doing
@@ -508,13 +682,47 @@ final class MockConversationSource: ConversationSource {
             // Tell the engine to begin a fresh session (no cwd/model override —
             // the engine keeps its configured defaults). The new id arrives back
             // out-of-band via `SessionStarted`.
+            submitSessionTransition(
+                cancelling: turnIdToCancel,
+                command: .newSession(cwd: nil, model: nil),
+                failurePrefix: "新建会话失败"
+            )
+        }
+
+        /// Capture the old turn before a session reset clears its correlator.
+        /// The caller submits this cancellation and the transition command in
+        /// one task, preserving engine-side ordering.
+        private func inFlightTurnForSessionSwitch() -> UInt64? {
+            guard model.streaming else { return nil }
+            return currentTurnId
+        }
+
+        private func submitSessionTransition(
+            cancelling turnId: UInt64?,
+            command: ClientCommand,
+            failurePrefix: String
+        ) {
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .newSession(cwd: nil, model: nil))
+                    if let turnId {
+                        try await self.submitCommand(.cancel(turnId: turnId))
+                    }
+                    try await self.submitCommand(command)
                 } catch {
-                    await self.fail(.host, "新建会话失败：\(error)")
+                    await self.fail(.host, "\(failurePrefix)：\(error)")
+                }
+            }
+        }
+
+        private func submitSessionCancellation(_ turnId: UInt64?) {
+            guard let turnId else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.submitCommand(.cancel(turnId: turnId))
+                } catch {
+                    await self.fail(.host, "取消旧会话失败：\(error)")
                 }
             }
         }
@@ -525,45 +733,247 @@ final class MockConversationSource: ConversationSource {
         /// into the session we just moved to. `isNew` drives the empty-state vs.
         /// a placeholder transcript.
         private func resetTranscriptForSessionSwitch(isNew: Bool) {
-            model.messages = isNew ? [] : MockData.messagesDefault
+            invalidateTurnContext()
+            model.messages = []
+            model.items = model.messages.map(ConversationRenderItem.message)
+            model.messageDetails = [:]
             model.streaming = false
             model.isNew = isNew
             model.statusLine = nil
             model.error = nil
             model.notice = nil
-            streamingIndex = nil
-            currentTurnId = nil
             // A pending permission belongs to the turn we're abandoning — drop it
             // so a stale prompt can't leak into the session we're switching to.
             model.pendingPermissions = []
+        }
+
+        private func invalidateTurnContext() {
+            sessionEpoch &+= 1
+            streamingIndex = nil
+            streamingItemIndex = nil
+            currentTurnId = nil
+            activeTurnEpoch = nil
+            quarantinedTurnIds = []
+            pendingPrompt = nil
+            activeRunItemIndex = nil
+        }
+
+        private func clearTurnPointers(keepEpoch: Bool = true) {
+            streamingIndex = nil
+            streamingItemIndex = nil
+            currentTurnId = nil
+            activeTurnEpoch = keepEpoch ? activeTurnEpoch : nil
+            activeRunItemIndex = nil
+        }
+
+        private func appendMessage(_ message: Message, detail: ConversationMessageDetail? = nil) {
+            model.messages.append(message)
+            model.items.append(.message(message))
+            if let detail {
+                model.messageDetails[message.id] = detail
+            } else {
+                model.messageDetails.removeValue(forKey: message.id)
+            }
+        }
+
+        private func replaceStreamingMessage(_ message: Message, detail: ConversationMessageDetail? = nil) {
+            guard let streamingIndex,
+                  model.messages.indices.contains(streamingIndex)
+            else {
+                appendMessage(message, detail: detail)
+                self.streamingIndex = model.messages.count - 1
+                self.streamingItemIndex = model.items.count - 1
+                return
+            }
+            let oldMessage = model.messages[streamingIndex]
+            model.messages[streamingIndex] = message
+            if let itemIndex = streamingItemIndex,
+               model.items.indices.contains(itemIndex) {
+                model.items[itemIndex] = .message(message)
+            } else if let itemIndex = model.items.firstIndex(where: { item in
+                if case let .message(existing) = item {
+                    return existing.id == oldMessage.id
+                }
+                return false
+            }) {
+                model.items[itemIndex] = .message(message)
+                streamingItemIndex = itemIndex
+            }
+            model.messageDetails.removeValue(forKey: oldMessage.id)
+            if let detail {
+                model.messageDetails[message.id] = detail
+            }
+        }
+
+        private func ensureActiveRun() -> ConversationExecutionRun {
+            if let itemIndex = activeRunItemIndex,
+               model.items.indices.contains(itemIndex),
+               case let .run(run) = model.items[itemIndex] {
+                return run
+            }
+            let run = ConversationExecutionRun(
+                id: "session-\(sessionEpoch)-turn-\(currentTurnId ?? 0)",
+                sessionId: model.activeSessionId,
+                turnId: currentTurnId,
+                status: .running
+            )
+            model.items.append(.run(run))
+            activeRunItemIndex = model.items.count - 1
+            return run
+        }
+
+        @discardableResult
+        private func updateActiveRun(_ mutate: (inout ConversationExecutionRun) -> Void) -> ConversationExecutionRun {
+            var run = ensureActiveRun()
+            mutate(&run)
+            if let itemIndex = activeRunItemIndex,
+               model.items.indices.contains(itemIndex) {
+                model.items[itemIndex] = .run(run)
+            }
+            return run
+        }
+
+        private func upsertTool(
+            id: String,
+            tool: String,
+            fallbackSummary: String?,
+            mutate: (inout ConversationToolTrace) -> Void
+        ) {
+            updateActiveRun { run in
+                if let index = run.tools.firstIndex(where: { $0.id == id }) {
+                    var existing = run.tools[index]
+                    mutate(&existing)
+                    run.tools[index] = existing
+                } else {
+                    var trace = ConversationToolTrace(
+                        id: id,
+                        tool: tool,
+                        status: .running,
+                        inputSummary: fallbackSummary,
+                        outputSummary: nil,
+                        elapsedMs: nil
+                    )
+                    mutate(&trace)
+                    run.tools.append(trace)
+                }
+            }
+        }
+
+        private func upsertShellCard(
+            id: String,
+            create: () -> ConversationShellCard,
+            mutate: (inout ConversationShellCard) -> Void
+        ) {
+            updateActiveRun { run in
+                if let index = run.shellCards.firstIndex(where: { $0.taskId == id }) {
+                    var existing = run.shellCards[index]
+                    mutate(&existing)
+                    run.shellCards[index] = existing
+                } else {
+                    var card = create()
+                    mutate(&card)
+                    run.shellCards.append(card)
+                }
+            }
+        }
+
+        private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
+            guard let currentTurnId, let activeTurnEpoch, activeTurnEpoch == sessionEpoch else {
+                return false
+            }
+            if quarantinedTurnIds.contains(currentTurnId), !model.streaming {
+                switch event {
+                case .turnEnded, .error:
+                    return true
+                default:
+                    return false
+                }
+            }
+            switch event {
+            case let .turnStarted(turnId):
+                return turnId == nil || turnId == currentTurnId
+            default:
+                return true
+            }
+        }
+
+        private func quarantineCurrentTurn(_ turnId: UInt64) {
+            guard !quarantinedTurnIds.contains(turnId) else { return }
+            quarantinedTurnIds.append(turnId)
+        }
+
+        private func consumeQuarantinedTurn(_ turnId: UInt64) {
+            quarantinedTurnIds.removeAll { $0 == turnId }
+        }
+
+        private func submitCommand(_ command: ClientCommand) async throws {
+            if let testCommandSubmitter {
+                try await testCommandSubmitter(command)
+                return
+            }
+            let handle = try await ensureHandle()
+            try await handle.submit(command: command)
+        }
+
+        private func pendingStatusLine() -> String {
+            "正在等待上一轮取消完成…"
+        }
+
+        private func startPrompt(_ prompt: PendingPrompt) {
+            pendingPrompt = nil
+            model.notice = nil
+            model.streaming = true
+            model.statusLine = nil
+            streamingIndex = nil
+            streamingItemIndex = nil
+            currentTurnId = prompt.turnId
+            activeTurnEpoch = sessionEpoch
+
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.submitCommand(.sendPrompt(
+                        text: prompt.text,
+                        promptMode: nil,
+                        images: [],
+                        turnId: prompt.turnId))
+                } catch {
+                    await self.fail(.host, "\(error)")
+                }
+            }
+        }
+
+        private func finishQuarantinedTurnAndStartPendingIfNeeded() {
+            let completedTurnId = currentTurnId
+            if let completedTurnId {
+                consumeQuarantinedTurn(completedTurnId)
+            }
+            clearTurnPointers(keepEpoch: false)
+            model.statusLine = nil
+            guard quarantinedTurnIds.isEmpty, let pendingPrompt else { return }
+            startPrompt(pendingPrompt)
         }
 
         func send(_ text: String) {
             // PR-4 item 1: a turn is already in flight — ignore the tap so we
             // never start an overlapping turn (which would corrupt appendDelta's
             // single `streamingIndex`). The Stop button is how you interrupt.
-            guard !model.streaming else { return }
+            guard !model.streaming, pendingPrompt == nil else { return }
 
             model.isNew = false
             model.notice = nil
-            model.messages.append(Message(role: .user, text: text))
-            model.streaming = true
-            streamingIndex = nil
+            appendMessage(Message(role: .user, text: text))
 
             let turnId = nextTurnId
             nextTurnId &+= 1
-            currentTurnId = turnId
+            let prompt = PendingPrompt(text: text, turnId: turnId)
 
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .sendPrompt(
-                        text: text, promptMode: nil, images: [], turnId: turnId))
-                } catch {
-                    await self.fail(.host, "\(error)")
-                }
+            if !quarantinedTurnIds.isEmpty {
+                pendingPrompt = prompt
+                model.statusLine = pendingStatusLine()
+                return
             }
+            startPrompt(prompt)
         }
 
         func cancel() {
@@ -573,11 +983,14 @@ final class MockConversationSource: ConversationSource {
             // `TurnEnded(.cancelled)` which sets the notice (idempotent).
             model.streaming = false
             streamingIndex = nil
+            streamingItemIndex = nil
+            quarantineCurrentTurn(turnId)
+            model.statusLine = pendingPrompt == nil ? nil : pendingStatusLine()
+            updateActiveRun { $0.status = .cancelled }
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .cancel(turnId: turnId))
+                    try await self.submitCommand(.cancel(turnId: turnId))
                 } catch {
                     await self.fail(.host, "取消失败：\(error)")
                 }
@@ -586,23 +999,100 @@ final class MockConversationSource: ConversationSource {
 
         func dismissError() { model.error = nil }
 
+        func submitEngineCommand(_ command: ClientCommand) async throws {
+            try await submitCommand(command)
+        }
+
+        func testProviderConnection(
+            profile: ProviderLaunchProfile,
+            credentialOverride: String?
+        ) async throws -> ProviderConnectionTestResult {
+            let handle = try await ensureHandle()
+            let trimmed = credentialOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let result = await handle.testProviderConnection(
+                providerId: profile.id,
+                providerPreset: profile.presetID,
+                apiBase: profile.baseURL,
+                model: profile.modelID,
+                credentialOverride: trimmed.flatMap { value in
+                    value.isEmpty ? nil : ProviderCredentialSecretDto(value: value)
+                }
+            )
+            return result.connected
+                ? .success(message: "\(result.message) · \(result.latencyMs)ms")
+                : .failure(message: result.message)
+        }
+
+        func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {
+            externalEventHandler = handler
+        }
+
         // MARK: handle construction
 
         /// Build the engine handle once (lazily). Registers the listener so the
         /// adapter can stream events the moment the first turn runs.
         private func ensureHandle() async throws -> MobileEngineHandle {
             if let handle { return handle }
+            if let handleBuildTask {
+                return try await handleBuildTask.value
+            }
+
             let listener = EngineListener(source: self)
-            self.listener = listener
             // SHIP-BLOCKER #3: register a real permission sink so a tool that needs
             // approval surfaces a prompt instead of hanging the turn forever.
             let permissionSink = EnginePermissionSink(source: self)
-            self.permissionSink = permissionSink
-            let handle = try buildIosEngine(
+            let providerConfig = config.providerProfilesJson.map {
+                IosProviderConfigFfi(
+                    providerProfilesJson: $0,
+                    routingJson: config.providerRoutingJson
+                )
+            }
+            let launchConfig = IosEngineLaunchConfigFfi(
                 apiBase: config.apiBase,
                 apiKey: config.apiKey,
                 model: config.model,
                 appSandboxRoot: config.appSandboxRoot,
+                projectCwd: config.projectCwd,
+                providerConfig: providerConfig,
+                mobileLinux: config.mobileLinux.map(makeIosMobileLinuxConfig)
+            )
+            let handleBuilder = self.handleBuilder
+            handleBuildAttemptID &+= 1
+            let attemptID = handleBuildAttemptID
+            let buildTask = Task { @MainActor [handleBuilder, launchConfig, listener, permissionSink] in
+                let handle = try handleBuilder(launchConfig, listener, permissionSink)
+                // Bootstrap listings are part of construction: never publish a
+                // handle that failed halfway through initialization.
+                try await handle.submit(command: .listModels)
+                try await handle.submit(command: .listSessions(limit: nil))
+                return handle
+            }
+            handleBuildTask = buildTask
+
+            do {
+                let builtHandle = try await buildTask.value
+                if handleBuildAttemptID == attemptID {
+                    handle = builtHandle
+                    self.listener = listener
+                    self.permissionSink = permissionSink
+                    handleBuildTask = nil
+                }
+                return handle ?? builtHandle
+            } catch {
+                if handleBuildAttemptID == attemptID {
+                    handleBuildTask = nil
+                }
+                throw error
+            }
+        }
+
+        private static func buildDefaultHandle(
+            config: IosEngineLaunchConfigFfi,
+            listener: IosEventListener,
+            permissions: IosPermissionSink
+        ) throws -> MobileEngineHandle {
+            try buildIosEngineWithConfig(
+                config: config,
                 listener: listener,
                 stt: SttImpl(),
                 tts: TtsImpl(),
@@ -611,25 +1101,10 @@ final class MockConversationSource: ConversationSource {
                 voice: VoiceImpl(),
                 notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(),
-                permissions: permissionSink,
-                mobileLinux: nil,
-                // Native Keychain secure store — enables OAuth /login token persist
-                // (flips the engine's oauth_supported true).
-                secureStorage: SecureStorageImpl())
-            self.handle = handle
-            // SHIP-BLOCKER #2: ask the engine for its real model catalog the moment
-            // the handle exists. The reply (`ModelList`) arrives out-of-band on the
-            // listener and populates `availableModels` / `activeModelId` — driving
-            // the picker off real ids, not the branded mock catalog. This is
-            // out-of-band model state, NOT part of any text turn.
-            try await handle.submit(command: .listModels)
-            // Same out-of-band pattern for the session catalog: ask the engine
-            // for its real resumable sessions the moment the handle exists. The
-            // reply (`SessionList`) arrives on the listener and populates
-            // `engineSessions`, driving the drawer off real history rather than
-            // the mock lists. NOT part of any text turn.
-            try await handle.submit(command: .listSessions(limit: nil))
-            return handle
+                permissions: permissions,
+                // Native Keychain secure store enables OAuth token persistence.
+                secureStorage: SecureStorageImpl()
+            )
         }
 
         /// Build the handle eagerly (independent of the first turn) so the model
@@ -644,6 +1119,10 @@ final class MockConversationSource: ConversationSource {
                 do { _ = try await self.ensureHandle() }
                 catch { await self.fail(.host, "\(error)") }
             }
+        }
+
+        func prepare() async throws {
+            _ = try await ensureHandle()
         }
 
         /// Refresh the real session catalog (drawer-open). Builds the handle if
@@ -682,46 +1161,258 @@ final class MockConversationSource: ConversationSource {
 
         /// Map one inbound `ClientEvent` onto the published state.
         fileprivate func apply(_ event: ClientEvent) {
+            externalEventHandler?(event)
             switch event {
             case .turnStarted:
+                guard acceptTurnEvent(event) else { return }
                 model.streaming = true
                 model.notice = nil
                 streamingIndex = nil
+                streamingItemIndex = nil
+                updateActiveRun {
+                    $0.status = .running
+                    $0.retry = nil
+                }
 
             case let .textDelta(text):
+                guard acceptTurnEvent(event) else { return }
                 appendDelta(text)
 
-            case let .toolUseStarted(_, tool, _):
-                // Surface tool activity as a dim status line; full tool cards are
-                // later parity work (spec §5 item 3).
-                model.statusLine = "调用工具 \(tool)…"
+            case let .thinkingDelta(thinking, signature):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun { run in
+                    run.reasoning += thinking
+                    if signature != nil && run.notices.contains(where: { $0.id == "thinking-signature" }) == false {
+                        run.notices.append(.init(id: "thinking-signature", kind: .info, text: "推理签名已附加"))
+                    }
+                }
 
-            case let .toolUseResult(_, tool, _, isError):
-                model.statusLine = isError ? "工具 \(tool) 失败" : nil
+            case let .systemNotice(message, isError):
+                guard acceptTurnEvent(event) else { return }
+                let notice = ConversationExecutionNotice(
+                    id: "notice-\(UUID().uuidString)",
+                    kind: isError ? .error : .info,
+                    text: message
+                )
+                updateActiveRun { $0.notices.append(notice) }
+                model.statusLine = message
+
+            case let .toolUseStarted(id, tool, inputJson):
+                guard acceptTurnEvent(event) else { return }
+                if ConversationExecutionParsing.isShellTool(tool) {
+                    let started = ConversationExecutionParsing.shellStarted(id: id, inputJson: inputJson)
+                    upsertShellCard(id: id, create: {
+                        ConversationShellCard(
+                            sessionId: model.activeSessionId,
+                            turnId: currentTurnId,
+                            taskId: started.taskId,
+                            command: started.command,
+                            cwd: started.cwd
+                        )
+                    }, mutate: { card in
+                        card.command = started.command
+                        card.cwd = started.cwd
+                        card.status = .running
+                    })
+                    upsertTool(id: id, tool: "Shell", fallbackSummary: started.command) { trace in
+                        trace.tool = "Shell"
+                        trace.status = .running
+                        trace.inputSummary = started.command
+                    }
+                    model.statusLine = "Shell 运行中…"
+                } else {
+                    let summary = ConversationExecutionParsing.summarizeToolInput(inputJson)
+                    upsertTool(id: id, tool: tool, fallbackSummary: summary) { trace in
+                        trace.tool = tool
+                        trace.status = .running
+                        trace.inputSummary = summary
+                    }
+                    model.statusLine = "调用工具 \(tool)…"
+                }
+
+            case let .toolHeartbeat(id, tool, elapsedMs):
+                guard acceptTurnEvent(event) else { return }
+                if ConversationExecutionParsing.isShellTool(tool) {
+                    upsertShellCard(id: id, create: {
+                        ConversationShellCard(
+                            sessionId: model.activeSessionId,
+                            turnId: currentTurnId,
+                            taskId: id,
+                            command: tool
+                        )
+                    }, mutate: { card in
+                        card.durationMs = elapsedMs
+                    })
+                    upsertTool(id: id, tool: "Shell", fallbackSummary: nil) { trace in
+                        trace.tool = "Shell"
+                        trace.status = .running
+                        trace.elapsedMs = elapsedMs
+                    }
+                    model.statusLine = "Shell 运行中…"
+                } else {
+                    upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
+                        trace.tool = tool
+                        trace.status = .running
+                        trace.elapsedMs = elapsedMs
+                    }
+                    model.statusLine = "工具 \(tool) 运行中…"
+                }
+
+            case let .toolUseResult(id, tool, resultJson, isError):
+                guard acceptTurnEvent(event) else { return }
+                if ConversationExecutionParsing.isShellTool(tool) {
+                    let finished = ConversationExecutionParsing.shellFinished(id: id, resultJson: resultJson, isError: isError)
+                    upsertShellCard(id: id, create: {
+                        ConversationShellCard(
+                            sessionId: model.activeSessionId,
+                            turnId: currentTurnId,
+                            taskId: id,
+                            command: tool
+                        )
+                    }, mutate: { card in
+                        if let finished {
+                            card.stdout = finished.stdout
+                            card.stderr = finished.stderr
+                            card.exitCode = finished.exitCode
+                            card.durationMs = finished.durationMs ?? card.durationMs
+                            card.status = finished.status
+                            card.truncated = finished.truncated
+                        } else {
+                            card.status = isError ? .failed : .completed
+                        }
+                    })
+                    upsertTool(id: id, tool: "Shell", fallbackSummary: nil) { trace in
+                        trace.tool = "Shell"
+                        trace.status = finished?.status.asToolStatus ?? (isError ? .failed : .completed)
+                        trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
+                        trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
+                    }
+                    model.statusLine = ConversationExecutionParsing.shellStatusLabel(
+                        finished?.status ?? (isError ? .failed : .completed)
+                    )
+                } else {
+                    upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
+                        trace.tool = tool
+                        trace.status = isError ? .failed : .completed
+                        trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
+                            resultJson,
+                            isError: isError,
+                            tool: tool
+                        )
+                    }
+                    model.statusLine = isError ? "工具 \(tool) 失败" : "工具 \(tool) 完成"
+                }
+
+            case let .usageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun {
+                    $0.usage = ConversationUsageSnapshot(
+                        inputTokens: inputTokens,
+                        outputTokens: outputTokens,
+                        cacheReadTokens: cacheReadTokens,
+                        cacheCreationTokens: cacheCreationTokens
+                    )
+                }
+
+            case let .apiRetry(message, attempt, maxRetries, delayMs):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun {
+                    $0.retry = ConversationRetrySnapshot(
+                        message: message,
+                        attempt: attempt,
+                        maxRetries: maxRetries,
+                        delayMs: delayMs
+                    )
+                }
+                model.statusLine = "重试中（\(attempt)/\(maxRetries)）…"
+
+            case let .costUpdate(_, _, _, _, _, formatted):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun { $0.costFormatted = formatted }
+
+            case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun {
+                    $0.compactions.append(
+                        ConversationCompactionSnapshot(
+                            messagesBefore: messagesBefore,
+                            messagesAfter: messagesAfter,
+                            bytesSaved: bytesSaved
+                        )
+                    )
+                }
+
+            case let .coordinatorStatus(activeWorkers, team):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun {
+                    $0.activeWorkers = activeWorkers
+                    $0.coordinatorTeam = team
+                }
+
+            case let .coordinatorWorker(worker):
+                guard acceptTurnEvent(event) else { return }
+                updateActiveRun { run in
+                    let viewModel = ConversationCoordinatorWorker(
+                        id: worker.agentId,
+                        name: worker.name,
+                        agentType: worker.agentType,
+                        status: worker.status
+                    )
+                    if let index = run.workers.firstIndex(where: { $0.id == viewModel.id }) {
+                        run.workers[index] = viewModel
+                    } else {
+                        run.workers.append(viewModel)
+                    }
+                }
+
+            case let .messageComplete(_, message):
+                guard acceptTurnEvent(event) else { return }
+                if let message {
+                    let lowered = Self.message(from: message)
+                    replaceStreamingMessage(lowered.message, detail: lowered.detail)
+                }
 
             case let .turnEnded(outcome, _, _):
+                guard acceptTurnEvent(event) else { return }
+                let completedQuarantinedTurn = currentTurnId.map { quarantinedTurnIds.contains($0) } ?? false
                 // PR-4 item 3: don't treat every outcome as a clean end. A normal
                 // `endTurn` just stops streaming; `maxTurns` / `cancelled` surface
                 // a distinct notice so the user knows the turn was interrupted.
                 model.streaming = false
                 streamingIndex = nil
-                currentTurnId = nil
+                streamingItemIndex = nil
                 model.statusLine = nil
                 switch outcome {
                 case .endTurn:
                     model.notice = nil
+                    updateActiveRun { $0.status = .completed }
                 case .maxTurns:
                     model.notice = .maxTurns
+                    updateActiveRun { $0.status = .maxTurns }
                 case .cancelled:
-                    model.notice = .cancelled
+                    model.notice = completedQuarantinedTurn && pendingPrompt != nil ? nil : .cancelled
+                    updateActiveRun { $0.status = .cancelled }
                 @unknown default:
                     // `#[non_exhaustive]` — a future outcome falls back to a clean
                     // end rather than crashing.
                     model.notice = nil
                 }
+                if completedQuarantinedTurn {
+                    finishQuarantinedTurnAndStartPendingIfNeeded()
+                    return
+                }
+                clearTurnPointers(keepEpoch: false)
 
             case let .error(kind, message):
+                guard acceptTurnEvent(event) else { return }
+                let completedQuarantinedTurn = currentTurnId.map { quarantinedTurnIds.contains($0) } ?? false
+                if completedQuarantinedTurn {
+                    updateActiveRun { $0.status = .failed }
+                    finishQuarantinedTurnAndStartPendingIfNeeded()
+                    return
+                }
                 // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
+                updateActiveRun { $0.status = .failed }
                 fail(Self.kind(from: kind), message)
 
             case let .modelList(models, current):
@@ -746,6 +1437,12 @@ final class MockConversationSource: ConversationSource {
                                   messageCount: Int($0.messageCount),
                                   relativeTime: RelativeTime.format($0.modifiedRfc3339))
                 }
+                // Publish the authoritative rows before flipping the loaded
+                // bit. `ConversationProjectBridge` persists on the loaded
+                // transition; reversing these assignments creates a crash
+                // window where it can durably replace a valid index with an
+                // intermediate empty value.
+                model.engineSessionsLoaded = true
 
             case let .sessionStarted(sessionId):
                 // A fresh session began on the connection (1:1 with a successful
@@ -759,6 +1456,7 @@ final class MockConversationSource: ConversationSource {
                 model.activeSessionId = sessionId
                 if isSwitch && !model.streaming {
                     resetTranscriptForSessionSwitch(isNew: true)
+                    model.activeSessionId = sessionId
                 }
 
             case let .sessionResumed(sessionId, messages):
@@ -772,11 +1470,18 @@ final class MockConversationSource: ConversationSource {
                 // placeholder transcript `resumeSession` left in place and append
                 // each restored message as a completed bubble — the out-of-band
                 // session-state sibling of `SessionList` / `SessionStarted`.
+                invalidateTurnContext()
                 model.activeSessionId = sessionId
-                model.messages = messages.map(Self.message(from:))
+                let restored = messages.map(Self.message(from:))
+                model.messages = restored.map(\.message)
+                model.items = restored.map { .message($0.message) }
+                model.messageDetails = Dictionary(
+                    uniqueKeysWithValues: restored.compactMap { item in
+                        item.detail.map { (item.message.id, $0) }
+                    }
+                )
                 model.isNew = messages.isEmpty
                 model.streaming = false
-                streamingIndex = nil
                 model.statusLine = nil
                 model.notice = nil
 
@@ -784,6 +1489,7 @@ final class MockConversationSource: ConversationSource {
                 // The current session ended (e.g. cleared). Drop the active id;
                 // the next `SessionStarted`/`SessionResumed` re-establishes one.
                 model.activeSessionId = ""
+                invalidateTurnContext()
 
             case let .mcpServers(servers):
                 // Out-of-band MCP listing → the UI `MCPServer` model. The DTO is
@@ -818,6 +1524,28 @@ final class MockConversationSource: ConversationSource {
             apply(event)
         }
 
+        func beginTurnForTesting(turnId: UInt64 = 1, sessionId: String = "test-session") {
+            model.activeSessionId = sessionId
+            model.streaming = true
+            currentTurnId = turnId
+            activeTurnEpoch = sessionEpoch
+            nextTurnId = max(nextTurnId, turnId &+ 1)
+        }
+
+        func cancelForTesting() {
+            guard model.streaming, let turnId = currentTurnId else { return }
+            model.streaming = false
+            streamingIndex = nil
+            streamingItemIndex = nil
+            quarantineCurrentTurn(turnId)
+            model.statusLine = pendingPrompt == nil ? nil : pendingStatusLine()
+            updateActiveRun { $0.status = .cancelled }
+        }
+
+        func setCommandSubmitterForTesting(_ submitter: ((ClientCommand) async throws -> Void)?) {
+            testCommandSubmitter = submitter
+        }
+
         /// Append streamed text into the in-flight assistant message, creating it
         /// on the first delta of a turn.
         ///
@@ -827,12 +1555,15 @@ final class MockConversationSource: ConversationSource {
         private func appendDelta(_ delta: String) {
             guard model.streaming else { return }
             if let i = streamingIndex, model.messages.indices.contains(i) {
-                model.messages[i] = Message(role: .ai,
-                                            tag: model.messages[i].tag,
-                                            text: model.messages[i].text + delta)
+                let updated = Message(role: .ai,
+                                      tag: model.messages[i].tag,
+                                      text: model.messages[i].text + delta)
+                replaceStreamingMessage(updated)
             } else {
-                model.messages.append(Message(role: .ai, text: delta))
+                let opened = Message(role: .ai, text: delta)
+                appendMessage(opened)
                 streamingIndex = model.messages.count - 1
+                streamingItemIndex = model.items.count - 1
             }
         }
 
@@ -842,47 +1573,88 @@ final class MockConversationSource: ConversationSource {
         /// `SessionResumed.messages`) onto the UI `Message` the scrollback renders.
         ///
         /// The engine roles are `"user" | "assistant" | "system"`; the iOS
-        /// `Message.role` is the binary user/AI split, so non-user roles (assistant
-        /// AND system) render as the AI side. The block list is flattened to the
-        /// single display string the `Message` model carries (it has no per-block
-        /// structure) via `text(from:)`, byte-faithful to the live `MessageComplete`
-        /// shape so a resumed bubble reads identically to one streamed this session.
-        fileprivate static func message(from dto: MessageDto) -> Message {
-            let role: Role = (dto.role == "user") ? .user : .ai
-            return Message(role: role, text: text(from: dto.blocks))
+        /// `Message.role` is the binary user/AI split, so non-user roles render on
+        /// the AI side. `Message.text` remains a compatibility summary, while the
+        /// complete typed block list is retained in `ConversationMessageDetail`
+        /// so restored reasoning, tool and compaction blocks keep their identity.
+        fileprivate struct RenderedMessage {
+            let message: Message
+            let detail: ConversationMessageDetail?
         }
 
-        /// Flatten a restored message's `MessageBlockDto` list into the plain
-        /// display text the iOS `Message` model carries. Text/thinking blocks
-        /// contribute their body; tool-use/result blocks contribute a compact,
-        /// human-readable line (the conversation surface has no tool cards yet —
-        /// spec §5 item 3 — so a resumed tool block shows as a labeled line rather
-        /// than vanishing). Blocks join on blank lines, mirroring paragraph breaks.
-        /// `#[non_exhaustive]` on the enum ⇒ `@unknown default` degrades a future
-        /// block kind to an empty contribution rather than crashing.
-        private static func text(from blocks: [MessageBlockDto]) -> String {
-            blocks.compactMap { block -> String? in
+        fileprivate static func message(from dto: MessageDto) -> RenderedMessage {
+            let role: Role = (dto.role == "user") ? .user : .ai
+            let detail = detail(from: dto.blocks)
+            let body = text(from: detail?.blocks ?? [])
+            return RenderedMessage(message: Message(role: role, text: body), detail: detail)
+        }
+
+        private static func detail(from blocks: [MessageBlockDto]) -> ConversationMessageDetail? {
+            let lowered = blocks.compactMap { block -> ConversationMessageBlock? in
                 switch block {
                 case let .text(text):
-                    return text
-                case let .thinking(thinking, _):
-                    return thinking
+                    return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(text)
+                case let .thinking(thinking, signature):
+                    return thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil :
+                        .thinking(text: thinking, signature: signature)
                 case .redactedThinking:
-                    // Opaque encrypted reasoning — nothing user-readable to show.
-                    return nil
-                case .compactBoundary:
-                    // Keep the boundary visible without presenting the internal
-                    // summary as user-authored transcript text.
-                    return "对话已压缩"
-                case let .toolUse(_, tool, _):
-                    return "调用工具 \(tool)"
-                case let .toolResult(_, _, _, isError, _, _, _):
-                    return isError ? "工具调用失败" : nil
+                    return .redactedThinking
+                case let .compactBoundary(messagesBefore, messagesAfter, summary):
+                    return .compactBoundary(
+                        messagesBefore: Int(messagesBefore),
+                        messagesAfter: Int(messagesAfter),
+                        summary: summary
+                    )
+                case let .toolUse(id, tool, inputJson):
+                    return .toolUse(
+                        id: id,
+                        tool: tool,
+                        inputSummary: ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson,
+                        inputJson: inputJson
+                    )
+                case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath):
+                    return .toolResult(
+                        id: id,
+                        tool: tool,
+                        isError: isError,
+                        summary: ConversationExecutionParsing.summarizeToolResult(
+                            resultJson,
+                            isError: isError,
+                            tool: tool
+                        ),
+                        resultJson: resultJson,
+                        oldString: oldString,
+                        newString: newString,
+                        filePath: filePath
+                    )
                 @unknown default:
                     return nil
                 }
             }
-            .filter { !$0.isEmpty }
+            return lowered.isEmpty ? nil : ConversationMessageDetail(blocks: lowered)
+        }
+
+        /// Flatten structured blocks into the plain transcript text the rest of
+        /// the app still consumes. The chat renderer itself uses the structured
+        /// blocks for display.
+        private static func text(from blocks: [ConversationMessageBlock]) -> String {
+            blocks.compactMap { block -> String? in
+                switch block {
+                case let .text(text):
+                    return text
+                case let .thinking(text, _):
+                    return text
+                case .redactedThinking:
+                    return "[已折叠的思考]"
+                case .compactBoundary:
+                    return "对话已压缩"
+                case let .toolUse(_, tool, _, _):
+                    return "调用工具 \(tool)…"
+                case let .toolResult(_, _, isError, summary, _, _, _, _):
+                    return isError ? summary : "工具结果：\(summary)"
+                }
+            }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
         }
 
@@ -902,13 +1674,12 @@ final class MockConversationSource: ConversationSource {
         private func fail(_ kind: ConversationError.Kind, _ message: String) {
             model.error = ConversationError(kind: kind, message: message)
             model.streaming = false
-            streamingIndex = nil
-            currentTurnId = nil
             model.statusLine = nil
             // A terminal error tears down the turn — its parked permission (if any)
             // can never be answered now, so drop the prompt rather than leave it
             // stranded.
             model.pendingPermissions = []
+            clearTurnPointers(keepEpoch: false)
         }
 
         // MARK: model selection (SHIP-BLOCKER #2)
@@ -957,20 +1728,9 @@ final class MockConversationSource: ConversationSource {
         /// switch can't append its deltas (or its `TurnEnded` notice) into the new
         /// session. Then resets the transcript to the session's default.
         func openSession(_ session: SessionRef) {
-            // Cancel the in-flight turn on the engine so its late deltas/outcome
-            // can't bleed into the new session. `cancel()` is a no-op if idle.
-            cancel()
-            model.messages = MockData.messagesDefault
-            model.streaming = false
-            model.isNew = false
-            model.statusLine = nil
-            model.error = nil
-            model.notice = nil
-            streamingIndex = nil
-            currentTurnId = nil
-            // A parked permission belongs to the turn we're leaving — drop it so a
-            // stale prompt can't leak into the session we just switched to.
-            model.pendingPermissions = []
+            let turnIdToCancel = inFlightTurnForSessionSwitch()
+            resetTranscriptForSessionSwitch(isNew: false)
+            submitSessionCancellation(turnIdToCancel)
         }
 
         /// Resume a prior engine session by UUID (the drawer-tap path for a REAL
@@ -985,21 +1745,17 @@ final class MockConversationSource: ConversationSource {
         /// context visible. No-op when already active.
         func resumeSession(_ uuid: String) {
             guard !uuid.isEmpty, uuid != model.activeSessionId else { return }
-            cancel()
+            let turnIdToCancel = inFlightTurnForSessionSwitch()
             resetTranscriptForSessionSwitch(isNew: false)
             // Optimistic local select (the task's "select it locally" requirement)
             // so the drawer marks the row even if engine-side resume is a
             // follow-up; `SessionResumed` confirms the same id.
             model.activeSessionId = uuid
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .resumeSession(sessionId: uuid, cwd: nil))
-                } catch {
-                    await self.fail(.host, "恢复会话失败：\(error)")
-                }
-            }
+            submitSessionTransition(
+                cancelling: turnIdToCancel,
+                command: .resumeSession(sessionId: uuid, cwd: nil),
+                failurePrefix: "恢复会话失败"
+            )
         }
 
         /// Background: the user left the app while a turn was streaming. Cancel the

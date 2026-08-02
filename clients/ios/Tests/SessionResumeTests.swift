@@ -11,6 +11,7 @@
 // No engine, no key, no network: this constructs the lowered DTOs directly and
 // exercises only the Swift mapping, so it is hermetic and fast.
 
+import Combine
 import XCTest
 
 @testable import LingxiCode
@@ -38,6 +39,49 @@ import XCTest
         }
 
         private func uuid() -> String { "22222222-2222-4222-8222-222222222222" }
+
+        /// An empty array before the first `SessionList` means "not loaded";
+        /// the same array after the event is an authoritative empty catalog.
+        /// Persisting code relies on this distinction to avoid erasing a cached
+        /// project index when engine startup or listing has not completed yet.
+        func testSessionListMarksAuthoritativeEmptyCatalogAsLoaded() {
+            let source = makeSource()
+            XCTAssertTrue(source.model.engineSessions.isEmpty)
+            XCTAssertFalse(source.model.engineSessionsLoaded)
+
+            source.applyForTesting(.sessionList(sessions: []))
+
+            XCTAssertTrue(source.model.engineSessions.isEmpty)
+            XCTAssertTrue(source.model.engineSessionsLoaded)
+        }
+
+        /// The loaded transition is the persistence trigger. It must never be
+        /// observable before the rows carried by the same engine event, or a
+        /// crash between the two publications can durably erase the old index.
+        func testSessionListPublishesRowsBeforeLoadedTransition() {
+            let source = makeSource()
+            var sessionIDsObservedWhenLoaded: [String] = []
+            let observation = source.model.$engineSessionsLoaded
+                .dropFirst()
+                .sink { loaded in
+                    if loaded {
+                        sessionIDsObservedWhenLoaded = source.model.engineSessions.map(\.id)
+                    }
+                }
+            defer { observation.cancel() }
+
+            source.applyForTesting(.sessionList(sessions: [
+                SessionRowDto(
+                    uuid: uuid(),
+                    title: "保留的会话",
+                    modifiedRfc3339: "2026-08-02T08:00:00Z",
+                    messageCount: 3,
+                    path: "/tmp/retained.jsonl"
+                ),
+            ]))
+
+            XCTAssertEqual(sessionIDsObservedWhenLoaded, [uuid()])
+        }
 
         /// SessionResumed with a 2-message transcript (a user text turn + an
         /// assistant text turn, oldest-first) must: adopt the session id, replace
@@ -131,6 +175,148 @@ import XCTest
             XCTAssertEqual(source.model.messages.count, 1)
             XCTAssertEqual(source.model.messages[0].role, .ai)
             XCTAssertEqual(source.model.messages[0].text, "系统提示")
+        }
+
+        func testConcurrentEngineEntryPointsShareOneHandleBuild() async throws {
+            let gate = EngineSubmitGate()
+            let handle = TestMobileEngineHandle { command in
+                try await gate.submit(command)
+            }
+            var buildCount = 0
+            let source = makeSource(handleBuilder: { _, _, _ in
+                buildCount += 1
+                return handle
+            })
+
+            source.warmUp()
+            source.listSessions()
+            source.send("并发消息")
+            let prepare = Task { try await source.prepare() }
+
+            await gate.waitForFirstSubmit()
+            XCTAssertEqual(buildCount, 1)
+            await gate.releaseFirstSubmit()
+            try await prepare.value
+            await gate.waitForSubmitCount(4)
+
+            XCTAssertEqual(buildCount, 1,
+                           "warm-up, prepare, list and send must await the same engine build")
+        }
+
+        func testFailedSharedEngineBuildCanRetryWithoutCachingPartialHandle() async throws {
+            let failingGate = EngineSubmitGate(firstSubmitError: EngineBuildTestError.bootstrapFailed)
+            let succeedingGate = EngineSubmitGate()
+            var buildCount = 0
+            let source = makeSource(handleBuilder: { _, _, _ in
+                buildCount += 1
+                if buildCount == 1 {
+                    return TestMobileEngineHandle { command in
+                        try await failingGate.submit(command)
+                    }
+                }
+                return TestMobileEngineHandle { command in
+                    try await succeedingGate.submit(command)
+                }
+            })
+
+            let first = Task { try await source.prepare() }
+            let concurrent = Task { try await source.prepare() }
+            await failingGate.waitForFirstSubmit()
+            XCTAssertEqual(buildCount, 1, "concurrent prepare calls must share the failing attempt")
+            await failingGate.releaseFirstSubmit()
+
+            await XCTAssertThrowsAsyncError(try await first.value)
+            await XCTAssertThrowsAsyncError(try await concurrent.value)
+
+            let retry = Task { try await source.prepare() }
+            await succeedingGate.waitForFirstSubmit()
+            XCTAssertEqual(buildCount, 2, "a failed bootstrap must not leave a cached handle")
+            await succeedingGate.releaseFirstSubmit()
+            try await retry.value
+            XCTAssertEqual(buildCount, 2)
+        }
+
+        private func makeSource(
+            handleBuilder: @escaping EngineConversationSource.HandleBuilder
+        ) -> EngineConversationSource {
+            let config = EngineConfig(
+                apiBase: "https://api.anthropic.com",
+                apiKey: "",
+                model: "",
+                appSandboxRoot: NSTemporaryDirectory())
+            return EngineConversationSource(config: config, handleBuilder: handleBuilder)
+        }
+
+        private func XCTAssertThrowsAsyncError<T>(
+            _ expression: @autoclosure () async throws -> T,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async {
+            do {
+                _ = try await expression()
+                XCTFail("expected async operation to throw", file: file, line: line)
+            } catch {
+                // Expected.
+            }
+        }
+    }
+
+    private enum EngineBuildTestError: Error {
+        case bootstrapFailed
+    }
+
+    private final class TestMobileEngineHandle: MobileEngineHandle {
+        private let submitHandler: (ClientCommand) async throws -> Void
+
+        required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+            submitHandler = { _ in }
+            super.init(unsafeFromRawPointer: pointer)
+        }
+
+        init(submitHandler: @escaping (ClientCommand) async throws -> Void) {
+            self.submitHandler = submitHandler
+            super.init(noPointer: .init())
+        }
+
+        override func submit(command: ClientCommand) async throws {
+            try await submitHandler(command)
+        }
+    }
+
+    private actor EngineSubmitGate {
+        private let firstSubmitError: Error?
+        private var commands: [ClientCommand] = []
+        private var firstSubmitContinuation: CheckedContinuation<Void, Never>?
+
+        init(firstSubmitError: Error? = nil) {
+            self.firstSubmitError = firstSubmitError
+        }
+
+        func submit(_ command: ClientCommand) async throws {
+            commands.append(command)
+            if commands.count == 1 {
+                await withCheckedContinuation { continuation in
+                    firstSubmitContinuation = continuation
+                }
+                if let firstSubmitError {
+                    throw firstSubmitError
+                }
+            }
+        }
+
+        func waitForFirstSubmit() async {
+            await waitForSubmitCount(1)
+        }
+
+        func waitForSubmitCount(_ expectedCount: Int) async {
+            while commands.count < expectedCount {
+                await Task.yield()
+            }
+        }
+
+        func releaseFirstSubmit() {
+            firstSubmitContinuation?.resume()
+            firstSubmitContinuation = nil
         }
     }
 

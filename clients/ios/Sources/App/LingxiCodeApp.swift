@@ -2,7 +2,8 @@ import SwiftUI
 
 @main
 struct LingxiCodeApp: App {
-    @StateObject private var app = AppState()
+    @UIApplicationDelegateAdaptor(AppNotificationDelegate.self) private var appDelegate
+    @State private var app = AppState()
 
     init() {
         // M10 A2 / P2 link smoke: a reachable reference to the engine static
@@ -18,7 +19,7 @@ struct LingxiCodeApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(app)
+                .environment(app)
                 .environment(\.theme, app.palette)
                 .preferredColorScheme(app.colorScheme)
                 .tint(app.palette.accent)

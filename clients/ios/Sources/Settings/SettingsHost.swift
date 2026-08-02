@@ -1,7 +1,7 @@
 import SwiftUI
 
 // MARK: - Settings page identity (the prototype's `stack` of `{id, ...}`)
-enum SettingsPage: Equatable {
+enum SettingsPage: Hashable {
     case main, account
     case providerList(ProviderKindBox)
     case providerPicker(ProviderKindBox)
@@ -23,111 +23,89 @@ struct ProviderKindBox: Equatable, Hashable {
     func hash(into h: inout Hasher) { h.combine(String(describing: kind)) }
 }
 
-// MARK: - Settings sheet host (slide-up + nav bar + page stack)
+// MARK: - Settings sheet host
 struct SettingsHost: View {
-    @EnvironmentObject private var app: AppState
+    @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
-    @ObservedObject var store: SettingsStore
+    @Bindable var store: SettingsStore
     /// The conversation model — its `mcpServers` carry the engine's REAL MCP
     /// listing (out-of-band). When populated we mirror it into the settings store
     /// so the MCP page renders real servers; empty keeps the mock list.
     @ObservedObject var convo: ConversationModel
     /// Pull the real MCP listing from the engine (`RefreshListings(.mcp)`).
     var onRefreshMcp: () -> Void = {}
+    /// Promote the runtime's PTY surface to the app-owned full-screen route.
+    var openTerminal: () -> Void = {}
     let onClose: () -> Void
 
-    @State private var stack: [SettingsPage] = [.main]
+    /// Settings deep links and in-sheet navigation share the app-owned typed
+    /// navigation model instead of copying a View that owns a Binding.
+    @Bindable var navigation: AppNavigationModel
 
-    private var top: SettingsPage { stack.last ?? .main }
-
-    func push(_ page: SettingsPage) { withAnimation(.easeOut(duration: 0.22)) { stack.append(page) } }
-    func pop() { if stack.count > 1 { withAnimation(.easeOut(duration: 0.22)) { _ = stack.removeLast() } } }
-    func reset() { withAnimation(.easeOut(duration: 0.22)) { stack = [.main] } }
+    func push(_ page: SettingsPage) {
+        withAnimation(.easeOut(duration: 0.22)) { navigation.pushSettings(page) }
+    }
+    func pop() {
+        withAnimation(.easeOut(duration: 0.22)) { navigation.popSettings() }
+    }
+    func reset() {
+        withAnimation(.easeOut(duration: 0.22)) { navigation.resetSettings() }
+    }
     /// Replaces the top two pages (used by the picker → edit flow).
     func replaceTopTwo(with pages: [SettingsPage]) {
-        var s = Array(stack.dropLast(2)); s.append(contentsOf: pages); stack = s
+        navigation.replaceSettingsTail(removing: 2, with: pages)
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { onClose() }
-            sheet
-                .transition(.move(edge: .bottom))
+        NavigationStack(path: $navigation.settingsPath) {
+            navigationPage(for: .main)
+                .navigationDestination(for: SettingsPage.self) { page in
+                    navigationPage(for: page)
+                }
         }
+        .background(t.windowBg)
         // Pull the real MCP listing when the sheet opens; mirror it into the store
         // (so the existing MCP page renders real servers) once it arrives.
         .onAppear { onRefreshMcp() }
         .onChange(of: convo.mcpServers) { _, servers in
             if !servers.isEmpty { store.mcpServers = servers }
         }
+        .accessibilityIdentifier("settings.root")
     }
 
-    private var sheet: some View {
-        GeometryReader { geo in
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
-                VStack(spacing: 0) {
-                    grabber
-                    navBar
-                    pageContent
-                }
-                .frame(height: geo.size.height * 0.94)
-                .background(t.windowBg)
-                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
-                .shadow(color: .black.opacity(0.35), radius: 15, y: -8)
-            }
-        }
-    }
-
-    private var grabber: some View {
-        RoundedRectangle(cornerRadius: 99).fill(t.text4.opacity(0.45))
-            .frame(width: 38, height: 4.5)
-            .padding(.top, 8).padding(.bottom, 4)
-    }
-
-    // MARK: nav bar — back (chevron + prev title) / title / Done|x
-    private var navBar: some View {
-        HStack(spacing: 4) {
-            Button {
-                stack.count > 1 ? pop() : onClose()
-            } label: {
-                HStack(spacing: 2) {
-                    LXIcon(name: .chevronR, size: 17, color: t.text2, stroke: 2.2)
-                        .rotationEffect(.degrees(180))
-                    Text(stack.count > 1 ? title(of: stack[stack.count - 2]) : "关闭")
-                        .font(.system(size: 14, weight: .medium)).foregroundColor(t.text2).lineLimit(1)
-                }
-                .frame(maxWidth: 120, alignment: .leading)
-            }
-            Spacer()
-            Text(title(of: top)).font(.system(size: 16, weight: .bold)).foregroundColor(t.text).lineLimit(1)
-            Spacer()
-            if stack.count > 1 {
-                Button { reset() } label: {
-                    Text("完成").font(.system(size: 14, weight: .semibold)).foregroundColor(t.accent)
-                        .frame(height: 34).padding(.horizontal, 12)
-                }
-            } else {
-                Button(action: onClose) {
-                    LXIcon(name: .x, size: 18, color: t.text3, stroke: 1.8).frame(width: 34, height: 34)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 8).padding(.top, 6).padding(.bottom, 12)
-        .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .bottom)
-    }
-
-    private var pageContent: some View {
+    private func pageContent(for page: SettingsPage) -> some View {
         ScrollView(showsIndicators: false) {
-            SettingsPages(store: store, host: self, page: top)
+            SettingsPages(store: store, host: self, page: page)
                 .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 28)
         }
-        .id(pageKey)
+        .id(pageKey(for: page))
         .transition(.opacity)
     }
 
-    private var pageKey: String { "\(stack.count)-\(title(of: top))" }
+    private func navigationPage(for page: SettingsPage) -> some View {
+        pageContent(for: page)
+            .navigationTitle(title(of: page))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if page == .main {
+                        Button(action: onClose) {
+                            LXIcon(name: .x, size: 18, color: t.text3, stroke: 1.8)
+                                .frame(width: 34, height: 34)
+                        }
+                        .accessibilityLabel("关闭设置")
+                    } else {
+                        Button("完成") { reset() }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(t.accent)
+                    }
+                }
+            }
+    }
+
+    private func pageKey(for page: SettingsPage) -> String {
+        "\(navigation.settingsPath.count)-\(title(of: page))"
+    }
 
     // MARK: titles
     func title(of page: SettingsPage) -> String {

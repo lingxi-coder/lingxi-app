@@ -7725,8 +7725,12 @@ mod tests {
             drain_events(&handle, &listener).await;
             let service = handle.local_apps().expect("local-apps service");
 
+            /// Highest yield offset in the sweep; this one is the deterministic
+            /// anchor (see below) rather than another timing probe.
+            const LAST_SWEEP_YIELD: u32 = 15;
+
             let mut committed_iterations = 0usize;
-            for yields in 0..16u32 {
+            for yields in 0..=LAST_SWEEP_YIELD {
                 let revision = service.draft(&app_id).await.expect("draft").revision;
                 let submit_handle = Arc::clone(&handle);
                 let submit_app_id = app_id.clone();
@@ -7739,8 +7743,26 @@ mod tests {
                         })
                         .await
                 });
-                for _ in 0..yields {
-                    tokio::task::yield_now().await;
+                if yields == LAST_SWEEP_YIELD {
+                    // Determinism anchor. A fixed yield budget is only a PROXY
+                    // for "the spawned handler got far enough to commit"; under
+                    // load the runtime can starve that task for all 16 offsets,
+                    // and then the sweep reports "the probe is broken" when in
+                    // fact nothing ever ran. The final offset therefore waits
+                    // for the commit and THEN drops the caller — still exactly
+                    // the drop-after-commit case this test exists to pin, but
+                    // guaranteed to occur at least once on any machine.
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while service.draft(&app_id).await.expect("draft").revision == revision
+                        && std::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                } else {
+                    for _ in 0..yields {
+                        tokio::task::yield_now().await;
+                    }
                 }
                 submit.abort();
                 let _ = submit.await;

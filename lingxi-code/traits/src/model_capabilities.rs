@@ -104,12 +104,19 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "adaptive_thinking",
             "context_management",
         ],
+        // Verified against the 2.1.220 catalog blob @225785080, which reads
+        // `capabilities:["effort","max_effort","xhigh_effort",
+        // "adaptive_thinking","context_management","fast_mode"]`. `fast_mode`
+        // was missing here and the omission was pinned by two tests below; the
+        // env-block prompt ("available on Opus 5/4.8/4.7.", oracle @113736244)
+        // had been telling users the opposite all along.
         "claude-opus-4-7" => &[
             "effort",
             "max_effort",
             "xhigh_effort",
             "adaptive_thinking",
             "context_management",
+            "fast_mode",
         ],
         "claude-opus-4-8" => &[
             "effort",
@@ -444,10 +451,8 @@ mod tests {
 
     #[test]
     fn fast_mode_matches_the_table() {
-        assert!(!has_capability(
-            "claude-opus-4-7",
-            ModelCapability::FastMode
-        ));
+        // 2.1.220 catalog @225785080 lists `fast_mode` for opus-4-7.
+        assert!(has_capability("claude-opus-4-7", ModelCapability::FastMode));
         assert!(has_capability("claude-opus-4-8", ModelCapability::FastMode));
         assert!(has_capability("claude-opus-5", ModelCapability::FastMode));
         // fable-5's list deliberately omits fast_mode.
@@ -486,6 +491,7 @@ mod tests {
     #[test]
     fn initialize_projection_and_request_gate_share_fast_capability() {
         for id in [
+            "claude-opus-4-7",
             "claude-opus-4-8",
             "claude-opus-5",
             "us.anthropic.claude-opus-5-v1:0",
@@ -496,12 +502,7 @@ mod tests {
             );
             assert!(has_capability(id, ModelCapability::FastMode), "{id}");
         }
-        for id in [
-            "claude-opus-4-7",
-            "claude-sonnet-5",
-            "claude-fable-5",
-            "gpt-5.5",
-        ] {
+        for id in ["claude-sonnet-5", "claude-fable-5", "gpt-5.5"] {
             assert!(
                 !initialization_capabilities_for(id).supports_fast_mode,
                 "{id}"

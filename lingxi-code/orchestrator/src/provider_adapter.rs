@@ -1339,10 +1339,15 @@ mod tests {
 
     #[test]
     fn model_supports_fast_mode_gates_on_opus_fast_tier() {
-        // Claude Code 2.1.219 removed opus-4-7 from fast mode. The 2.1.220
-        // registry keeps only opus-4-8 / opus-5 on the fast tier.
+        // The 2.1.220 catalog blob @225785080 lists `fast_mode` for opus-4-7:
+        // `capabilities:["effort","max_effort","xhigh_effort",
+        // "adaptive_thinking","context_management","fast_mode"]`. The previous
+        // comment here asserted the opposite ("2.1.219 removed opus-4-7 from
+        // fast mode") and the assertion below encoded it — a specific-sounding
+        // claim about the oracle that the oracle does not support. The
+        // env-block prompt agrees: "available on Opus 5/4.8/4.7." (@113736244).
         assert!(model_supports_fast_mode("claude-opus-4-8"));
-        assert!(!model_supports_fast_mode("claude-opus-4-7"));
+        assert!(model_supports_fast_mode("claude-opus-4-7"));
         assert!(model_supports_fast_mode("claude-opus-5"));
         assert!(model_supports_fast_mode("CLAUDE-OPUS-4-8"));
         assert!(model_supports_fast_mode("us.anthropic.claude-opus-5-v1:0"));

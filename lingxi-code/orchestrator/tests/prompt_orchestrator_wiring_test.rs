@@ -44,13 +44,23 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     let s = systems[0].as_deref().expect("system prompt threaded");
     // Assembler always opens with HEADER and carries the `# Environment` block.
     // There is NO `Notes:` FOOTER on the MAIN prompt (R-P1b).
-    // GAP-2: `# Context management` is now the last section (after env block).
+    // GAP-2: `# Context management` follows the env block; the
+    // act-don't-re-derive section is appended after it.
     assert!(s.starts_with("You are LingXi"));
     assert!(s.contains("# Environment"));
     assert!(!s.contains("<env>"));
     assert!(!s.contains("Notes:"));
     // The env block is still present; context management follows it.
-    assert!(s.contains("available on Opus 4.8/4.7."));
+    // Opus 5 joined the fast-mode list in the oracle; verified in the 2.1.220
+    // binary @113736244 as `toggled with /fast and is available on Opus
+    // 5/4.8/4.7.` This assertion still named the older two-model form, so it
+    // was pinning text the product had already moved past.
+    assert!(s.contains("available on Opus 5/4.8/4.7."));
     assert!(s.contains("# Context management"));
-    assert!(s.ends_with("you don't need to wrap up early or hand off mid-task."));
+    // The act-don't-re-derive section (`ACT_DONT_REDERIVE_SECTION`) now follows
+    // context management, so THAT is the tail. Verified in the 2.1.220 binary
+    // @237499709, which ends the clause with NO trailing period — the next
+    // constant starts `# Delivering work`, a section this model does not get
+    // (it gates on `opus_5_prompt_bundle`).
+    assert!(s.ends_with("give a recommendation, not an exhaustive survey"));
 }

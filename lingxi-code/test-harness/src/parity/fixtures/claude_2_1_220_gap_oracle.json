@@ -8,8 +8,9 @@
     "notes": "Only hashes, lengths, headings, public help surfaces, and observable state are retained. Full private prompt text is not committed."
   },
   "fast_mode": {
-    "claude-opus-4-7": "off",
-    "capture": "public 2.1.219 changelog; Opus 4.7 was removed from fast mode"
+    "claude-opus-4-7": "on",
+    "capture": "2.1.220 catalog blob @225785080 — the claude-opus-4-7 entry reads capabilities:[\"effort\",\"max_effort\",\"xhigh_effort\",\"adaptive_thinking\",\"context_management\",\"fast_mode\"]. Corroborated by the env-block prompt at @113736244: \"toggled with /fast and is available on Opus 5/4.8/4.7.\"",
+    "supersedes": "An earlier entry recorded \"off\", sourced from the public 2.1.219 CHANGELOG rather than from this binary. It described a different version and was wrong for the sha256 pinned above; the port had encoded it in three tests."
   },
   "system_prompt_manifests": [
     {

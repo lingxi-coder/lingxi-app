@@ -1901,6 +1901,11 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     // `Some(orchestrator::prompt::real_provider())` to load real LINGXI.md.
 ///     memory_provider: None,
 ///     permission_mode: permission::PermissionMode::Default,
+///     // Kept beside the resolved mode: `build()` needs the CLI's own value
+///     // and whether it was given explicitly to apply the oracle's precedence
+///     // (CLI/dangerous-skip > agent frontmatter > settings defaultMode).
+///     permission_mode_cli: None,
+///     permission_mode_cli_explicit: false,
 ///     allow_dangerously_skip_permissions: false,
 ///     connect_prompt: None,
 ///     system_prompt_override: None,

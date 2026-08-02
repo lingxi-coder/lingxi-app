@@ -1469,11 +1469,39 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     assert_eq!(adopted.4.loaded_tool_names, vec!["DeferredTool"]);
     assert_eq!(adopted.4.transcript_only_message_ids.len(), 1);
     assert_eq!(adopted.4.compact_summary_message_ids.len(), 1);
-    assert!(matches!(
-        sink.events().await.as_slice(),
-        [ClientEvent::SessionResumed { session_id: emitted_id, messages }]
-            if emitted_id == &session_id && messages.len() == 3
-    ));
+    // `lower_transcript` FOLDS the `is_compact_summary` user row into the
+    // PRECEDING message's `CompactBoundary` block (see
+    // `client-adapter/src/lowering.rs`, and the DTO's own doc: "Full compact
+    // summary paired from the transcript-only summary row"). So the 3 adopted
+    // history messages lower to 2 client messages — this assertion still
+    // expected the pre-fold count.
+    let events = sink.events().await;
+    let [ClientEvent::SessionResumed {
+        session_id: emitted_id,
+        messages,
+    }] = events.as_slice()
+    else {
+        panic!("expected exactly one SessionResumed, got {events:?}");
+    };
+    assert_eq!(emitted_id, &session_id);
+    assert_eq!(
+        messages.len(),
+        2,
+        "the compact-summary row folds into the boundary block"
+    );
+    // Assert the fold HAPPENED rather than the row simply being dropped —
+    // a count alone cannot tell those two apart.
+    assert!(
+        messages
+            .iter()
+            .flat_map(|m| &m.blocks)
+            .any(|b| matches!(
+                b,
+                client_protocol::message::MessageBlockDto::CompactBoundary { summary, .. }
+                    if !summary.is_empty()
+            )),
+        "the folded summary must survive into a CompactBoundary block"
+    );
 }
 
 // ── End-to-end: routing over the real WebSocket transport ─────────────────────

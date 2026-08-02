@@ -633,7 +633,8 @@ fn app_runtime_commands_round_trip() {
         let json = serde_json::to_value(&cmd).expect("serialize runtime command");
         assert_eq!(json["type"], tag, "{cmd:?} tag mismatch");
         assert_eq!(json["app_id"], "habits-1a2b");
-        let back: ClientCommand = serde_json::from_value(json).expect("deserialize runtime command");
+        let back: ClientCommand =
+            serde_json::from_value(json).expect("deserialize runtime command");
         assert_eq!(back, cmd);
     }
 }
@@ -680,8 +681,7 @@ fn list_app_checkpoints_round_trips() {
     let json = serde_json::to_value(&cmd).expect("serialize ListAppCheckpoints");
     assert_eq!(json["type"], "list_app_checkpoints");
     assert_eq!(json["app_id"], "habits-1a2b");
-    let back: ClientCommand =
-        serde_json::from_value(json).expect("deserialize ListAppCheckpoints");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize ListAppCheckpoints");
     assert_eq!(back, cmd);
 }
 

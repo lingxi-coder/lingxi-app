@@ -70,19 +70,31 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
 
     let record = h
         .service
-        .create_app("Habit Tracker", AppTemplateKind::CrudTracker, Some("conv-42".into()))
+        .create_app(
+            "Habit Tracker",
+            AppTemplateKind::CrudTracker,
+            Some("conv-42".into()),
+        )
         .await
         .expect("create app");
     let app_id = record.id.clone();
 
     // open_designer -> awaiting_spec_confirmation with a pending gate.
-    let designer = h.service.open_designer(&app_id).await.expect("open designer");
+    let designer = h
+        .service
+        .open_designer(&app_id)
+        .await
+        .expect("open designer");
     assert_eq!(designer.revision, 0);
 
     // Conflicting update rejected: wrong expected_revision, value kept.
     let err = h
         .service
-        .update_draft(&app_id, 7, &set("title", DesignValue::ShortText("X".into())))
+        .update_draft(
+            &app_id,
+            7,
+            &set("title", DesignValue::ShortText("X".into())),
+        )
         .await
         .expect_err("stale revision must conflict");
     assert_eq!(err.code(), AppErrorCode::RevisionConflict);
@@ -90,7 +102,11 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
     // Valid updates.
     assert_eq!(
         h.service
-            .update_draft(&app_id, 0, &set("title", DesignValue::ShortText("Habits".into())))
+            .update_draft(
+                &app_id,
+                0,
+                &set("title", DesignValue::ShortText("Habits".into()))
+            )
             .await
             .expect("update 1"),
         1
@@ -150,8 +166,15 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
         .expect("confirm design");
 
     // generating -> validating -> awaiting_preview_confirmation.
-    h.service.generation_complete(&app_id).await.expect("generation complete");
-    let preview = h.service.validation_passed(&app_id).await.expect("validation passed");
+    h.service
+        .generation_complete(&app_id)
+        .await
+        .expect("generation complete");
+    let preview = h
+        .service
+        .validation_passed(&app_id)
+        .await
+        .expect("validation passed");
     assert_eq!(preview.revision, 3);
     assert_ne!(preview.interaction_id, designer.interaction_id);
 
@@ -161,7 +184,11 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
         .await
         .expect("confirm preview");
     assert_eq!(
-        h.service.record(&app_id).await.expect("record").workflow_state,
+        h.service
+            .record(&app_id)
+            .await
+            .expect("record")
+            .workflow_state,
         AppWorkflowState::Ready
     );
 
@@ -176,7 +203,11 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
     )));
     assert!(events.iter().any(|e| matches!(
         e,
-        AppEvent::DesignConflict { expected_revision: 7, actual_revision: 0, .. }
+        AppEvent::DesignConflict {
+            expected_revision: 7,
+            actual_revision: 0,
+            ..
+        }
     )));
     assert!(events.iter().any(|e| matches!(
         e,
@@ -236,7 +267,11 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
     let runtime = h2.service.runtime_record(&app_id).await.expect("runtime");
     assert_eq!(runtime.state, AppRuntimeState::Stopped);
 
-    let queued = h2.service.interactions(&app_id).await.expect("interactions");
+    let queued = h2
+        .service
+        .interactions(&app_id)
+        .await
+        .expect("interactions");
     assert_eq!(
         queued.undelivered.iter().map(|c| c.seq).collect::<Vec<_>>(),
         vec![1, 2],
@@ -245,7 +280,10 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
 
     // Redelivery: exactly once, in seq order.
     assert_eq!(
-        h2.service.redeliver_all_undelivered().await.expect("redeliver"),
+        h2.service
+            .redeliver_all_undelivered()
+            .await
+            .expect("redeliver"),
         2
     );
     let accepted = h2.sink.accepted();
@@ -256,7 +294,10 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
     assert_eq!(accepted[0].1.payload, serde_json::json!({ "revision": 3 }));
 
     // A second sweep redelivers nothing (store-side dedup)…
-    assert_eq!(h2.service.redeliver_all_undelivered().await.expect("sweep"), 0);
+    assert_eq!(
+        h2.service.redeliver_all_undelivered().await.expect("sweep"),
+        0
+    );
     assert_eq!(h2.sink.calls().len(), 2);
 
     // …and even a raw seq replay is a no-op at the consumer (sink dedup).
@@ -265,7 +306,11 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
     assert_eq!(h2.sink.calls().len(), 3, "replay call happens");
     assert_eq!(h2.sink.accepted().len(), 2, "replayed seq is a no-op");
 
-    let drained = h2.service.interactions(&app_id).await.expect("interactions");
+    let drained = h2
+        .service
+        .interactions(&app_id)
+        .await
+        .expect("interactions");
     assert!(drained.undelivered.is_empty());
     assert_eq!(drained.last_delivered_seq, 2);
 }

@@ -274,10 +274,7 @@ impl AppService {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
                         .map_err(|error| {
-                            AppError::Io(format!(
-                                "restrict data root {}: {error}",
-                                root.display()
-                            ))
+                            AppError::Io(format!("restrict data root {}: {error}", root.display()))
                         })?;
                 }
                 storage::load_all(&root)
@@ -321,7 +318,12 @@ impl AppService {
         let events: Vec<AppEvent> = {
             let apps = self.state.lock().await;
             apps.iter()
-                .filter_map(|app| app.interactions.pending.as_ref().map(Self::gate_announcement))
+                .filter_map(|app| {
+                    app.interactions
+                        .pending
+                        .as_ref()
+                        .map(Self::gate_announcement)
+                })
                 .collect()
         };
         Self::spawn_emission(Arc::clone(&self.observer), order, events);
@@ -353,7 +355,9 @@ impl AppService {
         self.clock
             .now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            })
     }
 
     fn position(apps: &[AppState], app_id: &str) -> Result<usize, AppError> {
@@ -509,8 +513,7 @@ impl AppService {
     /// The `known_ids` set for [`storage::save_index_preserving`]: every id
     /// this instance currently holds plus every id it ever deleted.
     fn known_ids(&self, apps: &[AppState]) -> BTreeSet<String> {
-        let mut known: BTreeSet<String> =
-            apps.iter().map(|app| app.record.id.clone()).collect();
+        let mut known: BTreeSet<String> = apps.iter().map(|app| app.record.id.clone()).collect();
         if let Ok(retired) = self.retired_ids.lock() {
             known.extend(retired.iter().cloned());
         }
@@ -714,7 +717,9 @@ impl AppService {
     ) -> Result<AppRecord, AppError> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
-            return Err(AppError::InvalidRequest("app name must not be empty".into()));
+            return Err(AppError::InvalidRequest(
+                "app name must not be empty".into(),
+            ));
         }
         ensure_within("app name", trimmed.len(), MAX_NAME_BYTES)?;
         if let Some(conversation_id) = &conversation_id {
@@ -736,8 +741,7 @@ impl AppService {
             )));
         }
         let existing_ids: Vec<String> = apps.iter().map(|app| app.record.id.clone()).collect();
-        let existing_records: Vec<AppRecord> =
-            apps.iter().map(|app| app.record.clone()).collect();
+        let existing_records: Vec<AppRecord> = apps.iter().map(|app| app.record.clone()).collect();
         let known = self.known_ids(&apps);
         let root = self.root.clone();
         let observer = Arc::clone(&self.observer);
@@ -843,9 +847,12 @@ impl AppService {
             }
             apps.remove(idx);
             drop(apps);
-            Self::spawn_emission(observer, order, vec![AppEvent::AppsChanged { apps: records }]);
-            let removal =
-                Self::run_blocking(move || storage::delete_app_dir(&root, &app_id)).await;
+            Self::spawn_emission(
+                observer,
+                order,
+                vec![AppEvent::AppsChanged { apps: records }],
+            );
+            let removal = Self::run_blocking(move || storage::delete_app_dir(&root, &app_id)).await;
             if let Err(error) = removal {
                 tracing::warn!(
                     error = %error,
@@ -979,10 +986,7 @@ impl AppService {
                     if pending.suggestion_id == suggestion_id {
                         if let Err(error) = validate_patch(&pending.patch) {
                             app.draft.pending_suggestion = None;
-                            return (
-                                Ok(SuggestionOutcome::RejectedConsumed(error)),
-                                Vec::new(),
-                            );
+                            return (Ok(SuggestionOutcome::RejectedConsumed(error)), Vec::new());
                         }
                     }
                 }
@@ -1078,10 +1082,7 @@ impl AppService {
 
     /// `validating -> awaiting_preview_confirmation`; opens the preview gate
     /// and announces it via `PreviewReady` (`url` is `None` until phase 4).
-    pub async fn validation_passed(
-        &self,
-        app_id: &str,
-    ) -> Result<AppInteractionRequest, AppError> {
+    pub async fn validation_passed(&self, app_id: &str) -> Result<AppInteractionRequest, AppError> {
         let interaction_id = ids::generate_interaction_id();
         self.with_app(app_id, move |app, now| {
             match app.validation_passed(interaction_id, now) {
@@ -1234,7 +1235,11 @@ impl AppService {
             MAX_TEXT_VALUE_BYTES,
         )?;
         if let Some(detail) = &progress.detail {
-            ensure_within("generation progress detail", detail.len(), MAX_TEXT_VALUE_BYTES)?;
+            ensure_within(
+                "generation progress detail",
+                detail.len(),
+                MAX_TEXT_VALUE_BYTES,
+            )?;
         }
         if let Some(percent) = progress.percent {
             if percent > 100 {
@@ -1309,10 +1314,9 @@ impl AppService {
         let idx = Self::position(&apps, app_id)?;
         let root = self.root.clone();
         let working = apps[idx].clone();
-        let (merged, next) = Self::run_blocking(move || {
-            Self::merge_resolve_persist(&root, working, delivered_seq)
-        })
-        .await?;
+        let (merged, next) =
+            Self::run_blocking(move || Self::merge_resolve_persist(&root, working, delivered_seq))
+                .await?;
         apps[idx] = merged;
         Ok(next)
     }
@@ -1511,12 +1515,19 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("  Habit Tracker  ", AppTemplateKind::CrudTracker, Some("conv-1".into()))
+            .create_app(
+                "  Habit Tracker  ",
+                AppTemplateKind::CrudTracker,
+                Some("conv-1".into()),
+            )
             .await
             .unwrap();
         assert_eq!(record.name, "Habit Tracker", "name is trimmed");
         assert_eq!(record.workflow_state, AppWorkflowState::CollectingSpec);
-        assert_eq!(record.workspace_rel, format!("apps/{}/workspace", record.id));
+        assert_eq!(
+            record.workspace_rel,
+            format!("apps/{}/workspace", record.id)
+        );
         assert!(ids::is_valid_app_id(&record.id));
         assert_eq!(h.service.list_apps().await, vec![record.clone()]);
         let events = h.take_events().await;
@@ -1572,7 +1583,11 @@ mod tests {
             AppErrorCode::NotFound
         );
         assert_eq!(
-            h.service.list_checkpoints(missing).await.unwrap_err().code(),
+            h.service
+                .list_checkpoints(missing)
+                .await
+                .unwrap_err()
+                .code(),
             AppErrorCode::NotFound
         );
         assert_eq!(
@@ -1723,7 +1738,13 @@ mod tests {
             .await
             .unwrap();
         h.service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, Some(3001), None, None)
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3001),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let err = h.service.delete_app(&record.id).await.unwrap_err();
@@ -1846,7 +1867,13 @@ mod tests {
         let _ = h.take_events().await;
         let runtime = h
             .service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, Some(3010), Some(9), None)
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3010),
+                Some(9),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(runtime.state, AppRuntimeState::Starting);
@@ -1878,7 +1905,11 @@ mod tests {
             reloaded.last_error.as_deref(),
             Some("reconciled at load: no live runtime manager")
         );
-        assert_eq!(reloaded.port, Some(3010), "the port pin survives reconciliation");
+        assert_eq!(
+            reloaded.port,
+            Some(3010),
+            "the port pin survives reconciliation"
+        );
     }
 
     #[tokio::test]
@@ -1907,9 +1938,15 @@ mod tests {
         let h2 = harness(dir.path()).await;
         let queued = h2.service.interactions(&record.id).await.unwrap();
         assert_eq!(queued.undelivered.len(), 1, "undelivered survives restart");
-        assert_eq!(h2.service.redeliver_undelivered(&record.id).await.unwrap(), 1);
+        assert_eq!(
+            h2.service.redeliver_undelivered(&record.id).await.unwrap(),
+            1
+        );
         assert_eq!(h2.sink.accepted().len(), 1);
-        assert_eq!(h2.service.redeliver_undelivered(&record.id).await.unwrap(), 0);
+        assert_eq!(
+            h2.service.redeliver_undelivered(&record.id).await.unwrap(),
+            0
+        );
         assert_eq!(h2.sink.calls().len(), 1, "second sweep delivers nothing");
         let drained = h2.service.interactions(&record.id).await.unwrap();
         assert!(drained.undelivered.is_empty());
@@ -1998,11 +2035,18 @@ mod tests {
                 .len(),
             2
         );
-        let err = h.service.redeliver_undelivered(&record.id).await.unwrap_err();
+        let err = h
+            .service
+            .redeliver_undelivered(&record.id)
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::Io);
         // Working sink drains both, in order, exactly once.
         h.sink.set_fail(false);
-        assert_eq!(h.service.redeliver_undelivered(&record.id).await.unwrap(), 2);
+        assert_eq!(
+            h.service.redeliver_undelivered(&record.id).await.unwrap(),
+            2
+        );
         let seqs: Vec<u64> = h.sink.accepted().iter().map(|(_, c)| c.seq).collect();
         assert_eq!(seqs, vec![1, 2]);
         assert_eq!(h.service.redeliver_all_undelivered().await.unwrap(), 0);
@@ -2032,7 +2076,12 @@ mod tests {
             .create_app("C", AppTemplateKind::ContentShowcase, None)
             .await
             .unwrap();
-        assert!(h.service.list_checkpoints(&record.id).await.unwrap().is_empty());
+        assert!(h
+            .service
+            .list_checkpoints(&record.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2111,7 +2160,12 @@ mod tests {
         );
         // A's continuation stays queued and delivers once A recovers.
         assert_eq!(
-            h.service.interactions(&a.id).await.unwrap().undelivered.len(),
+            h.service
+                .interactions(&a.id)
+                .await
+                .unwrap()
+                .undelivered
+                .len(),
             1
         );
         h.sink.set_fail_for(&a.id, false);
@@ -2179,7 +2233,11 @@ mod tests {
         let h = harness(dir.path()).await;
         let err = h
             .service
-            .create_app(&"x".repeat(MAX_NAME_BYTES + 1), AppTemplateKind::Dashboard, None)
+            .create_app(
+                &"x".repeat(MAX_NAME_BYTES + 1),
+                AppTemplateKind::Dashboard,
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
@@ -2193,7 +2251,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        assert!(h.service.list_apps().await.is_empty(), "nothing was created");
+        assert!(
+            h.service.list_apps().await.is_empty(),
+            "nothing was created"
+        );
         // Exactly at the cap is fine.
         h.service
             .create_app(
@@ -2247,7 +2308,9 @@ mod tests {
         let oversized: Vec<AppDesignPatch> = vec![
             // Too many ops.
             AppDesignPatch {
-                ops: (0..=MAX_PATCH_OPS).map(|i| set_op(&format!("f{i}"), "v")).collect(),
+                ops: (0..=MAX_PATCH_OPS)
+                    .map(|i| set_op(&format!("f{i}"), "v"))
+                    .collect(),
                 note: None,
             },
             // Oversized field id (set + remove).
@@ -2315,7 +2378,11 @@ mod tests {
             .await
             .unwrap();
         // Fill to the cap across several max-size patches.
-        assert_eq!(MAX_DRAFT_FIELDS % MAX_PATCH_OPS, 0, "test assumes even split");
+        assert_eq!(
+            MAX_DRAFT_FIELDS % MAX_PATCH_OPS,
+            0,
+            "test assumes even split"
+        );
         let mut revision = 0;
         for chunk in 0..(MAX_DRAFT_FIELDS / MAX_PATCH_OPS) {
             let ops = (0..MAX_PATCH_OPS)
@@ -2437,7 +2504,11 @@ mod tests {
             note: None,
         };
         // The first in-caps patch lands (~7.7 MiB serialized draft)…
-        let revision = h.service.update_draft(&record.id, 0, &chunk(0)).await.unwrap();
+        let revision = h
+            .service
+            .update_draft(&record.id, 0, &chunk(0))
+            .await
+            .unwrap();
         // …the second would push the persisted document past 8 MiB.
         let err = h
             .service
@@ -2482,7 +2553,10 @@ mod tests {
         let index_path = dir.path().join("apps/index.json");
         let index_before = squat_document(&index_path);
         let per_app_docs = [
-            dir.path().join("apps").join(&record.id).join("interactions.json"),
+            dir.path()
+                .join("apps")
+                .join(&record.id)
+                .join("interactions.json"),
             dir.path()
                 .join("apps")
                 .join(&record.id)
@@ -2512,12 +2586,21 @@ mod tests {
             AppWorkflowState::AwaitingSpecConfirmation
         );
         let interactions = h.service.interactions(&record.id).await.unwrap();
-        assert!(interactions.undelivered.is_empty(), "no phantom continuation");
+        assert!(
+            interactions.undelivered.is_empty(),
+            "no phantom continuation"
+        );
         assert_eq!(
-            interactions.pending.as_ref().map(|p| p.interaction_id.as_str()),
+            interactions
+                .pending
+                .as_ref()
+                .map(|p| p.interaction_id.as_str()),
             Some(gate.interaction_id.as_str())
         );
-        assert!(h.take_events().await.is_empty(), "a failed mutation emits nothing");
+        assert!(
+            h.take_events().await.is_empty(),
+            "a failed mutation emits nothing"
+        );
         // DISK rolled back too: the compensating rollback restored every
         // per-app document byte-for-byte.
         for (path, before) in per_app_docs.iter().zip(&per_app_before) {
@@ -2614,12 +2697,21 @@ mod tests {
             AppWorkflowState::AwaitingSpecConfirmation
         );
         let interactions = h.service.interactions(&record.id).await.unwrap();
-        assert!(interactions.undelivered.is_empty(), "no phantom continuation");
+        assert!(
+            interactions.undelivered.is_empty(),
+            "no phantom continuation"
+        );
         assert_eq!(
-            interactions.pending.as_ref().map(|p| p.interaction_id.as_str()),
+            interactions
+                .pending
+                .as_ref()
+                .map(|p| p.interaction_id.as_str()),
             Some(gate.interaction_id.as_str())
         );
-        assert!(h.take_events().await.is_empty(), "a failed mutation emits nothing");
+        assert!(
+            h.take_events().await.is_empty(),
+            "a failed mutation emits nothing"
+        );
 
         unsquat_document(&interactions_path, &interactions_before);
 
@@ -2639,7 +2731,12 @@ mod tests {
             "the gate is still armed after reload"
         );
         assert!(
-            h2.service.draft(&record.id).await.unwrap().confirmed_revision.is_none(),
+            h2.service
+                .draft(&record.id)
+                .await
+                .unwrap()
+                .confirmed_revision
+                .is_none(),
             "the failed confirm left no committed residue"
         );
         let announced = h2.take_events().await;
@@ -2655,7 +2752,11 @@ mod tests {
             .confirm_design(&record.id, &gate.interaction_id, 0)
             .await
             .unwrap();
-        assert_eq!(h2.sink.accepted().len(), 1, "exactly one delivery after re-confirm");
+        assert_eq!(
+            h2.sink.accepted().len(),
+            1,
+            "exactly one delivery after re-confirm"
+        );
     }
 
     /// Finding 3(b): redelivery merges the on-disk queue (union by seq) with
@@ -2798,7 +2899,10 @@ mod tests {
         let seqs: Vec<u64> = recording.accepted().iter().map(|(_, c)| c.seq).collect();
         assert_eq!(seqs, vec![1, 2], "both seqs delivered, in order");
         let drained = service.interactions(&record.id).await.unwrap();
-        assert!(drained.undelivered.is_empty(), "nothing clobbered, nothing left");
+        assert!(
+            drained.undelivered.is_empty(),
+            "nothing clobbered, nothing left"
+        );
         assert_eq!(drained.last_delivered_seq, 2);
         assert_eq!(
             drained.next_seq, 3,
@@ -2828,7 +2932,10 @@ mod tests {
         // cleared + design_confirmed minted) while MEMORY still holds the
         // armed gate.
         let mut on_disk = storage::load_interactions(dir.path(), &record.id).unwrap();
-        assert!(on_disk.pending.is_some(), "precondition: gate armed on disk too");
+        assert!(
+            on_disk.pending.is_some(),
+            "precondition: gate armed on disk too"
+        );
         on_disk.pending = None;
         on_disk.undelivered.push(AppContinuation {
             seq: 1,
@@ -2846,7 +2953,11 @@ mod tests {
             "the proven confirm is delivered exactly once"
         );
         assert_eq!(
-            h.sink.accepted().iter().map(|(_, c)| c.kind).collect::<Vec<_>>(),
+            h.sink
+                .accepted()
+                .iter()
+                .map(|(_, c)| c.kind)
+                .collect::<Vec<_>>(),
             vec![AppContinuationKind::DesignConfirmed]
         );
         // The contradiction resolved FORWARD: gate gone, state follows the
@@ -2908,11 +3019,21 @@ mod tests {
         let huge = "e".repeat(MAX_TEXT_VALUE_BYTES + 500);
         let runtime = h
             .service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, Some(3001), None, Some(huge))
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3001),
+                None,
+                Some(huge),
+            )
             .await
             .unwrap();
         let stored = runtime.last_error.clone().expect("error kept");
-        assert!(stored.len() <= MAX_TEXT_VALUE_BYTES, "{} bytes", stored.len());
+        assert!(
+            stored.len() <= MAX_TEXT_VALUE_BYTES,
+            "{} bytes",
+            stored.len()
+        );
         assert!(stored.ends_with("… [truncated]"), "{stored:?}");
         assert!(stored.starts_with("eee"), "the report's head is kept");
         // The event carries exactly what was persisted.
@@ -2929,7 +3050,13 @@ mod tests {
         let multi = "é".repeat(MAX_TEXT_VALUE_BYTES); // 2 bytes per char
         let runtime = h
             .service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, None, None, Some(multi))
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                None,
+                None,
+                Some(multi),
+            )
             .await
             .unwrap();
         let stored = runtime.last_error.expect("error kept");
@@ -2940,7 +3067,13 @@ mod tests {
         let exact = "x".repeat(MAX_TEXT_VALUE_BYTES);
         let runtime = h
             .service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, None, None, Some(exact.clone()))
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                None,
+                None,
+                Some(exact.clone()),
+            )
             .await
             .unwrap();
         assert_eq!(runtime.last_error.as_deref(), Some(exact.as_str()));
@@ -3038,7 +3171,10 @@ mod tests {
             detail: Some("d".repeat(MAX_TEXT_VALUE_BYTES)),
         };
         // At the caps everything is accepted.
-        h.service.report_generation_progress(base.clone()).await.unwrap();
+        h.service
+            .report_generation_progress(base.clone())
+            .await
+            .unwrap();
         assert_eq!(h.take_events().await.len(), 1);
 
         let oversized_stage = AppGenerationProgress {
@@ -3061,7 +3197,10 @@ mod tests {
             let err = h.service.report_generation_progress(bad).await.unwrap_err();
             assert_eq!(err.code(), AppErrorCode::InvalidRequest, "{label}");
         }
-        assert!(h.take_events().await.is_empty(), "rejected reports emit nothing");
+        assert!(
+            h.take_events().await.is_empty(),
+            "rejected reports emit nothing"
+        );
     }
 
     /// Finding 5: a load re-announces the pending gate of EVERY app through
@@ -3181,7 +3320,13 @@ mod tests {
             .await
             .unwrap();
         h.service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, Some(3005), Some(1), None)
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3005),
+                Some(1),
+                None,
+            )
             .await
             .unwrap();
         // While the process lives, the busy runtime still blocks deletion.
@@ -3225,11 +3370,20 @@ mod tests {
         // The runtime-only mutation no longer touches that file: it must
         // SUCCEED and persist runtime.json.
         h.service
-            .update_runtime_record(&record.id, AppRuntimeState::Starting, Some(3020), Some(7), None)
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3020),
+                Some(7),
+                None,
+            )
             .await
             .unwrap();
         let runtime_body = std::fs::read_to_string(
-            dir.path().join("apps").join(&record.id).join("runtime.json"),
+            dir.path()
+                .join("apps")
+                .join(&record.id)
+                .join("runtime.json"),
         )
         .unwrap();
         assert!(runtime_body.contains("\"starting\""), "{runtime_body}");
@@ -3254,7 +3408,11 @@ mod tests {
         let h2 = harness(dir.path()).await;
         let reloaded = h2.service.runtime_record(&record.id).await.unwrap();
         assert_eq!(reloaded.port, Some(3020));
-        assert_eq!(reloaded.state, AppRuntimeState::Failed, "reconciled at load");
+        assert_eq!(
+            reloaded.state,
+            AppRuntimeState::Failed,
+            "reconciled at load"
+        );
     }
 
     /// Finding 2 (prefix property): the compensating rollback restores
@@ -3303,7 +3461,12 @@ mod tests {
             h2.service.record(&record.id).await.unwrap().workflow_state,
             AppWorkflowState::Generating
         );
-        assert!(h2.service.pending_interaction(&record.id).await.unwrap().is_none());
+        assert!(h2
+            .service
+            .pending_interaction(&record.id)
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(h2.service.redeliver_all_undelivered().await.unwrap(), 1);
         let accepted = h2.sink.accepted();
         assert_eq!(accepted.len(), 1);
@@ -3434,7 +3597,11 @@ mod tests {
         service.cancel_design(&record.id).await.unwrap();
 
         let seqs: Vec<u64> = sink.inner.accepted().iter().map(|(_, c)| c.seq).collect();
-        assert_eq!(seqs, vec![1, 2], "the mid-delivery disk-only seq must survive and deliver");
+        assert_eq!(
+            seqs,
+            vec![1, 2],
+            "the mid-delivery disk-only seq must survive and deliver"
+        );
         let drained = service.interactions(&record.id).await.unwrap();
         assert!(drained.undelivered.is_empty());
         assert_eq!(drained.last_delivered_seq, 2);
@@ -3481,12 +3648,19 @@ mod tests {
 
         // The merge resolves the contradiction: evidence wins, exactly like
         // the load-time repair table (design_confirmed → generating).
-        assert_eq!(h.service.redeliver_undelivered(&record.id).await.unwrap(), 1);
+        assert_eq!(
+            h.service.redeliver_undelivered(&record.id).await.unwrap(),
+            1
+        );
         let accepted = h.sink.accepted();
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].1.kind, AppContinuationKind::DesignConfirmed);
         assert!(
-            h.service.pending_interaction(&record.id).await.unwrap().is_none(),
+            h.service
+                .pending_interaction(&record.id)
+                .await
+                .unwrap()
+                .is_none(),
             "the provably-consumed gate must not stay armed"
         );
         assert_eq!(
@@ -3501,7 +3675,11 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::WorkflowStateInvalid);
-        assert_eq!(h.sink.accepted().len(), 1, "exactly one confirmation ever delivered");
+        assert_eq!(
+            h.sink.accepted().len(),
+            1,
+            "exactly one confirmation ever delivered"
+        );
         // The resolution was persisted coherently: a fresh load agrees.
         drop(h);
         let h2 = harness(dir.path()).await;
@@ -3509,7 +3687,12 @@ mod tests {
             h2.service.record(&record.id).await.unwrap().workflow_state,
             AppWorkflowState::Generating
         );
-        assert!(h2.service.pending_interaction(&record.id).await.unwrap().is_none());
+        assert!(h2
+            .service
+            .pending_interaction(&record.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// Finding 4: the undelivered queue is byte-capped (4 MiB serialized) —
@@ -3540,7 +3723,10 @@ mod tests {
         // 4 MiB budget (and ~68 would have crossed the 8 MiB doc bound).
         let prompt = "\u{1}".repeat(MAX_PROMPT_BYTES);
         for _ in 0..45 {
-            h.service.request_revision(&record.id, &prompt).await.unwrap();
+            h.service
+                .request_revision(&record.id, &prompt)
+                .await
+                .unwrap();
             h.service.revision_ready(&record.id).await.unwrap();
             h.service.validation_passed(&record.id).await.unwrap();
         }
@@ -3557,7 +3743,10 @@ mod tests {
         );
         // The persisted document stays comfortably inside the load bound.
         let doc_len = std::fs::metadata(
-            dir.path().join("apps").join(&record.id).join("interactions.json"),
+            dir.path()
+                .join("apps")
+                .join(&record.id)
+                .join("interactions.json"),
         )
         .unwrap()
         .len();
@@ -3607,7 +3796,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, AppError::RevisionConflict { expected: 0, actual: 3 }),
+            matches!(
+                err,
+                AppError::RevisionConflict {
+                    expected: 0,
+                    actual: 3
+                }
+            ),
             "typed conflict must carry based_on vs current: {err}"
         );
         let events = h.take_events().await;
@@ -3627,8 +3822,14 @@ mod tests {
             Some(&DesignValue::ShortText("v2".into())),
             "the user's newer edit survives"
         );
-        assert!(!draft.fields.contains_key("accent"), "the stale patch never landed");
-        assert!(draft.pending_suggestion.is_none(), "the stale suggestion is consumed");
+        assert!(
+            !draft.fields.contains_key("accent"),
+            "the stale patch never landed"
+        );
+        assert!(
+            draft.pending_suggestion.is_none(),
+            "the stale suggestion is consumed"
+        );
         // Consumption persisted: a fresh load agrees, and a replay fails as
         // interaction_invalid (nothing pending).
         drop(h);
@@ -3669,8 +3870,7 @@ mod tests {
             .await
             .unwrap();
         let on_disk = storage::load_all(dir.path()).unwrap();
-        let mut ids_on_disk: Vec<&str> =
-            on_disk.iter().map(|app| app.record.id.as_str()).collect();
+        let mut ids_on_disk: Vec<&str> = on_disk.iter().map(|app| app.record.id.as_str()).collect();
         ids_on_disk.sort_unstable();
         let mut expected = [app1.id.as_str(), app2.id.as_str()];
         expected.sort_unstable();
@@ -3689,12 +3889,17 @@ mod tests {
             .await
             .unwrap();
         let final_state = storage::load_all(dir.path()).unwrap();
-        let mut final_ids: Vec<&str> =
-            final_state.iter().map(|app| app.record.id.as_str()).collect();
+        let mut final_ids: Vec<&str> = final_state
+            .iter()
+            .map(|app| app.record.id.as_str())
+            .collect();
         final_ids.sort_unstable();
         let mut expected = [app2.id.as_str(), app3.id.as_str()];
         expected.sort_unstable();
-        assert_eq!(final_ids, expected, "app1 never resurrects; app2 still survives");
+        assert_eq!(
+            final_ids, expected,
+            "app1 never resurrects; app2 still survives"
+        );
     }
 
     /// Await `future`, converting a panic anywhere in its polls into an
@@ -3739,7 +3944,9 @@ mod tests {
                 if self.fired.swap(true, Ordering::SeqCst) {
                     return;
                 }
-                let Some(service) = self.service.get() else { return };
+                let Some(service) = self.service.get() else {
+                    return;
+                };
                 let message = match catch_panic_message(service.announce_apps()).await {
                     Err(panic_message) => panic_message,
                     Ok(_) => "the reentrant call did NOT panic".to_string(),
@@ -3772,7 +3979,12 @@ mod tests {
             .await
             .unwrap();
         service.flush_events().await; // completes — the queue is NOT deadlocked
-        let outcome = observer.outcome.lock().unwrap().clone().expect("observer ran");
+        let outcome = observer
+            .outcome
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("observer ran");
         assert!(
             outcome.contains("re-entered"),
             "the reentrancy guard must panic with its message, got: {outcome}"

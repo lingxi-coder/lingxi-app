@@ -305,12 +305,12 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::AppsChanged", "apps_changed");
     put("ClientEvent::AppsChanged.apps", "Vec<AppRecordDto>");
 
-    put("ClientEvent::AppDesignerRequested", "app_designer_requested");
-    put("ClientEvent::AppDesignerRequested.app_id", "String");
     put(
-        "ClientEvent::AppDesignerRequested.interaction_id",
-        "String",
+        "ClientEvent::AppDesignerRequested",
+        "app_designer_requested",
     );
+    put("ClientEvent::AppDesignerRequested.app_id", "String");
+    put("ClientEvent::AppDesignerRequested.interaction_id", "String");
     put("ClientEvent::AppDesignerRequested.revision", "u64");
 
     put(
@@ -328,10 +328,7 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::AppDesignSuggestionAvailable",
         "app_design_suggestion_available",
     );
-    put(
-        "ClientEvent::AppDesignSuggestionAvailable.app_id",
-        "String",
-    );
+    put("ClientEvent::AppDesignSuggestionAvailable.app_id", "String");
     put(
         "ClientEvent::AppDesignSuggestionAvailable.suggestion_id",
         "String",
@@ -347,10 +344,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientEvent::AppDesignConflict", "app_design_conflict");
     put("ClientEvent::AppDesignConflict.app_id", "String");
-    put(
-        "ClientEvent::AppDesignConflict.expected_revision",
-        "u64",
-    );
+    put("ClientEvent::AppDesignConflict.expected_revision", "u64");
     put("ClientEvent::AppDesignConflict.actual_revision", "u64");
 
     put("ClientEvent::AppWorkflowChanged", "app_workflow_changed");
@@ -359,10 +353,7 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::AppWorkflowChanged.state",
         "AppWorkflowStateDto",
     );
-    put(
-        "ClientEvent::AppWorkflowChanged.detail",
-        "Option<String>",
-    );
+    put("ClientEvent::AppWorkflowChanged.detail", "Option<String>");
 
     put(
         "ClientEvent::AppGenerationProgress",
@@ -370,10 +361,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientEvent::AppGenerationProgress.app_id", "String");
     put("ClientEvent::AppGenerationProgress.stage", "String");
-    put(
-        "ClientEvent::AppGenerationProgress.percent",
-        "Option<u8>",
-    );
+    put("ClientEvent::AppGenerationProgress.percent", "Option<u8>");
     put(
         "ClientEvent::AppGenerationProgress.detail",
         "Option<String>",
@@ -381,10 +369,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientEvent::AppRuntimeChanged", "app_runtime_changed");
     put("ClientEvent::AppRuntimeChanged.app_id", "String");
-    put(
-        "ClientEvent::AppRuntimeChanged.state",
-        "AppRuntimeStateDto",
-    );
+    put("ClientEvent::AppRuntimeChanged.state", "AppRuntimeStateDto");
     put(
         "ClientEvent::AppRuntimeChanged.last_error",
         "Option<String>",
@@ -407,10 +392,7 @@ fn current_contract_index() -> ContractIndex {
     );
 
     put("ClientEvent::AppOperationFailed", "app_operation_failed");
-    put(
-        "ClientEvent::AppOperationFailed.app_id",
-        "Option<String>",
-    );
+    put("ClientEvent::AppOperationFailed.app_id", "Option<String>");
     put("ClientEvent::AppOperationFailed.code", "AppErrorCodeDto");
     put("ClientEvent::AppOperationFailed.message", "String");
 
@@ -583,10 +565,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp.name", "String");
     put("ClientCommand::CreateApp.template", "AppTemplateKindDto");
     put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
-    put(
-        "ClientCommand::CreateApp.conversation_id",
-        "Option<String>",
-    );
+    put("ClientCommand::CreateApp.conversation_id", "Option<String>");
 
     put("ClientCommand::OpenAppDesigner", "open_app_designer");
     put("ClientCommand::OpenAppDesigner.app_id", "String");
@@ -609,10 +588,7 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::ApplyAgentDesignSuggestion",
         "apply_agent_design_suggestion",
     );
-    put(
-        "ClientCommand::ApplyAgentDesignSuggestion.app_id",
-        "String",
-    );
+    put("ClientCommand::ApplyAgentDesignSuggestion.app_id", "String");
     put(
         "ClientCommand::ApplyAgentDesignSuggestion.suggestion_id",
         "String",
@@ -625,10 +601,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::ConfirmAppDesign", "confirm_app_design");
     put("ClientCommand::ConfirmAppDesign.app_id", "String");
     put("ClientCommand::ConfirmAppDesign.revision", "u64");
-    put(
-        "ClientCommand::ConfirmAppDesign.interaction_id",
-        "String",
-    );
+    put("ClientCommand::ConfirmAppDesign.interaction_id", "String");
 
     put("ClientCommand::CancelAppDesign", "cancel_app_design");
     put("ClientCommand::CancelAppDesign.app_id", "String");
@@ -645,22 +618,13 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::ConfirmAppPreview", "confirm_app_preview");
     put("ClientCommand::ConfirmAppPreview.app_id", "String");
     put("ClientCommand::ConfirmAppPreview.revision", "u64");
-    put(
-        "ClientCommand::ConfirmAppPreview.interaction_id",
-        "String",
-    );
+    put("ClientCommand::ConfirmAppPreview.interaction_id", "String");
 
-    put(
-        "ClientCommand::RequestAppRevision",
-        "request_app_revision",
-    );
+    put("ClientCommand::RequestAppRevision", "request_app_revision");
     put("ClientCommand::RequestAppRevision.app_id", "String");
     put("ClientCommand::RequestAppRevision.prompt", "String");
 
-    put(
-        "ClientCommand::ListAppCheckpoints",
-        "list_app_checkpoints",
-    );
+    put("ClientCommand::ListAppCheckpoints", "list_app_checkpoints");
     put("ClientCommand::ListAppCheckpoints.app_id", "String");
 
     put(
@@ -919,14 +883,8 @@ fn current_contract_index() -> ContractIndex {
     );
     put("AppWorkflowStateDto::Revising", "revising");
     put("AppWorkflowStateDto::Ready", "ready");
-    put(
-        "AppWorkflowStateDto::GenerationFailed",
-        "generation_failed",
-    );
-    put(
-        "AppWorkflowStateDto::ValidationFailed",
-        "validation_failed",
-    );
+    put("AppWorkflowStateDto::GenerationFailed", "generation_failed");
+    put("AppWorkflowStateDto::ValidationFailed", "validation_failed");
 
     put("AppRuntimeStateDto::Stopped", "stopped");
     put("AppRuntimeStateDto::Starting", "starting");
@@ -939,10 +897,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppErrorCodeDto::NotFound", "not_found");
     put("AppErrorCodeDto::RevisionConflict", "revision_conflict");
-    put(
-        "AppErrorCodeDto::InteractionInvalid",
-        "interaction_invalid",
-    );
+    put("AppErrorCodeDto::InteractionInvalid", "interaction_invalid");
     put(
         "AppErrorCodeDto::WorkflowStateInvalid",
         "workflow_state_invalid",
@@ -953,18 +908,12 @@ fn current_contract_index() -> ContractIndex {
     put("AppErrorCodeDto::InvalidRequest", "invalid_request");
     put("AppErrorCodeDto::Io", "io");
 
-    put(
-        "AppCheckpointKindDto::ScaffoldCreated",
-        "scaffold_created",
-    );
+    put("AppCheckpointKindDto::ScaffoldCreated", "scaffold_created");
     put(
         "AppCheckpointKindDto::GenerationValidated",
         "generation_validated",
     );
-    put(
-        "AppCheckpointKindDto::PreviewApproved",
-        "preview_approved",
-    );
+    put("AppCheckpointKindDto::PreviewApproved", "preview_approved");
     put("AppCheckpointKindDto::UserApproved", "user_approved");
     put("AppCheckpointKindDto::PreRestore", "pre_restore");
 
@@ -1233,8 +1182,8 @@ fn contract_index_covers_every_dto() {
     };
     use client_protocol::local_apps::{
         AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
-        AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto,
-        AppTemplateKindDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+        AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto,
+        AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{

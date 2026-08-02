@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn every_variant_maps_to_its_code() {
-        assert_eq!(AppError::NotFound("x".into()).code(), AppErrorCode::NotFound);
+        assert_eq!(
+            AppError::NotFound("x".into()).code(),
+            AppErrorCode::NotFound
+        );
         assert_eq!(
             AppError::RevisionConflict {
                 expected: 1,

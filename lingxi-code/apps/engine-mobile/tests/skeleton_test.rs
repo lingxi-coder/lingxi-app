@@ -172,11 +172,9 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     // control is the externally-observable contract here: before the fix the
     // stale, non-cancelled token made every post-turn NewSession look mid-turn
     // and therefore fail forever.
-    handle
-        .runtime()
-        .block_on(async {
-            start_new_session(&handle).await;
-        });
+    handle.runtime().block_on(async {
+        start_new_session(&handle).await;
+    });
 }
 
 #[test]

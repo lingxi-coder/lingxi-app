@@ -90,7 +90,13 @@ fn seed_app(
     template: AppTemplateKind,
     conversation_id: Option<String>,
 ) {
-    let app = AppState::create(id.to_string(), name.to_string(), template, conversation_id, T0);
+    let app = AppState::create(
+        id.to_string(),
+        name.to_string(),
+        template,
+        conversation_id,
+        T0,
+    );
     save_app_files(root, &app).expect("seed app files");
     existing.push(app);
     let records: Vec<AppRecord> = existing.iter().map(|app| app.record.clone()).collect();
@@ -182,7 +188,7 @@ async fn drive_canonical_store(root: &Path) {
     assert!(d1.interaction_id.starts_with("int-"));
     advance_to(T0 + 150);
     service.cancel_design("aaaa1111").await.expect("cancel d1"); // seq 1 delivered
-    // …then a dead sink keeps every later continuation queued (legally).
+                                                                 // …then a dead sink keeps every later continuation queued (legally).
     sink.set_fail(true);
     advance_to(T0 + 200);
     let _d2 = service.open_designer("aaaa1111").await.expect("open d2");
@@ -201,9 +207,15 @@ async fn drive_canonical_store(root: &Path) {
         .await
         .expect("confirm design"); // seq 3 queued
     advance_to(T0 + 450);
-    service.generation_complete("aaaa1111").await.expect("generated");
+    service
+        .generation_complete("aaaa1111")
+        .await
+        .expect("generated");
     advance_to(T0 + 500);
-    service.validation_passed("aaaa1111").await.expect("preview 1");
+    service
+        .validation_passed("aaaa1111")
+        .await
+        .expect("preview 1");
     advance_to(T0 + 550);
     service
         .request_revision("aaaa1111", "make the header darker")
@@ -229,12 +241,24 @@ async fn drive_canonical_store(root: &Path) {
         .await
         .expect("store suggestion");
     advance_to(T0 + 650);
-    service.revision_ready("aaaa1111").await.expect("revision ready");
+    service
+        .revision_ready("aaaa1111")
+        .await
+        .expect("revision ready");
     advance_to(T0 + 700);
-    service.validation_passed("aaaa1111").await.expect("preview 2");
+    service
+        .validation_passed("aaaa1111")
+        .await
+        .expect("preview 2");
     advance_to(T0 + 750);
     service
-        .update_runtime_record("aaaa1111", AppRuntimeState::Starting, Some(3111), Some(4242), None)
+        .update_runtime_record(
+            "aaaa1111",
+            AppRuntimeState::Starting,
+            Some(3111),
+            Some(4242),
+            None,
+        )
         .await
         .expect("runtime starting");
     advance_to(T0 + 800);
@@ -251,9 +275,15 @@ async fn drive_canonical_store(root: &Path) {
 
     // ── bbbb2222: the minimal app (every optional absent) ───────────────
     advance_to(T0 + 850);
-    service.open_designer("bbbb2222").await.expect("open minimal");
+    service
+        .open_designer("bbbb2222")
+        .await
+        .expect("open minimal");
     advance_to(T0 + 900);
-    service.cancel_design("bbbb2222").await.expect("cancel minimal"); // seq 1 queued
+    service
+        .cancel_design("bbbb2222")
+        .await
+        .expect("cancel minimal"); // seq 1 queued
 }
 
 /// The in-memory states the fixture tree must load to, spelled out as

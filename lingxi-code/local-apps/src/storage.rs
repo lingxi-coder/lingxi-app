@@ -191,7 +191,9 @@ pub fn workspace_rel_str(app_id: &str) -> String {
 /// Root-relative path of `apps/<id>/workspace/.lingxi/app.json`.
 #[must_use]
 pub fn metadata_rel(app_id: &str) -> PathBuf {
-    workspace_dir_rel(app_id).join(APP_STATE_DIR).join(APP_METADATA_FILE)
+    workspace_dir_rel(app_id)
+        .join(APP_STATE_DIR)
+        .join(APP_METADATA_FILE)
 }
 
 /// Root-relative path of `apps/<id>/workspace/.lingxi/design-spec.json`.
@@ -712,32 +714,29 @@ pub fn save_index_preserving(
     known_ids: &BTreeSet<String>,
 ) -> Result<(), AppError> {
     let _lock = lock_index(root)?;
-    let disk: Vec<AppRecord> = match rooted_fs::read_to_string_limited(
-        root,
-        &index_rel(),
-        MAX_DOC_BYTES,
-    ) {
-        Ok(body) => match serde_json::from_str::<AppIndexFile>(&body) {
-            Ok(index) => index.apps,
+    let disk: Vec<AppRecord> =
+        match rooted_fs::read_to_string_limited(root, &index_rel(), MAX_DOC_BYTES) {
+            Ok(body) => match serde_json::from_str::<AppIndexFile>(&body) {
+                Ok(index) => index.apps,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "apps/index.json on disk is unparseable during a locked index write; \
+                         rewriting it from this instance's records"
+                    );
+                    Vec::new()
+                }
+            },
+            Err(FsError::NotFound(_)) => Vec::new(),
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    "apps/index.json on disk is unparseable during a locked index write; \
+                    "apps/index.json on disk is unreadable during a locked index write; \
                      rewriting it from this instance's records"
                 );
                 Vec::new()
             }
-        },
-        Err(FsError::NotFound(_)) => Vec::new(),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "apps/index.json on disk is unreadable during a locked index write; \
-                 rewriting it from this instance's records"
-            );
-            Vec::new()
-        }
-    };
+        };
     let mut merged = records.to_vec();
     for entry in disk {
         if !known_ids.contains(&entry.id) && !merged.iter().any(|r| r.id == entry.id) {
@@ -871,11 +870,7 @@ pub fn save_interactions(
 }
 
 /// Atomically persist `apps/<id>/runtime.json`.
-pub fn save_runtime(
-    root: &Path,
-    app_id: &str,
-    runtime: &AppRuntimeRecord,
-) -> Result<(), AppError> {
+pub fn save_runtime(root: &Path, app_id: &str, runtime: &AppRuntimeRecord) -> Result<(), AppError> {
     write_doc(root, &runtime_rel(app_id), runtime)
 }
 
@@ -886,9 +881,8 @@ pub fn save_runtime(
 pub fn delete_app_dir(root: &Path, app_id: &str) -> Result<(), AppError> {
     match trash_app_dir(root, app_id)? {
         None => Ok(()),
-        Some(trash_path) => std::fs::remove_dir_all(&trash_path).map_err(|error| {
-            AppError::Io(format!("remove {}: {error}", trash_path.display()))
-        }),
+        Some(trash_path) => std::fs::remove_dir_all(&trash_path)
+            .map_err(|error| AppError::Io(format!("remove {}: {error}", trash_path.display()))),
     }
 }
 
@@ -1097,7 +1091,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_all(dir.path()).unwrap(), Vec::new());
         // Root without even the apps/ dir is fine too.
-        assert_eq!(load_all(&dir.path().join("nested-missing")).unwrap(), Vec::new());
+        assert_eq!(
+            load_all(&dir.path().join("nested-missing")).unwrap(),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -1215,7 +1212,10 @@ mod tests {
         save_interactions(dir.path(), "rrrr8888", &interactions).unwrap();
         let err = load_all(dir.path()).unwrap_err();
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-        assert!(err.to_string().contains("violates continuation invariants"), "{err}");
+        assert!(
+            err.to_string().contains("violates continuation invariants"),
+            "{err}"
+        );
         assert!(err.to_string().contains("mint floor"), "{err}");
 
         // And the equal-counters variant: the next mint would land AT the
@@ -1250,7 +1250,10 @@ mod tests {
         save_interactions(dir.path(), "ssss1111", &interactions).unwrap();
         let err = load_all(dir.path()).unwrap_err();
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "pending: {err}");
-        assert!(err.to_string().contains("pending gate claims app id"), "{err}");
+        assert!(
+            err.to_string().contains("pending gate claims app id"),
+            "{err}"
+        );
 
         // undelivered[*].app_id
         let dir = tempfile::tempdir().unwrap();
@@ -1262,7 +1265,11 @@ mod tests {
         interactions.undelivered[0].app_id = "tttt2222".into();
         save_interactions(dir.path(), "ssss1111", &interactions).unwrap();
         let err = load_all(dir.path()).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "undelivered: {err}");
+        assert_eq!(
+            err.code(),
+            AppErrorCode::StorageCorrupt,
+            "undelivered: {err}"
+        );
         assert!(err.to_string().contains("claims app id"), "{err}");
 
         // runtime.app_id
@@ -1314,7 +1321,10 @@ mod tests {
         // The old content is still only in the trash, and the slow removal
         // targets the nonce'd trash path — never the recreated dir.
         std::fs::remove_dir_all(&trash_path).unwrap();
-        assert!(dir.path().join("apps/uuuu3333/workspace/.lingxi/app.json").is_file());
+        assert!(dir
+            .path()
+            .join("apps/uuuu3333/workspace/.lingxi/app.json")
+            .is_file());
     }
 
     /// Finding 10: `.trash` leftovers are swept (best-effort) at the next
@@ -1334,7 +1344,11 @@ mod tests {
         assert!(app_id_present_on_disk(dir.path(), "wwww5555"));
 
         let loaded = load_all(dir.path()).unwrap();
-        assert_eq!(loaded, vec![keep], ".trash must be invisible to enumeration");
+        assert_eq!(
+            loaded,
+            vec![keep],
+            ".trash must be invisible to enumeration"
+        );
         assert!(!trash_path.exists(), "the leftover tombstone is swept");
         assert!(!app_id_present_on_disk(dir.path(), "wwww5555"));
     }
@@ -1356,7 +1370,10 @@ mod tests {
         // Another id sharing a PREFIX is not confused with the tombstone.
         assert!(!app_id_present_on_disk(dir.path(), "xxxx666"));
         std::fs::remove_dir_all(trash_path).unwrap();
-        assert!(!app_id_present_on_disk(dir.path(), "xxxx6666"), "fully gone");
+        assert!(
+            !app_id_present_on_disk(dir.path(), "xxxx6666"),
+            "fully gone"
+        );
     }
 
     /// Finding 9: `save_index_preserving` keeps foreign-process entries this
@@ -1376,8 +1393,7 @@ mod tests {
         .unwrap();
         // We know about `ours` (writing it) and `deleted` (we deleted it);
         // the foreign entry is unknown to us and must survive.
-        let known: BTreeSet<String> =
-            [ours.record.id.clone(), deleted.record.id.clone()].into();
+        let known: BTreeSet<String> = [ours.record.id.clone(), deleted.record.id.clone()].into();
         save_index_preserving(dir.path(), std::slice::from_ref(&ours.record), &known).unwrap();
 
         let body = std::fs::read_to_string(dir.path().join("apps/index.json")).unwrap();
@@ -1563,7 +1579,8 @@ mod tests {
         type Tamper = Box<dyn Fn(&mut AppInteractions)>;
         let base = || {
             let mut app = new_app("llll2222");
-            app.open_designer("int-1".into(), 1_700_000_000_001).unwrap();
+            app.open_designer("int-1".into(), 1_700_000_000_001)
+                .unwrap();
             app.cancel_design(1_700_000_000_002).unwrap();
             app
         };
@@ -1650,9 +1667,17 @@ mod tests {
         // poked directly; only the serialized difference matters here).
         let mut after = before.clone();
         after.draft.revision = 1;
-        after.open_designer("int-order".into(), 1_700_000_000_100).unwrap();
         after
-            .set_runtime(AppRuntimeState::Starting, Some(3999), Some(7), None, 1_700_000_000_101)
+            .open_designer("int-order".into(), 1_700_000_000_100)
+            .unwrap();
+        after
+            .set_runtime(
+                AppRuntimeState::Starting,
+                Some(3999),
+                Some(7),
+                None,
+                1_700_000_000_101,
+            )
             .unwrap();
 
         let squat = |rel: PathBuf| {
@@ -1714,7 +1739,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut app = new_app("nnnn4444");
             // Walk legal runtime transitions up to the stranded state.
-            app.set_runtime(Starting, Some(3123), Some(42), None, 2).unwrap();
+            app.set_runtime(Starting, Some(3123), Some(42), None, 2)
+                .unwrap();
             if matches!(stranded, Running | Stopping) {
                 app.set_runtime(Running, None, Some(42), None, 3).unwrap();
             }
@@ -1736,13 +1762,17 @@ mod tests {
             assert_eq!(load_all(dir.path()).unwrap(), loaded, "{stranded}");
             let body =
                 std::fs::read_to_string(dir.path().join("apps/nnnn4444/runtime.json")).unwrap();
-            assert!(body.contains(&format!("\"{expected}\"")), "{stranded}: {body}");
+            assert!(
+                body.contains(&format!("\"{expected}\"")),
+                "{stranded}: {body}"
+            );
         }
         // stopped / failed records are untouched (no rewrite).
         let dir = tempfile::tempdir().unwrap();
         let app = new_app("nnnn4444");
         save_full(dir.path(), std::slice::from_ref(&app));
-        let before = std::fs::read_to_string(dir.path().join("apps/nnnn4444/runtime.json")).unwrap();
+        let before =
+            std::fs::read_to_string(dir.path().join("apps/nnnn4444/runtime.json")).unwrap();
         assert_eq!(load_all(dir.path()).unwrap(), vec![app]);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("apps/nnnn4444/runtime.json")).unwrap(),

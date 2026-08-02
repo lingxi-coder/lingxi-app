@@ -195,9 +195,7 @@ impl AppState {
         interaction_id: &str,
     ) -> Result<(), AppError> {
         match &self.interactions.pending {
-            Some(pending)
-                if pending.kind == kind && pending.interaction_id == interaction_id =>
-            {
+            Some(pending) if pending.kind == kind && pending.interaction_id == interaction_id => {
                 Ok(())
             }
             Some(_) => Err(AppError::InteractionInvalid(format!(
@@ -371,8 +369,15 @@ impl AppState {
         revision: u64,
         now_ms: u64,
     ) -> Result<AppContinuation, AppError> {
-        self.ensure_workflow("confirm_design", &[AppWorkflowState::AwaitingSpecConfirmation])?;
-        self.validate_pending("confirm_design", AppInteractionKind::Designer, interaction_id)?;
+        self.ensure_workflow(
+            "confirm_design",
+            &[AppWorkflowState::AwaitingSpecConfirmation],
+        )?;
+        self.validate_pending(
+            "confirm_design",
+            AppInteractionKind::Designer,
+            interaction_id,
+        )?;
         self.ensure_current_revision(revision)?;
         self.interactions.pending = None;
         self.draft.confirmed_revision = Some(revision);
@@ -387,7 +392,10 @@ impl AppState {
     /// `awaiting_spec_confirmation -> collecting_spec`; voids the pending
     /// interaction and enqueues a `design_cancelled` continuation.
     pub fn cancel_design(&mut self, now_ms: u64) -> Result<AppContinuation, AppError> {
-        self.ensure_workflow("cancel_design", &[AppWorkflowState::AwaitingSpecConfirmation])?;
+        self.ensure_workflow(
+            "cancel_design",
+            &[AppWorkflowState::AwaitingSpecConfirmation],
+        )?;
         self.interactions.pending = None;
         self.set_workflow(AppWorkflowState::CollectingSpec, now_ms);
         Ok(self.enqueue_continuation(
@@ -473,7 +481,11 @@ impl AppState {
             "confirm_preview",
             &[AppWorkflowState::AwaitingPreviewConfirmation],
         )?;
-        self.validate_pending("confirm_preview", AppInteractionKind::Preview, interaction_id)?;
+        self.validate_pending(
+            "confirm_preview",
+            AppInteractionKind::Preview,
+            interaction_id,
+        )?;
         self.ensure_current_revision(revision)?;
         self.interactions.pending = None;
         self.set_workflow(AppWorkflowState::Ready, now_ms);
@@ -669,7 +681,10 @@ mod tests {
             a.record.workflow_state,
             AppWorkflowState::AwaitingSpecConfirmation
         );
-        assert_eq!(a.interactions.pending.as_ref().unwrap().interaction_id, "int-1");
+        assert_eq!(
+            a.interactions.pending.as_ref().unwrap().interaction_id,
+            "int-1"
+        );
     }
 
     #[test]
@@ -680,7 +695,10 @@ mod tests {
             "update_draft",
         );
         let mut a = app();
-        assert_eq!(a.update_draft(0, &set_patch("title", "Board"), 11).unwrap(), 1);
+        assert_eq!(
+            a.update_draft(0, &set_patch("title", "Board"), 11).unwrap(),
+            1
+        );
         assert_eq!(
             a.draft.fields.get("title"),
             Some(&DesignValue::ShortText("Board".into()))
@@ -711,7 +729,9 @@ mod tests {
     fn update_draft_revision_conflict_keeps_user_value() {
         let mut a = app();
         a.update_draft(0, &set_patch("title", "Mine"), 11).unwrap();
-        let err = a.update_draft(0, &set_patch("title", "Stale"), 12).unwrap_err();
+        let err = a
+            .update_draft(0, &set_patch("title", "Stale"), 12)
+            .unwrap_err();
         assert!(matches!(
             err,
             AppError::RevisionConflict {
@@ -732,15 +752,22 @@ mod tests {
         let mut a = app();
         let interaction = a.open_designer("int-1".into(), 11).unwrap();
         a.update_draft(0, &set_patch("title", "v1"), 12).unwrap();
-        assert!(a.interactions.pending.is_some(), "interaction must survive edits");
+        assert!(
+            a.interactions.pending.is_some(),
+            "interaction must survive edits"
+        );
         // Confirming with the interaction's original (now stale) revision fails.
         let err = a
             .confirm_design(&interaction.interaction_id, interaction.revision, 13)
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::RevisionConflict);
-        assert!(a.interactions.pending.is_some(), "failed confirm must not consume the gate");
+        assert!(
+            a.interactions.pending.is_some(),
+            "failed confirm must not consume the gate"
+        );
         // Confirming with the CURRENT revision succeeds.
-        a.confirm_design(&interaction.interaction_id, 1, 14).unwrap();
+        a.confirm_design(&interaction.interaction_id, 1, 14)
+            .unwrap();
         assert_eq!(a.record.workflow_state, AppWorkflowState::Generating);
         assert_eq!(a.draft.confirmed_revision, Some(1));
         assert!(a.interactions.pending.is_none());
@@ -920,7 +947,10 @@ mod tests {
             a.record.workflow_state,
             AppWorkflowState::AwaitingPreviewConfirmation
         );
-        assert_eq!(a.interactions.pending.as_ref().unwrap().interaction_id, "int-p");
+        assert_eq!(
+            a.interactions.pending.as_ref().unwrap().interaction_id,
+            "int-p"
+        );
     }
 
     #[test]
@@ -1061,7 +1091,11 @@ mod tests {
             "queue must stay capped"
         );
         let seqs: Vec<u64> = a.interactions.undelivered.iter().map(|c| c.seq).collect();
-        assert_eq!(seqs.first(), Some(&2), "the OLDEST entry (seq 1) is dropped");
+        assert_eq!(
+            seqs.first(),
+            Some(&2),
+            "the OLDEST entry (seq 1) is dropped"
+        );
         assert_eq!(seqs.last(), Some(&cycles), "the newest entry survives");
         assert!(
             seqs.windows(2).all(|pair| pair[0] < pair[1]),
@@ -1087,8 +1121,10 @@ mod tests {
         for cycle in 0..40u64 {
             a.request_revision(&prompt, 100 + cycle).unwrap();
             a.revision_ready(101 + cycle).unwrap();
-            a.validation_passed(format!("int-{cycle}"), 102 + cycle).unwrap();
-            a.confirm_preview(&format!("int-{cycle}"), 0, 103 + cycle).unwrap();
+            a.validation_passed(format!("int-{cycle}"), 102 + cycle)
+                .unwrap();
+            a.confirm_preview(&format!("int-{cycle}"), 0, 103 + cycle)
+                .unwrap();
         }
         let minted = usize::try_from(a.interactions.next_seq - 1).unwrap();
         assert_eq!(minted, 80, "40 heavy + 40 small continuations were minted");
@@ -1097,7 +1133,10 @@ mod tests {
             queue.len() < minted,
             "the byte budget must have dropped oldest entries"
         );
-        assert!(queue.first().map(|c| c.seq) > Some(1), "oldest seqs dropped first");
+        assert!(
+            queue.first().map(|c| c.seq) > Some(1),
+            "oldest seqs dropped first"
+        );
         let total: usize = queue
             .iter()
             .map(|c| serde_json::to_string(c).unwrap().len())
@@ -1126,7 +1165,8 @@ mod tests {
             .unwrap();
         // The user edits past the suggestion's basis.
         a.update_draft(0, &set_patch("title", "Mine"), 12).unwrap();
-        a.update_draft(1, &set_patch("title", "Mine v2"), 13).unwrap();
+        a.update_draft(1, &set_patch("title", "Mine v2"), 13)
+            .unwrap();
         // Caller passes the CURRENT revision — only the suggestion is stale.
         let err = a.apply_suggestion("sugg-1", 2, 14).unwrap_err();
         assert!(
@@ -1139,7 +1179,10 @@ mod tests {
             ),
             "conflict must carry based_on vs current: {err}"
         );
-        assert!(a.draft.pending_suggestion.is_none(), "stale suggestion consumed");
+        assert!(
+            a.draft.pending_suggestion.is_none(),
+            "stale suggestion consumed"
+        );
         assert_eq!(a.draft.revision, 2, "revision untouched");
         assert_eq!(
             a.draft.fields.get("title"),

@@ -57,12 +57,12 @@ use client_protocol::local_apps::{
     AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
-use std::collections::HashMap;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Directory holding the checked-in goldens.
 fn snapshots_dir() -> PathBuf {

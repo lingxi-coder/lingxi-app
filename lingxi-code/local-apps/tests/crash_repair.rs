@@ -209,7 +209,10 @@ fn torn_request_revision_from_preview_gate_repairs_to_revising() {
     assert!(app.interactions.pending.is_none());
     let newest = app.interactions.undelivered.last().expect("prompt queued");
     assert_eq!(newest.kind, AppContinuationKind::RevisionRequested);
-    assert_eq!(newest.payload, serde_json::json!({ "prompt": "darker header" }));
+    assert_eq!(
+        newest.payload,
+        serde_json::json!({ "prompt": "darker header" })
+    );
 }
 
 #[test]
@@ -241,7 +244,11 @@ fn torn_generation_complete_adopts_the_mirror_state() {
 
     let app = load_repaired(dir.path());
     assert_eq!(app.record.workflow_state, AppWorkflowState::Validating);
-    assert_eq!(app.record.updated_at_ms, T0 + 3, "mirror record adopted whole");
+    assert_eq!(
+        app.record.updated_at_ms,
+        T0 + 3,
+        "mirror record adopted whole"
+    );
 }
 
 #[test]

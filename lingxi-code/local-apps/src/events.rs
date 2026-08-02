@@ -152,7 +152,12 @@ impl RecordingAppEventObserver {
     /// Drain and return the observed events.
     #[must_use]
     pub fn take(&self) -> Vec<AppEvent> {
-        std::mem::take(&mut *self.events.lock().expect("recording observer lock poisoned"))
+        std::mem::take(
+            &mut *self
+                .events
+                .lock()
+                .expect("recording observer lock poisoned"),
+        )
     }
 }
 

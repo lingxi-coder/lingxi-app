@@ -85,10 +85,7 @@ impl AppEmissionQueue {
     /// Create the channel and spawn its single forwarder task on the engine
     /// runtime. The forwarder drains in order, lowers, and awaits
     /// `sink.emit` with no lock held; it exits when the last sender drops.
-    pub(crate) fn spawn(
-        runtime: &tokio::runtime::Handle,
-        sink: Arc<dyn ClientEventSink>,
-    ) -> Self {
+    pub(crate) fn spawn(runtime: &tokio::runtime::Handle, sink: Arc<dyn ClientEventSink>) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel();
         runtime.spawn(async move {
             while let Some(emission) = rx.recv().await {
@@ -656,8 +653,7 @@ mod tests {
         );
         assert_eq!(chat.conversation_binding(None), None);
         // …and Library never binds one, even when the caller sent an id.
-        let library =
-            raise_origin(AppCreateOriginDto::Library).expect("library is a known origin");
+        let library = raise_origin(AppCreateOriginDto::Library).expect("library is a known origin");
         assert_eq!(library, AppCreateOrigin::Library);
         assert_eq!(library.conversation_binding(Some("conv-1".into())), None);
         // The failing wildcard arm cannot be exercised from this crate:

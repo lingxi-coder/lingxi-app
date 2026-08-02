@@ -78,7 +78,9 @@ mod tests {
         for _ in 0..64 {
             let id = generate_app_id();
             assert_eq!(id.len(), 8);
-            assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
             assert!(is_valid_app_id(&id));
         }
     }

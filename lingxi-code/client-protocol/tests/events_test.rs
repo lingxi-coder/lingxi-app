@@ -545,8 +545,7 @@ fn app_checkpoint_created_round_trips() {
     assert_eq!(json["type"], "app_checkpoint_created");
     assert_eq!(json["checkpoint"]["id"], "ckpt-0001");
     assert_eq!(json["checkpoint"]["kind"], "preview_approved");
-    let back: ClientEvent =
-        serde_json::from_value(json).expect("deserialize AppCheckpointCreated");
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppCheckpointCreated");
     assert_eq!(back, ev);
 }
 

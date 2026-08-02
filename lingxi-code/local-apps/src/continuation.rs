@@ -42,7 +42,11 @@ pub struct NoopContinuationSink;
 
 #[async_trait]
 impl ContinuationSink for NoopContinuationSink {
-    async fn deliver(&self, _app_id: &str, _continuation: &AppContinuation) -> Result<(), AppError> {
+    async fn deliver(
+        &self,
+        _app_id: &str,
+        _continuation: &AppContinuation,
+    ) -> Result<(), AppError> {
         Ok(())
     }
 }
@@ -92,7 +96,10 @@ impl RecordingContinuationSink {
     /// Every successful `deliver` call, in order (including seq replays).
     #[must_use]
     pub fn calls(&self) -> Vec<(String, AppContinuation)> {
-        self.calls.lock().expect("recording sink lock poisoned").clone()
+        self.calls
+            .lock()
+            .expect("recording sink lock poisoned")
+            .clone()
     }
 
     /// Deliveries after consumer-side seq dedup: a replayed `(app_id, seq)`

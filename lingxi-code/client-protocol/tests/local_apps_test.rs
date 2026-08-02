@@ -51,8 +51,14 @@ fn workflow_state_serializes_as_bare_string() {
         ),
         (AppWorkflowStateDto::Revising, "\"revising\""),
         (AppWorkflowStateDto::Ready, "\"ready\""),
-        (AppWorkflowStateDto::GenerationFailed, "\"generation_failed\""),
-        (AppWorkflowStateDto::ValidationFailed, "\"validation_failed\""),
+        (
+            AppWorkflowStateDto::GenerationFailed,
+            "\"generation_failed\"",
+        ),
+        (
+            AppWorkflowStateDto::ValidationFailed,
+            "\"validation_failed\"",
+        ),
     ];
     for (state, expected) in cases {
         let json = serde_json::to_string(&state).expect("serialize AppWorkflowStateDto");
@@ -104,7 +110,10 @@ fn error_code_serializes_as_bare_string() {
     let cases = [
         (AppErrorCodeDto::NotFound, "\"not_found\""),
         (AppErrorCodeDto::RevisionConflict, "\"revision_conflict\""),
-        (AppErrorCodeDto::InteractionInvalid, "\"interaction_invalid\""),
+        (
+            AppErrorCodeDto::InteractionInvalid,
+            "\"interaction_invalid\"",
+        ),
         (
             AppErrorCodeDto::WorkflowStateInvalid,
             "\"workflow_state_invalid\"",
@@ -128,12 +137,18 @@ fn error_code_serializes_as_bare_string() {
 #[test]
 fn checkpoint_kind_serializes_as_bare_string() {
     let cases = [
-        (AppCheckpointKindDto::ScaffoldCreated, "\"scaffold_created\""),
+        (
+            AppCheckpointKindDto::ScaffoldCreated,
+            "\"scaffold_created\"",
+        ),
         (
             AppCheckpointKindDto::GenerationValidated,
             "\"generation_validated\"",
         ),
-        (AppCheckpointKindDto::PreviewApproved, "\"preview_approved\""),
+        (
+            AppCheckpointKindDto::PreviewApproved,
+            "\"preview_approved\"",
+        ),
         (AppCheckpointKindDto::UserApproved, "\"user_approved\""),
         (AppCheckpointKindDto::PreRestore, "\"pre_restore\""),
     ];

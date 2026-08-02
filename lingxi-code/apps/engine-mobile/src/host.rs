@@ -2421,7 +2421,8 @@ impl MobileEngineHandle {
         match &self.local_apps {
             Ok(service) => Some(service.clone()),
             Err(error) => {
-                self.emit_app_failure(app_id.map(str::to_string), error).await;
+                self.emit_app_failure(app_id.map(str::to_string), error)
+                    .await;
                 None
             }
         }
@@ -2557,7 +2558,10 @@ impl MobileEngineHandle {
         };
         let emissions = self.app_emissions.clone();
         Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.update_draft(&app_id, expected_revision, &patch).await {
+            match service
+                .update_draft(&app_id, expected_revision, &patch)
+                .await
+            {
                 Ok(_revision) => Self::emit_apps_snapshot(&service).await,
                 // A stale revision already emitted `AppDesignConflict` from
                 // the service; the typed failure rides BEHIND it on the
@@ -2606,7 +2610,10 @@ impl MobileEngineHandle {
         let emissions = self.app_emissions.clone();
         let interaction_id = interaction_id.to_string();
         Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.confirm_design(&app_id, &interaction_id, revision).await {
+            match service
+                .confirm_design(&app_id, &interaction_id, revision)
+                .await
+            {
                 Ok(()) => Self::emit_apps_snapshot(&service).await,
                 Err(error) => {
                     emissions
@@ -2636,14 +2643,22 @@ impl MobileEngineHandle {
         .await;
     }
 
-    async fn handle_confirm_app_preview(&self, app_id: String, interaction_id: &str, revision: u64) {
+    async fn handle_confirm_app_preview(
+        &self,
+        app_id: String,
+        interaction_id: &str,
+        revision: u64,
+    ) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
         let emissions = self.app_emissions.clone();
         let interaction_id = interaction_id.to_string();
         Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.confirm_preview(&app_id, &interaction_id, revision).await {
+            match service
+                .confirm_preview(&app_id, &interaction_id, revision)
+                .await
+            {
                 Ok(()) => Self::emit_apps_snapshot(&service).await,
                 Err(error) => {
                     emissions
@@ -3280,8 +3295,12 @@ impl MobileEngineHandle {
                 suggestion_id,
                 expected_revision,
             } => {
-                self.handle_apply_agent_design_suggestion(app_id, &suggestion_id, expected_revision)
-                    .await;
+                self.handle_apply_agent_design_suggestion(
+                    app_id,
+                    &suggestion_id,
+                    expected_revision,
+                )
+                .await;
                 Ok(())
             }
             ClientCommand::ConfirmAppDesign {
@@ -4467,6 +4486,45 @@ impl MobileCronStoreHandle {
                     })
             })
             .collect()
+    }
+
+    /// Mark a due occurrence complete after the host exhausts retries. This is
+    /// intentionally available on the lightweight store so iOS background
+    /// reconciliation never needs to construct an LLM engine just to advance
+    /// durable schedule bookkeeping.
+    pub async fn acknowledge_occurrence(&self, task_id: String, scheduled_at_ms: u64) -> bool {
+        let _process_guard = cron::lock_cron_file().await;
+        let Ok(_file_guard) = cron::lock_scheduled_tasks(self.fs.as_ref(), &self.cwd).await else {
+            return false;
+        };
+        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let now = self.clock.now();
+        let now_ms = now
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let Some(task) = document.tasks.iter().find(|task| task.id == task_id) else {
+            return false;
+        };
+        let expected = task_next_fire_ms(
+            &task.id,
+            &task.cron,
+            task.created_at,
+            task.last_fired_at,
+            task.recurring.unwrap_or(false),
+            now,
+        );
+        if expected != Some(scheduled_at_ms) || scheduled_at_ms > now_ms {
+            return false;
+        }
+        finalize_cron_occurrence(&mut document, &task_id, now_ms);
+        cron::write_tasks_body(
+            self.fs.as_ref(),
+            &self.cwd,
+            &cron::serialize_tasks(&document),
+        )
+        .await
+        .is_ok()
     }
 
     pub fn validate_schedule(&self, cron_expr: String, recurring: bool) -> Option<String> {
@@ -6745,15 +6803,16 @@ mod tests {
                     }
                 )
             });
-            let failed_at = position_of(&events, "AppOperationFailed(revision_conflict)", |event| {
-                matches!(
-                    event,
-                    Ev::AppOperationFailed {
-                        code: AppErrorCodeDto::RevisionConflict,
-                        ..
-                    }
-                )
-            });
+            let failed_at =
+                position_of(&events, "AppOperationFailed(revision_conflict)", |event| {
+                    matches!(
+                        event,
+                        Ev::AppOperationFailed {
+                            code: AppErrorCodeDto::RevisionConflict,
+                            ..
+                        }
+                    )
+                });
             assert!(
                 conflict_at < failed_at,
                 "AppDesignConflict (the cause) must precede AppOperationFailed \
@@ -7198,10 +7257,9 @@ mod tests {
                 .await
                 .expect("submit(UpdateAppDesignDraft)");
             let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppDesignDraftChanged { revision: 1, .. }
-            )));
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, Ev::AppDesignDraftChanged { revision: 1, .. })));
 
             // An agent-side suggestion (AppService seam — the phase-3 designer
             // agent drives this) is announced with the id the apply command
@@ -7243,7 +7301,10 @@ mod tests {
                     saw_suggestion = true;
                 }
             }
-            assert!(saw_suggestion, "AppDesignSuggestionAvailable must be emitted");
+            assert!(
+                saw_suggestion,
+                "AppDesignSuggestionAvailable must be emitted"
+            );
 
             // A guessed suggestion id cannot apply…
             handle
@@ -7416,9 +7477,7 @@ mod tests {
             let designer_interaction = events
                 .iter()
                 .find_map(|event| match event {
-                    Ev::AppDesignerRequested { interaction_id, .. } => {
-                        Some(interaction_id.clone())
-                    }
+                    Ev::AppDesignerRequested { interaction_id, .. } => Some(interaction_id.clone()),
                     _ => None,
                 })
                 .expect("AppDesignerRequested must be emitted");
@@ -7495,7 +7554,10 @@ mod tests {
             )));
 
             // The revision pass lands → a FRESH preview gate is minted.
-            service.revision_ready(&app_id).await.expect("revision_ready");
+            service
+                .revision_ready(&app_id)
+                .await
+                .expect("revision_ready");
             service
                 .validation_passed(&app_id)
                 .await
@@ -7625,8 +7687,9 @@ mod tests {
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
         let perm_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
-        let handle = build_mobile_engine(test_config(tmp.path()), platform, listener_dyn, perm_sink)
-            .expect("build_mobile_engine failed");
+        let handle =
+            build_mobile_engine(test_config(tmp.path()), platform, listener_dyn, perm_sink)
+                .expect("build_mobile_engine failed");
         *listener.engine.lock().unwrap() = Some(handle.clone());
 
         handle.runtime().block_on(async {
@@ -7669,9 +7732,10 @@ mod tests {
                     "the listener never saw AppDesignerRequested"
                 );
                 assert!(
-                    events
-                        .iter()
-                        .any(|event| matches!(event, Ev::AppDesignDraftChanged { revision: 1, .. })),
+                    events.iter().any(|event| matches!(
+                        event,
+                        Ev::AppDesignDraftChanged { revision: 1, .. }
+                    )),
                     "the listener-driven draft edit must complete and deliver (got {events:?})"
                 );
                 let service = handle.local_apps().expect("local-apps service");
@@ -7714,10 +7778,10 @@ mod tests {
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events)
-                .expect("CreateApp must announce AppsChanged")[0]
-                .id
-                .clone();
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -7754,8 +7818,7 @@ mod tests {
                     // for the commit and THEN drops the caller — still exactly
                     // the drop-after-commit case this test exists to pin, but
                     // guaranteed to occur at least once on any machine.
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                     while service.draft(&app_id).await.expect("draft").revision == revision
                         && std::time::Instant::now() < deadline
                     {
@@ -7844,10 +7907,10 @@ mod tests {
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events)
-                .expect("CreateApp must announce AppsChanged")[0]
-                .id
-                .clone();
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
             let service = handle.local_apps().expect("local-apps service");
 
             service
@@ -7943,10 +8006,10 @@ mod tests {
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events)
-                .expect("CreateApp must announce AppsChanged")[0]
-                .id
-                .clone();
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8051,10 +8114,10 @@ mod tests {
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events)
-                .expect("CreateApp must announce AppsChanged")[0]
-                .id
-                .clone();
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8231,7 +8294,9 @@ mod tests {
                 "each app command must emit the typed boot failure: {events:?}"
             );
             assert!(
-                !events.iter().any(|event| matches!(event, Ev::AppsChanged { .. })),
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::AppsChanged { .. })),
                 "a corrupt store must never masquerade as an (empty) app list"
             );
         });

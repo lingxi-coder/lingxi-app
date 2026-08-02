@@ -242,11 +242,14 @@ impl LlmError {
 ///   `body.message`, re-prefixed with the status
 /// - otherwise the message unchanged
 ///
-/// ⚠️ NOT ported: `StreamSuspended`, `ETIMEDOUT` and
-/// `BedrockUnexpectedContentType`. The oracle reads those from `x2(e)`'s
-/// cause-chain CODE; this taxonomy carries no code on [`LlmError::Transport`],
-/// so there is nothing to branch on. Guessing from message text would invent a
-/// predicate the oracle does not have. That needs a transport-code seam.
+/// - timeout → the `ETIMEDOUT` line, via [`LlmError::TransportTimeout`]
+///
+/// ⚠️ NOT ported: `StreamSuspended` and `BedrockUnexpectedContentType`. The
+/// oracle reads those from `x2(e)`'s cause-chain CODE, and this port has NO
+/// equivalent signal — no system-sleep stream-suspension detection, no Bedrock
+/// content-type validation (verified: the only hits for either are these doc
+/// comments). Guessing from message text would invent a predicate the oracle
+/// does not have, so both need the underlying detection built first.
 #[must_use]
 pub fn error_display_text(error: &LlmError) -> String {
     if let LlmError::TlsCert { code, .. } = error {

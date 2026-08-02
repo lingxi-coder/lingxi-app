@@ -1522,7 +1522,15 @@ mod tests {
             cwd: Some("/root".to_string()),
             env: BTreeMap::new(),
             stdin: None,
-            timeout_ms: Some(1000),
+            // Generous on purpose. These commands are `printf`/`true`, so the
+            // only thing this bound can catch is the machine being busy -- and
+            // at 1000ms it did: under a full `--workspace` run the spawn alone
+            // could exceed it, the runtime SIGKILLed the group as instructed,
+            // and the test failed with an empty stdout that looked like a drain
+            // race rather than a timeout. The one test that actually exercises
+            // the timeout sets its own `timeout_ms` (50ms), so raising this
+            // weakens no assertion.
+            timeout_ms: Some(30_000),
             network: NetworkPolicy::Allowed,
             mounts: vec![],
         }

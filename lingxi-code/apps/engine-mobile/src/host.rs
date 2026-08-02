@@ -2255,6 +2255,8 @@ impl MobileEngineHandle {
                                 condition: goal.condition,
                                 set_at: goal.set_at,
                                 last_reason: goal.last_reason,
+                                iterations: goal.iterations,
+                                tokens_at_start: goal.tokens_at_start,
                             }),
                         replayed.handle_runtime_snapshot(),
                     )

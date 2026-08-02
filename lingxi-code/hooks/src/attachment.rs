@@ -62,6 +62,14 @@ use serde_json::{Map, Value};
 pub trait HookAttachmentSink: Send + Sync {
     /// Persist one hook-run attachment payload.
     async fn record(&self, attachment: Value);
+
+    /// Persist oversized hook output and return the transcript-visible path
+    /// reference. Hosts without session storage may return `None`; callers then
+    /// retain the legacy inline truncation fallback.
+    async fn persist_large_output(&self, text: &str) -> Option<String> {
+        let _ = text;
+        None
+    }
 }
 
 /// claude's inline cap for hook output spliced into an attachment's `content`
@@ -72,10 +80,9 @@ pub const HOOK_OUTPUT_INLINE_LIMIT: usize = 10_000;
 /// Apply claude's `jKe` inline-vs-persist threshold to hook output.
 ///
 /// At or under [`HOOK_OUTPUT_INLINE_LIMIT`] chars the text is returned
-/// verbatim — the byte-exact common case. RESIDUAL: over the limit claude
-/// persists the full output to `~/.claude/…/tool-results` and substitutes a
-/// `(Full output saved to: …)` reference (BIN off 233100900); the port has no
-/// hook-output persist seam, so it truncates at the same boundary instead.
+/// verbatim — the byte-exact common case. The production attachment sink
+/// persists larger output before this fallback is used; hosts without session
+/// storage still truncate safely at the same boundary.
 #[must_use]
 pub fn inline_hook_output(text: &str) -> String {
     if text.chars().count() <= HOOK_OUTPUT_INLINE_LIMIT {
@@ -853,6 +860,9 @@ mod tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
 
         let cmd = base(HookExecutor::Command {

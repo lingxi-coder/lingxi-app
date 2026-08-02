@@ -40,20 +40,29 @@ pub struct HookDefinition {
     /// If `true`, the hook runs once and is removed after a successful
     /// execution (claude-code `once` field; `schemas/hooks.ts:51-54`).
     ///
-    /// This carries the parsed flag from settings; the actual self-removal
-    /// RUNTIME behavior (dropping the hook from the registry after it
-    /// succeeds) is executor work and is NOT wired here — see the loader
-    /// module docs. Defaults to `false`.
+    /// The executor removes the definition from its registry after a successful
+    /// run. Defaults to `false`.
     #[serde(default)]
     pub once: bool,
     /// Custom status message shown in the spinner while the hook runs
     /// (claude-code `statusMessage` field; `schemas/hooks.ts:47-50`).
     ///
-    /// This carries the parsed text from settings; the TUI spinner wiring
-    /// that actually displays it is presentation work and is NOT done here.
-    /// Defaults to `None` (use the engine's generic running message).
+    /// The executor emits this through the live hook observer and the TUI keeps
+    /// it out of transcript history. Defaults to `None` (use the engine's
+    /// generic running message).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
+    /// Re-enter the agent loop when this asynchronous hook completes.
+    #[serde(default)]
+    pub async_rewake: bool,
+    /// Wall-clock limit for asynchronous execution. This is independent from
+    /// the foreground `timeout` and defaults to 15 seconds at dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_timeout: Option<Duration>,
+    /// Bounded meta-context supplied when an async completion reawakens the
+    /// agent. Empty values fall back to the normal async-hook response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewake_message: Option<String>,
 }
 
 impl HookDefinition {
@@ -245,4 +254,21 @@ pub enum HookSource {
     Session,
     /// Hook registered as part of a skill bundle.
     Skill,
+}
+
+impl HookSource {
+    /// Claude-compatible source-family label used by deferred hook records.
+    /// Plugin/skill identity is not part of the legacy definition wire shape,
+    /// so those sources retain their trusted family rather than fabricating a
+    /// package name.
+    #[must_use]
+    pub const fn deferred_label(self) -> &'static str {
+        match self {
+            Self::User | Self::Project | Self::Local | Self::Managed => "settings",
+            Self::Plugin => "plugin",
+            Self::FrontMatter => "agent",
+            Self::Session => "session",
+            Self::Skill => "skill",
+        }
+    }
 }

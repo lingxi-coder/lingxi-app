@@ -192,6 +192,9 @@ async fn builtin_arm_pretooluse_returns_success() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -239,6 +242,9 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let mock_http = Arc::new(MockHttpTransport::new());
@@ -299,6 +305,9 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let mock_http = Arc::new(MockHttpTransport::new());
@@ -349,6 +358,9 @@ async fn command_arm_deferred_stub_returns_error() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -393,6 +405,9 @@ async fn agent_arm_without_spawner_returns_error() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -434,6 +449,9 @@ async fn builtin_arm_posttooluse_fires_correctly() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());

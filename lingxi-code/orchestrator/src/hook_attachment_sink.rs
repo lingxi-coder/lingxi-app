@@ -60,4 +60,9 @@ impl hooks::HookAttachmentSink for JsonlHookAttachmentSink {
         };
         orch.persist_hook_attachment_to_jsonl(attachment).await;
     }
+
+    async fn persist_large_output(&self, text: &str) -> Option<String> {
+        let orch = self.orch.get().and_then(Weak::upgrade)?;
+        orch.persist_large_hook_output(text).await
+    }
 }

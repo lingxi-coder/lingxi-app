@@ -495,7 +495,6 @@ enum StopHookDisposition {
 /// disposition into their own loop mechanics uniformly.
 
 const GOAL_PROMPT_TIMEOUT_SECS: u64 = 30;
-const GOAL_STATE_SUBTYPE: &str = "thread_goal_updated";
 const GOAL_STOP_HOOK_NAME: &str = "__session_goal_stop";
 const GOAL_STOP_HOOK_PRIORITY: i32 = 1_000_000;
 
@@ -1061,6 +1060,10 @@ pub struct ConversationOrchestrator {
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
+    /// Serializes user, queued, and async-hook re-wake turns. A background hook
+    /// may finish while a user turn is still streaming; waiting here makes its
+    /// re-wake the next turn instead of racing two model loops over one history.
+    turn_gate: Mutex<()>,
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
@@ -1641,7 +1644,7 @@ pub struct ConversationOrchestrator {
     /// with claude-code's `tengu_memdir_prefetch_collected` side-channel,
     /// `wAo`/`Y$p`). `None` when no prefetch is wired (every test + any binary
     /// without a memory selector) — then [`Self::start_memory_prefetch`] +
-    /// [`Self::relevant_memory_reminder_message`] are strict no-ops, keeping the
+    /// [`Self::relevant_memory_reminder_messages`] are strict no-ops, keeping the
     /// surfacing channel inert and the ~4000 locked fixtures byte-identical. The
     /// LingXi gate is purely `memory_prefetch.is_some()` at the composition root
     /// (no new env flag), mirroring claude-code's `tengu_moth_copse`-default-false
@@ -1655,7 +1658,7 @@ pub struct ConversationOrchestrator {
     pub(crate) end_conversation_slot: Option<crate::end_conversation_tool::EndConversationSlot>,
     /// P0.1 per-turn slot holding the in-flight prefetch handle armed by
     /// [`Self::start_memory_prefetch`] at turn start and consumed by
-    /// [`Self::relevant_memory_reminder_message`] before snapshot assembly.
+    /// [`Self::relevant_memory_reminder_messages`] before snapshot assembly.
     /// `None` between turns / when no prefetch is wired. Mirrors the
     /// pending-handle slot pattern of the recovery / cache-safe slots.
     pub(crate) pending_memory_prefetch: Mutex<Option<memory::prefetch::PendingMemoryPrefetch>>,
@@ -1858,6 +1861,7 @@ impl ConversationOrchestrator {
             perms,
             output,
             session: Arc::new(Mutex::new(session)),
+            turn_gate: Mutex::new(()),
             current_effort: std::sync::RwLock::new(current_effort),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
             memory,
@@ -2664,7 +2668,7 @@ impl ConversationOrchestrator {
 
     /// Attach a memory prefetcher so the per-turn `relevant_memories` surfacing
     /// reminder is injected (P0.1). Without this the surfacing channel is a
-    /// strict no-op ([`Self::relevant_memory_reminder_message`] returns `None`),
+    /// strict no-op ([`Self::relevant_memory_reminder_messages`] returns empty),
     /// keeping the locked fixtures byte-identical — the LingXi equivalent of
     /// claude-code's `tengu_moth_copse`-default-false gate (here: "is a prefetch
     /// wired at all"). Wired at the composition root once a real
@@ -4691,6 +4695,12 @@ impl ConversationOrchestrator {
                 })
                 .collect(),
             unknown_models: !state.unpriced_models.is_empty(),
+            current_usage: state.last_usage.map(|usage| traits::CurrentUsageSnapshot {
+                input_tokens: usage.tokens.input,
+                output_tokens: usage.tokens.output,
+                cache_read_input_tokens: state.last_cache_read_input_tokens,
+                cache_creation_input_tokens: state.last_cache_creation_input_tokens,
+            }),
         }
     }
 
@@ -5891,6 +5901,49 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Atomically persist oversized hook output below this session's
+    /// root-confined `tool-results` directory and return the attachment copy.
+    pub(crate) async fn persist_large_hook_output(&self, text: &str) -> Option<String> {
+        let config_home = self.config_home.clone()?;
+        let (session_uuid, cwd) = {
+            let session = self.session.lock().await;
+            (
+                session.session_id.as_uuid().to_string(),
+                self.current_cwd().to_string_lossy().into_owned(),
+            )
+        };
+        let relative = std::path::PathBuf::from("projects")
+            .join(session::jsonl::path::project_dir_name(&cwd))
+            .join(session_uuid)
+            .join("tool-results")
+            .join(format!("hook-{}.txt", uuid::Uuid::new_v4()));
+        let absolute = config_home.join(&relative);
+        let bytes = text.as_bytes().to_vec();
+        let write = tokio::task::spawn_blocking(move || {
+            traits::rooted_fs::atomic_write(
+                &config_home,
+                &relative,
+                &bytes,
+                traits::AtomicWriteOptions {
+                    overwrite: false,
+                    ..traits::AtomicWriteOptions::default()
+                },
+            )
+        })
+        .await;
+        match write {
+            Ok(Ok(())) => Some(format!("(Full output saved to: {})", absolute.display())),
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "failed to persist oversized hook output");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "oversized hook output writer task failed");
+                None
+            }
+        }
+    }
+
     /// Persist the latest active-goal snapshot as a transcript metadata line.
     ///
     /// This keeps `/goal` resumable on non-compacted transcripts; compact
@@ -5900,54 +5953,49 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         active_goal: Option<&engine::session::ActiveGoalState>,
     ) {
-        let Some(writer) = self.jsonl_writer.as_ref() else {
+        let status = if active_goal.is_some() {
+            traits::GoalStatusKind::Set
+        } else {
+            traits::GoalStatusKind::Cleared
+        };
+        self.persist_goal_status_attachment(status, active_goal)
+            .await;
+    }
+
+    async fn persist_goal_status_attachment(
+        &self,
+        status: traits::GoalStatusKind,
+        active_goal: Option<&engine::session::ActiveGoalState>,
+    ) {
+        let Some(goal) = active_goal else {
             return;
         };
-        let session_id_str = self.session.lock().await.session_id.to_string();
-        let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
-        let git_branch = self.resolve_git_branch().await;
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "subtype".to_string(),
-            serde_json::Value::String(GOAL_STATE_SUBTYPE.to_string()),
-        );
-        extra.insert(
-            "goalState".to_string(),
-            active_goal
-                .map(|goal| serde_json::to_value(goal).unwrap_or(serde_json::Value::Null))
-                .unwrap_or(serde_json::Value::Null),
-        );
-
-        let jmsg = session::JsonlMessage {
-            message_type: "system".to_string(),
-            uuid: uuid::Uuid::new_v4().to_string(),
-            parent_uuid,
-            session_id: session_id_str.clone(),
-            timestamp: chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string(),
-            cwd: self.current_cwd().to_string_lossy().into_owned(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            message: serde_json::Value::Null,
-            is_sidechain: false,
-            user_type: Some("external".to_string()),
-            git_branch,
-            entrypoint: Some(entrypoint_value()),
-            slug: None,
-            prompt_id: None,
-            logical_parent_uuid: None,
-            extra,
+        let total_tokens = self.snapshot_cost_real().await.total_tokens;
+        let duration_ms = std::time::SystemTime::now()
+            .duration_since(goal.set_at)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let snapshot = traits::ActiveGoalSnapshot {
+            condition: goal.condition.clone(),
+            set_at: goal.set_at,
+            last_reason: goal.last_reason.clone(),
+            iterations: goal.iterations,
+            tokens_at_start: goal.tokens_at_start,
         };
-        let line_uuid = jmsg.uuid.clone();
-        match writer.append(&jmsg).await {
-            Ok(()) => {
-                *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
-                telemetry::emit_session_appended(&session_id_str, &line_uuid);
-            }
-            Err(e) => {
-                self.record_transcript_append_failure(&session_id_str, "active_goal", &e)
-                    .await;
-            }
+        let attachment = traits::GoalStatusAttachment {
+            kind: "goal_status".to_string(),
+            status,
+            condition: goal.condition.clone(),
+            iterations: goal.iterations,
+            duration_ms,
+            tokens: total_tokens.saturating_sub(goal.tokens_at_start),
+            last_reason: goal.last_reason.clone(),
+            goal_state: matches!(status, traits::GoalStatusKind::Set).then_some(snapshot),
+        };
+        match serde_json::to_value(attachment) {
+            Ok(value) => self.persist_hook_attachment_to_jsonl(value).await,
+            Err(error) => tracing::warn!(%error, "failed to encode goal status attachment"),
         }
     }
 
@@ -5972,6 +6020,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             priority: GOAL_STOP_HOOK_PRIORITY,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let _ = self
             .hooks
@@ -6010,16 +6061,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     pub(crate) async fn clear_active_goal_state_and_hook(
         &self,
     ) -> Option<traits::ActiveGoalSnapshot> {
-        let (session_id, cleared) = {
+        self.finish_active_goal_state_and_hook(traits::GoalStatusKind::Cleared)
+            .await
+    }
+
+    async fn finish_active_goal_state_and_hook(
+        &self,
+        status: traits::GoalStatusKind,
+    ) -> Option<traits::ActiveGoalSnapshot> {
+        let (session_id, goal, cleared) = {
             let mut s = self.session.lock().await;
-            let cleared = s.active_goal.take().map(|goal| traits::ActiveGoalSnapshot {
-                condition: goal.condition,
+            let goal = s.active_goal.take();
+            let cleared = goal.as_ref().map(|goal| traits::ActiveGoalSnapshot {
+                condition: goal.condition.clone(),
                 set_at: goal.set_at,
-                last_reason: goal.last_reason,
+                last_reason: goal.last_reason.clone(),
+                iterations: goal.iterations,
+                tokens_at_start: goal.tokens_at_start,
             });
-            (s.session_id, cleared)
+            (s.session_id, goal, cleared)
         };
-        self.persist_active_goal_state_to_jsonl(None).await;
+        if let Some(goal) = goal.as_ref() {
+            self.persist_goal_status_attachment(status, Some(goal))
+                .await;
+        }
         let _ = self
             .remove_active_goal_stop_hook_for_session(session_id)
             .await;
@@ -6678,6 +6743,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// - [`orch_events::CONVERSATION_COMPLETED`] on success
     /// - [`orch_events::CONVERSATION_FAILED`] on error
     pub async fn run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
+        let _turn_guard = self.turn_gate.lock().await;
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
@@ -7130,6 +7196,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .iter()
             .find(|(hook_id, _)| *hook_id == goal_hook_id)
         else {
+            self.record_goal_evaluation(Some("Goal completion hook did not run".to_string()), true)
+                .await;
             return Some(StopHookDisposition::GoalContinue(
                 "Goal completion hook did not run".to_string(),
             ));
@@ -7145,10 +7213,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             .map(strip_goal_prompt_block_reason)
                             .filter(|reason| !reason.is_empty())
                             .unwrap_or_else(|| "Goal not met yet".to_string());
+                        self.record_goal_evaluation(Some(reason.clone()), true)
+                            .await;
                         return Some(StopHookDisposition::GoalContinue(reason));
                     }
                 }
-                let _ = self.clear_active_goal_state_and_hook().await;
+                // The terminal `achieved` attachment below carries the updated
+                // iteration count; avoid writing a redundant intermediate
+                // `set` attachment for the same successful evaluation.
+                self.record_goal_evaluation(None, false).await;
+                let _ = self
+                    .finish_active_goal_state_and_hook(traits::GoalStatusKind::Achieved)
+                    .await;
                 None
             }
             hooks::HookOutcome::Timeout
@@ -7161,8 +7237,26 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 } else {
                     "Goal completion check failed".to_string()
                 };
+                self.record_goal_evaluation(Some(reason.clone()), true)
+                    .await;
                 Some(StopHookDisposition::GoalContinue(reason))
             }
+        }
+    }
+
+    async fn record_goal_evaluation(&self, last_reason: Option<String>, persist_active: bool) {
+        let snapshot = {
+            let mut session = self.session.lock().await;
+            let Some(goal) = session.active_goal.as_mut() else {
+                return;
+            };
+            goal.iterations = goal.iterations.saturating_add(1);
+            goal.last_reason = last_reason;
+            goal.clone()
+        };
+        if persist_active {
+            self.persist_active_goal_state_to_jsonl(Some(&snapshot))
+                .await;
         }
     }
 
@@ -8015,14 +8109,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Stop dispatch's `hook-${randomUUID()}` — the SAME id shape the
         // dispatch's `hook_additional_context` record uses (BIN off 233240830).
         //
-        // Written BEFORE the meta message so the transcript order matches the
-        // oracle's yield order.
-        //
-        // RESIDUAL: the oracle derives the meta message FROM this attachment at
-        // API-normalization time and persists only the attachment, whereas the
-        // port persists both. Left as-is deliberately — the existing message
-        // bytes are byte-locked by the FIX C tests and unpicking the double
-        // record is a separate change.
+        // The derived meta message is kept in live API history but is not written
+        // as a second JSONL row. Cold resume performs the same normalization from
+        // this attachment, so the on-disk transcript has one source of truth.
         self.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
             &hooks::HookAttachmentIdentity {
                 hook_name: "Stop".to_string(),
@@ -8038,9 +8127,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let msg = ConversationMessage::user_meta(MessageId::new(), content);
         {
             let mut s = self.session.lock().await;
-            s.history.push(msg.clone());
+            s.history.push(msg);
         }
-        self.persist_message_to_jsonl(&msg).await;
     }
 
     async fn try_run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
@@ -8200,6 +8288,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         prompt: &str,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        let _turn_guard = self.turn_gate.lock().await;
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
@@ -8207,7 +8296,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
         let result = self
-            .try_run_turn_streaming(prompt, Vec::new(), None, None)
+            .try_run_turn_streaming(prompt, Vec::new(), None, None, false)
             .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
@@ -8231,6 +8320,36 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         result
     }
 
+    /// Start a model turn solely to deliver completed async-hook responses.
+    ///
+    /// No synthetic human prompt is added to history or JSONL. The completed
+    /// hook buffer contributes the transient `async_hook_response` meta user
+    /// message during request assembly, so the provider still receives a valid
+    /// user boundary while the transcript remains faithful.
+    pub async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, OrchestratorError> {
+        let _turn_guard = self.turn_gate.lock().await;
+        self.output.emit_turn_started().await;
+        let result = self
+            .try_run_turn_streaming("", Vec::new(), None, None, true)
+            .await;
+        self.emit_terminal_rate_limit_if_changed(&result).await;
+        match result {
+            Ok(
+                ConversationOutcome::EndTurn { .. } | ConversationOutcome::StopHookPrevented { .. },
+            ) => Ok(TurnOutcome::EndTurn),
+            Err(OrchestratorError::MaxTurnsReached { .. }) => Ok(TurnOutcome::MaxTurns),
+            Err(error) => {
+                let error = self.enrich_api_error(error);
+                self.output
+                    .emit_system_notice(&error.to_string(), true)
+                    .await;
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("error", &cost).await;
+                Err(error)
+            }
+        }
+    }
+
     /// Internal streaming turn driver (no telemetry — wrapped by
     /// `run_turn_streaming`).
     #[allow(clippy::too_many_lines)]
@@ -8247,6 +8366,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `StreamingToolExecutor` user_interrupted path.
         user_cancel: Option<CancellationToken>,
         message_id: Option<MessageId>,
+        transient_rewake: bool,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::ExecutorPump;
         use protocol::ContentBlock;
@@ -8273,11 +8393,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             prompt.to_string(),
             images,
         );
-        {
+        let prior_message_id = {
             let mut s = self.session.lock().await;
-            s.history.push(user_msg.clone());
+            let prior = s.history.last().map(ConversationMessage::id);
+            if !transient_rewake {
+                s.history.push(user_msg.clone());
+            }
+            prior
+        };
+        if !transient_rewake {
+            self.persist_message_to_jsonl(&user_msg).await;
         }
-        self.persist_message_to_jsonl(&user_msg).await;
 
         // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this
         // user message, so `track_edit` (fired by Edit/Write/NotebookEdit during
@@ -8287,14 +8413,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // persisting it now would leave disk-based restore (`rewind_from_disk`,
         // which runs after the TUI unwinds and rebuilds the index from these
         // lines) with nothing to restore.
-        let file_history_msg_id = user_msg.id().as_uuid();
-        if let Some(fh) = &self.file_history {
-            fh.make_snapshot(file_history_msg_id).await;
+        let file_history_msg_id = (!transient_rewake).then(|| user_msg.id().as_uuid());
+        if let (Some(fh), Some(message_id)) = (&self.file_history, file_history_msg_id) {
+            fh.make_snapshot(message_id).await;
         }
 
         // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
         // first stream is opened. No-op when unregistered.
-        if self.fire_user_prompt_submit(prompt, user_msg.id()).await {
+        if !transient_rewake && self.fire_user_prompt_submit(prompt, user_msg.id()).await {
             return Ok(ConversationOutcome::StopHookPrevented {
                 turn_count: 0,
                 final_message_id: user_msg.id(),
@@ -8342,7 +8468,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // turn's assistant id). The top-of-loop user-interrupt guard reports it as
         // the turn's `final_message_id` when it stops a turn before the next model
         // call (claude-code `aborted_streaming` — query.ts:1015).
-        let mut last_message_id = user_msg.id();
+        let mut last_message_id = prior_message_id.unwrap_or_else(|| user_msg.id());
         loop {
             // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
             // every terminal top-of-loop guard, including `max_turns`. A message
@@ -8402,7 +8528,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
             // P0.1 (streaming twin): arm the memory-selector prefetch CONCURRENTLY
             // with this turn (claude-code `wAo`). Fired here at turn start so the
-            // in-flight handle is ready when `relevant_memory_reminder_message`
+            // in-flight handle is ready when `relevant_memory_reminder_messages`
             // awaits it below, before the blocking-limit estimate. A strict no-op
             // when no prefetch is wired, keeping the locked streaming fixtures
             // byte-identical. See [`Self::start_memory_prefetch`].
@@ -8581,17 +8707,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
 
             // P0.1 (streaming twin): per-turn, transient `relevant_memories`
-            // SURFACING reminder — the memory-selector/prefetch result rendered
-            // as one `<system-reminder>` meta user message. Appended to THIS
+            // SURFACING reminders — the memory-selector/prefetch result rendered
+            // as one meta user message per surfaced memory. Appended to THIS
             // turn's OUTGOING snapshot only (never `session.history` / JSONL),
             // after the async-hook reminder and BEFORE the blocking-limit estimate
             // below so its tokens are counted in the prompt size. Awaits the
-            // prefetch armed by `start_memory_prefetch` at turn start. `None` when
+            // prefetch armed by `start_memory_prefetch` at turn start. Empty when
             // no prefetch is wired / empty result / everything already injected.
-            // See [`Self::relevant_memory_reminder_message`].
-            if let Some(reminder) = self.relevant_memory_reminder_message().await {
-                turn_reminders.push(reminder);
-            }
+            // See [`Self::relevant_memory_reminder_messages`].
+            turn_reminders.extend(self.relevant_memory_reminder_messages().await);
 
             // EXPERIMENTAL_SKILL_SEARCH (streaming twin): per-turn, transient
             // `skill_discovery` SURFACING reminder, collected AFTER the memory
@@ -10104,7 +10228,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // these lines, so the record must carry the backups, not the empty map
         // it had at turn start. Persisted unconditionally (an edit-free turn
         // still records a restore point for conversation-only rewind).
-        if let Some(fh) = &self.file_history {
+        if let (Some(fh), Some(file_history_msg_id)) = (&self.file_history, file_history_msg_id) {
             if let (Some(record), Some(writer)) =
                 (fh.snapshot_record(file_history_msg_id), &self.jsonl_writer)
             {
@@ -10146,6 +10270,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         prompt: &str,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        let _turn_guard = self.turn_gate.lock().await;
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
@@ -10430,6 +10555,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         cancel: CancellationToken,
         message_id: Option<MessageId>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        let _turn_guard = self.turn_gate.lock().await;
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
@@ -10459,7 +10585,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // and is still reported `Cancelled` here — faithful: claude-code only
         // aborts Cancel-behavior tools; Block tools / the stream finish.
         let r = self
-            .try_run_turn_streaming(prompt, images, Some(cancel.clone()), message_id)
+            .try_run_turn_streaming(prompt, images, Some(cancel.clone()), message_id, false)
             .await;
         match r {
             Ok(
@@ -11084,7 +11210,7 @@ As you answer the user's questions, you can use the following context:\n\
              Remember to follow the specific guidelines for this style.\n</system-reminder>",
             resolved.name
         );
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// SKILLLIST.1: the per-turn, transient `skill_listing` reminder, or `None`
@@ -11305,7 +11431,7 @@ As you answer the user's questions, you can use the following context:\n\
         let provider = self.async_hook_responses.as_ref()?;
         let responses = provider.take_pending_responses().await;
         let content = crate::prompt::async_hook_response::render_reminder(&responses)?;
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// T35: the per-turn, transient `task-notification` reminder, or `None` when
@@ -11973,9 +12099,9 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// CONCURRENTLY with the main API call (claude-code's `wAo` prefetch
     /// side-channel). Called at the START of each turn in BOTH drivers, BEFORE
     /// the snapshot is assembled, so the in-flight handle is ready for
-    /// [`Self::relevant_memory_reminder_message`] to await. A strict no-op when
+    /// [`Self::relevant_memory_reminder_messages`] to await. A strict no-op when
     /// no prefetch is wired ([`Self::memory_prefetch`] is `None`) — then the slot
-    /// stays empty and the surfacing reminder is `None`, keeping the locked
+    /// stays empty and the surfacing reminder list is empty, keeping the locked
     /// fixtures byte-identical.
     ///
     /// The prefetch query is the latest NON-meta user-message text in the
@@ -12036,18 +12162,18 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         *self.pending_memory_prefetch.lock().await = Some(pending);
     }
 
-    /// P0.1: the per-turn, transient `relevant_memories` SURFACING reminder — the
-    /// memory-selector/prefetch result rendered as a single `<system-reminder>`
-    /// meta user message. Returns `None` when no prefetch was armed this turn
+    /// P0.1: the per-turn, transient `relevant_memories` SURFACING reminders — the
+    /// memory-selector/prefetch result rendered as one meta user message per
+    /// surfaced memory. Returns an empty list when no prefetch was armed this turn
     /// ([`Self::start_memory_prefetch`] left the slot empty / no prefetch wired),
     /// the prefetch resolved to an empty set, or every surfaced memory was
     /// already injected (the SHARED dedup below).
     ///
     /// 1:1 with claude-code v2.1.181's `relevant_memories` attachment
     /// (`normalizeAttachmentForAPI` case `"relevant_memories"`, messages.ts —
-    /// see [`memory::surfacing::render_surfacing_block`] for the exact shape):
+    /// see [`memory::surfacing::render_surfacing_messages`] for the exact shape):
     /// the em-dash idx-0 preamble + per-memory `Memory: {path}:` header (with a
-    /// `>1`-day staleness prefix) wrapped in one `<system-reminder>` envelope.
+    /// `>1`-day staleness prefix), preserving each memory's message boundary.
     ///
     /// SHARED DEDUP: a memory is skipped when its path is in EITHER
     /// [`Self::surfaced_memory_paths`] (already surfaced a prior turn) OR
@@ -12059,22 +12185,24 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// Like every other per-turn reminder, the message is appended ONLY to the
     /// per-turn OUTGOING snapshot (never `session.history` / JSONL), so it is
     /// recomputed each turn and never accumulates.
-    pub(crate) async fn relevant_memory_reminder_message(&self) -> Option<ConversationMessage> {
+    pub(crate) async fn relevant_memory_reminder_messages(&self) -> Vec<ConversationMessage> {
         // Never await an unresolved side query on the model-call critical path.
         // Leave it in the slot so it can run concurrently with this iteration
         // and be collected by a later one.
         let pending = {
             let mut slot = self.pending_memory_prefetch.lock().await;
-            let pending = slot.take()?;
+            let Some(pending) = slot.take() else {
+                return Vec::new();
+            };
             if !pending.is_ready() {
                 *slot = Some(pending);
-                return None;
+                return Vec::new();
             }
             pending
         };
         let surfaced = pending.take().await;
         if surfaced.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         // SHARED DEDUP — skip any memory already surfaced this session OR already
@@ -12099,11 +12227,13 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             out
         };
         if fresh.is_empty() {
-            return None;
+            return Vec::new();
         }
 
-        let content = memory::surfacing::render_surfacing_block(&fresh);
-        Some(ConversationMessage::user(MessageId::new(), content))
+        memory::surfacing::render_surfacing_messages(&fresh)
+            .into_iter()
+            .map(|content| ConversationMessage::user_meta(MessageId::new(), content))
+            .collect()
     }
 
     /// EXPERIMENTAL_SKILL_SEARCH: arm the skill-discovery prefetch CONCURRENTLY
@@ -13325,6 +13455,9 @@ mod turn_recovery_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -13522,6 +13655,64 @@ mod turn_recovery_tests {
             MessageId::new(),
             "x".repeat(8_000_000),
         ));
+    }
+
+    struct RewakeResponses(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl crate::prompt::async_hook_response::AsyncHookResponseProvider for RewakeResponses {
+        async fn take_pending_responses(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("rewake", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "continued"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_async_hook_responses(Arc::new(RewakeResponses(std::sync::Mutex::new(vec![
+            "background verification finished".into(),
+        ]))));
+
+        let outcome = orch.run_async_hook_rewake().await.expect("rewake turn");
+        assert_eq!(outcome, TurnOutcome::EndTurn);
+
+        let calls = streaming.captured_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].messages.iter().any(|message| {
+            message.is_meta()
+                && message
+                    .text_content()
+                    .contains("background verification finished")
+        }));
+        assert!(
+            calls[0]
+                .messages
+                .iter()
+                .all(|message| message.is_meta() || !message.text_content().is_empty()),
+            "the provider request must not contain a synthetic empty human prompt"
+        );
+
+        let history = orch.session.lock().await.history.clone();
+        assert_eq!(history.len(), 1, "only the assistant response is durable");
+        assert!(matches!(history[0], ConversationMessage::Assistant { .. }));
     }
 
     // -------- RECOV.1 — streaming blocking-limit preempt --------
@@ -14393,8 +14584,9 @@ mod turn_recovery_tests {
             "continue:false must terminate as StopHookPrevented, got {outcome:?}"
         );
 
-        // The exact meta message is appended to history (persisted via the same
-        // `persist_message_to_jsonl` path as `append_stop_hook_feedback`).
+        // The exact meta message is appended to live history. The transcript
+        // persists only its typed attachment; cold resume derives this message
+        // from that single source of truth.
         let session = orch.session();
         let s = session.lock().await;
         let found = s.history.iter().any(|m| {
@@ -14465,6 +14657,20 @@ mod turn_recovery_tests {
         assert!(
             tool_use_id.starts_with("hook-"),
             "Stop mints `hook-${{randomUUID()}}`, got {tool_use_id}"
+        );
+        let duplicate_rows = raw
+            .lines()
+            .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
+            .filter(|row| {
+                row["type"] == "user"
+                    && row["message"]["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("STOP-CONTINUATION"))
+            })
+            .count();
+        assert_eq!(
+            duplicate_rows, 0,
+            "the normalized meta message must not be persisted beside its attachment: {raw}"
         );
     }
 
@@ -17252,7 +17458,7 @@ mod nested_memory_reminder_tests {
     }
 }
 
-// P0.1: `relevant_memory_reminder_message` SURFACING tests.
+// P0.1: `relevant_memory_reminder_messages` SURFACING tests.
 //
 // A `MemoryPrefetch::with_fixed_result` (seeded surfaced set) is wired via
 // `with_memory_prefetch`; `start_memory_prefetch` arms the per-turn handle and
@@ -17352,7 +17558,7 @@ mod relevant_memory_reminder_tests {
         let orch = orch_bare();
         // Without arming, and with no prefetch, the reminder is a strict no-op.
         orch.start_memory_prefetch().await;
-        assert!(orch.relevant_memory_reminder_message().await.is_none());
+        assert!(orch.relevant_memory_reminder_messages().await.is_empty());
         assert!(!orch.has_memory_prefetch());
     }
 
@@ -17360,14 +17566,14 @@ mod relevant_memory_reminder_tests {
     async fn empty_prefetch_result_yields_none() {
         let orch = orch_with_seed(vec![]);
         orch.start_memory_prefetch().await;
-        assert!(orch.relevant_memory_reminder_message().await.is_none());
+        assert!(orch.relevant_memory_reminder_messages().await.is_empty());
     }
 
     #[tokio::test]
     async fn not_armed_yields_none() {
         // A wired prefetch that was never armed this turn (slot empty) ⇒ None.
         let orch = orch_with_seed(vec![mem("/m/a.md", "A", 0)]);
-        assert!(orch.relevant_memory_reminder_message().await.is_none());
+        assert!(orch.relevant_memory_reminder_messages().await.is_empty());
     }
 
     #[tokio::test]
@@ -17375,11 +17581,12 @@ mod relevant_memory_reminder_tests {
         let orch = orch_with_seed(vec![mem("/m/a.md", "USE FD NOT FIND", 0)]);
         orch.start_memory_prefetch().await;
         let msg = orch
-            .relevant_memory_reminder_message()
+            .relevant_memory_reminder_messages()
             .await
+            .pop()
             .expect("seeded prefetch must surface");
         let text = msg.text_content();
-        assert!(text.starts_with("<system-reminder>\n"), "got: {text}");
+        assert!(msg.is_meta(), "relevant memory must be a meta user message");
         assert!(
             text.contains(
                 "Retrieved for possible relevance \u{2014} use only if it actually applies"
@@ -17390,7 +17597,6 @@ mod relevant_memory_reminder_tests {
             text.contains("Memory: /m/a.md:\n\nUSE FD NOT FIND"),
             "got: {text}"
         );
-        assert!(text.ends_with("\n</system-reminder>"), "got: {text}");
     }
 
     #[tokio::test]
@@ -17399,13 +17605,13 @@ mod relevant_memory_reminder_tests {
         // Turn 0: surfaced.
         orch.start_memory_prefetch().await;
         assert!(
-            orch.relevant_memory_reminder_message().await.is_some(),
+            !orch.relevant_memory_reminder_messages().await.is_empty(),
             "first surfacing must inject"
         );
         // Turn 1: same memory ⇒ already in surfaced_memory_paths ⇒ no re-inject.
         orch.start_memory_prefetch().await;
         assert!(
-            orch.relevant_memory_reminder_message().await.is_none(),
+            orch.relevant_memory_reminder_messages().await.is_empty(),
             "an already-surfaced memory must not be re-injected"
         );
     }
@@ -17454,7 +17660,7 @@ mod relevant_memory_reminder_tests {
         seed_read_state(&orch, PathBuf::from("/m/a.md"));
         orch.start_memory_prefetch().await;
         assert!(
-            orch.relevant_memory_reminder_message().await.is_none(),
+            orch.relevant_memory_reminder_messages().await.is_empty(),
             "a path already in read_state_map must not be surfaced"
         );
     }
@@ -17469,11 +17675,8 @@ mod relevant_memory_reminder_tests {
         ]);
         seed_read_state(&orch, PathBuf::from("/m/seen.md"));
         orch.start_memory_prefetch().await;
-        let text = orch
-            .relevant_memory_reminder_message()
-            .await
-            .expect("the fresh memory must surface")
-            .text_content();
+        let messages = orch.relevant_memory_reminder_messages().await;
+        let text = messages[0].text_content();
         assert!(text.contains("Memory: /m/new.md:\n\nNEW"), "got: {text}");
         assert!(
             !text.contains("/m/seen.md"),
@@ -17486,15 +17689,26 @@ mod relevant_memory_reminder_tests {
         let orch = orch_with_seed(vec![mem("/m/seeded.md", "SEEDED", 0)]);
         seed_host_read_state(&orch, PathBuf::from("/m/seeded.md"));
         orch.start_memory_prefetch().await;
-        let text = orch
-            .relevant_memory_reminder_message()
-            .await
-            .expect("host-seeded path must still surface as fresh memory")
-            .text_content();
+        let messages = orch.relevant_memory_reminder_messages().await;
+        let text = messages[0].text_content();
         assert!(
             text.contains("Memory: /m/seeded.md:\n\nSEEDED"),
             "got: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn multiple_memories_keep_independent_meta_message_boundaries() {
+        let orch = orch_with_seed(vec![mem("/m/a.md", "A", 0), mem("/m/b.md", "B", 0)]);
+        orch.start_memory_prefetch().await;
+        let messages = orch.relevant_memory_reminder_messages().await;
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(ConversationMessage::is_meta));
+        assert!(messages[0].text_content().contains("Memory: /m/a.md:"));
+        assert!(messages[1].text_content().contains("Memory: /m/b.md:"));
+        assert!(!messages[1]
+            .text_content()
+            .contains("Retrieved for possible relevance"));
     }
 }
 
@@ -18438,6 +18652,9 @@ mod hook_attachment_persistence_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         });
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -18507,6 +18724,38 @@ mod hook_attachment_persistence_tests {
             raw.contains(r#""attachment":{"type":"hook_cancelled"}"#),
             "sink persisted the payload: {raw}"
         );
+    }
+
+    #[tokio::test]
+    async fn sink_atomically_persists_oversized_hook_output_in_session_storage() {
+        use hooks::HookAttachmentSink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let sink = Arc::new(crate::JsonlHookAttachmentSink::new());
+        let orch =
+            Arc::new(orch_with_writer(dir.path(), path).with_config_home(dir.path().to_path_buf()));
+        let session_uuid = orch.session.lock().await.session_id.as_uuid().to_string();
+        sink.attach(&orch);
+        let body = "x".repeat(hooks::attachment::HOOK_OUTPUT_INLINE_LIMIT + 1);
+
+        let reference = sink
+            .persist_large_output(&body)
+            .await
+            .expect("persisted reference");
+        let output_dir = session::jsonl::path::tool_results_dir(
+            dir.path(),
+            &orch.current_cwd().to_string_lossy(),
+            &session_uuid,
+        );
+        let files = std::fs::read_dir(output_dir)
+            .expect("tool-results directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("tool-results entries");
+        assert_eq!(files.len(), 1);
+        let saved = files[0].path();
+        assert!(reference.contains(&saved.to_string_lossy().to_string()));
+        assert_eq!(std::fs::read_to_string(saved).expect("full output"), body);
     }
 }
 

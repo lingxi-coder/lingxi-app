@@ -2040,6 +2040,9 @@ async fn exec_with_start_context(context: &str) -> Arc<hooks::HookExecutorImpl> 
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
     let mut exec = hooks::HookExecutorImpl::new(
         registry,
@@ -2080,6 +2083,9 @@ async fn exec_with_two_start_contexts(c0: &str, c1: &str) -> Arc<hooks::HookExec
             priority: -(i as i32),
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         });
     }
     let mut exec = hooks::HookExecutorImpl::new(
@@ -2204,6 +2210,9 @@ fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition 
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     }
 }
 
@@ -2352,6 +2361,9 @@ async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
     let mut exec = hooks::HookExecutorImpl::new(
         registry,

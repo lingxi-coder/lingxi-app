@@ -112,6 +112,9 @@ fn context_pre_hook_executor() -> Arc<HookExecutorImpl> {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);

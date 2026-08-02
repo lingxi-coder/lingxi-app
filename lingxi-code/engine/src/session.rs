@@ -68,6 +68,12 @@ pub struct ActiveGoalState {
     /// Most recent stop-time evaluation reason, when available.
     #[serde(default)]
     pub last_reason: Option<String>,
+    /// Number of completed Stop evaluations for this goal.
+    #[serde(default)]
+    pub iterations: u64,
+    /// Cumulative session tokens when the goal was set.
+    #[serde(default)]
+    pub tokens_at_start: u64,
 }
 
 /// Timestamp sidecar for timing-sensitive history policies.

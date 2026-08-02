@@ -4460,12 +4460,29 @@ impl PluginRuntime {
 /// (mirrors TS `removeDeliveredAsyncHooks`). A plain `std::sync::Mutex` — every
 /// critical section is a brief push / `mem::take`, never held across an `await`.
 #[derive(Clone, Default)]
-struct AsyncHookResponseBuffer(Arc<std::sync::Mutex<Vec<String>>>);
+struct AsyncHookResponseBuffer {
+    responses: Arc<std::sync::Mutex<Vec<String>>>,
+    rewake_target: Arc<std::sync::OnceLock<std::sync::Weak<dyn OrchestratorHandle>>>,
+}
 
 impl AsyncHookResponseBuffer {
     fn push(&self, text: String) {
-        if let Ok(mut v) = self.0.lock() {
+        if let Ok(mut v) = self.responses.lock() {
             v.push(text);
+        }
+    }
+
+    fn attach_rewake_target(&self, orchestrator: &Arc<ConversationOrchestrator>) {
+        let target: Arc<dyn OrchestratorHandle> = orchestrator.clone();
+        let _ = self.rewake_target.set(Arc::downgrade(&target));
+    }
+
+    async fn rewake(&self) {
+        let Some(target) = self.rewake_target.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        if let Err(error) = target.run_async_hook_rewake().await {
+            tracing::warn!(error = %error, "async hook re-wake turn failed");
         }
     }
 }
@@ -4475,7 +4492,7 @@ impl orchestrator::prompt::async_hook_response::AsyncHookResponseProvider
     for AsyncHookResponseBuffer
 {
     async fn take_pending_responses(&self) -> Vec<String> {
-        self.0
+        self.responses
             .lock()
             .map(|mut v| std::mem::take(&mut *v))
             .unwrap_or_default()
@@ -7081,6 +7098,10 @@ pub async fn build(
     let async_hook_drain_buffer = async_hook_response_buffer.clone();
     tokio::spawn(async move {
         while let Some((_id, result)) = async_hook_completion_rx.recv().await {
+            let should_rewake = result
+                .response
+                .as_ref()
+                .is_some_and(|response| response.async_rewake);
             if let Some(resp) = result.response.as_ref() {
                 if let Some(text) = resp.system_message.clone() {
                     async_hook_drain_buffer.push(text);
@@ -7088,6 +7109,9 @@ pub async fn build(
                 if let Some(text) = resp.additional_context.clone() {
                     async_hook_drain_buffer.push(text);
                 }
+            }
+            if should_rewake {
+                async_hook_drain_buffer.rewake().await;
             }
         }
     });
@@ -8837,7 +8861,7 @@ pub async fn build(
         )))
         // B5: fold completed background (`async`) hook responses back into the
         // next turn. Backed by the completion-channel drain buffer above.
-        .with_async_hook_responses(Arc::new(async_hook_response_buffer))
+        .with_async_hook_responses(Arc::new(async_hook_response_buffer.clone()))
         // T35: fold terminal background tasks (a backgrounded `local_bash` /
         // `local_agent` / MCP `monitor` …) back into the next turn as a
         // `<task-notification>` reminder so the model learns its async task
@@ -8958,6 +8982,7 @@ pub async fn build(
         _ => orch_builder,
     };
     let orch = Arc::new(orch_builder);
+    async_hook_response_buffer.attach_rewake_target(&orch);
 
     // Fill the hook-attachment sink's cell now that the orchestrator (and its
     // JSONL writer) exists, so every hook run from here on persists its one

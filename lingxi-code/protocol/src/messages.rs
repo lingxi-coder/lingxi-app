@@ -236,6 +236,12 @@ pub struct CompactActiveGoalState {
     /// Most recent stop-time evaluation reason, when available.
     #[serde(default, alias = "lastReason")]
     pub last_reason: Option<String>,
+    /// Stop evaluations completed while the goal was active.
+    #[serde(default)]
+    pub iterations: u64,
+    /// Cumulative tokens when the goal was activated.
+    #[serde(default, alias = "tokensAtStart")]
+    pub tokens_at_start: u64,
 }
 
 /// Typed metadata carried by a compact-boundary system message.

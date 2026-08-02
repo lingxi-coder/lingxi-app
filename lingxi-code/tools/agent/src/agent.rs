@@ -320,14 +320,18 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// stays the canonical/full schema for deserialization; this projection is what
 /// [`Tool::input_schema`] exposes.
 ///
-/// claude additionally omits `run_in_background` when background tasks are
-/// disabled or on the pro plan (`K8t||MY() ? e.omit({run_in_background:!0}) : e`);
-/// that is runtime-conditional and `input_schema(&self)` has no context, so it
-/// is left in place (deferred).
 static AGENT_INPUT_SCHEMA_MODEL: Lazy<Value> = Lazy::new(|| {
     let mut schema = AGENT_INPUT_SCHEMA.clone();
     if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         props.remove("cwd");
+    }
+    schema
+});
+
+static AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
+    let mut schema = AGENT_INPUT_SCHEMA_MODEL.clone();
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        props.remove("run_in_background");
     }
     schema
 });
@@ -450,6 +454,7 @@ fn render_completed_model_content(
 /// in `lingxi-coordinator` post-M5).
 pub struct AgentTool {
     ctx: BuiltinToolContext,
+    background_available: bool,
 }
 
 /// Normalize a subagent `description` the way the binary does — `replace(/\s+/g,
@@ -529,7 +534,15 @@ impl AgentTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        let background_available = !traits::env::is_env_truthy(
+            std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+                .ok()
+                .as_deref(),
+        ) && !traits::subscription::is_pro_plan();
+        Self {
+            ctx,
+            background_available,
+        }
     }
 
     fn fresh_invocation_id() -> String {
@@ -1324,7 +1337,11 @@ impl Tool for AgentTool {
     fn input_schema(&self) -> &Value {
         // claude advertises `yJp().omit({cwd:!0})` — the model-facing schema
         // never exposes `cwd` (set internally by isolation / explicit override).
-        &AGENT_INPUT_SCHEMA_MODEL
+        if self.background_available {
+            &AGENT_INPUT_SCHEMA_MODEL
+        } else {
+            &AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -1867,7 +1884,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .as_deref(),
         );
         let run_in_background = (parsed.run_in_background.unwrap_or(true) || selected.background)
-            && !background_tasks_disabled;
+            && !background_tasks_disabled
+            && self.background_available;
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -2039,8 +2057,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // explicit-model override is honored only on the non-fork path.
             model: if is_fork { None } else { parsed.model.clone() },
             model_profile: None,
-            // claude collapses `run_in_background === true`; absent ⇒ false.
-            run_in_background: parsed.run_in_background.unwrap_or(false),
+            // This is the synchronous arm after the resolved availability and
+            // subscription gates above. Do not leak the caller's now-disabled
+            // request bit into the child runtime snapshot.
+            run_in_background,
             // Fork path carries no teammate/isolation/cwd overrides.
             name: if is_fork { None } else { parsed.name.clone() },
             team_name: if is_fork {

@@ -34,6 +34,8 @@ pub fn compact_active_goal_from_engine(
         condition: goal.condition.clone(),
         set_at: goal.set_at,
         last_reason: goal.last_reason.clone(),
+        iterations: goal.iterations,
+        tokens_at_start: goal.tokens_at_start,
     }
 }
 
@@ -46,6 +48,8 @@ pub fn compact_active_goal_into_engine(
         condition: goal.condition,
         set_at: goal.set_at,
         last_reason: goal.last_reason,
+        iterations: goal.iterations,
+        tokens_at_start: goal.tokens_at_start,
     }
 }
 
@@ -367,6 +371,8 @@ mod tests {
             set_at: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_700_000_000),
             last_reason: Some("tests still running".to_string()),
+            iterations: 3,
+            tokens_at_start: 42,
         };
         let wire = compact_active_goal_from_engine(&goal);
         let json = serde_json::to_value(&wire).unwrap();

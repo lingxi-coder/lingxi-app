@@ -65,6 +65,8 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .ask_user_question_timeout
             .or(prev.ask_user_question_timeout),
         process_wrapper: next.process_wrapper.or(prev.process_wrapper),
+        status_line: next.status_line.or(prev.status_line),
+        subagent_status_line: next.subagent_status_line.or(prev.subagent_status_line),
         // Scalar Override — `viewMode` (enum default|verbose|focus), H-BIN-11.
         view_mode: next.view_mode.or(prev.view_mode),
         // Scalar Override — `emojiCompletionEnabled` (default true at use).

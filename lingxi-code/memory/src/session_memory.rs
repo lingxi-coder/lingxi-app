@@ -4,7 +4,7 @@
 //! to `<configHome>/agents/session-memory/<session_id>.md`. That file is NOT
 //! injected through a second path: the next session re-loads it through the
 //! normal memory-load → selector → prefetch pipeline and it surfaces via the
-//! SURFACING-owned `relevant_memory_reminder_message`. So this module owns only
+//! SURFACING-owned `relevant_memory_reminder_messages`. So this module owns only
 //! the WRITE + threshold-trigger side; it never adds a surfacing API of its own.
 //!
 //! 1:1 with the §6.5 sketch:

@@ -5,7 +5,7 @@
 //!
 //! P0.1: the pending handle resolves to a `Vec<`[`SurfacedMemory`]`>` — the
 //! exact shape [`crate::surfacing::render_surfacing_block`] renders — so the
-//! orchestrator's `relevant_memory_reminder_message` can await this handle and
+//! orchestrator's `relevant_memory_reminder_messages` can await this handle and
 //! render the surfaced block with no further disk work.
 //!
 //! Two construction modes:
@@ -127,7 +127,7 @@ impl MemoryPrefetch {
     /// Construct a prefetcher that resolves to a PRE-SELECTED surfaced set,
     /// bypassing the selector body. Used by a composition root that has already
     /// picked the relevant memories, and by the orchestrator's surfacing tests
-    /// to drive `relevant_memory_reminder_message` deterministically. The result
+    /// to drive `relevant_memory_reminder_messages` deterministically. The result
     /// is buffered before [`Self::start`] returns; no selector is needed.
     #[must_use]
     pub fn with_fixed_result(

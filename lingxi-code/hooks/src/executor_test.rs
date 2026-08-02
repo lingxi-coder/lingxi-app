@@ -54,6 +54,9 @@ mod session_end_timeout_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -222,6 +225,9 @@ mod session_end_batch_deadline_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -506,6 +512,9 @@ mod command_arm_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -2077,6 +2086,9 @@ mod async_path_tests {
             priority,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -2228,7 +2240,7 @@ mod async_path_tests {
         let runner = GatedRunner::new(gate, ran.clone(), out("never", "", 0));
 
         let mut hook = command_hook(false);
-        hook.timeout = Some(Duration::from_millis(10));
+        hook.async_timeout = Some(Duration::from_millis(10));
         let hook_id = hook.id;
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -2520,6 +2532,117 @@ mod async_path_tests {
         }
     }
 
+    /// Runtime-marker runner whose detached output is released explicitly,
+    /// allowing the test to observe the interval after the originating hook
+    /// dispatch returns but before the real child completes.
+    struct DeferredMarkerRunner {
+        sender: StdMutex<Option<tokio::sync::oneshot::Sender<ProcessOutput>>>,
+        async_timeout: Duration,
+    }
+
+    impl DeferredMarkerRunner {
+        fn new(async_timeout: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                sender: StdMutex::new(None),
+                async_timeout,
+            })
+        }
+
+        fn release(&self, output: ProcessOutput) {
+            self.sender
+                .lock()
+                .unwrap()
+                .take()
+                .expect("runtime marker registered its output channel")
+                .send(output)
+                .expect("detached output receiver remains live");
+        }
+    }
+
+    #[async_trait]
+    impl ProcessRunner for DeferredMarkerRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        async fn run_hook_with_async_detection(
+            &self,
+            _cmd: &SandboxedCommand,
+            _default_async_timeout: Duration,
+        ) -> Result<traits::HookRunOutcome, ProcessError> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            *self.sender.lock().unwrap() = Some(tx);
+            Ok(traits::HookRunOutcome::Backgrounded {
+                async_timeout: self.async_timeout,
+                output: Some(rx),
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct AsyncProgressObserver {
+        events: StdMutex<Vec<(bool, String)>>,
+    }
+
+    #[async_trait]
+    impl traits::OutputStream for AsyncProgressObserver {
+        async fn emit_text(&self, _text: &str) {}
+
+        async fn emit_tool_call(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _input: &serde_json::Value,
+        ) {
+        }
+
+        async fn emit_tool_result(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _model_text: &str,
+            _result: &serde_json::Value,
+        ) {
+        }
+
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+
+        async fn emit_hook_progress_started(
+            &self,
+            progress_id: &str,
+            _hook_name: &str,
+            _hook_event: &str,
+            _status_message: Option<&str>,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((true, progress_id.to_string()));
+        }
+
+        async fn emit_hook_progress_finished(&self, progress_id: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((false, progress_id.to_string()));
+        }
+    }
+
     /// A Command hook that prints the runtime `{"async":true}` marker contributes
     /// NO synchronous decision (it never blocks the turn), and its eventual
     /// post-marker output folds back on the async registry's completion channel —
@@ -2589,6 +2712,45 @@ mod async_path_tests {
         assert_eq!(seen[0]["content"], "");
         assert_eq!(seen[0]["stdout"], got.stdout);
         assert_eq!(seen[0]["exitCode"], 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_marker_keeps_live_progress_until_detached_child_completes() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+        let runner = DeferredMarkerRunner::new(Duration::from_secs(30));
+        let observer = Arc::new(AsyncProgressObserver::default());
+
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox))
+        .with_async_registry(async_reg)
+        .with_hook_observer(observer.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg.decision, None);
+        {
+            let events = observer.events.lock().unwrap();
+            assert_eq!(events.len(), 1, "only the progress start is visible");
+            assert!(events[0].0);
+        }
+
+        runner.release(out("done", "", 0));
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("runtime completion must publish")
+            .expect("completion channel remains open");
+
+        let events = observer.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "completion closes the live progress row");
+        assert!(!events[1].0);
+        assert_eq!(events[0].1, events[1].1, "the same progress run is closed");
     }
 
     /// When no async registry is wired, the runtime-marker path degrades to a
@@ -2782,6 +2944,57 @@ mod once_and_status_message_tests {
     use crate::events::{HookEvent, HookEventType};
     use protocol::{HookId, ToolUseId};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct ProgressObserver {
+        events: Mutex<Vec<(bool, String, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl traits::OutputStream for ProgressObserver {
+        async fn emit_text(&self, _text: &str) {}
+
+        async fn emit_tool_call(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _input: &serde_json::Value,
+        ) {
+        }
+
+        async fn emit_tool_result(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _model_text: &str,
+            _result: &serde_json::Value,
+        ) {
+        }
+
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+
+        async fn emit_hook_progress_started(
+            &self,
+            progress_id: &str,
+            _hook_name: &str,
+            _hook_event: &str,
+            status_message: Option<&str>,
+        ) {
+            self.events.lock().unwrap().push((
+                true,
+                progress_id.to_string(),
+                status_message.map(str::to_owned),
+            ));
+        }
+
+        async fn emit_hook_progress_finished(&self, progress_id: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((false, progress_id.to_string(), None));
+        }
+    }
 
     /// `HttpTransport` stub — never exercised by these Builtin-arm tests.
     struct UnusedHttp;
@@ -2871,6 +3084,9 @@ mod once_and_status_message_tests {
             priority: 0,
             once,
             status_message: status_message.map(Into::into),
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -3048,6 +3264,9 @@ mod once_and_status_message_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let (exec, _reg) = executor_with(hook, Arc::new(RewriteBuiltin));
         let post = HookEvent::PostToolUse {
@@ -3103,6 +3322,9 @@ mod once_and_status_message_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let (exec, _reg) = executor_with(hook, Arc::new(RewriteAll));
         let post = HookEvent::PostToolUse {
@@ -3158,6 +3380,9 @@ mod once_and_status_message_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let (exec, _reg) = executor_with(hook, Arc::new(TermHook));
         let pre = HookEvent::PreToolUse {
@@ -3193,6 +3418,9 @@ mod once_and_status_message_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let (exec, _reg) = executor_with(hook, handler);
         let post = HookEvent::PostToolUse {
@@ -3238,6 +3466,31 @@ mod once_and_status_message_tests {
             Some("Formatting\u{2026}"),
             "the per-hook status_message threads onto the progress event",
         );
+    }
+
+    #[tokio::test]
+    async fn status_message_reaches_live_observer_and_is_cleared() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let handler = Arc::new(CountingBuiltin {
+            id: "with-live-status".into(),
+            runs,
+            outcome: HookOutcome::Success,
+        });
+        let (exec, _reg) = executor_with(
+            builtin_hook("with-live-status", false, Some("Formatting\u{2026}")),
+            handler,
+        );
+        let observer = Arc::new(ProgressObserver::default());
+        let exec = exec.with_hook_observer(observer.clone());
+
+        exec.execute(pre_event(), HookContext::default()).await;
+
+        let events = observer.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].0);
+        assert_eq!(events[0].2.as_deref(), Some("Formatting\u{2026}"));
+        assert!(!events[1].0);
+        assert_eq!(events[0].1, events[1].1, "finish clears the same run");
     }
 
     /// A hook with no `status_message` yields a progress event whose
@@ -3360,6 +3613,9 @@ mod http_agent_dispatch_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -3489,6 +3745,9 @@ mod http_agent_dispatch_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -3654,6 +3913,9 @@ mod prompt_dispatch_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 

@@ -87,6 +87,8 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("sandbox", layer.sandbox.is_some()),
         ("hooks", layer.hooks.is_some()),
         ("outputStyle", layer.output_style.is_some()),
+        ("statusLine", layer.status_line.is_some()),
+        ("subagentStatusLine", layer.subagent_status_line.is_some()),
         ("telemetryEnabled", layer.telemetry_enabled.is_some()),
         ("model", layer.model.is_some()),
         // 2.1.198 AWS/GCP auth-refresh script keys (scalar-override). The

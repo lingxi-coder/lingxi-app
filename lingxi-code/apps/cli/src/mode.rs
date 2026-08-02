@@ -948,7 +948,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
     // only when the widget re-armed `dirty` on a turn boundary, set-only-on-
     // change). The slot is shared with the render thread via `run_app`.
-    let status_line = tui::status_line::new_slot(read_status_line_config().await);
+    let resolved_status_lines = read_status_line_configs(
+        tui_build.flag_settings.as_ref(),
+        tui_build.status_line_source_scope,
+    )
+    .await;
+    let subagent_status_line = resolved_status_lines.subagent;
+    let status_line = tui::status_line::new_slot(resolved_status_lines.main);
     // Seed the boot-known 2.1.206 payload base fields (`Rf()`): session_id +
     // transcript_path (`<lingxi_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`).
     {
@@ -970,6 +976,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let status_pump = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut warned_failure = false;
         loop {
             interval.tick().await;
             // Build the (command, stdin-json) payload under the lock, then DROP
@@ -978,10 +985,19 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 let Ok(mut s) = pump_slot.lock() else {
                     continue;
                 };
-                if !s.dirty {
+                let periodic_due = s
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.refresh_interval)
+                    .is_some_and(|refresh| {
+                        s.last_run_at
+                            .is_none_or(|last_run| last_run.elapsed() >= refresh)
+                    });
+                if !s.dirty && !periodic_due {
                     continue;
                 }
                 s.dirty = false;
+                s.last_run_at = Some(std::time::Instant::now());
                 tui::status_line::build_payload(&s)
             };
             let Some((command, stdin_json)) = payload else {
@@ -996,12 +1012,19 @@ pub(crate) async fn run_ratatui_with_initial_state(
             })
             .await
             .unwrap_or_default();
-            // `run_status_line_command` already returns formatted text — set
-            // only on change (claude-code `prev.statusLineText === text`).
-            if let Some(text) = out {
-                if let Ok(mut s) = pump_slot.lock() {
+            // A failed command must remove stale custom output so the built-in
+            // footer remains authoritative. Keep diagnostics one-shot because
+            // refreshInterval can otherwise emit the same warning forever.
+            if let Ok(mut s) = pump_slot.lock() {
+                if let Some(text) = out {
                     if s.text.as_deref() != Some(text.as_str()) {
                         s.text = Some(text);
+                    }
+                } else {
+                    s.text = None;
+                    if !warned_failure {
+                        warned_failure = true;
+                        tracing::warn!("statusLine failed; using the built-in status UI");
                     }
                 }
             }
@@ -1010,10 +1033,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // Live Agent/Task status below the composer. The task registry is the
     // authoritative lifecycle source for detached agents; send full snapshots
     // only on change so the blocking render loop does no async polling itself.
+    let agent_status_line_slot = status_line.clone();
     let agent_status_pump = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut previous = Vec::new();
+        let mut custom_by_id = std::collections::HashMap::<String, String>::new();
+        let mut custom_default: Option<String> = None;
+        let mut custom_active = false;
+        let mut last_custom_run: Option<std::time::Instant> = None;
+        let mut last_custom_task_ids = Vec::<String>::new();
+        let mut warned_custom_failure = false;
         loop {
             interval.tick().await;
             let Ok(records) = agent_status_registry
@@ -1022,14 +1052,128 @@ pub(crate) async fn run_ratatui_with_initial_state(
             else {
                 continue;
             };
-            let mut agents = records
+            let mut records = records
                 .into_iter()
                 .filter(|record| {
                     is_agent_task_type(&record.task_type)
                         && matches!(record.status.as_str(), "pending" | "running")
                 })
+                .collect::<Vec<_>>();
+            records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+            let task_ids = records
+                .iter()
+                .map(|record| record.task_id.clone())
+                .collect::<Vec<_>>();
+            if task_ids.is_empty() {
+                custom_by_id.clear();
+                custom_default = None;
+                custom_active = false;
+                last_custom_task_ids.clear();
+            }
+
+            if let Some(config) = subagent_status_line
+                .as_ref()
+                .filter(|config| config.should_run(true))
+            {
+                let refresh_due = !records.is_empty()
+                    && (task_ids != last_custom_task_ids
+                        || last_custom_run
+                            .is_none_or(|last_run| last_run.elapsed() >= config.refresh_interval));
+                if refresh_due {
+                    last_custom_run = Some(std::time::Instant::now());
+                    last_custom_task_ids.clone_from(&task_ids);
+                    let columns = crossterm::terminal::size()
+                        .map(|(columns, _)| columns.max(1))
+                        .unwrap_or(80);
+                    let (base, model, effort, context_window_size, cwd) = {
+                        let Ok(shared) = agent_status_line_slot.lock() else {
+                            continue;
+                        };
+                        (
+                            tui::status_line::build_input(&shared),
+                            shared.data.model_id.clone(),
+                            shared.data.effort_level.clone(),
+                            shared.data.context_window_tokens,
+                            shared.data.cwd.display().to_string(),
+                        )
+                    };
+                    let tasks = records
+                        .iter()
+                        .map(|record| {
+                            let name = record.agent_type.clone().unwrap_or_else(|| {
+                                if record.task_type == "in_process_teammate" {
+                                    "teammate".to_string()
+                                } else {
+                                    "Agent".to_string()
+                                }
+                            });
+                            tui_core::status_line_command::SubagentStatusLineTask {
+                                id: record.task_id.clone(),
+                                name,
+                                task_type: record.task_type.clone(),
+                                status: record.status.clone(),
+                                description: record.description.clone(),
+                                label: record.description.clone(),
+                                start_time: record.started_at_ms.unwrap_or(0),
+                                model: model.clone(),
+                                effort: effort.clone(),
+                                context_window_size,
+                                token_count: 0,
+                                token_samples: Vec::new(),
+                                cwd: cwd.clone(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let input = tui_core::status_line_command::build_subagent_status_line_input(
+                        &base, columns, &tasks,
+                    )
+                    .to_string();
+                    let command = config.command.clone();
+                    let output = tokio::task::spawn_blocking(move || {
+                        tui_core::status_line_command::run_subagent_status_line_command(
+                            &command,
+                            &input,
+                            columns,
+                            tui_core::status_line_command::STATUS_LINE_TIMEOUT,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    match output.filter(|rows| {
+                        tui_core::status_line_command::validate_subagent_status_line_output(
+                            rows, &task_ids,
+                        )
+                    }) {
+                        Some(rows) => {
+                            custom_by_id.clear();
+                            custom_default = None;
+                            for row in rows {
+                                if let Some(id) = row.id.filter(|id| !id.is_empty()) {
+                                    custom_by_id.insert(id, row.content);
+                                } else {
+                                    custom_default = Some(row.content);
+                                }
+                            }
+                            custom_active = true;
+                        }
+                        None => {
+                            custom_active = false;
+                            if !warned_custom_failure {
+                                warned_custom_failure = true;
+                                tracing::warn!(
+                                    "subagentStatusLine failed; using the built-in agent status"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            let agents = records
+                .into_iter()
                 .map(|record| tui_core::orchestrator_bridge::RunningAgentStatus {
-                    id: record.task_id,
+                    id: record.task_id.clone(),
                     task_type: record.task_type.clone(),
                     agent_type: record.agent_type.unwrap_or_else(|| {
                         if record.task_type == "in_process_teammate" {
@@ -1040,9 +1184,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     }),
                     description: record.description,
                     status: record.status,
+                    custom_content: custom_active.then(|| {
+                        custom_by_id
+                            .get(&record.task_id)
+                            .cloned()
+                            .or_else(|| custom_default.clone())
+                            .unwrap_or_default()
+                    }),
                 })
                 .collect::<Vec<_>>();
-            agents.sort_by(|left, right| left.id.cmp(&right.id));
             if agents == previous {
                 continue;
             }
@@ -2456,37 +2606,59 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     (lingxi_home, project_dir)
 }
 
-/// Read the effective `statusLine` with source provenance and freeze the trust
-/// and hook-policy decision that must be checked before process creation.
-fn read_status_line_config_from(
+#[derive(Debug, Default)]
+struct ResolvedStatusLineConfigs {
+    main: Option<tui_core::status_line_command::StatusLineConfig>,
+    subagent: Option<tui_core::status_line_command::SubagentStatusLineConfig>,
+}
+
+/// Read effective `statusLine` and `subagentStatusLine` configurations with
+/// source provenance, then freeze the trust/hook-policy decision that must be
+/// checked before any process creation.
+fn read_status_line_configs_from(
     lingxi_home: &std::path::Path,
     project_dir: &std::path::Path,
     managed_tiers: &[String],
     workspace_trusted: bool,
-) -> Option<tui_core::status_line_command::StatusLineConfig> {
+    flag_settings: Option<&engine::settings::SettingsJson>,
+    source_scope: (bool, bool, bool),
+) -> ResolvedStatusLineConfigs {
     use migrations::settings_update::read_settings_map;
     use tui_core::status_line_command::{StatusLineExecutionPolicy, StatusLineSource};
 
     let mut status_line: Option<(serde_json::Value, StatusLineSource)> = None;
+    let mut subagent_status_line: Option<(serde_json::Value, StatusLineSource)> = None;
     let mut disable_all_hooks = false;
     let mut managed_hooks_only = false;
     let file_layers = [
-        (lingxi_home.join("settings.json"), StatusLineSource::User),
         (
+            source_scope.0,
+            lingxi_home.join("settings.json"),
+            StatusLineSource::User,
+        ),
+        (
+            source_scope.1,
             project_dir.join(branding::DOT_DIR).join("settings.json"),
             StatusLineSource::Project,
         ),
         (
+            source_scope.2,
             project_dir
                 .join(branding::DOT_DIR)
                 .join("settings.local.json"),
             StatusLineSource::Local,
         ),
     ];
-    for (path, source) in file_layers {
+    for (enabled, path, source) in file_layers {
+        if !enabled {
+            continue;
+        }
         if let Ok(map) = read_settings_map(&path) {
             if let Some(value) = map.get("statusLine") {
                 status_line = Some((value.clone(), source));
+            }
+            if let Some(value) = map.get("subagentStatusLine") {
+                subagent_status_line = Some((value.clone(), source));
             }
             if let Some(value) = map
                 .get("disableAllHooks")
@@ -2502,6 +2674,20 @@ fn read_status_line_config_from(
             }
         }
     }
+    if let Some(flag) = flag_settings {
+        if let Some(value) = flag.status_line.as_ref() {
+            status_line = Some((value.clone(), StatusLineSource::Flag));
+        }
+        if let Some(value) = flag.subagent_status_line.as_ref() {
+            subagent_status_line = Some((value.clone(), StatusLineSource::Flag));
+        }
+        if let Some(value) = flag.disable_all_hooks {
+            disable_all_hooks = value;
+        }
+        if let Some(value) = flag.allow_managed_hooks_only {
+            managed_hooks_only = value;
+        }
+    }
     for raw in managed_tiers {
         let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw)
         else {
@@ -2509,6 +2695,9 @@ fn read_status_line_config_from(
         };
         if let Some(value) = map.get("statusLine") {
             status_line = Some((value.clone(), StatusLineSource::Managed));
+        }
+        if let Some(value) = map.get("subagentStatusLine") {
+            subagent_status_line = Some((value.clone(), StatusLineSource::Managed));
         }
         if let Some(value) = map
             .get("disableAllHooks")
@@ -2524,31 +2713,39 @@ fn read_status_line_config_from(
         }
     }
 
-    let (value, source) = status_line?;
-    tui_core::status_line_command::StatusLineConfig::from_settings_value(&value).map(|config| {
-        config.with_execution_policy(
-            source,
-            StatusLineExecutionPolicy {
-                workspace_trusted,
-                disable_all_hooks,
-                managed_hooks_only,
-            },
-        )
-    })
+    let policy = StatusLineExecutionPolicy {
+        workspace_trusted,
+        disable_all_hooks,
+        managed_hooks_only,
+    };
+    let main = status_line.and_then(|(value, source)| {
+        tui_core::status_line_command::StatusLineConfig::from_settings_value(&value)
+            .map(|config| config.with_execution_policy(source, policy))
+    });
+    let subagent = subagent_status_line.and_then(|(value, source)| {
+        tui_core::status_line_command::SubagentStatusLineConfig::from_settings_value(&value)
+            .map(|config| config.with_execution_policy(source, policy))
+    });
+    ResolvedStatusLineConfigs { main, subagent }
 }
 
-/// Live wrapper over [`read_status_line_config_from`].
-async fn read_status_line_config() -> Option<tui_core::status_line_command::StatusLineConfig> {
+/// Live wrapper over [`read_status_line_configs_from`].
+async fn read_status_line_configs(
+    flag_settings: Option<&engine::settings::SettingsJson>,
+    source_scope: (bool, bool, bool),
+) -> ResolvedStatusLineConfigs {
     let (lingxi_home, project_dir) = settings_dirs();
     let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
     let workspace_trusted = migrations::global_config::global_config_path().is_none_or(|path| {
         migrations::global_config::check_has_trust_dialog_accepted(&path, &project_dir)
     });
-    read_status_line_config_from(
+    read_status_line_configs_from(
         &lingxi_home,
         &project_dir,
         &managed_tiers,
         workspace_trusted,
+        flag_settings,
+        source_scope,
     )
 }
 
@@ -3077,6 +3274,81 @@ mod tests {
         // -p with piped input should still print one-shot (matches v0.6.0).
         let a = argv(Some("hi"), false);
         assert_eq!(decide_mode_with(&a, false), Mode::Print("hi".into()));
+    }
+
+    #[test]
+    fn status_line_configs_share_precedence_and_pre_spawn_policy() {
+        use tui_core::status_line_command::StatusLineSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"user-main"},"subagentStatusLine":{"type":"command","command":"user-agent"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"subagentStatusLine":{"type":"command","command":"local-agent"}}"#,
+        )
+        .unwrap();
+
+        let configs =
+            read_status_line_configs_from(&home, &project, &[], true, None, (true, true, true));
+        assert_eq!(configs.main.unwrap().source, StatusLineSource::User);
+        let subagent = configs.subagent.unwrap();
+        assert_eq!(subagent.source, StatusLineSource::Local);
+        assert_eq!(subagent.command, "local-agent");
+        assert!(subagent.should_run(true));
+
+        let managed = vec![
+            r#"{"allowManagedHooksOnly":true,"subagentStatusLine":{"type":"command","command":"managed-agent"}}"#.to_string(),
+        ];
+        let configs = read_status_line_configs_from(
+            &home,
+            &project,
+            &managed,
+            true,
+            None,
+            (true, true, true),
+        );
+        let subagent = configs.subagent.unwrap();
+        assert_eq!(subagent.source, StatusLineSource::Managed);
+        assert!(subagent.should_run(true));
+        assert!(
+            !configs.main.unwrap().should_run(true),
+            "managed-hooks-only must reject a user status command before spawn"
+        );
+
+        let configs =
+            read_status_line_configs_from(&home, &project, &[], false, None, (true, true, true));
+        assert!(!configs.subagent.unwrap().should_run(true));
+
+        let flag = engine::settings::SettingsJson {
+            status_line: Some(serde_json::json!({
+                "type":"command",
+                "command":"flag-main"
+            })),
+            ..Default::default()
+        };
+        let configs = read_status_line_configs_from(
+            &home,
+            &project,
+            &[],
+            true,
+            Some(&flag),
+            (false, false, false),
+        );
+        let main = configs.main.unwrap();
+        assert_eq!(main.source, StatusLineSource::Flag);
+        assert_eq!(main.command, "flag-main");
+        assert!(
+            configs.subagent.is_none(),
+            "disabled file scopes may not contribute subagentStatusLine"
+        );
     }
 
     #[test]

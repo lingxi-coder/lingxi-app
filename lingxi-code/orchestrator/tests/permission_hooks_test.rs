@@ -394,6 +394,9 @@ fn builtin_hook(name: &str, handler_id: &str, event_type: HookEventType) -> Hook
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     }
 }
 

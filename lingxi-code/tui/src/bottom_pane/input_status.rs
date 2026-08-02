@@ -9,6 +9,26 @@ use ratatui::text::{Line, Span};
 use tui_core::orchestrator_bridge::RunningAgentStatus;
 use tui_core::theme::Theme;
 
+/// Render transient hook status rows above the composer. These rows are live
+/// state only and deliberately have no transcript representation.
+#[must_use]
+pub fn hook_lines(
+    hooks: &std::collections::BTreeMap<String, String>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let accent = crate::style_adapter::to_ratatui(theme.suggestion);
+    hooks
+        .values()
+        .map(|status| {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("\u{00b7} ", Style::default().fg(accent)),
+                Span::styled(status.clone(), Style::default().fg(accent)),
+            ])
+        })
+        .collect()
+}
+
 /// Maximum task rows shown before a compact overflow line.
 const MAX_VISIBLE_TASKS: usize = 5;
 
@@ -185,6 +205,19 @@ pub fn agent_lines(agents: &[RunningAgentStatus], theme: &Theme) -> Vec<Line<'st
         return Vec::new();
     }
     let accent = crate::style_adapter::to_ratatui(theme.suggestion);
+    if agents.iter().any(|agent| agent.custom_content.is_some()) {
+        return agents
+            .iter()
+            .filter_map(|agent| agent.custom_content.as_deref())
+            .filter(|content| !content.is_empty())
+            .map(|content| {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(content.to_string(), Style::default().fg(accent)),
+                ])
+            })
+            .collect();
+    }
     vec![Line::from(vec![
         Span::raw("  "),
         Span::styled(agent_summary(agents), Style::default().fg(accent)),
@@ -246,6 +279,21 @@ mod tests {
     }
 
     #[test]
+    fn hook_status_rows_preserve_configured_copy() {
+        let hooks = std::collections::BTreeMap::from([
+            ("run-1".to_string(), "Formatting\u{2026}".to_string()),
+            ("run-2".to_string(), "Checking policy".to_string()),
+        ]);
+        assert_eq!(
+            plain(&hook_lines(&hooks, &Theme::dark())),
+            vec![
+                "  \u{00b7} Formatting\u{2026}",
+                "  \u{00b7} Checking policy"
+            ]
+        );
+    }
+
+    #[test]
     fn task_block_uses_claude_overflow_copy() {
         let tasks = (0..7)
             .map(|index| PlanTask {
@@ -291,6 +339,7 @@ mod tests {
                 agent_type: "Explore".into(),
                 description: format!("Mapping lane {index}"),
                 status: "running".into(),
+                custom_content: None,
             })
             .collect::<Vec<_>>();
         let lines = plain(&agent_lines(&agents, &Theme::dark()));
@@ -302,6 +351,7 @@ mod tests {
             agent_type: "Agent".into(),
             description: "Remote work".into(),
             status: "pending".into(),
+            custom_content: None,
         }];
         assert_eq!(
             plain(&agent_lines(&remote, &Theme::dark())),
@@ -315,6 +365,7 @@ mod tests {
                 agent_type: "teammate".into(),
                 description: "Review".into(),
                 status: "running".into(),
+                custom_content: None,
             },
             RunningAgentStatus {
                 id: "t2".into(),
@@ -322,6 +373,7 @@ mod tests {
                 agent_type: "teammate".into(),
                 description: "Test".into(),
                 status: "running".into(),
+                custom_content: None,
             },
         ];
         assert_eq!(
@@ -333,6 +385,32 @@ mod tests {
         assert_eq!(
             plain(&agent_lines(&mixed, &Theme::dark())),
             vec!["  2 background tasks"]
+        );
+    }
+
+    #[test]
+    fn custom_agent_rows_replace_summary_and_empty_content_hides() {
+        let agents = vec![
+            RunningAgentStatus {
+                id: "a1".into(),
+                task_type: "local_agent".into(),
+                agent_type: "Explore".into(),
+                description: "Map".into(),
+                status: "running".into(),
+                custom_content: Some("Exploring 42%".into()),
+            },
+            RunningAgentStatus {
+                id: "a2".into(),
+                task_type: "local_agent".into(),
+                agent_type: "Plan".into(),
+                description: "Plan".into(),
+                status: "running".into(),
+                custom_content: Some(String::new()),
+            },
+        ];
+        assert_eq!(
+            plain(&agent_lines(&agents, &Theme::dark())),
+            vec!["  Exploring 42%"]
         );
     }
 }

@@ -10,7 +10,9 @@
 //! command-hook contract (`claude-code/src/utils/hooks.ts`).
 
 use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
-use crate::async_registry::{AsyncHookRegistry, HookCompletion, HookWork};
+use crate::async_registry::{
+    AsyncHookRegistry, HookCompletion, HookWork, DEFAULT_ASYNC_HOOK_TIMEOUT_MS,
+};
 use crate::attachment::{self, CancellationTimeout, HookAttachmentIdentity, HookAttachmentSink};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
@@ -352,6 +354,31 @@ impl HookExecutorImpl {
         self
     }
 
+    async fn begin_hook_progress(
+        &self,
+        hook: &HookDefinition,
+        hook_event: &str,
+        identity: &HookAttachmentIdentity,
+    ) -> Option<String> {
+        let observer = self.hook_observer.as_ref()?;
+        let progress_id = format!("{}:{}", hook.id, identity.tool_use_id);
+        observer
+            .emit_hook_progress_started(
+                &progress_id,
+                &hook.name,
+                hook_event,
+                hook.status_message.as_deref(),
+            )
+            .await;
+        Some(progress_id)
+    }
+
+    async fn finish_hook_progress(&self, progress_id: Option<&str>) {
+        if let (Some(observer), Some(progress_id)) = (&self.hook_observer, progress_id) {
+            observer.emit_hook_progress_finished(progress_id).await;
+        }
+    }
+
     /// Override the SSRF guard used by HTTP hook dispatch.
     ///
     /// The default constructor keeps the production guard policy. This builder
@@ -438,6 +465,7 @@ impl HookExecutorImpl {
             sandbox: self.sandbox.clone(),
             async_registry: self.async_registry.clone(),
             attachment_sink: self.attachment_sink.clone(),
+            hook_observer: self.hook_observer.clone(),
         }
     }
 
@@ -579,6 +607,9 @@ impl HookExecutorImpl {
                 status_message: hook.status_message.clone(),
             });
             if hook.blocking {
+                let progress_id = self
+                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .await;
                 // Emit hook_started BEFORE dispatch (for --include-hook-events).
                 if let Some(observer) = &self.hook_observer {
                     observer
@@ -593,7 +624,8 @@ impl HookExecutorImpl {
                 let run_started = std::time::Instant::now();
                 let Ok(result) = tokio::time::timeout_at(
                     deadline,
-                    self.dispatcher().dispatch(hook, &event, &ctx),
+                    self.dispatcher()
+                        .dispatch(hook, &event, &ctx, progress_id.as_deref()),
                 )
                 .await
                 else {
@@ -627,6 +659,7 @@ impl HookExecutorImpl {
                             )
                             .await;
                     }
+                    self.finish_hook_progress(progress_id.as_deref()).await;
                     // hook runs are bounded by the batch deadline — fits u64
                     #[allow(clippy::cast_possible_truncation)]
                     let run_ms = run_started.elapsed().as_millis() as u64;
@@ -667,6 +700,9 @@ impl HookExecutorImpl {
                             outcome_str,
                         )
                         .await;
+                }
+                if !is_runtime_async_backgrounded(&result) {
+                    self.finish_hook_progress(progress_id.as_deref()).await;
                 }
                 // hook runs are bounded by the batch deadline — fits u64
                 #[allow(clippy::cast_possible_truncation)]
@@ -737,6 +773,9 @@ impl HookExecutorImpl {
                 status_message: hook.status_message.clone(),
             });
             if hook.blocking {
+                let progress_id = self
+                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .await;
                 // Emit hook_started BEFORE dispatch (for --include-hook-events).
                 if let Some(observer) = &self.hook_observer {
                     observer
@@ -745,7 +784,10 @@ impl HookExecutorImpl {
                 }
                 // Synchronous path — unchanged from M5-06.
                 let run_started = std::time::Instant::now();
-                let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                let result = self
+                    .dispatcher()
+                    .dispatch(hook, &event, &ctx, progress_id.as_deref())
+                    .await;
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
@@ -782,6 +824,9 @@ impl HookExecutorImpl {
                             outcome_str,
                         )
                         .await;
+                }
+                if !is_runtime_async_backgrounded(&result) {
+                    self.finish_hook_progress(progress_id.as_deref()).await;
                 }
                 // `once` runtime removal (claude-code `registerSkillHooks.ts:35-36`,
                 // `utils/hooks.ts:2918-2919`): drop the hook from the registry
@@ -858,8 +903,17 @@ impl HookExecutorImpl {
                 status_message: hook.status_message.clone(),
             });
             if hook.blocking {
+                let progress_id = self
+                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .await;
                 let run_started = std::time::Instant::now();
-                let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                let result = self
+                    .dispatcher()
+                    .dispatch(hook, &event, &ctx, progress_id.as_deref())
+                    .await;
+                if !is_runtime_async_backgrounded(&result) {
+                    self.finish_hook_progress(progress_id.as_deref()).await;
+                }
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
@@ -925,8 +979,17 @@ impl HookExecutorImpl {
                 status_message: hook.status_message.clone(),
             });
             if hook.blocking {
+                let progress_id = self
+                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .await;
                 let run_started = std::time::Instant::now();
-                let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                let result = self
+                    .dispatcher()
+                    .dispatch(hook, &event, &ctx, progress_id.as_deref())
+                    .await;
+                if !is_runtime_async_backgrounded(&result) {
+                    self.finish_hook_progress(progress_id.as_deref()).await;
+                }
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
@@ -975,7 +1038,15 @@ impl HookExecutorImpl {
         result: &HookResult,
         elapsed_ms: u64,
     ) {
-        if let Some(value) = build_run_attachment(hook, id, result, elapsed_ms) {
+        if let Some(value) = build_run_attachment_persisting(
+            self.attachment_sink.as_ref(),
+            hook,
+            id,
+            result,
+            elapsed_ms,
+        )
+        .await
+        {
             self.publish_attachment(agg, value).await;
         }
         // O2: `hook_system_message` — transcript + TUI only. Its renderer entry
@@ -990,7 +1061,12 @@ impl HookExecutorImpl {
             .and_then(|r| r.system_message.as_deref())
             .unwrap_or_default();
         if !system_message.is_empty() {
-            let value = attachment::system_message_attachment(id, system_message);
+            let mut value = attachment::system_message_attachment(id, system_message);
+            if let Some(reference) =
+                persist_large_hook_output(self.attachment_sink.as_ref(), system_message).await
+            {
+                value["content"] = serde_json::Value::String(reference);
+            }
             self.publish_attachment(agg, value).await;
         }
     }
@@ -1018,20 +1094,33 @@ impl HookExecutorImpl {
         ctx: &HookContext,
     ) -> Option<serde_json::Value> {
         let identity = attachment_identity(event);
+        let hook_event = format!("{:?}", event.event_type());
+        let progress_id = self.begin_hook_progress(hook, &hook_event, &identity).await;
         let Some(registry) = &self.async_registry else {
             // No registry wired: run inline but exclude the decision from the
             // aggregate so the "non-blocking can't block" contract still holds.
             let run_started = std::time::Instant::now();
-            let result = self.dispatcher().dispatch(hook, event, ctx).await;
+            let result = self
+                .dispatcher()
+                .dispatch(hook, event, ctx, progress_id.as_deref())
+                .await;
             if hook.once && matches!(result.outcome, HookOutcome::Success) {
                 self.registry.write().await.remove_once_hook(hook.id);
             }
             #[allow(clippy::cast_possible_truncation)]
             let run_ms = run_started.elapsed().as_millis() as u64;
-            let attachment = build_run_attachment(hook, &identity, &result, run_ms);
+            let attachment = build_run_attachment_persisting(
+                self.attachment_sink.as_ref(),
+                hook,
+                &identity,
+                &result,
+                run_ms,
+            )
+            .await;
             if let (Some(sink), Some(value)) = (&self.attachment_sink, &attachment) {
                 sink.record(value.clone()).await;
             }
+            self.finish_hook_progress(progress_id.as_deref()).await;
             return attachment;
         };
         let dispatcher = self.dispatcher();
@@ -1041,15 +1130,26 @@ impl HookExecutorImpl {
         let hook_registry = self.registry.clone();
         let hook_id = hook.id;
         let once = hook.once;
+        let dispatch_progress_id = progress_id.clone();
+        let rewake_message = hook
+            .async_rewake
+            .then(|| hook.rewake_message.clone().unwrap_or_default());
         let completion = attachment_completion(
             self.attachment_sink.clone(),
             hook_owned.clone(),
             identity,
             std::time::Instant::now(),
+            self.hook_observer.clone(),
+            progress_id.clone(),
         );
         let work: HookWork = Box::pin(async move {
             let result = dispatcher
-                .dispatch(&hook_owned, &event_owned, &ctx_owned)
+                .dispatch(
+                    &hook_owned,
+                    &event_owned,
+                    &ctx_owned,
+                    dispatch_progress_id.as_deref(),
+                )
                 .await;
             if once && matches!(result.outcome, HookOutcome::Success) {
                 hook_registry.write().await.remove_once_hook(hook_id);
@@ -1057,9 +1157,16 @@ impl HookExecutorImpl {
             result
         });
         if let Err(e) = registry
-            .spawn_with_completion(hook.id, hook.timeout, work, completion)
+            .spawn_with_completion_and_rewake(
+                hook.id,
+                hook.async_timeout,
+                work,
+                completion,
+                rewake_message,
+            )
             .await
         {
+            self.finish_hook_progress(progress_id.as_deref()).await;
             tracing::warn!(
                 hook_id = %hook.id,
                 error = %e,
@@ -1098,6 +1205,9 @@ struct Dispatcher {
     /// Transcript sink needed by runtime-marker completions. The synchronous
     /// caller has already returned by the time their real output is available.
     attachment_sink: Option<Arc<dyn HookAttachmentSink>>,
+    /// Live progress sink retained for runtime-marker hooks whose real command
+    /// completion happens after the originating dispatch has returned.
+    hook_observer: Option<Arc<dyn OutputStream>>,
 }
 
 impl Dispatcher {
@@ -1110,6 +1220,7 @@ impl Dispatcher {
         hook: &HookDefinition,
         event: &HookEvent,
         ctx: &HookContext,
+        progress_id: Option<&str>,
     ) -> HookResult {
         match &hook.executor {
             HookExecutor::Builtin { handler_id } => {
@@ -1299,8 +1410,9 @@ impl Dispatcher {
                 // for every hook (the default trait method), so non-async hooks —
                 // i.e. every hook that does not print the marker — behave exactly
                 // as the buffered path did.
-                let default_async_timeout =
-                    Duration::from_millis(crate::async_registry::DEFAULT_ASYNC_HOOK_TIMEOUT_MS);
+                let default_async_timeout = hook.async_timeout.unwrap_or_else(|| {
+                    Duration::from_millis(crate::async_registry::DEFAULT_ASYNC_HOOK_TIMEOUT_MS)
+                });
                 let run_started = std::time::Instant::now();
                 let (result, timed_out) = match process
                     .run_hook_with_async_detection(&sandboxed, default_async_timeout)
@@ -1320,6 +1432,7 @@ impl Dispatcher {
                         // publishes to the registry's `completion_tx`, mapped
                         // through the same command-hook contract as a foreground
                         // hook (`map_command_output`).
+                        let mut registered = false;
                         if let (Some(output_rx), Some(registry)) = (output, &self.async_registry) {
                             let hook_owned = hook.clone();
                             let hook_id = hook.id;
@@ -1328,6 +1441,8 @@ impl Dispatcher {
                                 hook_owned.clone(),
                                 attachment_identity(event),
                                 run_started,
+                                self.hook_observer.clone(),
+                                progress_id.map(str::to_owned),
                             );
                             let work: HookWork = Box::pin(async move {
                                 let out =
@@ -1344,20 +1459,25 @@ impl Dispatcher {
                             // the (biased) `work` arm wins and publishes the mapped
                             // output; on overrun the registry publishes a timeout
                             // result, matching claude's `asyncTimeout` semantics.
-                            if let Err(e) = registry
-                                .spawn_with_completion(
+                            match registry
+                                .spawn_with_completion_and_rewake(
                                     hook_id,
                                     Some(async_timeout),
                                     work,
                                     completion,
+                                    hook.async_rewake
+                                        .then(|| hook.rewake_message.clone().unwrap_or_default()),
                                 )
                                 .await
                             {
-                                tracing::warn!(
-                                    hook_id = %hook_id,
-                                    error = %e,
-                                    "failed to register async-marker hook fold-back",
-                                );
+                                Ok(_) => registered = true,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        hook_id = %hook_id,
+                                        error = %e,
+                                        "failed to register async-marker hook fold-back",
+                                    );
+                                }
                             }
                         }
                         // No synchronous decision — an async-marker hook never
@@ -1368,7 +1488,10 @@ impl Dispatcher {
                                 stdout: String::new(),
                                 stderr: String::new(),
                                 exit_code: None,
-                                response: None,
+                                response: registered.then(|| HookResponse {
+                                    async_backgrounded: true,
+                                    ..HookResponse::default()
+                                }),
                             },
                             false,
                         )
@@ -1513,6 +1636,7 @@ impl HookExecutorImpl {
                 matches!(agg.decision, Some(crate::response::HookDecision::Block));
             if resp.decision.is_some() && !already_blocked {
                 agg.decision = resp.decision;
+                agg.hook_source = Some(hook.source);
             }
             // Freeze the block reason at the first blocker: once blocked, a later
             // hook's `reason` no longer overwrites the aggregate one.
@@ -2577,17 +2701,43 @@ fn attachment_completion(
     hook: HookDefinition,
     identity: HookAttachmentIdentity,
     run_started: std::time::Instant,
+    observer: Option<Arc<dyn OutputStream>>,
+    progress_id: Option<String>,
 ) -> Option<HookCompletion> {
-    let sink = sink?;
+    if sink.is_none() && observer.is_none() {
+        return None;
+    }
     Some(Box::new(move |result| {
         Box::pin(async move {
+            let transferred_again = is_runtime_async_backgrounded(&result);
             #[allow(clippy::cast_possible_truncation)]
             let run_ms = run_started.elapsed().as_millis() as u64;
-            if let Some(value) = build_run_attachment(&hook, &identity, &result, run_ms) {
-                sink.record(value).await;
+            if let Some(sink) = sink {
+                if let Some(value) =
+                    build_run_attachment_persisting(Some(&sink), &hook, &identity, &result, run_ms)
+                        .await
+                {
+                    sink.record(value).await;
+                }
+            }
+            // A configured-async command can itself print the runtime async
+            // marker. In that case the nested registry completion owns this
+            // same progress id; closing it here would recreate the early-finish
+            // race one layer higher.
+            if !transferred_again {
+                if let (Some(observer), Some(progress_id)) = (observer, progress_id) {
+                    observer.emit_hook_progress_finished(&progress_id).await;
+                }
             }
         })
     }))
+}
+
+fn is_runtime_async_backgrounded(result: &HookResult) -> bool {
+    result
+        .response
+        .as_ref()
+        .is_some_and(|response| response.async_backgrounded)
 }
 
 /// Mint the identity fields shared by every attachment produced for one
@@ -2632,12 +2782,13 @@ fn build_run_attachment(
     // turn non-blocking. It is not a completed run and must never be persisted;
     // the Dispatcher records the eventual result once the detached process
     // actually finishes.
-    if matches!(&hook.executor, HookExecutor::Command { .. })
-        && matches!(result.outcome, HookOutcome::Success)
-        && result.exit_code.is_none()
-        && result.stdout.is_empty()
-        && result.stderr.is_empty()
-        && result.response.is_none()
+    if is_runtime_async_backgrounded(result)
+        || (matches!(&hook.executor, HookExecutor::Command { .. })
+            && matches!(result.outcome, HookOutcome::Success)
+            && result.exit_code.is_none()
+            && result.stdout.is_empty()
+            && result.stderr.is_empty()
+            && result.response.is_none())
     {
         return None;
     }
@@ -2698,9 +2849,45 @@ fn build_run_attachment(
     }
 }
 
+async fn persist_large_hook_output(
+    sink: Option<&Arc<dyn HookAttachmentSink>>,
+    text: &str,
+) -> Option<String> {
+    if text.chars().count() <= attachment::HOOK_OUTPUT_INLINE_LIMIT {
+        return None;
+    }
+    match sink {
+        Some(sink) => sink.persist_large_output(text).await,
+        None => None,
+    }
+}
+
+async fn build_run_attachment_persisting(
+    sink: Option<&Arc<dyn HookAttachmentSink>>,
+    hook: &HookDefinition,
+    id: &HookAttachmentIdentity,
+    result: &HookResult,
+    elapsed_ms: u64,
+) -> Option<serde_json::Value> {
+    let mut value = build_run_attachment(hook, id, result, elapsed_ms)?;
+    if matches!(result.outcome, HookOutcome::Success) && result.response.is_none() {
+        if let Some(reference) = persist_large_hook_output(sink, result.stdout.trim()).await {
+            value["content"] = serde_json::Value::String(reference);
+        }
+    }
+    Some(value)
+}
+
 /// The deadline in force for a hook — `re = q.timeout ? q.timeout*1000 : i`
 /// (BIN off 237797884), where `i` is the runner's per-arm default.
 fn attachment_timeout_ms(hook: &HookDefinition) -> u64 {
+    if !hook.blocking {
+        #[allow(clippy::cast_possible_truncation)]
+        return hook
+            .async_timeout
+            .unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS))
+            .as_millis() as u64;
+    }
     if let Some(t) = hook.timeout {
         // hook timeouts are seconds-scale — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
@@ -2827,12 +3014,18 @@ mod attachment_wiring_tests {
     #[derive(Default)]
     struct RecordingSink {
         seen: Mutex<Vec<Value>>,
+        large_outputs: Mutex<Vec<String>>,
     }
 
     #[async_trait]
     impl HookAttachmentSink for RecordingSink {
         async fn record(&self, attachment: Value) {
             self.seen.lock().unwrap().push(attachment);
+        }
+
+        async fn persist_large_output(&self, text: &str) -> Option<String> {
+            self.large_outputs.lock().unwrap().push(text.to_string());
+            Some("(Full output saved to: /session/tool-results/hook.txt)".into())
         }
     }
 
@@ -2950,6 +3143,9 @@ mod attachment_wiring_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -3031,6 +3227,25 @@ mod attachment_wiring_tests {
                 "durationMs"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn successful_large_output_is_persisted_and_replaced_by_a_reference() {
+        let sink = Arc::new(RecordingSink::default());
+        let output = "x".repeat(attachment::HOOK_OUTPUT_INLINE_LIMIT + 1);
+        let exec = exec_with(Ok(out(&output, "", 0)), sink.clone());
+
+        let agg = exec.execute(post_event(), HookContext::default()).await;
+
+        assert_eq!(
+            sink.large_outputs.lock().unwrap().as_slice(),
+            [output.as_str()]
+        );
+        assert_eq!(
+            agg.hook_attachments[0]["content"],
+            "(Full output saved to: /session/tool-results/hook.txt)"
+        );
+        assert_eq!(agg.hook_attachments[0]["stdout"], output);
     }
 
     /// An engine without an async registry executes config-non-blocking hooks

@@ -336,7 +336,7 @@ mod exclude_filter_tests {
 /// [`MemoryPrefetch::start`](memory::prefetch::MemoryPrefetch::start) scans the
 /// memdir, asks the selector which entries are relevant to the turn query, and
 /// surfaces them through
-/// [`ConversationOrchestrator::relevant_memory_reminder_message`](crate::ConversationOrchestrator).
+/// [`ConversationOrchestrator::relevant_memory_reminder_messages`](crate::ConversationOrchestrator).
 /// Hand the returned handle to
 /// [`ConversationOrchestrator::with_memory_prefetch`](crate::ConversationOrchestrator).
 ///

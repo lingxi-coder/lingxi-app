@@ -45,6 +45,18 @@ pub struct StatusLineData {
     pub output_style: String,
     /// Pre-formatted session cost string (`$0.0000`); parsed to `total_cost_usd`.
     pub cost: String,
+    /// Cumulative API duration in milliseconds.
+    pub total_api_duration_ms: u64,
+    /// Cumulative edited lines added.
+    pub total_lines_added: u64,
+    /// Cumulative edited lines removed.
+    pub total_lines_removed: u64,
+    /// Cumulative input tokens across model calls.
+    pub total_input_tokens: u64,
+    /// Cumulative output tokens across model calls.
+    pub total_output_tokens: u64,
+    /// Most recent successful model response usage.
+    pub current_usage: Option<traits::CurrentUsageSnapshot>,
     /// Context-window used fraction (0-1), from `TurnEvent::ContextPressure`.
     pub context_pct: f32,
     /// Raw context token estimate behind the fraction
@@ -83,6 +95,12 @@ impl Default for StatusLineData {
             cwd: PathBuf::new(),
             output_style: "default".to_string(),
             cost: String::new(),
+            total_api_duration_ms: 0,
+            total_lines_added: 0,
+            total_lines_removed: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            current_usage: None,
             context_pct: 0.0,
             used_tokens: 0,
             context_window_tokens: 0,
@@ -110,6 +128,8 @@ pub struct StatusLineShared {
     /// Slot creation time — `cost.total_duration_ms` (wall time since session
     /// start, the binary's `Dxe()`).
     pub started_at: Option<std::time::Instant>,
+    /// Last command start, used by `refreshInterval` while the session is idle.
+    pub last_run_at: Option<std::time::Instant>,
 }
 
 /// Composition-root-shared statusline slot: the widget writes inputs + dirty,
@@ -132,11 +152,21 @@ pub fn new_slot(config: Option<StatusLineConfig>) -> SharedStatusLine {
 #[must_use]
 pub fn build_payload(shared: &StatusLineShared) -> Option<(String, String)> {
     let cfg = shared.config.as_ref()?;
-    // trusted=true: the same upstream-trust stance the hooks executor takes
-    // (lingxi has no `hasTrustDialogAccepted` port yet).
+    // `true` here means no later renderer-local veto. The composition root has
+    // already frozen workspace trust and managed-hook policy into `cfg`, and
+    // `should_run` rechecks that snapshot before any command is spawned.
     if !cfg.should_run(true) {
         return None;
     }
+    let json = build_input(shared);
+    Some((cfg.command.clone(), json.to_string()))
+}
+
+/// Build the shared base payload even when no main `statusLine` command is
+/// configured. `subagentStatusLine` extends this exact payload with terminal
+/// columns and tasks, so both command surfaces observe one session snapshot.
+#[must_use]
+pub fn build_input(shared: &StatusLineShared) -> serde_json::Value {
     let d = &shared.data;
     let cwd = d.cwd.to_string_lossy();
     #[allow(clippy::cast_possible_truncation)]
@@ -144,7 +174,7 @@ pub fn build_payload(shared: &StatusLineShared) -> Option<(String, String)> {
         .started_at
         .map(|t| t.elapsed().as_millis() as u64)
         .unwrap_or(0);
-    let json = build_status_line_input(&StatusLineInputs {
+    build_status_line_input(&StatusLineInputs {
         session_id: &d.session_id,
         transcript_path: &d.transcript_path,
         model_id: &d.model_id,
@@ -156,9 +186,12 @@ pub fn build_payload(shared: &StatusLineShared) -> Option<(String, String)> {
         output_style: &d.output_style,
         cost_usd: parse_cost_usd(&d.cost),
         total_duration_ms,
-        total_api_duration_ms: 0, // residual — no per-call duration counter
-        total_lines_added: 0,     // residual — no edit-line counters
-        total_lines_removed: 0,
+        total_api_duration_ms: d.total_api_duration_ms,
+        total_lines_added: d.total_lines_added,
+        total_lines_removed: d.total_lines_removed,
+        total_input_tokens: d.total_input_tokens,
+        total_output_tokens: d.total_output_tokens,
+        current_usage: d.current_usage.as_ref(),
         used_tokens: d.used_tokens,
         context_window_tokens: d.context_window_tokens,
         fast_mode: d.fast_mode,
@@ -166,8 +199,7 @@ pub fn build_payload(shared: &StatusLineShared) -> Option<(String, String)> {
         thinking_enabled: d.thinking_enabled,
         vim_mode: d.vim_mode.as_deref(),
         raw_utilization: d.raw_utilization.as_ref(),
-    });
-    Some((cfg.command.clone(), json.to_string()))
+    })
 }
 
 #[cfg(test)]

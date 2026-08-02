@@ -177,11 +177,15 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
         condition: "ship it".to_string(),
         set_at,
         last_reason: Some("initial".to_string()),
+        iterations: 1,
+        tokens_at_start: 10,
     };
     let updated_goal = ActiveGoalState {
         condition: "ship it".to_string(),
         set_at,
         last_reason: Some("still working".to_string()),
+        iterations: 2,
+        tokens_at_start: 10,
     };
     let messages = vec![
         line(json!({
@@ -210,6 +214,80 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
     let restored = state.active_goal.expect("goal restored");
     assert_eq!(restored.condition, "ship it");
     assert_eq!(restored.last_reason.as_deref(), Some("still working"));
+}
+
+#[test]
+fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
+    let sid = Uuid::new_v4();
+    let set_at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let snapshot = traits::ActiveGoalSnapshot {
+        condition: "ship it".to_string(),
+        set_at,
+        last_reason: Some("tests pending".to_string()),
+        iterations: 2,
+        tokens_at_start: 500,
+    };
+    let attachment = |status, goal_state| traits::GoalStatusAttachment {
+        kind: "goal_status".to_string(),
+        status,
+        condition: "ship it".to_string(),
+        iterations: 2,
+        duration_ms: 1000,
+        tokens: 200,
+        last_reason: Some("tests pending".to_string()),
+        goal_state,
+    };
+    let line = |payload: traits::GoalStatusAttachment| {
+        serde_json::from_value(json!({
+            "type":"attachment", "attachment":payload,
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+        }))
+        .unwrap()
+    };
+    let active = line(attachment(
+        traits::GoalStatusKind::Set,
+        Some(snapshot.clone()),
+    ));
+    let state = state_from_messages(sid, &[active]);
+    let goal = state
+        .active_goal
+        .expect("typed set attachment restores goal");
+    assert_eq!(goal.iterations, 2);
+    assert_eq!(goal.tokens_at_start, 500);
+
+    let achieved = line(attachment(traits::GoalStatusKind::Achieved, None));
+    assert!(state_from_messages(sid, &[achieved]).active_goal.is_none());
+}
+
+#[test]
+fn resume_normalizes_stopped_hook_attachment_into_one_meta_message() {
+    let sid = Uuid::new_v4();
+    let message_uuid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{
+            "type":"hook_stopped_continuation",
+            "message":"STOP-NOW",
+            "hookName":"PostToolUseFailure:Write",
+            "toolUseID":"tool-1",
+            "hookEvent":"PostToolUseFailure"
+        },
+        "uuid":message_uuid.to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert_eq!(state.history.len(), 1);
+    assert!(state.history[0].is_meta());
+    assert_eq!(
+        state.history[0].text_content(),
+        "<system-reminder>\nPostToolUseFailure:Write hook stopped continuation: STOP-NOW\n</system-reminder>"
+    );
+    assert_eq!(state.history[0].id().as_uuid(), message_uuid);
 }
 
 #[test]

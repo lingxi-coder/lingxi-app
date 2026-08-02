@@ -232,8 +232,12 @@ impl MarketplacePolicy {
     /// Load policy with last-write-wins semantics for each managed field.
     #[must_use]
     pub fn from_managed_settings() -> Self {
+        Self::from_raw_tiers(managed_settings_raw_tiers())
+    }
+
+    fn from_raw_tiers(tiers: impl IntoIterator<Item = String>) -> Self {
         let mut policy = Self::default();
-        for raw in managed_settings_raw_tiers() {
+        for raw in tiers {
             let Ok(value) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
@@ -295,6 +299,16 @@ impl MarketplacePolicy {
             }
         }
         Ok(())
+    }
+
+    fn blocked_names(self) -> BTreeSet<String> {
+        self.blocked
+            .into_iter()
+            .filter_map(|rule| match rule {
+                MarketplaceRule::Name(name) => Some(name),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -363,14 +377,7 @@ fn managed_settings_raw_tiers() -> Vec<String> {
 /// Compatibility view used by older call sites and output tests.
 #[must_use]
 pub fn blocked_marketplaces() -> BTreeSet<String> {
-    MarketplacePolicy::from_managed_settings()
-        .blocked
-        .into_iter()
-        .filter_map(|rule| match rule {
-            MarketplaceRule::Name(name) => Some(name),
-            _ => None,
-        })
-        .collect()
+    MarketplacePolicy::from_managed_settings().blocked_names()
 }
 
 /// Reject an operation when its name is denied or outside a name allowlist.
@@ -404,31 +411,25 @@ pub fn ensure_marketplace_source_preflight(
 mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_policy(raw: &str, run: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("managed-settings.json"), raw).unwrap();
-        std::env::set_var("LINGXI_MANAGED_DIR", temp.path());
-        run();
-        std::env::remove_var("LINGXI_MANAGED_DIR");
+    fn policy(raw: &str) -> MarketplacePolicy {
+        MarketplacePolicy::from_raw_tiers([raw.to_string()])
     }
 
     #[test]
     fn absent_strict_policy_is_unrestricted_but_empty_blocks_all() {
-        with_policy("{}", || assert!(ensure_marketplace_allowed("any").is_ok()));
-        with_policy(r#"{"strictKnownMarketplaces":[]}"#, || {
-            assert!(ensure_marketplace_allowed("any").is_err());
-        });
+        assert!(policy("{}").check(Some("any"), None).is_ok());
+        assert!(policy(r#"{"strictKnownMarketplaces":[]}"#)
+            .check(Some("any"), None)
+            .is_err());
     }
 
     #[test]
     fn blocked_rule_wins_over_strict_allow() {
-        with_policy(
-            r#"{"strictKnownMarketplaces":["approved"],"blockedMarketplaces":["approved"]}"#,
-            || assert!(ensure_marketplace_allowed("approved").is_err()),
-        );
+        assert!(policy(
+            r#"{"strictKnownMarketplaces":["approved"],"blockedMarketplaces":["approved"]}"#
+        )
+        .check(Some("approved"), None)
+        .is_err());
     }
 
     #[test]
@@ -443,13 +444,11 @@ mod tests {
             git_ref: Some("main".to_string()),
             path: Some("catalog".to_string()),
         };
-        with_policy(
+        let policy = policy(
             r#"{"strictKnownMarketplaces":[{"source":"github","repo":"acme/plugins","ref":"v2","path":"catalog"}]}"#,
-            || {
-                assert!(ensure_marketplace_source_allowed(None, Some(&allowed)).is_ok());
-                assert!(ensure_marketplace_source_allowed(None, Some(&wrong_ref)).is_err());
-            },
         );
+        assert!(policy.check(None, Some(&allowed)).is_ok());
+        assert!(policy.check(None, Some(&wrong_ref)).is_err());
     }
 
     #[test]
@@ -460,34 +459,20 @@ mod tests {
         let denied = MarketplaceSourceIdentity::Url {
             url: "https://plugins.example.com/private/marketplace.json".to_string(),
         };
-        with_policy(
+        let policy = policy(
             r#"{"strictKnownMarketplaces":[{"hostPattern":"*.example.com","pathPattern":"/team/*"}]}"#,
-            || {
-                assert!(ensure_marketplace_source_allowed(None, Some(&allowed)).is_ok());
-                assert!(ensure_marketplace_source_allowed(None, Some(&denied)).is_err());
-            },
         );
+        assert!(policy.check(None, Some(&allowed)).is_ok());
+        assert!(policy.check(None, Some(&denied)).is_err());
     }
 
     #[test]
     fn blocked_marketplaces_uses_last_managed_tier() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
-        let drop_in = temp.path().join("managed-settings.d");
-        std::fs::create_dir_all(&drop_in).unwrap();
-        std::fs::write(
-            temp.path().join("managed-settings.json"),
-            r#"{"blockedMarketplaces":["alpha","beta"]}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            drop_in.join("20-org.json"),
-            r#"{"blockedMarketplaces":["gamma"]}"#,
-        )
-        .unwrap();
-        std::env::set_var("LINGXI_MANAGED_DIR", temp.path());
-        let blocked = blocked_marketplaces();
-        std::env::remove_var("LINGXI_MANAGED_DIR");
+        let blocked = MarketplacePolicy::from_raw_tiers([
+            r#"{"blockedMarketplaces":["alpha","beta"]}"#.to_string(),
+            r#"{"blockedMarketplaces":["gamma"]}"#.to_string(),
+        ])
+        .blocked_names();
         assert_eq!(blocked, BTreeSet::from(["gamma".to_string()]));
     }
 }

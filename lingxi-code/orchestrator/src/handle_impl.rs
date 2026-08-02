@@ -175,6 +175,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             condition: goal.condition,
             set_at: goal.set_at,
             last_reason: goal.last_reason,
+            iterations: goal.iterations,
+            tokens_at_start: goal.tokens_at_start,
         });
         let resumed_effort = runtime.effort.clone();
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
@@ -250,15 +252,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
             condition: goal.condition.clone(),
             set_at: goal.set_at,
             last_reason: goal.last_reason.clone(),
+            iterations: goal.iterations,
+            tokens_at_start: goal.tokens_at_start,
         })
     }
 
     async fn set_active_goal(&self, condition: &str) {
+        let tokens_at_start = self.snapshot_cost_real().await.total_tokens;
         let mut s = self.session.lock().await;
         s.active_goal = Some(engine::session::ActiveGoalState {
             condition: condition.to_string(),
             set_at: SystemTime::now(),
             last_reason: None,
+            iterations: 0,
+            tokens_at_start,
         });
         let snapshot = s.active_goal.clone();
         drop(s);
@@ -1032,6 +1039,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
     }
 
+    async fn run_async_hook_rewake(&self) -> Result<traits::TurnOutcome, HandleError> {
+        match crate::ConversationOrchestrator::run_async_hook_rewake(self).await {
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
+            Err(error) => Err(HandleError::ActionFailed(error.to_string())),
+        }
+    }
+
     // engine-data-commands additions:
 
     async fn conversation_transcript(&self) -> Vec<protocol::ConversationMessage> {
@@ -1654,6 +1670,9 @@ mod tests {
                 priority: 0,
                 once: false,
                 status_message: None,
+                async_rewake: false,
+                async_timeout: None,
+                rewake_message: None,
             }],
             icon: None,
             allowed_tools: Vec::new(),

@@ -343,6 +343,9 @@ fn build_state_from_jsonl(
                 last_uuid = Some(msg_uuid);
             }
             _ => {
+                if let Some(message) = hook_attachment_message_for_api(m, msg_uuid) {
+                    state.history.push(message);
+                }
                 if is_compact_boundary(m) {
                     let content = m
                         .extra
@@ -384,7 +387,49 @@ fn build_state_from_jsonl(
     (state, last_uuid, resume_runtime_metadata(messages))
 }
 
+fn hook_attachment_message_for_api(
+    message: &JsonlMessage,
+    message_uuid: Uuid,
+) -> Option<ConversationMessage> {
+    if message.message_type != "attachment" {
+        return None;
+    }
+    let attachment = message.extra.get("attachment")?;
+    if attachment.get("type").and_then(serde_json::Value::as_str)
+        != Some("hook_stopped_continuation")
+    {
+        return None;
+    }
+    let hook_name = attachment.get("hookName")?.as_str()?;
+    let reason = attachment.get("message")?.as_str()?;
+    Some(ConversationMessage::user_meta(
+        MessageId::from_uuid(message_uuid),
+        format!(
+            "<system-reminder>\n{hook_name} hook stopped continuation: {reason}\n</system-reminder>"
+        ),
+    ))
+}
+
 fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalState>> {
+    if message.message_type == "attachment" {
+        let attachment = message.extra.get("attachment")?;
+        if attachment.get("type").and_then(serde_json::Value::as_str) == Some("goal_status") {
+            let status: traits::GoalStatusAttachment =
+                serde_json::from_value(attachment.clone()).ok()?;
+            return match status.status {
+                traits::GoalStatusKind::Set => status.goal_state.map(|goal| {
+                    Some(ActiveGoalState {
+                        condition: goal.condition,
+                        set_at: goal.set_at,
+                        last_reason: goal.last_reason,
+                        iterations: goal.iterations,
+                        tokens_at_start: goal.tokens_at_start,
+                    })
+                }),
+                traits::GoalStatusKind::Cleared | traits::GoalStatusKind::Achieved => Some(None),
+            };
+        }
+    }
     if message.message_type != "system" {
         return None;
     }

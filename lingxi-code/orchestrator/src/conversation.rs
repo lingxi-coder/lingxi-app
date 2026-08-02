@@ -6558,7 +6558,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => {
                 crate::api_error_copy::auth_failed_fallback(
                     self.config.interactive_session,
-                    err.provider_message().unwrap_or_default(),
+                    &crate::api_error_copy::api_error_detail(
+                        err.provider_message().unwrap_or_default(),
+                    ),
                 )
             }
             LlmError::ContextOverflow { .. } => {
@@ -20999,6 +21001,16 @@ mod main_thread_agent_tests {
             orch.model_error_text(&plain).await,
             "Failed to authenticate. API Error: 403 forbidden",
             "default config is non-interactive"
+        );
+
+        // The COMMON shape: the SDK stringifies the whole body into the
+        // message, and the oracle unwraps it rather than showing raw JSON.
+        let json_body = LlmError::PermissionDenied {
+            message: r#"403 {"type":"error","error":{"message":"quota gone"}}"#.to_string(),
+        };
+        assert_eq!(
+            orch.model_error_text(&json_body).await,
+            "Failed to authenticate. API Error: 403 quota gone"
         );
     }
 

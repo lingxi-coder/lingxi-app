@@ -66,9 +66,15 @@ final class AppState {
         inputDialog = defaults.object(forKey: "inputDialog") == nil ? true : defaults.bool(forKey: "inputDialog")
         #if DEBUG
             // UI tests use real app navigation with a deterministic local
-            // source; bypass only the first-run overlay for that process.
-            setupDone = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1"
-                || defaults.bool(forKey: "setupDone")
+            // source. A separate override keeps the onboarding layout directly
+            // testable without clearing the simulator's persisted preferences.
+            let environment = ProcessInfo.processInfo.environment
+            if environment["LINGXI_FORCE_ONBOARDING"] == "1" {
+                setupDone = false
+            } else {
+                setupDone = environment["LINGXI_UI_TESTING"] == "1"
+                    || defaults.bool(forKey: "setupDone")
+            }
         #else
             setupDone = defaults.bool(forKey: "setupDone")
         #endif

@@ -45,16 +45,26 @@ struct SetupWizardView: View {
 
             VStack(spacing: 0) {
                 header
-                ScrollView {
-                    bodyContent
-                        .padding(.horizontal, 30)
-                        .id(step)
-                        .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
-                                                removal: .opacity))
+                GeometryReader { viewport in
+                    ScrollView {
+                        bodyContent
+                            .padding(.horizontal, 30)
+                            .padding(.vertical, 16)
+                            .frame(
+                                maxWidth: .infinity,
+                                minHeight: viewport.size.height,
+                                alignment: .center
+                            )
+                            .id(step)
+                            .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
+                                                    removal: .opacity))
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .accessibilityIdentifier("onboarding.content")
                 }
-                .scrollDismissesKeyboard(.interactively)
                 footer
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .onAppear {
             guard !seeded else { return }
@@ -97,6 +107,7 @@ struct SetupWizardView: View {
         .padding(.horizontal, 18)
         .padding(.top, 8)
         .frame(minHeight: 40)
+        .accessibilityIdentifier("onboarding.header")
     }
 
     // MARK: footer — primary CTA + optional skip
@@ -118,18 +129,17 @@ struct SetupWizardView: View {
                 .shadow(color: ctaDisabled ? .clear : Color(okl: 0.66, 0.20, 290, 0.4), radius: 12, y: 8)
             }
             .disabled(ctaDisabled)
+            .accessibilityIdentifier("onboarding.primaryAction")
 
             if let skip = skipLabel {
                 Button(skip) { withAnimation(.easeOut(duration: 0.3)) { step += 1 } }
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundColor(Color(okl: 0.60, 0.03, 275))
-            } else {
-                Color.clear.frame(height: 20)
             }
         }
         .padding(.horizontal, 30)
         .padding(.top, 14)
-        .padding(.bottom, 42)
+        .padding(.bottom, 16)
     }
 
     // MARK: step bodies

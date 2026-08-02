@@ -98,6 +98,40 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(schedulingNote.exists)
     }
 
+    func testOnboardingHeaderStaysAtTopAndPrimaryActionIsVisible() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_FORCE_ONBOARDING"] = "1"
+        app.launch()
+
+        let header = app.descendants(matching: .any)["onboarding.header"]
+        let content = app.descendants(matching: .any)["onboarding.content"]
+        let primaryAction = app.buttons["onboarding.primaryAction"]
+        XCTAssertTrue(header.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(content.exists)
+        XCTAssertTrue(primaryAction.exists)
+        XCTAssertTrue(primaryAction.isHittable)
+
+        let screen = app.frame
+        XCTAssertLessThan(header.frame.minY, screen.height * 0.18)
+        XCTAssertGreaterThan(primaryAction.frame.minY, content.frame.minY)
+        XCTAssertLessThanOrEqual(primaryAction.frame.maxY, screen.maxY)
+
+        primaryAction.tap()
+        XCTAssertTrue(app.staticTexts["给你的灵犀起个名字"].waitForExistence(timeout: 3))
+        primaryAction.tap()
+        XCTAssertTrue(app.staticTexts["我该怎么称呼你？"].waitForExistence(timeout: 3))
+        let nameField = app.textFields["你的名字"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 3), app.debugDescription)
+        nameField.tap()
+        nameField.typeText("测试用户")
+        primaryAction.tap()
+
+        let voiceTitle = app.staticTexts["选择语音识别方式"]
+        XCTAssertTrue(voiceTitle.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(voiceTitle.isHittable)
+        XCTAssertTrue(primaryAction.isHittable)
+    }
+
     private func openDrawer() {
         let trigger = app.buttons["打开抽屉"]
         XCTAssertTrue(trigger.waitForExistence(timeout: 8), app.debugDescription)

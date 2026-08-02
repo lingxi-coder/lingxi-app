@@ -93,6 +93,36 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(repository.state(for: "openai")?.profile.modelID, "gpt-4o")
     }
 
+    func testDeepSeekPresetMatchesAndroidOfficialModels() throws {
+        let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "deepseek" }))
+
+        XCTAssertEqual(preset.defaultUrl, "https://api.deepseek.com")
+        XCTAssertEqual(preset.models, ["deepseek-v4-flash", "deepseek-v4-pro"])
+
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let deepSeek = repository.addProfile(presetID: "deepseek")
+        let profile = try XCTUnwrap(repository.state(for: deepSeek)?.profile)
+        XCTAssertEqual(profile.baseURL, "https://api.deepseek.com")
+        XCTAssertEqual(profile.modelID, "deepseek-v4-flash")
+    }
+
+    func testLegacyDeepSeekProfileMigratesToCurrentEndpointAndModel() throws {
+        let legacyJSON = """
+        {"version":2,"profiles":[{"id":"deepseek","presetID":"deepseek","name":"DeepSeek","baseURL":"https://api.deepseek.com/v1/","modelID":"deepseek-reasoner","enabled":true,"isDefault":true}],"routing":{"retryMaxAttempts":10,"retryBackoffMs":500,"fallbackProfileIDs":[]}}
+        """
+        try XCTUnwrap(legacyJSON.data(using: .utf8)).write(to: persistenceURL)
+
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let profile = try XCTUnwrap(repository.state(for: "deepseek")?.profile)
+
+        XCTAssertEqual(profile.baseURL, "https://api.deepseek.com")
+        XCTAssertEqual(profile.modelID, "deepseek-v4-flash")
+
+        let persisted = try String(contentsOf: persistenceURL, encoding: .utf8)
+        XCTAssertFalse(persisted.contains("api.deepseek.com/v1"))
+        XCTAssertFalse(persisted.contains("deepseek-reasoner"))
+    }
+
     func testRoutingJsonIncludesRetryAndOrderedFallbackForDefaultModel() throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let openAI = repository.addProfile(presetID: "openai")

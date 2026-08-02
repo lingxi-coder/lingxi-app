@@ -277,18 +277,21 @@ final class ProviderRepository {
         let shouldMigrateLegacyCredential = persistenceURL == nil
         let resolvedPersistenceURL = persistenceURL ?? Self.defaultPersistenceURL()
         let loadedEnvelope = Self.loadEnvelope(from: resolvedPersistenceURL, fileManager: fileManager)
+        let loadedProfiles = loadedEnvelope?.profiles ?? []
+        let migratedProfiles = loadedProfiles.map(Self.migrateLegacyDeepSeekProfile)
+        let didMigrateDeepSeek = loadedProfiles != migratedProfiles
         let initialRoutingSettings = loadedEnvelope?.routing ?? ProviderRoutingSettings()
         self.persistenceURL = resolvedPersistenceURL
         self.fileManager = fileManager
         self.credentialOperationTimeout = credentialOperationTimeout
         self.routingSettings = initialRoutingSettings
         self.lastAppliedRoutingSettings = initialRoutingSettings
-        self.profiles = loadedEnvelope?.profiles.map {
+        self.profiles = migratedProfiles.map {
             ProviderProfileState(
                 profile: $0,
                 hasLegacyAnthropicCredential: false
             )
-        } ?? []
+        }
         if shouldMigrateLegacyCredential,
            self.profiles.isEmpty,
            let legacyProfile = Self.legacyAnthropicProfile() {
@@ -296,6 +299,9 @@ final class ProviderRepository {
         }
         normalizeDefaults()
         sanitizeRoutingSettings(persist: false)
+        if didMigrateDeepSeek {
+            persistProfiles()
+        }
     }
 
     func configure(
@@ -1184,6 +1190,23 @@ final class ProviderRepository {
             return nil
         }
         return envelope
+    }
+
+    private static func migrateLegacyDeepSeekProfile(
+        _ profile: ProviderStoredProfile
+    ) -> ProviderStoredProfile {
+        guard profile.presetID == "deepseek" else { return profile }
+
+        var migrated = profile
+        let trimmedURL = profile.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURL = trimmedURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if normalizedURL == "https://api.deepseek.com/v1" {
+            migrated.baseURL = "https://api.deepseek.com"
+        }
+        if ["deepseek-chat", "deepseek-reasoner"].contains(profile.modelID) {
+            migrated.modelID = "deepseek-v4-flash"
+        }
+        return migrated
     }
 
     private static func legacyAnthropicProfile() -> ProviderProfileState? {

@@ -171,6 +171,12 @@ pub(crate) fn api_key_auth_disabled_text(
     format!("{ORG_DISABLED_PREFIX} \u{b7} {tail}")
 }
 
+/// Oracle `Epo` @230618923 — the GATEWAY could not authenticate upstream, so
+/// nothing the user holds is wrong and no credential of theirs will fix it.
+pub(crate) const GATEWAY_UPSTREAM_AUTH_FAILED: &str =
+    "Authentication error \u{b7} The gateway could not authenticate with its upstream provider \
+     \u{2014} contact your gateway administrator";
+
 /// The auth command this product actually tells users to run.
 ///
 /// ⚠️ **DELIBERATE DIVERGENCE from the oracle — do not "align" it back.**
@@ -560,6 +566,11 @@ pub enum ErrorRouteTag {
         /// Configured base URL, named when it is a gateway.
         base_url: String,
     },
+    /// `"gateway"` — an inference gateway fronting the provider.
+    ///
+    /// Checked FIRST by [`Self::from_env`], ahead of every `CLAUDE_CODE_USE_*`
+    /// variable, because `xn()` opens with `if (C_()) return "gateway"`.
+    Gateway,
     /// `"anthropicAws"`.
     AnthropicAws,
     /// `"anthropicGoogleCloud"`.
@@ -615,6 +626,18 @@ impl ErrorRouteTag {
         fn on(var: &str) -> bool {
             std::env::var(var).is_ok_and(|v| !v.is_empty() && v != "0" && v != "false")
         }
+        // `xn()` opens with `if (C_()) return "gateway"`, ahead of the whole
+        // env chain. `C_()` is `Mt.gatewayAuth`, which `CJi()` bootstraps from
+        // the environment: `CLAUDE_CODE_USE_GATEWAY` plus BOTH
+        // `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` (@228931780). With
+        // either missing the oracle warns and IGNORES the flag, so the
+        // conjunction is the gate, not the flag alone.
+        if on("CLAUDE_CODE_USE_GATEWAY")
+            && std::env::var("ANTHROPIC_BASE_URL").is_ok_and(|v| !v.is_empty())
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok_and(|v| !v.is_empty())
+        {
+            return Self::Gateway;
+        }
         if on("CLAUDE_CODE_USE_BEDROCK") {
             return Self::Other {
                 display: "Bedrock".to_string(),
@@ -663,6 +686,12 @@ impl ErrorRouteTag {
             },
             Self::AnthropicAws => ErrorRoute::AnthropicAws,
             Self::AnthropicGoogleCloud => ErrorRoute::AnthropicGoogleCloud,
+            // `hpo()` only splits firstParty / anthropicAws / anthropicGoogleCloud
+            // from everything else, so gateway collapses into `Other` carrying
+            // the oracle's own display name (`rK.gateway`, @227683906).
+            Self::Gateway => ErrorRoute::Other {
+                display: "Cloud gateway",
+            },
             Self::Other { display } => ErrorRoute::Other { display },
         }
     }
@@ -750,6 +779,9 @@ mod tests {
             "CLAUDE_CODE_USE_MANTLE",
             "CLAUDE_CODE_USE_VERTEX",
         ];
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved: Vec<Option<String>> = VARS.iter().map(|v| std::env::var(v).ok()).collect();
         let saved_base = std::env::var("ANTHROPIC_BASE_URL").ok();
         for v in VARS {
@@ -1031,6 +1063,64 @@ mod tests {
         assert_eq!(llm_client::api_error_detail(r#"403 {"nope":1}"#), r#"403 {"nope":1}"#);
         // No JSON at all → unchanged.
         assert_eq!(llm_client::api_error_detail("403 forbidden"), "403 forbidden");
+    }
+
+    /// Serializes every test in this module that touches the process
+    /// environment. ONE lock for the state, taken by ALL readers and writers —
+    /// a lock only protects the tests that take it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The gateway arm. `xn()` checks it FIRST, so it must beat every
+    /// `CLAUDE_CODE_USE_*` variable — and the oracle IGNORES the flag unless
+    /// both companion variables are present.
+    #[test]
+    fn the_gateway_route_outranks_the_env_chain_but_needs_all_three_vars() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved: Vec<(&str, Option<String>)> = [
+            "CLAUDE_CODE_USE_GATEWAY",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+        ]
+        .iter()
+        .map(|&k| (k, std::env::var(k).ok()))
+        .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+
+        // All three present → Gateway, even with BEDROCK also set.
+        std::env::set_var("CLAUDE_CODE_USE_GATEWAY", "1");
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://gw.example");
+        std::env::set_var("ANTHROPIC_AUTH_TOKEN", "jwt");
+        std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        assert_eq!(ErrorRouteTag::from_env(), ErrorRouteTag::Gateway);
+
+        // Missing a companion → the oracle warns and IGNORES the flag, so the
+        // env chain resumes and Bedrock wins.
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        assert_ne!(ErrorRouteTag::from_env(), ErrorRouteTag::Gateway);
+
+        for (k, v) in saved {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// A gateway that cannot authenticate upstream is not the user's problem.
+    #[test]
+    fn the_gateway_copy_blames_the_gateway_not_the_user() {
+        assert_eq!(
+            GATEWAY_UPSTREAM_AUTH_FAILED,
+            "Authentication error \u{b7} The gateway could not authenticate with its upstream \
+             provider \u{2014} contact your gateway administrator"
+        );
+        // It must NOT tell the user to re-authenticate.
+        assert!(!GATEWAY_UPSTREAM_AUTH_FAILED.contains(AUTH_COMMAND));
     }
 
     /// The terminal 401/403 arm, reached when no specific branch matched.

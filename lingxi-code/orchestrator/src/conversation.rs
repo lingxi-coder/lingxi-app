@@ -6535,14 +6535,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if crate::api_error_copy::is_remote_session() {
                     return crate::api_error_copy::AUTH_TRANSIENT.to_string();
                 }
-                // The oracle checks `xn()==="gateway"` next. Skipped: that comes
-                // from a runtime `gatewayAuth` object the port has no equivalent
-                // of, so the branch is unreachable here rather than mis-selected.
+                // `xn()==="gateway"` comes next in the oracle. It IS reachable:
+                // `Mt.gatewayAuth` is bootstrapped from the environment
+                // (`CLAUDE_CODE_USE_GATEWAY` + `ANTHROPIC_BASE_URL` +
+                // `ANTHROPIC_AUTH_TOKEN`), so the route resolves without any
+                // runtime credential object. When a gateway fronts the provider
+                // and IT cannot authenticate upstream, no credential the user
+                // holds is at fault — say so instead of sending them to /connect.
                 let route = self
                     .config
                     .error_route
                     .clone()
                     .unwrap_or_else(crate::api_error_copy::ErrorRouteTag::from_env);
+                if matches!(route, crate::api_error_copy::ErrorRouteTag::Gateway) {
+                    return crate::api_error_copy::GATEWAY_UPSTREAM_AUTH_FAILED.to_string();
+                }
                 crate::api_error_copy::cloud_credential_text(&route, err.http_status())
                     .unwrap_or_else(|| {
                         crate::api_error_copy::credential_rejected_text(

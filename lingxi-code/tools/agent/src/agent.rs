@@ -2325,6 +2325,19 @@ Use /mcp to configure and authenticate the required MCP servers.",
     }
 }
 
+/// Test-only: serializes every test whose prompt output depends on a
+/// process-global env gate — `LINGXI_AGENT_LIST_IN_MESSAGES` AND
+/// `LINGXI_FORK_SUBAGENT`, both of which `build_prompt_with_async_agents`
+/// consults.
+///
+/// Lives HERE, not inside `agent_test`, so the description tests below can
+/// reach it. They previously could not, and their module doc claimed they
+/// "never" touch the process env — true of the background-tasks kill switch it
+/// was written about, but NOT of the fork gate, which is read inside the
+/// builder. That is how they raced.
+#[cfg(test)]
+pub(crate) static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 #[path = "agent_test.rs"]
 mod agent_test;
@@ -2332,13 +2345,37 @@ mod agent_test;
 /// F-cluster: the two `l`-gated bullets at the tail of the Agent tool
 /// description (binary `mvd` @234647480).
 ///
-/// These tests drive [`AgentTool::build_prompt_with_async_agents`] with an
-/// EXPLICIT `async_agents_available`, never the process-global env, so they
-/// cannot race the `LINGXI_DISABLE_BACKGROUND_TASKS` manipulation in
-/// `agent_test.rs` (which serializes on a lock this module cannot reach).
+/// These tests pass `async_agents_available` EXPLICITLY, so they cannot race
+/// the `LINGXI_DISABLE_BACKGROUND_TASKS` manipulation in `agent_test.rs`.
+///
+/// ⚠️ That is NOT sufficient on its own: the builder also consults
+/// `LINGXI_FORK_SUBAGENT` internally (`is_fork_subagent_enabled`), which the
+/// fork tests in `agent_test.rs` flip. Every test here therefore runs under
+/// [`prompt_env`], which takes the shared [`AGENT_LIST_ENV_LOCK`] and clears
+/// that variable. An earlier version of this doc claimed these tests never
+/// touch the process env; the fork gate made that false and the suite failed
+/// intermittently on whichever test happened to run alongside a fork test.
 #[cfg(test)]
 mod f_description_l_gate_tests {
-    use super::AgentTool;
+    use super::{AgentTool, AGENT_LIST_ENV_LOCK};
+
+    /// Run `body` with `LINGXI_FORK_SUBAGENT` cleared, under the shared lock,
+    /// restoring the prior value BEFORE the guard drops — a global mutated
+    /// under a lock has to be put back inside the critical section, or the lock
+    /// just serializes the corruption.
+    fn prompt_env<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let out = body();
+        match saved {
+            Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
+            None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
+        }
+        out
+    }
 
     fn agents() -> Vec<traits::subagent_spawn::SubagentListingEntry> {
         vec![traits::subagent_spawn::SubagentListingEntry {
@@ -2356,7 +2393,7 @@ mod f_description_l_gate_tests {
     /// "final message is returned to you as the tool result" arm.
     #[test]
     fn first_tail_bullet_uses_the_l_true_arm_by_default() {
-        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true);
+        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
         assert!(
             p.contains(
                 "\n\n- The agent's final report is not shown to the user \u{2014} relay what matters.\n- Use "
@@ -2375,7 +2412,7 @@ mod f_description_l_gate_tests {
     /// are disabled.
     #[test]
     fn first_tail_bullet_uses_the_l_false_arm_when_async_agents_unavailable() {
-        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false);
+        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
         assert!(p.contains(
             "\n\n- The agent's final message is returned to you as the tool result; it is not shown to the user \u{2014} relay what matters.\n- Use "
         ));
@@ -2389,7 +2426,7 @@ mod f_description_l_gate_tests {
     /// text, so `contains` on the old string does not discriminate.
     #[test]
     fn background_bullet_carries_the_full_long_arm() {
-        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true);
+        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
         assert!(
             p.ends_with(
                 "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
@@ -2403,7 +2440,7 @@ mod f_description_l_gate_tests {
     /// at all, not a shortened one.
     #[test]
     fn background_bullet_absent_when_async_agents_unavailable() {
-        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false);
+        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
         assert!(
             !p.contains("Subagents run in the background"),
             "l=false must drop the background bullet entirely"
@@ -2418,7 +2455,7 @@ mod f_description_l_gate_tests {
     /// by default ⇒ the background bullet is LAST.
     #[test]
     fn tail_bullet_order_matches_the_binary() {
-        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true);
+        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
         let i1 = p.find("- The agent's final report is not shown").unwrap();
         let i2 = p.find("- Use SendMessage").unwrap();
         let i3 = p.find("- Each agent type's model").unwrap();
@@ -2435,7 +2472,7 @@ mod f_description_l_gate_tests {
     #[test]
     fn coordinator_branch_has_no_tail_bullets_either_way() {
         for l in [true, false] {
-            let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l);
+            let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l));
             assert!(!p.contains("relay what matters"));
             assert!(!p.contains("Subagents run in the background"));
         }

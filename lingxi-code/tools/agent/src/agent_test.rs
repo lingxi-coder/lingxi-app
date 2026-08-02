@@ -129,7 +129,7 @@ mod tests {
     /// `should_inject_agent_list_in_messages()` gate so a gate-ON test never
     /// races a default-OFF test. Every such test acquires this AND removes the
     /// var first, neutralizing ordering (mirrors `tools/shell/src/prompt.rs`).
-    static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::agent::AGENT_LIST_ENV_LOCK;
 
     /// Build a `BuiltinToolContext` wired with all four M4-05 mocks.
     fn wired_ctx(
@@ -921,9 +921,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-    // Serializes the LINGXI_DISABLE_BACKGROUND_TASKS env across the two
-    // background tests below (env is process-global).
-    static BG_DISABLE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `LINGXI_DISABLE_BACKGROUND_TASKS` used to have its OWN lock here. That
+    // was the bug: `build_prompt` reads the same variable to decide whether the
+    // background bullet renders, and the prompt tests serialize on
+    // `AGENT_LIST_ENV_LOCK` — so two locks guarded one process-global and
+    // neither excluded the other. Everything that touches prompt-affecting env
+    // now shares ONE lock.
 
     // `run_in_background:true` (kill-switch unset) → the `async_launched` payload
     // carries `resolvedModel` + `isAsync`, and the originating `tool_use_id` is
@@ -932,7 +935,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_launch_payload_has_resolved_model_and_threads_tool_use_id() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -978,7 +981,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn omitted_run_in_background_defaults_to_async() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1011,7 +1014,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_launched_tool_result_is_byte_exact_2_1_207() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1052,7 +1055,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_false_runs_agent_synchronously() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1085,7 +1088,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn disable_background_tasks_env_forces_sync() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
@@ -1122,7 +1125,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_isolation_worktree_created_and_cwd_threaded() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1187,7 +1190,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn definition_isolation_worktree_created_when_input_omits_isolation() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1238,7 +1241,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_isolation_overrides_definition_isolation() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1288,7 +1291,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_worktree_create_failure_errors_before_spawn() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1335,7 +1338,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_cwd_wins_over_worktree_path() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1384,7 +1387,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn sync_worktree_kept_when_dirty_removed_when_clean() {
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -2829,7 +2832,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // Serialize with the test that deliberately enables it; otherwise this
         // async-path assertion can be rerouted through the synchronous branch
         // when the test binary runs cases in parallel.
-        let _g = BG_DISABLE_ENV_LOCK
+        let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");

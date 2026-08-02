@@ -307,6 +307,22 @@ mod unix {
             !matches!(*self.inner.controller.lock().unwrap(), Controller::Vacant)
         }
 
+        /// Is the controller ACTIVE (registered for broadcast), as opposed to
+        /// merely `Reserved`?
+        ///
+        /// [`Self::has_clients`] cannot answer this — it is true for `Reserved`
+        /// too. The distinction matters because `FRAME_READY` is written to the
+        /// socket BEFORE `activate_controller` runs, so a client can be holding
+        /// READY while the hub still has nothing to broadcast to. Tests that
+        /// send a frame immediately after connecting must wait for this.
+        #[cfg(test)]
+        pub(crate) fn controller_is_active(&self) -> bool {
+            matches!(
+                *self.inner.controller.lock().unwrap(),
+                Controller::Active(_)
+            )
+        }
+
         /// Release the current controller through the same explicit-detach
         /// path as Ctrl-Z, without stopping the PTY child.
         pub fn detach_controller(&self) -> bool {
@@ -1228,6 +1244,36 @@ mod unix {
             PathBuf::from(format!("/tmp/lx-bg-{}-{n}.sock", std::process::id()))
         }
 
+        /// Read one frame, tolerating the client socket's read timeout.
+        ///
+        /// The hub broadcasts from its OWN thread, so "not here yet" is a normal
+        /// outcome on a loaded machine, not a failure. `connect_client` sets a
+        /// 2s `set_read_timeout`, which surfaces that as `WouldBlock`; unwrapping
+        /// the first miss turns scheduling latency into a test failure. The
+        /// production reader at the top of this file already treats
+        /// `WouldBlock | TimedOut` as retryable — this mirrors it.
+        fn read_frame_waiting(stream: &mut UnixStream) -> (u8, Vec<u8>) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                match read_frame(stream) {
+                    Ok(Some(frame)) => return frame,
+                    Ok(None) => panic!("peer closed before the expected frame arrived"),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "no frame arrived within 30s"
+                        );
+                    }
+                    Err(error) => panic!("read_frame failed: {error}"),
+                }
+            }
+        }
+
         fn connect_client(path: &PathBuf, auth: &str) -> UnixStream {
             let mut client = UnixStream::connect(path).unwrap();
             client
@@ -1239,7 +1285,7 @@ mod unix {
                 .and_then(|name| name.to_str())
                 .unwrap();
             write_handshake(&mut client, auth, label, 120, 40).unwrap();
-            let (kind, _payload) = read_frame(&mut client).unwrap().unwrap();
+            let (kind, _payload) = read_frame_waiting(&mut client);
             assert_eq!(kind, FRAME_READY);
             client
         }
@@ -1401,16 +1447,28 @@ mod unix {
             let hub = AttachHub::start(path.clone(), "token-1".to_string()).unwrap();
             let _rx = hub.take_input_rx().unwrap();
             let mut client = connect_client(&path, "token-1");
+            // `FRAME_READY` is written BEFORE `activate_controller`, so holding
+            // READY does not yet mean the hub can broadcast to us. Broadcasting
+            // in that window silently drops the frame — which is why this test
+            // failed under load and why waiting 30s for it never helped.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !hub.controller_is_active() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "controller never became active"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
 
             hub.error("failed");
             assert_eq!(
-                read_frame(&mut client).unwrap().unwrap(),
+                read_frame_waiting(&mut client),
                 (FRAME_ERROR, b"failed".to_vec())
             );
             hub.exit(17);
             drop(hub);
             assert_eq!(
-                read_frame(&mut client).unwrap().unwrap(),
+                read_frame_waiting(&mut client),
                 (FRAME_EXIT, 17_i32.to_be_bytes().to_vec())
             );
         }

@@ -152,6 +152,25 @@ mod tests {
         }
     }
 
+    /// `token_warning_banner` reads `DISABLE_COMPACT` from the process env, and
+    /// the threshold tests in this same binary SET it. Take the crate-wide
+    /// [`ENV_LOCK`] and clear the variable for the duration, restoring it
+    /// before the guard drops — a lock that is not taken by every participant
+    /// serializes nothing, which is exactly how this raced.
+    fn without_disable_compact<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = crate::thresholds::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var("DISABLE_COMPACT").ok();
+        std::env::remove_var("DISABLE_COMPACT");
+        let out = body();
+        match saved {
+            Some(value) => std::env::set_var("DISABLE_COMPACT", value),
+            None => std::env::remove_var("DISABLE_COMPACT"),
+        }
+        out
+    }
+
     #[test]
     fn below_warning_threshold_renders_nothing() {
         // `:108` — no banner until the warning threshold is crossed.
@@ -188,8 +207,9 @@ mod tests {
     fn auto_compact_disabled_shows_context_low_warning_byte_exact() {
         // `:169` warning branch — exact string incl. the U+00B7 separator and
         // the `Run /compact to compact & continue` CTA.
-        let banner =
-            token_warning_banner(&state(8, true, false), false, false, None).expect("renders");
+        let banner = without_disable_compact(|| {
+            token_warning_banner(&state(8, true, false), false, false, None).expect("renders")
+        });
         assert_eq!(
             banner.text,
             "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
@@ -204,8 +224,9 @@ mod tests {
     #[test]
     fn above_error_threshold_colors_context_low_as_error() {
         // `:169` `color={isAboveErrorThreshold ? "error" : "warning"}`.
-        let banner =
-            token_warning_banner(&state(3, true, true), false, false, None).expect("renders");
+        let banner = without_disable_compact(|| {
+            token_warning_banner(&state(3, true, true), false, false, None).expect("renders")
+        });
         assert_eq!(
             banner.text,
             "Context low (3% remaining) \u{00b7} Run /compact to compact & continue"

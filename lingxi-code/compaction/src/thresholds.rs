@@ -331,14 +331,22 @@ fn parse_positive_u64(raw: &str) -> Option<u64> {
     digits.parse::<u64>().ok().filter(|&v| v > 0)
 }
 
+/// Test-only: serializes every test in this crate that reads or writes the
+/// process environment.
+///
+/// Crate-visible on purpose. It used to live inside this module's `tests`, so
+/// it only serialized the threshold tests — while `token_warning_banner`'s
+/// tests read `DISABLE_COMPACT` without taking it and intermittently observed
+/// the value a threshold test had set. **A lock only protects the tests that
+/// actually take it.**
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Threshold math reads several process-wide env vars. Serialize all tests
-    // that touch env so they don't race; restore prior values inside the guard.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::ENV_LOCK;
 
     const ENV_VARS: &[&str] = &[
         "LINGXI_AUTO_COMPACT_WINDOW",

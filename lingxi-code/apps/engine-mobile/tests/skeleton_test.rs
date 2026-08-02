@@ -34,6 +34,37 @@ use orchestrator::test_support_stream::{
 };
 use orchestrator::StreamingApiClient;
 
+/// Submit `NewSession`, tolerating the transient mid-turn rejection.
+///
+/// `TurnEnded` reaching the listener does NOT mean the engine has cleared its
+/// in-flight slot: `NewSession` is gated on `active_cancel`, which the turn task
+/// drops as it unwinds — strictly AFTER the terminal event is emitted. So the
+/// event these tests spin on is not the precondition they actually need, and
+/// under load the gap between the two widens past the old bounded spin. Retry
+/// against the real precondition instead of guessing a duration.
+async fn start_new_session(handle: &std::sync::Arc<engine_mobile::MobileEngineHandle>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match handle
+            .submit(ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+            })
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => {
+                let mid_turn = format!("{error:?}").contains("turn is in flight");
+                assert!(
+                    mid_turn && std::time::Instant::now() < deadline,
+                    "NewSession never succeeded: {error:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    }
+}
+
 /// F3-06: `submit(SendPrompt)` drives the streaming turn on the handle-owned
 /// runtime and the registered listener receives `TextDelta` then `TurnEnded`.
 ///
@@ -144,14 +175,8 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     handle
         .runtime()
         .block_on(async {
-            handle
-                .submit(ClientCommand::NewSession {
-                    cwd: None,
-                    model: None,
-                })
-                .await
-        })
-        .expect("a completed turn must release the slot so NewSession succeeds");
+            start_new_session(&handle).await;
+        });
 }
 
 #[test]
@@ -194,13 +219,7 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
             .into_iter()
             .enumerate()
         {
-            handle
-                .submit(ClientCommand::NewSession {
-                    cwd: None,
-                    model: None,
-                })
-                .await
-                .expect("start session");
+            start_new_session(&handle).await;
             let session_id = listener
                 .received
                 .lock()

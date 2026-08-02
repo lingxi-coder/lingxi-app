@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_auto_resolves_without_client_answer() {
+    async fn timeout_resolves_with_no_fabricated_client_answer() {
         let sink = MockSink::arc();
         let broker = Arc::new(BridgeAskUserQuestionBroker::new(sink.clone()));
         let (tx, rx) = mpsc::channel(1);
@@ -265,7 +265,7 @@ mod tests {
         .unwrap();
 
         let answers = resp_rx.await.unwrap();
-        assert_eq!(answers["Choose?"], "A");
+        assert!(answers.is_empty());
         assert_eq!(broker.pending_count().await, 0);
         let events = sink.events().await;
         assert!(matches!(

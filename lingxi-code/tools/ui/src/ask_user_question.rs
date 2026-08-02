@@ -1413,29 +1413,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_resolver_never_auto_picks_when_headless() {
-        // Non-interactive (`--print`) ⇒ never block; fall back to first-option so
-        // batch runs complete.
+    async fn default_resolver_requires_interaction_when_headless() {
+        // Non-interactive (`--print`) has no truthful way to answer on the
+        // user's behalf. It must fail explicitly rather than choosing option 1.
         let resolver = DefaultTimeoutResolver::new(AskUserQuestionTimeout::Never);
         let qs = validate_input_internal(&one_question()).expect("ok");
-        let ans = resolver
+        let err = resolver
             .resolve(&qs, /* non_interactive */ true)
             .await
-            .expect("headless must not block");
-        assert_eq!(ans.get("Pick one?").map(String::as_str), Some("Alpha"));
+            .expect_err("headless must not fabricate an answer");
+        assert!(matches!(err, ToolError::InteractionRequired(_)));
     }
 
     #[tokio::test]
-    async fn default_resolver_duration_auto_advances_interactive() {
-        // Interactive + a duration ⇒ auto-continue with first-option after the
-        // idle window. Uses a zero window so the test does not wait minutes.
+    async fn default_resolver_without_ui_never_fabricates_timeout_answers() {
+        // The resolver has no selection state. Even with a timeout it can only
+        // report that interaction is required; the TUI bridge owns confirmed
+        // answers and may submit an empty/partial map at timeout.
         let resolver = DefaultTimeoutResolver::with_window(Some(Duration::ZERO));
         let qs = validate_input_internal(&one_question()).expect("ok");
-        let ans = resolver
+        let err = resolver
             .resolve(&qs, /* non_interactive */ false)
             .await
-            .expect("duration must auto-advance");
-        assert_eq!(ans.get("Pick one?").map(String::as_str), Some("Alpha"));
+            .expect_err("a resolver without a UI cannot invent timeout answers");
+        assert!(matches!(err, ToolError::InteractionRequired(_)));
     }
 
     #[tokio::test]

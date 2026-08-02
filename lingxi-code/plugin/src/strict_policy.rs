@@ -130,6 +130,32 @@ mod tests {
     }
 
     #[test]
+    fn boolean_true_locks_only_the_four_customization_surfaces() {
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":true}"#,
+        ]);
+
+        assert_eq!(policy.locked.len(), 4);
+        assert!(policy.is_locked(PluginComponent::Agents));
+        assert!(policy.is_locked(PluginComponent::Skills));
+        assert!(policy.is_locked(PluginComponent::Hooks));
+        assert!(policy.is_locked(PluginComponent::McpServers));
+        assert!(!policy.is_locked(PluginComponent::Commands));
+        assert!(!policy.is_locked(PluginComponent::OutputStyles));
+        assert!(!policy.is_locked(PluginComponent::LspServers));
+        assert!(!policy.is_locked(PluginComponent::Channels));
+    }
+
+    #[test]
+    fn unknown_and_non_customization_array_entries_are_ignored() {
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":["skills","commands","outputStyles","unknown"]}"#,
+        ]);
+
+        assert_eq!(policy.locked, HashSet::from([PluginComponent::Skills]));
+    }
+
+    #[test]
     fn explicit_false_unlocks_previous_tier() {
         let policy = StrictPluginOnlyPolicy::from_settings_tiers([
             r#"{"strictPluginOnlyCustomization":["mcp"]}"#,

@@ -18,6 +18,7 @@ fn rows(n: usize) -> Vec<SessionMetadata> {
             message_count: 3,
             path: PathBuf::from(format!("s{i}.jsonl")),
             pr_number: None,
+            custom_or_ai_title: Some(format!("title-{i}")),
         })
         .collect()
 }

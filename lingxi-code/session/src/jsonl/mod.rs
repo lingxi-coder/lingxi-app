@@ -37,8 +37,9 @@ pub use path::{project_dir_name, session_path, tool_results_dir};
 pub use reader::JsonlReader;
 // Metadata re-append (`reAppendSessionMetadata`, 2.1.220 offset 237852347).
 pub use re_append::{
-    extract_quoted_field, find_last_typed_field, normalize_last_prompt, plan_re_append, read_tail,
-    ReAppendPlan, SessionMetadataState, METADATA_REAPPEND_BACKSTOP_BYTES,
+    extract_quoted_field, find_last_typed_field, format_iso_millis, normalize_last_prompt,
+    plan_re_append, read_tail, ReAppendPlan, SessionMetadataState,
+    METADATA_REAPPEND_BACKSTOP_BYTES,
 };
 // Tolerant-reader surface (real-transcript gap fix): the two-phase routed
 // loader output + its line-router + the transcript-message type predicate.
@@ -51,8 +52,8 @@ pub use writer::JsonlWriter;
 pub use loader::{
     build_conversation_chain, discovered_tool_names, find_tip, list_recent_sessions,
     list_recent_sessions_with_diagnostics, load_session, pre_compact_discovered_tools,
-    read_agent_resume_state, read_agent_snapshot, select_session_interactive, LoaderError,
-    SessionCatalog, SessionMetadata,
+    read_agent_resume_state, read_agent_snapshot, search_sessions_by_custom_title,
+    select_session_interactive, LoaderError, SessionCatalog, SessionMetadata,
 };
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};
 

@@ -2684,15 +2684,136 @@ fn parse_pr_value(raw: &str) -> Option<u64> {
 ///   - else (`--no-tui` / non-TTY, no prompt) → keep the stdio fallback:
 ///     surface "Resumed session {id}" + the not-yet-wired stdio REPL notice.
 async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
-    let arg = argv.resume.as_deref().unwrap_or("");
+    // `t.resume.trim()` — the oracle trims before deciding id-vs-title.
+    let arg = argv.resume.as_deref().unwrap_or("").trim();
     let session_id = match resolve_session_id(arg) {
         Ok(id) => id,
-        Err(e) => {
-            sink.error("runtime", &e.to_string()).await;
-            return exit_codes::RUNTIME_ERROR;
-        }
+        // Not a UUID: fall back to a session-TITLE lookup before failing.
+        Err(uuid_error) => match resolve_resume_title(arg).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                // Empty arg keeps the original uuid-parse error — there is no
+                // title to look up and the oracle's title copy would misdescribe
+                // it.
+                sink.error("runtime", &uuid_error.to_string()).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+            Err(message) => {
+                sink.error("runtime", &message).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+        },
     };
     resume_resolved_session(argv, runtime, sink, session_id).await
+}
+
+/// Resolve `--resume <title>` to a session id — the `!s && i` arm of the
+/// oracle's print entrypoint (2.1.220 @246508120):
+///
+/// ```js
+/// let u = await OEe(i, {exact:!0});
+/// if (u.length === 1) { let d = zS(u[0]); if (d) s = Cbi(d) }
+/// else if (u.length > 1) { …"matches N sessions. Pass one of these session IDs to disambiguate:" }
+/// ```
+///
+/// EXACT matching — `--resume` passes `{exact:!0}`, unlike the `/resume`
+/// argument-completer which substring-matches with a limit of 10. Searching a
+/// substring here would resume an arbitrary session on a partial title.
+///
+/// Returns `Ok(None)` for an empty argument (nothing to search), `Ok(Some(id))`
+/// on a unique hit, and `Err(message)` for the two failure copies. A loader
+/// failure is reported as "no match" rather than surfaced: the oracle's `OEe`
+/// cannot distinguish an unreadable project dir from an empty one either, and
+/// inventing a third error here would be fabrication.
+async fn resolve_resume_title(arg: &str) -> Result<Option<uuid::Uuid>, String> {
+    if arg.is_empty() {
+        return Ok(None);
+    }
+    // The oracle loads EVERY log for the project before filtering; the picker's
+    // 5-row cap is a display limit and must not silently bound the search.
+    let rows = load_resume_rows_all().await.unwrap_or_default();
+    resolve_resume_title_from(rows, arg)
+}
+
+/// The pure resolution half of [`resolve_resume_title`], split out so the
+/// one-match / no-match / ambiguous arms are unit-testable without touching the
+/// environment or the process cwd — the same split [`load_resume_rows_from`]
+/// exists for.
+fn resolve_resume_title_from(
+    rows: Vec<SessionMetadata>,
+    arg: &str,
+) -> Result<Option<uuid::Uuid>, String> {
+    if arg.is_empty() {
+        return Ok(None);
+    }
+    let matches = session::jsonl::search_sessions_by_custom_title(rows, arg, true, None);
+    match matches.len() {
+        0 => Err(resume_title_not_found(arg)),
+        1 => Ok(Some(matches[0].uuid)),
+        _ => Err(resume_title_ambiguous(arg, &matches)),
+    }
+}
+
+/// `--resume <title>` matched nothing. Oracle (@246508120):
+///
+/// ```js
+/// let u = "Error: --resume requires a valid session ID or session title when used with
+///          --print. Usage: claude -p --resume <session-id|title>";
+/// if (i) u += `. Provided value "${i}" is not a UUID and does not match any session title.`;
+/// ```
+///
+/// The base sentence carries no trailing period — the appended clause supplies
+/// it. Only the binary name is adapted (`lingxi`, matching the "Resume with:"
+/// hint); the product this port ships is not `claude`.
+fn resume_title_not_found(arg: &str) -> String {
+    format!(
+        "Error: --resume requires a valid session ID or session title when used with --print. \
+         Usage: lingxi -p --resume <session-id|title>. Provided value \"{arg}\" is not a UUID \
+         and does not match any session title."
+    )
+}
+
+/// `--resume <title>` matched more than one session. Oracle (@246508120):
+///
+/// ```js
+/// let d = u.map((p) => `  ${zS(p) ?? "(unknown)"}  (modified ${p.modified.toISOString()})`)
+///          .join(`\n`);
+/// `Error: --resume "${i}" matches ${u.length} sessions. Pass one of these session IDs to disambiguate:\n${d}`
+/// ```
+///
+/// TWO spaces lead each row and TWO separate id from `(modified …)`. Rows arrive
+/// newest-first from [`session::jsonl::search_sessions_by_custom_title`].
+fn resume_title_ambiguous(arg: &str, matches: &[SessionMetadata]) -> String {
+    let listed = matches
+        .iter()
+        .map(|row| {
+            let millis = row
+                .modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis());
+            format!(
+                "  {}  (modified {})",
+                row.uuid,
+                session::jsonl::format_iso_millis(millis)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Error: --resume \"{arg}\" matches {} sessions. Pass one of these session IDs to \
+         disambiguate:\n{listed}",
+        matches.len()
+    )
+}
+
+/// Every resumable row for the cwd's project, unbounded — the search corpus for
+/// [`resolve_resume_title`]. [`load_resume_rows`] caps at 5 for the picker.
+async fn load_resume_rows_all() -> Result<Vec<SessionMetadata>, LoaderError> {
+    let lingxi_home = lingxi_home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.clone()));
+    list_recent_sessions(&lingxi_home, &cwd_str, usize::MAX, fs).await
 }
 
 /// `-c/--continue` — resume the MOST-RECENT conversation in the current cwd's
@@ -5260,6 +5381,103 @@ mod tests {
         let prefixed = resolve_session_id(&format!("sess:{uuid}")).expect("sess: prefix resolves");
         assert_eq!(bare, prefixed);
         assert_eq!(bare.to_string(), uuid);
+    }
+
+    /// Byte-exact against the oracle's no-match copy (2.1.220 @246508120). The
+    /// base sentence ends WITHOUT a period; the appended clause supplies it.
+    #[test]
+    fn resume_title_not_found_copy_is_byte_exact() {
+        assert_eq!(
+            resume_title_not_found("my session"),
+            "Error: --resume requires a valid session ID or session title when used with \
+             --print. Usage: lingxi -p --resume <session-id|title>. Provided value \"my session\" \
+             is not a UUID and does not match any session title."
+        );
+    }
+
+    /// Byte-exact against the oracle's multi-match copy. Two spaces lead each
+    /// row; two more separate the id from `(modified …)`; rows are newline
+    /// joined under the header.
+    #[test]
+    fn resume_title_ambiguous_copy_is_byte_exact() {
+        let row = |id: u128, secs: u64| SessionMetadata {
+            uuid: uuid::Uuid::from_u128(id),
+            title: "shared".to_string(),
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            created: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            message_count: 1,
+            path: PathBuf::from("x.jsonl"),
+            pr_number: None,
+            custom_or_ai_title: Some("shared".to_string()),
+        };
+        let matches = vec![row(2, 1_700_000_001), row(1, 1_700_000_000)];
+        assert_eq!(
+            resume_title_ambiguous("shared", &matches),
+            "Error: --resume \"shared\" matches 2 sessions. Pass one of these session IDs to \
+             disambiguate:\n  \
+             00000000-0000-0000-0000-000000000002  (modified 2023-11-14T22:13:21.000Z)\n  \
+             00000000-0000-0000-0000-000000000001  (modified 2023-11-14T22:13:20.000Z)"
+        );
+    }
+
+    /// An empty `--resume` has no title to look up, so the uuid-parse error
+    /// stands rather than the title copy misdescribing it.
+    #[tokio::test]
+    async fn resume_title_lookup_declines_an_empty_argument() {
+        assert_eq!(resolve_resume_title("").await, Ok(None));
+    }
+
+    fn titled_row(id: u128, secs: u64, searchable: &str) -> SessionMetadata {
+        SessionMetadata {
+            uuid: uuid::Uuid::from_u128(id),
+            title: searchable.to_string(),
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            created: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            message_count: 1,
+            path: PathBuf::from(format!("{id}.jsonl")),
+            pr_number: None,
+            custom_or_ai_title: Some(searchable.to_string()),
+        }
+    }
+
+    /// The success path: exactly one title match resolves to that session's id.
+    #[test]
+    fn resume_title_resolves_a_unique_match_to_its_session_id() {
+        let rows = vec![
+            titled_row(1, 100, "ship the parser"),
+            titled_row(2, 200, "unrelated"),
+        ];
+        assert_eq!(
+            resolve_resume_title_from(rows, "ship the parser"),
+            Ok(Some(uuid::Uuid::from_u128(1)))
+        );
+    }
+
+    /// `--resume` searches EXACTLY, so a partial title must not silently resume
+    /// the session it happens to be a prefix of.
+    #[test]
+    fn resume_title_refuses_a_partial_match() {
+        let rows = vec![titled_row(1, 100, "ship the parser")];
+        assert!(
+            resolve_resume_title_from(rows, "ship")
+                .expect_err("partial title must not resolve")
+                .contains("does not match any session title"),
+            "a substring must fall through to the no-match copy"
+        );
+    }
+
+    /// Two sessions sharing a title cannot be disambiguated by the port, so the
+    /// user is handed the ids rather than an arbitrary pick.
+    #[test]
+    fn resume_title_reports_every_candidate_when_ambiguous() {
+        let rows = vec![titled_row(1, 100, "dup"), titled_row(2, 200, "dup")];
+        let error = resolve_resume_title_from(rows, "dup").expect_err("ambiguous must error");
+        assert!(error.contains("matches 2 sessions"), "{error}");
+        assert!(
+            error.contains("00000000-0000-0000-0000-000000000001")
+                && error.contains("00000000-0000-0000-0000-000000000002"),
+            "both candidate ids must be listed: {error}"
+        );
     }
 
     #[test]

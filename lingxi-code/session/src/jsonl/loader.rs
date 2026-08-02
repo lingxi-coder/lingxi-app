@@ -68,6 +68,17 @@ pub struct SessionMetadata {
     /// Pull-request number linked to this session, when a `pr-link` metadata
     /// entry exists. This powers Claude-compatible `--from-pr` filtering.
     pub pr_number: Option<u64>,
+    /// The title `searchSessionsByCustomTitle` (`OEe`) matches against:
+    /// `customTitle ?? aiTitle`, stored RAW.
+    ///
+    /// Deliberately NOT [`Self::title`]. That one folds in `agentName`,
+    /// `summary`, and the first user message for display, and it is truncated
+    /// to [`crate::jsonl::title::TITLE_MAX_CHARS`] — searching it would resume
+    /// a session whose *summary* happened to contain the query, which the
+    /// oracle never does, and would miss a match past the truncation point.
+    /// `None` when the session has neither title kind, which the oracle skips
+    /// outright (`if (!p) return !1`).
+    pub custom_or_ai_title: Option<String>,
 }
 
 /// A resumable-session catalog plus the number of UUID-named transcript files
@@ -520,10 +531,20 @@ async fn collect_dir(
                 |t| truncate_title(t),
             );
         let pr_number = loaded.pr_numbers.get(sid).copied();
+        // `OEe`'s match source: `d.customTitle ?? d.aiTitle`. Note this skips
+        // `agent_names`, which the DISPLAY title above leads with — an
+        // agent-owned session is searchable by the title the user (or the AI)
+        // gave it, not by the agent's name.
+        let custom_or_ai_title = loaded
+            .custom_titles
+            .get(sid)
+            .or_else(|| loaded.ai_titles.get(sid))
+            .cloned();
 
         rows.push(SessionMetadata {
             uuid,
             title,
+            custom_or_ai_title,
             modified,
             created,
             // claude-code `messageCount: countVisibleMessages(chain)`
@@ -657,6 +678,66 @@ pub async fn list_recent_sessions(
             .await?
             .sessions,
     )
+}
+
+/// Filter already-loaded rows by session title — port of
+/// `searchSessionsByCustomTitle` (`OEe`, 2.1.220 @237903684):
+///
+/// ```js
+/// let a = e.toLowerCase().trim(),
+///     l = s.filter((d) => {
+///       let p = (d.customTitle ?? d.aiTitle)?.toLowerCase().trim();
+///       if (!p) return !1;
+///       return n ? p === a : p.includes(a)
+///     });
+/// // …dedup by session id keeping the newest `modified`, sort modified DESC, slice(limit)
+/// ```
+///
+/// Both sides are lowercased AND trimmed before comparing, so a query with
+/// stray whitespace or different casing still matches. Rows with neither title
+/// kind are skipped rather than treated as an empty string — otherwise an empty
+/// query would "match" every untitled session.
+///
+/// `exact` selects equality over substring. `--resume` passes `true`; the
+/// `/resume` argument-completer passes `false` with a limit of 10.
+///
+/// The oracle's dedup-by-session-id step is a no-op here and is intentionally
+/// not reproduced: it exists because its `logs` can hold several entries per
+/// session, whereas [`collect_dir`] emits exactly one row per transcript FILE,
+/// keyed by the uuid filename stem. Sorting is still applied — callers depend
+/// on newest-first for the disambiguation listing.
+#[must_use]
+pub fn search_sessions_by_custom_title(
+    sessions: Vec<SessionMetadata>,
+    query: &str,
+    exact: bool,
+    limit: Option<usize>,
+) -> Vec<SessionMetadata> {
+    let needle = query.to_lowercase();
+    let needle = needle.trim();
+    let mut matched: Vec<SessionMetadata> = sessions
+        .into_iter()
+        .filter(|row| {
+            let Some(title) = row.custom_or_ai_title.as_deref() else {
+                return false;
+            };
+            let title = title.to_lowercase();
+            let title = title.trim();
+            if title.is_empty() {
+                return false;
+            }
+            if exact {
+                title == needle
+            } else {
+                title.contains(needle)
+            }
+        })
+        .collect();
+    matched.sort_by(|a, b| b.modified.cmp(&a.modified));
+    if let Some(limit) = limit {
+        matched.truncate(limit);
+    }
+    matched
 }
 
 /// Enumerate resumable sessions while retaining a count of corrupt or
@@ -2283,6 +2364,7 @@ mod tests {
             message_count: 1,
             path: PathBuf::from("z.jsonl"),
             pr_number: None,
+            custom_or_ai_title: None,
         };
         let newer = SessionMetadata {
             uuid: Uuid::from_u128(2),
@@ -2292,6 +2374,7 @@ mod tests {
             message_count: 1,
             path: PathBuf::from("a.jsonl"),
             pr_number: None,
+            custom_or_ai_title: None,
         };
         // Insert oldest-created first to prove the sort (not insertion order)
         // drives the result.
@@ -2342,6 +2425,76 @@ mod tests {
         assert!(
             read_worktree_state(&path, fs, session_id).await.is_none(),
             "cleared worktree state resolves to None"
+        );
+    }
+
+    fn search_row(id: u128, secs: u64, display: &str, searchable: Option<&str>) -> SessionMetadata {
+        SessionMetadata {
+            uuid: Uuid::from_u128(id),
+            title: display.to_string(),
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            created: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            message_count: 1,
+            path: PathBuf::from(format!("{id}.jsonl")),
+            pr_number: None,
+            custom_or_ai_title: searchable.map(str::to_string),
+        }
+    }
+
+    /// `OEe` lowercases AND trims both sides before comparing.
+    #[test]
+    fn title_search_is_case_and_whitespace_insensitive() {
+        let rows = vec![search_row(1, 100, "d", Some("  Ship The Parser  "))];
+        let hit = search_sessions_by_custom_title(rows, "\tship the parser ", true, None);
+        assert_eq!(hit.len(), 1, "case + surrounding whitespace must not matter");
+    }
+
+    /// The search source is `customTitle ?? aiTitle` — NOT the merged display
+    /// title, which also folds in agentName/summary/first-user-message. Matching
+    /// the display title would resume a session because its SUMMARY contained
+    /// the query, which the oracle never does.
+    #[test]
+    fn title_search_ignores_the_merged_display_title() {
+        let rows = vec![search_row(1, 100, "refactor the loader", None)];
+        assert!(
+            search_sessions_by_custom_title(rows, "refactor the loader", true, None).is_empty(),
+            "a row with no custom/ai title must not match on its display title"
+        );
+    }
+
+    /// `if (!p) return !1` — an untitled row is skipped outright, so an empty
+    /// query cannot sweep up every session.
+    #[test]
+    fn title_search_skips_untitled_rows_even_for_an_empty_query() {
+        let rows = vec![search_row(1, 100, "d", None), search_row(2, 100, "d", Some(""))];
+        assert!(search_sessions_by_custom_title(rows, "", false, None).is_empty());
+    }
+
+    /// `exact` is what `--resume` passes; substring is the completer's mode.
+    #[test]
+    fn title_search_exact_rejects_a_substring_that_inexact_accepts() {
+        let rows = vec![search_row(1, 100, "d", Some("ship the parser"))];
+        assert!(search_sessions_by_custom_title(rows.clone(), "parser", true, None).is_empty());
+        assert_eq!(
+            search_sessions_by_custom_title(rows, "parser", false, None).len(),
+            1
+        );
+    }
+
+    /// Sorted `modified` DESC, then `slice(limit)` — the disambiguation listing
+    /// and the completer both depend on newest-first.
+    #[test]
+    fn title_search_sorts_newest_first_then_limits() {
+        let rows = vec![
+            search_row(1, 100, "d", Some("dup")),
+            search_row(3, 300, "d", Some("dup")),
+            search_row(2, 200, "d", Some("dup")),
+        ];
+        let hits = search_sessions_by_custom_title(rows, "dup", true, Some(2));
+        assert_eq!(
+            hits.iter().map(|r| r.uuid.as_u128()).collect::<Vec<_>>(),
+            vec![3, 2],
+            "newest first, then truncated to the limit"
         );
     }
 }

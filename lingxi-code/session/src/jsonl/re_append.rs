@@ -647,7 +647,13 @@ fn iso_now() -> String {
     format_iso_millis(now.as_millis())
 }
 
-fn format_iso_millis(millis: u128) -> String {
+/// `Date.prototype.toISOString()` — millisecond precision, `Z` suffix.
+///
+/// Public because the `--resume <title>` disambiguation listing renders
+/// `(modified ${p.modified.toISOString()})` and must produce the same shape;
+/// pinned by `iso_timestamp_matches_javascript_to_iso_string`.
+#[must_use]
+pub fn format_iso_millis(millis: u128) -> String {
     let total_secs = i64::try_from(millis / 1000).unwrap_or(i64::MAX);
     let ms = u32::try_from(millis % 1000).unwrap_or(0);
     let days = total_secs.div_euclid(86_400);

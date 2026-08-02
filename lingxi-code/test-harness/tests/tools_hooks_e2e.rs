@@ -66,6 +66,8 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // PreToolUse Block mock, not a SessionStart hook.
                 initial_user_message: None,
                 reload_skills: None,
+                async_rewake: false,
+                async_backgrounded: false,
             }),
         }
     }

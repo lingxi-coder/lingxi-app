@@ -211,6 +211,20 @@ pub struct SessionInfo {
     /// alongside [`Self::model_allowlist`] so a Bedrock-ARN row still matches an
     /// allowlisted Anthropic id. Empty (the default) = no reverse-mapping.
     pub model_overrides: std::collections::BTreeMap<String, String>,
+    /// One `/status` warning row per LOADED memory file whose body exceeds
+    /// [`memory::max_memory_character_count`] for the current model — the rows
+    /// claude-code's `htf()` (2.1.220 binary offset 241152161) contributes:
+    /// `Large <path> will impact performance (<n> chars > <max>)`.
+    ///
+    /// Captured at launch from the same `MemoryHierarchyProvider` the system
+    /// prompt's memory block is built from, so the rows describe files that are
+    /// really in the context. Empty (the default) leaves the `/status` panel
+    /// byte-identical to before the warning existed.
+    ///
+    /// This launch snapshot is only the fail-safe fallback. `/status`
+    /// recomputes the rows against the live model and loaded memory set when the
+    /// panel mounts; `Some(Vec::new())` authoritatively clears this snapshot.
+    pub large_memory_warnings: Vec<String>,
 }
 
 #[cfg(test)]

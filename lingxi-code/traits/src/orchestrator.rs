@@ -1363,6 +1363,13 @@ pub trait OrchestratorHandle: Send + Sync {
         None
     }
 
+    /// Host-validated beta additions that affect session-visible model
+    /// capabilities such as the context window. The default remains empty for
+    /// lightweight and test implementations.
+    async fn active_betas(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
     /// Read the session's fast-mode flag (`/fast`; the priority `speed:"fast"`

@@ -589,12 +589,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
             (session.model.clone(), self.session_cwd.cwd())
         };
         let files = self.memory.load(&cwd).await;
+        let active_betas = self.api.active_betas();
         Some(crate::prompt::large_memory_warning_rows(
             &files,
             &cwd,
             dirs::home_dir().as_deref(),
             &model,
+            &active_betas,
         ))
+    }
+
+    async fn active_betas(&self) -> Vec<String> {
+        self.api.active_betas()
     }
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {

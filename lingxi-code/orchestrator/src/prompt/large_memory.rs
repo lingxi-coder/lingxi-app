@@ -58,14 +58,6 @@ pub fn shorten_memory_path(
 /// caller owns alias resolution (`Ei`), per
 /// [`memory::memory_chars_per_token`]'s contract.
 ///
-/// ⚠️ The beta list is empty. That is a real, narrow divergence, not a
-/// no-op: `--betas context-1m-2025-08-07` on a 200k Claude model gives the
-/// session a 1M window (and so a 150k–200k threshold) while this computes
-/// 40 000. `StatusSnapshot` carries no betas, so closing it means adding the
-/// field the orchestrator already has (`active_betas()`) — deliberately out of
-/// scope here. An explicit `[1m]` model suffix and every natively-1M model are
-/// still detected from the model id alone.
-///
 /// The `> max_chars` test is [`memory::get_large_memory_files`]' 1:1 port of
 /// `fJr` inlined: that helper takes `memory::file::MemoryFile` (mtime +
 /// frontmatter), which cannot be built from a loaded LINGXI.md without
@@ -77,9 +69,10 @@ pub fn large_memory_warning_rows(
     cwd: &std::path::Path,
     os_home: Option<&std::path::Path>,
     model: &str,
+    active_betas: &[String],
 ) -> Vec<String> {
     let max_chars = memory::max_memory_character_count(
-        llm_client::model::context_window::context_window_for_model(model, &[]),
+        llm_client::model::context_window::context_window_for_model(model, active_betas),
         memory::memory_chars_per_token(model),
     );
     let max_u64 = u64::try_from(max_chars).unwrap_or(u64::MAX);

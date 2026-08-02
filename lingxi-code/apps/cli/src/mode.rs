@@ -2354,11 +2354,13 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
     // as an unknown 200k/4-cpt model (threshold 40k) when it resolves to a
     // natively-1M model (threshold 150k).
     let threshold_model = agent::model_resolution::resolve_user_specified_model(&current_model);
+    let active_betas = orch.active_betas().await;
     let large_memory_warnings = orchestrator::prompt::large_memory_warning_rows(
         &memory_files,
         &cwd,
         home_dir.as_deref(),
         &threshold_model,
+        &active_betas,
     );
 
     // Managed `availableModels` allowlist for the `/model` picker filter (parity
@@ -2441,7 +2443,6 @@ fn memory_rows(cwd: &std::path::Path, os_home: &std::path::Path) -> Vec<tui::ses
     }
     rows
 }
-
 
 /// Resolve `(lingxi_home, project_dir)` the settings reader/writer address.
 ///
@@ -2704,22 +2705,38 @@ mod tests {
         let home = Some(std::path::Path::new("/home/u"));
         // Under cwd → cwd-relative, no leading "./".
         assert_eq!(
-            orchestrator::prompt::shorten_memory_path(std::path::Path::new("/work/repo/LINGXI.md"), cwd, home),
+            orchestrator::prompt::shorten_memory_path(
+                std::path::Path::new("/work/repo/LINGXI.md"),
+                cwd,
+                home
+            ),
             "LINGXI.md"
         );
         assert_eq!(
-            orchestrator::prompt::shorten_memory_path(std::path::Path::new("/work/repo/a/b/LINGXI.md"), cwd, home),
+            orchestrator::prompt::shorten_memory_path(
+                std::path::Path::new("/work/repo/a/b/LINGXI.md"),
+                cwd,
+                home
+            ),
             "a/b/LINGXI.md"
         );
         // Escapes cwd (relative would start with "..") but lives under $HOME →
         // "~"-abbreviated.
         assert_eq!(
-            orchestrator::prompt::shorten_memory_path(std::path::Path::new("/home/u/.lingxi/LINGXI.md"), cwd, home),
+            orchestrator::prompt::shorten_memory_path(
+                std::path::Path::new("/home/u/.lingxi/LINGXI.md"),
+                cwd,
+                home
+            ),
             "~/.lingxi/LINGXI.md"
         );
         // Neither → the absolute path, verbatim.
         assert_eq!(
-            orchestrator::prompt::shorten_memory_path(std::path::Path::new("/etc/lingxi/LINGXI.md"), cwd, home),
+            orchestrator::prompt::shorten_memory_path(
+                std::path::Path::new("/etc/lingxi/LINGXI.md"),
+                cwd,
+                home
+            ),
             "/etc/lingxi/LINGXI.md"
         );
         // `$HOME` itself is not `$HOME + sep`, so it does NOT abbreviate.
@@ -2757,7 +2774,13 @@ mod tests {
         let files = vec![loaded_memory_file("/work/repo/LINGXI.md", 52_310)];
 
         // A 200k-context model: threshold collapses to the 40k floor → flagged.
-        let rows = orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, "claude-sonnet-4-5");
+        let rows = orchestrator::prompt::large_memory_warning_rows(
+            &files,
+            cwd,
+            home,
+            "claude-sonnet-4-5",
+            &[],
+        );
         assert_eq!(
             rows,
             vec!["Large LINGXI.md will impact performance (52.3k chars > 40.0k)".to_string()],
@@ -2766,14 +2789,43 @@ mod tests {
         // The SAME file under a 1M-context model: `max(40000, round(1e6*0.05*3))`
         // = 150_000 > 52_310 → NOT flagged. This is the only regime in which the
         // model-derived threshold differs from the old flat 40k constant.
-        assert!(orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, "claude-opus-5[1m]").is_empty());
+        assert!(orchestrator::prompt::large_memory_warning_rows(
+            &files,
+            cwd,
+            home,
+            "claude-opus-5[1m]",
+            &[]
+        )
+        .is_empty());
+        assert!(orchestrator::prompt::large_memory_warning_rows(
+            &files,
+            cwd,
+            home,
+            "claude-sonnet-4-5",
+            &["context-1m-2025-08-07".to_string()],
+        )
+        .is_empty());
 
         // A file exactly AT the threshold is not flagged (`>`), one char over is.
         let at = vec![loaded_memory_file("/work/repo/LINGXI.md", 40_000)];
-        assert!(orchestrator::prompt::large_memory_warning_rows(&at, cwd, home, "claude-sonnet-4-5").is_empty());
+        assert!(orchestrator::prompt::large_memory_warning_rows(
+            &at,
+            cwd,
+            home,
+            "claude-sonnet-4-5",
+            &[]
+        )
+        .is_empty());
         let over = vec![loaded_memory_file("/work/repo/LINGXI.md", 40_001)];
         assert_eq!(
-            orchestrator::prompt::large_memory_warning_rows(&over, cwd, home, "claude-sonnet-4-5").len(),
+            orchestrator::prompt::large_memory_warning_rows(
+                &over,
+                cwd,
+                home,
+                "claude-sonnet-4-5",
+                &[]
+            )
+            .len(),
             1
         );
 
@@ -2784,7 +2836,13 @@ mod tests {
             loaded_memory_file("/work/repo/LINGXI.md", 52_310),
         ];
         assert_eq!(
-            orchestrator::prompt::large_memory_warning_rows(&many, cwd, home, "claude-sonnet-4-5"),
+            orchestrator::prompt::large_memory_warning_rows(
+                &many,
+                cwd,
+                home,
+                "claude-sonnet-4-5",
+                &[]
+            ),
             vec![
                 "Large ~/.lingxi/LINGXI.md will impact performance (52.3k chars > 40.0k)"
                     .to_string(),
@@ -2805,14 +2863,15 @@ mod tests {
 
         // The bare alias would flag the file …
         assert_eq!(
-            orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, "opus").len(),
+            orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, "opus", &[]).len(),
             1,
             "the unresolved alias must be the case that misfires"
         );
         // … while the id `Ei` resolves it to does not.
         let resolved = agent::model_resolution::resolve_user_specified_model("opus");
         assert!(
-            orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, &resolved).is_empty(),
+            orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, &resolved, &[])
+                .is_empty(),
             "resolved {resolved} should be a 1M model with a 150k threshold"
         );
     }

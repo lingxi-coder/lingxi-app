@@ -1,8 +1,29 @@
-# What is actually left, 2026-07-26
+# What is actually left, 2026-07-26 (re-verified 2026-08-02)
 
 Every audit backlog in `docs/` has been swept at the behaviour sites. This is
 the residue, with the blocker named for each so the next session starts from
 execution rather than re-derivation.
+
+> ## 2026-08-02 re-verification — read this before trusting anything below
+>
+> Every deferred item in this file plus the ones carried in session memory was
+> re-checked **at the code**, not from notes. Result: **one real task, one
+> correction, one stale entry.**
+>
+> | Item | Verdict |
+> |---|---|
+> | **`--resume <title>`** | ❗ **REAL and now UNBLOCKED.** It was deferred because the port never WROTE `custom-title`. It does now — `jsonl/writer.rs:323,:350`, `jsonl/re_append.rs:449`, `branch.rs:134`. `resolve_session_id` (`run.rs:3573`) still accepts only a UUID, so a title argument errors. Oracle confirms the feature: `searchSessionsByCustomTitle` = 2 hits (control string 0, known-present string 4 — comparator validated). **This is the only open engineering task in the repo.** |
+> | "8 unprobed CLI surfaces" | **It is 6, and it is a TEST-COVERAGE gap, not a feature gap.** `install` + `update` are deliberate NOT-APPLICABLE divergences (source build, no auto-update channel): they parse the byte-faithful clap surface, then return `NOT_IMPLEMENTED` rather than fake success. The other 6 are really implemented (74–3420 lines each). Their stated blocker still stands — probing them for real reaches third-party IdP/registry. |
+> | `--version` shape | Confirmed a **branding decision**, not work. `traits::CLAUDE_CODE_VERSION` already carries the Claude-compat identifier separately. |
+> | `--bare` / `lingxiMdExcludes` | ❌ **STALE — both shipped long ago.** `--bare` is WIRED at `argv.rs:294` (exports `LINGXI_SIMPLE=1`); excludes have their own module (`memory/src/lingxi_md/excludes.rs`), are wired into `prompt/memory_block.rs`, and are registered in the settings schema. Delete this entry, do not re-derive it. |
+> | `N-env-3` / `N-protocol-8` | Already adjudicated **DIVERGENCE** (Anthropic private first-party backend), and the two are ONE item — `N-protocol-8` is marked DUPLICATE. The 2.1.220 backlog is **25 CLOSED + 1 DIVERGENCE**. |
+>
+> 🚨 **Method note, earned twice today.** A 0-hit grep for the ORACLE's symbol
+> name is not evidence of a missing feature. `gatewayAuth` returned 0 hits and I
+> wrote a whole "remaining item" around it — the port expresses that predicate as
+> a conjunction of three env vars and never uses the name. **Grep the ported
+> behaviour.** And before recording a gap, check whether a doc two screens up
+> already answers it.
 
 ## The behaviour audit now has a harness: `scripts/parity_behaviour.py`
 

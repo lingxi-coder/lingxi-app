@@ -14,6 +14,7 @@
 
 pub mod agent_validation;
 pub mod blocklist;
+pub mod dependency;
 pub mod discovery;
 mod git;
 pub mod installed;
@@ -36,6 +37,9 @@ pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;
+pub use dependency::{
+    merge_dependency_requirements, parse_dependencies, version_satisfies_all, PluginDependency,
+};
 pub use discovery::{
     discover_cli_plugin_dirs, discover_effective_plugins, discover_enabled_plugins,
     discover_installed_plugins, discover_recorded_plugins,

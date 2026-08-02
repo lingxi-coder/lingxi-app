@@ -206,6 +206,7 @@ mod tests {
             components: Default::default(),
             trust_level: PluginTrustLevel::UserTrusted,
             depends_on: Vec::new(),
+            dependencies: Vec::new(),
             user_config: Some(UserConfigSchema { fields: map }),
             channels: Vec::new(),
             settings: HashMap::new(),

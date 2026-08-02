@@ -23,6 +23,7 @@
 //! * an unknown `--scope` →
 //!   `Invalid scope "x". Valid scopes: user, project, local`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use migrations::settings_update::{read_settings_map, update_settings};
@@ -130,6 +131,108 @@ fn set_value(path: &Path, id: &str, value: bool) -> Result<(), String> {
     )
 }
 
+fn installed_plugins(home: &Path) -> Value {
+    std::fs::read_to_string(home.join("plugins").join("installed_plugins.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({"version":2,"plugins":{}}))
+}
+
+fn installed_record<'a>(
+    db: &'a Value,
+    id: &str,
+    scope: Scope,
+    project_path: &Option<String>,
+) -> Option<&'a Value> {
+    db.get("plugins")
+        .and_then(|plugins| plugins.get(id))
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|record| {
+            if record.get("scope").and_then(Value::as_str) != Some(scope.label()) {
+                return false;
+            }
+            match project_path {
+                Some(path) => {
+                    record.get("projectPath").and_then(Value::as_str) == Some(path.as_str())
+                }
+                None => record.get("projectPath").is_none(),
+            }
+        })
+}
+
+fn scope_project_path(scope: Scope, cwd: &Path) -> Option<String> {
+    match scope {
+        Scope::User => None,
+        Scope::Project | Scope::Local => Some(
+            std::fs::canonicalize(cwd)
+                .unwrap_or_else(|_| cwd.to_path_buf())
+                .display()
+                .to_string(),
+        ),
+    }
+}
+
+fn record_dependencies(record: &Value, owner_id: &str) -> Vec<String> {
+    let Some(path) = record.get("installPath").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let dependencies = std::fs::read_to_string(
+        Path::new(path)
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|manifest| manifest.get("dependencies").cloned());
+    let owner_marketplace = marketplace_of(owner_id).unwrap_or("");
+    plugin::parse_dependencies(dependencies.as_ref())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|dependency| dependency.resolved_id(owner_marketplace))
+        .collect()
+}
+
+fn collect_dependencies(
+    db: &Value,
+    id: &str,
+    scope: Scope,
+    project_path: &Option<String>,
+    seen: &mut HashSet<String>,
+) {
+    if !seen.insert(id.to_string()) {
+        return;
+    }
+    let Some(record) = installed_record(db, id, scope, project_path) else {
+        return;
+    };
+    for dependency in record_dependencies(record, id) {
+        collect_dependencies(db, &dependency, scope, project_path, seen);
+    }
+}
+
+fn enabled_dependents(
+    db: &Value,
+    id: &str,
+    scope: Scope,
+    project_path: &Option<String>,
+    settings_path: &Path,
+) -> Vec<String> {
+    let enabled = read_enabled(settings_path);
+    let Some(record) = installed_record(db, id, scope, project_path) else {
+        return Vec::new();
+    };
+    record
+        .get("requiredBy")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|owner| enabled.get(*owner).and_then(Value::as_bool) == Some(true))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Resolve a user-supplied plugin argument to a full `plugin@marketplace` id.
 ///
 /// A value already containing `@` is a full id (returned verbatim). A bare
@@ -206,7 +309,20 @@ pub fn run_enable(
             &format!("Plugin \"{id}\" is already enabled"),
         ));
     }
-    set_value(&path, &id, true).map_err(|e| fail("enable", &id, &e))?;
+    let installed = installed_plugins(home);
+    let project_path = scope_project_path(scope, cwd);
+    let mut enable = HashSet::new();
+    collect_dependencies(&installed, &id, scope, &project_path, &mut enable);
+    enable.insert(id.clone());
+    let mut map = read_enabled(&path);
+    for plugin_id in enable {
+        map.insert(plugin_id, Value::Bool(true));
+    }
+    update_settings(
+        &path,
+        vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
+    )
+    .map_err(|e| fail("enable", &id, &e))?;
     Ok(format!(
         "✔ Successfully enabled plugin: {} (scope: {})",
         name_of(&id),
@@ -283,6 +399,18 @@ pub fn run_disable(
             &format!("Plugin \"{id}\" is already disabled"),
         ));
     }
+    let project_path = scope_project_path(scope, cwd);
+    let dependents = enabled_dependents(&installed_plugins(home), &id, scope, &project_path, &path);
+    if !dependents.is_empty() {
+        return Err(fail(
+            "disable",
+            &id,
+            &format!(
+                "Plugin \"{id}\" is required by enabled plugin(s): {}",
+                dependents.join(", ")
+            ),
+        ));
+    }
     set_value(&path, &id, false).map_err(|e| fail("disable", &id, &e))?;
     Ok(format!(
         "✔ Successfully disabled plugin: {} (scope: {})",
@@ -321,6 +449,38 @@ mod tests {
         serde_json::from_str(&raw).unwrap()
     }
 
+    fn install_record(e: &Env, id: &str, dependencies: &[&str], required_by: &[&str]) {
+        let install = e
+            .home
+            .join("plugins")
+            .join("cache")
+            .join(id.replace('@', "--"));
+        std::fs::create_dir_all(install.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            install
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::to_vec(&json!({
+                "name": name_of(id),
+                "dependencies": dependencies,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let db_path = e.home.join("plugins").join("installed_plugins.json");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let mut db = std::fs::read_to_string(&db_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({"version":2,"plugins":{}}));
+        db["plugins"][id] = json!([{
+            "scope":"user",
+            "installPath":install,
+            "requiredBy":required_by,
+        }]);
+        std::fs::write(db_path, serde_json::to_vec(&db).unwrap()).unwrap();
+    }
+
     #[test]
     fn enable_writes_true_to_user_and_reports_name() {
         let e = env();
@@ -355,6 +515,39 @@ mod tests {
             err,
             "✘ Failed to enable plugin \"foo@bar\": Plugin \"foo@bar\" is already enabled"
         );
+    }
+
+    #[test]
+    fn enable_recursively_enables_installed_dependencies() {
+        let e = env();
+        install_record(&e, "app@m", &["dep"], &[]);
+        install_record(&e, "dep@m", &["leaf"], &["app@m"]);
+        install_record(&e, "leaf@m", &[], &["dep@m"]);
+
+        run_enable("app@m", None, &e.home, &e.cwd).unwrap();
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"],
+            json!({"app@m":true,"dep@m":true,"leaf@m":true})
+        );
+    }
+
+    #[test]
+    fn disable_rejects_dependency_used_by_enabled_plugin() {
+        let e = env();
+        install_record(&e, "app@m", &["dep"], &[]);
+        install_record(&e, "dep@m", &[], &["app@m"]);
+        std::fs::write(
+            e.home.join("settings.json"),
+            r#"{"enabledPlugins":{"app@m":true,"dep@m":true}}"#,
+        )
+        .unwrap();
+
+        let error = run_disable(Some("dep@m"), None, false, &e.home, &e.cwd).unwrap_err();
+        assert!(
+            error.contains("required by enabled plugin(s): app@m"),
+            "{error}"
+        );
+        assert_eq!(user_settings(&e)["enabledPlugins"]["dep@m"], true);
     }
 
     #[test]

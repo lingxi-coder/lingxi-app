@@ -20,11 +20,8 @@
 //! `MarketplaceManager::resolve_index_via_git` into
 //! `<plugins>/marketplaces/<name>/`), or a hosted **url** `marketplace.json`.
 //!
-//! Residuals: the **url** source's HTTP `marketplace.json` download is not
-//! ported (the plugin crate has no HTTP-catalog fetch) — it classifies + shapes
-//! the `source` object but declines the fetch; a `ref` on a github/git source is
-//! recorded in the `source` object but not checked out (the shared clone helper
-//! fetches the default branch); and the network add path emits a single result
+//! A `ref` on a github/git source is checked out by the shared clone helper;
+//! the network add path emits a single result
 //! line rather than the binary's live per-step progress
 //! ("Refreshing marketplace cache…", "Cloning repository…", …).
 
@@ -527,9 +524,8 @@ fn source_object(src: &Source) -> Value {
 ///   `<plugins>/marketplaces/<name>/` via `MarketplaceManager::resolve_index_via_git`,
 ///   taking the marketplace `name` from the cloned catalog and setting
 ///   `installLocation` to the clone dir.
-/// - **url**: a hosted `marketplace.json` fetched over HTTP — classification +
-///   `source` object are shaped, but the download itself is a residual (the
-///   plugin crate has no HTTP-catalog fetch), so it declines cleanly.
+/// - **url**: a hosted `marketplace.json` fetched over HTTPS into an atomic
+///   local catalog directory.
 pub fn run_add(
     source: &str,
     scope: Option<&str>,
@@ -629,15 +625,35 @@ fn add_remote(
     // Determine the clone URL + a provisional clone-dir name hint (the final
     // directory is renamed to the marketplace's own name after the catalog is
     // parsed, matching the binary's temp-then-rename).
-    let (clone_url, hint) = match remote {
-        Source::Github { repo, .. } => (format!("https://github.com/{repo}.git"), repo.clone()),
-        Source::Git { url, .. } => (url.clone(), url_repo_hint(url)),
+    let (clone_url, hint, git_ref) = match remote {
+        Source::Github { repo, git_ref } => (
+            format!("https://github.com/{repo}.git"),
+            repo.clone(),
+            git_ref.as_deref(),
+        ),
+        Source::Git { url, git_ref } => (url.clone(), url_repo_hint(url), git_ref.as_deref()),
         Source::Url { url } => {
-            // A hosted marketplace.json is fetched over HTTP, not git-cloned; the
-            // plugin crate has no HTTP-catalog fetch yet (module residual).
-            return Err(format!(
-                "Adding marketplace…✘ Failed to add marketplace: Hosted marketplace.json URL sources are not yet supported: {url}"
-            ));
+            let (name, catalog_dir) = fetch_hosted_marketplace(plugins_dir, url)
+                .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+            let identity = source_identity(remote);
+            if let Err(reason) =
+                plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
+            {
+                let _ = std::fs::remove_dir_all(&catalog_dir);
+                return Err(format!(
+                    "Adding marketplace…✘ Failed to add marketplace: {reason}"
+                ));
+            }
+            let source_value = source_object(remote);
+            return write_marketplace(
+                &name,
+                &source_value,
+                &catalog_dir.display().to_string(),
+                target,
+                plugins_dir,
+                home,
+                cwd,
+            );
         }
         Source::Directory(_) => unreachable!("add_remote called with a directory source"),
     };
@@ -648,7 +664,7 @@ fn add_remote(
     }
 
     // From here the "Adding marketplace…" progress prefix is part of the line.
-    let (name, clone_dir) = clone_marketplace(plugins_dir, &clone_url, &hint)
+    let (name, clone_dir) = clone_marketplace(plugins_dir, &clone_url, &hint, git_ref)
         .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
     let identity = source_identity(remote);
     if let Err(reason) =
@@ -670,6 +686,106 @@ fn add_remote(
         home,
         cwd,
     )
+}
+
+const MAX_HOSTED_MARKETPLACE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Fetch a hosted marketplace catalog without following redirects, validate
+/// its public shape, and publish it through a same-parent rename. The policy
+/// source gate runs before this function; the name-aware gate runs before the
+/// returned directory is registered.
+fn fetch_hosted_marketplace(plugins_dir: &Path, url: &str) -> Result<(String, PathBuf), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid marketplace URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Hosted marketplace URLs must use HTTPS".to_string());
+    }
+    let plugins_dir = plugins_dir.to_path_buf();
+    let url = url.to_string();
+    std::thread::spawn(move || -> Result<(String, PathBuf), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to initialize marketplace download: {e}"))?;
+        runtime.block_on(async move {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("Failed to initialize marketplace download: {e}"))?;
+            let mut response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to download marketplace: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Failed to download marketplace: HTTP {}",
+                    response.status()
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_HOSTED_MARKETPLACE_BYTES as u64)
+            {
+                return Err("Hosted marketplace exceeds the 5 MiB limit".to_string());
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| format!("Failed to download marketplace: {e}"))?
+            {
+                if bytes.len().saturating_add(chunk.len()) > MAX_HOSTED_MARKETPLACE_BYTES {
+                    return Err("Hosted marketplace exceeds the 5 MiB limit".to_string());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("Invalid marketplace schema: {e}"))?;
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "Invalid marketplace schema: missing required field 'name'".to_string())?
+                .to_string();
+            if !value.get("owner").is_some_and(Value::is_object)
+                || !value.get("plugins").is_some_and(Value::is_array)
+            {
+                return Err(
+                    "Invalid marketplace schema: owner must be an object and plugins must be an array"
+                        .to_string(),
+                );
+            }
+
+            let parent = plugins_dir.join("marketplaces");
+            std::fs::create_dir_all(&parent)
+                .map_err(|e| format!("Failed to create marketplace cache: {e}"))?;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let temp = parent.join(format!(".hosted-{}-{nonce}", std::process::id()));
+            let manifest_dir = temp.join(branding::PLUGIN_MANIFEST_DIR);
+            std::fs::create_dir_all(&manifest_dir)
+                .map_err(|e| format!("Failed to create marketplace cache: {e}"))?;
+            if let Err(error) = std::fs::write(manifest_dir.join("marketplace.json"), &bytes) {
+                let _ = std::fs::remove_dir_all(&temp);
+                return Err(format!("Failed to cache marketplace: {error}"));
+            }
+            let destination = parent.join(sanitize_segment(&name));
+            if destination.exists() {
+                std::fs::remove_dir_all(&destination)
+                    .map_err(|e| format!("Failed to replace marketplace cache: {e}"))?;
+            }
+            if let Err(error) = std::fs::rename(&temp, &destination) {
+                let _ = std::fs::remove_dir_all(&temp);
+                return Err(format!("Failed to publish marketplace cache: {error}"));
+            }
+            Ok((name, destination))
+        })
+    })
+    .join()
+    .map_err(|_| "Marketplace download worker panicked".to_string())?
 }
 
 /// A provisional clone-dir name derived from a git URL's last path segment
@@ -713,17 +829,20 @@ fn clone_marketplace(
     plugins_dir: &Path,
     clone_url: &str,
     hint: &str,
+    git_ref: Option<&str>,
 ) -> Result<(String, PathBuf), String> {
     let plugins_dir = plugins_dir.to_path_buf();
     let url = clone_url.to_string();
     let hint = hint.to_string();
+    let git_ref = git_ref.map(ToOwned::to_owned);
     std::thread::spawn(move || -> Result<(String, PathBuf), String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
         let mgr = plugin::MarketplaceManager::new(plugins_dir.clone());
-        let (index, clone_dir) = rt.block_on(mgr.resolve_index_via_git(&url, &hint))?;
+        let (index, clone_dir) =
+            rt.block_on(mgr.resolve_index_via_git_ref(&url, &hint, git_ref.as_deref()))?;
         let name = index.name;
         // Rename the (hint-named) clone to the marketplace's own name so the
         // recorded installLocation is `marketplaces/<marketplace-name>/`. The
@@ -1438,21 +1557,12 @@ mod tests {
     }
 
     #[test]
-    fn add_url_source_declines() {
+    fn hosted_marketplace_requires_https_before_network_io() {
         let e = full_env();
-        let err = run_add(
-            "https://example.com/marketplace.json",
-            None,
-            &[],
-            &e.plugins,
-            &e.home,
-            &e.cwd,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            "Adding marketplace…✘ Failed to add marketplace: Hosted marketplace.json URL sources are not yet supported: https://example.com/marketplace.json"
-        );
+        let err = fetch_hosted_marketplace(&e.plugins, "http://example.com/marketplace.json")
+            .unwrap_err();
+        assert_eq!(err, "Hosted marketplace URLs must use HTTPS");
+        assert!(!e.plugins.join("marketplaces").exists());
     }
 
     #[test]

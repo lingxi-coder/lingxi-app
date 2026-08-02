@@ -3,7 +3,7 @@
 //! plugin, 1:1 with claude-code 2.1.201 (probed against the real binary in an
 //! isolated `$CLAUDE_CONFIG_DIR`).
 //!
-//! A v2 `installed_plugins.json` record carries an `auto: true` marker
+//! A v2 `installed_plugins.json` record carries an `autoInstalled: true` marker
 //! ("True when pulled in as a dependency. Eligible for orphan sweep."). Prune
 //! computes, at the chosen scope, the set of `auto`-installed plugins that are
 //! NOT reachable — via the `manifest.dependencies` graph — from any
@@ -30,15 +30,7 @@
 //! An unknown `--scope` yields the install-family wording
 //! `Invalid scope: <s>. Must be one of: user, project, local.`
 //!
-//! Residual: this port's `plugin install` does not yet write the `auto: true`
-//! marker (dependency auto-install is not ported), so in the common case
-//! `autoCount == 0` and the empty-case line is what runs end-to-end. The full
-//! scan/removal path is implemented and unit-tested against synthetic v2 DBs;
-//! the "loaded plugins" set is sourced from each record's own `installPath`
-//! manifest (rather than the live `PluginManager` registry, which is not wired
-//! into the CLI seam), so a record with a missing/unreadable `installPath`
-//! manifest is treated as failed-to-load (matching the oracle's unloadable
-//! branch).
+//! Legacy `auto` and snake-case `auto_installed` markers remain readable.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, IsTerminal, Write};
@@ -178,15 +170,14 @@ fn load_dependencies(install_path: &str) -> Option<Vec<String>> {
     let value: Value = serde_json::from_str(&raw).ok()?;
     // `dependencies` is optional; an absent key is an empty dependency list (a
     // loadable plugin), NOT a load failure.
-    let deps = value
-        .get("dependencies")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.as_str().map(String::from))
-                .collect()
+    let deps = plugin::parse_dependencies(value.get("dependencies"))
+        .ok()?
+        .into_iter()
+        .map(|dependency| match dependency.marketplace {
+            Some(marketplace) => format!("{}@{marketplace}", dependency.name),
+            None => dependency.name,
         })
-        .unwrap_or_default();
+        .collect();
     Some(deps)
 }
 
@@ -207,7 +198,10 @@ fn scan(db: &Value, scope: Scope, project_path: &Option<String>) -> Scan {
             Some(r) => r,
             None => continue,
         };
-        if rec.get("auto").and_then(Value::as_bool) == Some(true) {
+        let auto_installed = ["autoInstalled", "auto_installed", "auto"]
+            .iter()
+            .any(|key| rec.get(*key).and_then(Value::as_bool) == Some(true));
+        if auto_installed {
             auto.push(id.clone());
         } else {
             manual.push(id.clone());
@@ -631,6 +625,36 @@ mod tests {
             msg,
             "Nothing to prune (1 auto-installed plugin at user scope, all still needed)."
         );
+    }
+
+    #[test]
+    fn typed_dependency_and_auto_installed_marker_are_supported() {
+        let e = env();
+        let app_path = e.plugins.join("cache").join("app");
+        std::fs::create_dir_all(app_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            app_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"app","dependencies":[{"name":"dep","version":"^1"}]}"#,
+        )
+        .unwrap();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        std::fs::write(
+            installed_path(&e.plugins),
+            serde_json::to_vec(&serde_json::json!({"version":2,"plugins":{
+                "app@mkt":[{"scope":"user","installPath":app_path}],
+                "dep@mkt":[{"scope":"user","installPath":dep,"autoInstalled":true}]
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let msg = run_prune_inner(
+            false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
+        assert!(msg.contains("all still needed"), "{msg}");
     }
 
     #[test]

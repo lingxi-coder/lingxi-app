@@ -2876,6 +2876,7 @@ mod transport_summary_tests {
         let http = McpTransportSpec::Http {
             url: "https://x.example/mcp".into(),
             headers: Default::default(),
+            headers_helper: None,
             oauth: None,
         };
         assert_eq!(
@@ -3245,6 +3246,7 @@ mod pending_approval_tests {
         let http = |url: &str| traits::McpTransportSpec::Http {
             url: url.to_string(),
             headers: traits::McpHeaders::default(),
+            headers_helper: None,
             oauth: None,
         };
 

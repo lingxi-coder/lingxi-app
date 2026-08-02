@@ -244,12 +244,14 @@ impl LlmError {
 ///
 /// - timeout → the `ETIMEDOUT` line, via [`LlmError::TransportTimeout`]
 ///
-/// ⚠️ NOT ported: `StreamSuspended` and `BedrockUnexpectedContentType`. The
-/// oracle reads those from `x2(e)`'s cause-chain CODE, and this port has NO
-/// equivalent signal — no system-sleep stream-suspension detection, no Bedrock
-/// content-type validation (verified: the only hits for either are these doc
-/// comments). Guessing from message text would invent a predicate the oracle
-/// does not have, so both need the underlying detection built first.
+/// - stream suspend → "Connection interrupted by system sleep", via
+///   [`crate::model::stream_watchdog::is_stream_suspended`]
+///
+/// ⚠️ `BedrockUnexpectedContentType` is NOT special-cased, and does not need to
+/// be: the oracle returns the cause message verbatim for it, which is what the
+/// default arm here already produces. The only divergence would be a Bedrock
+/// content-type message that itself embeds JSON, where the oracle skips the
+/// unwrap — and no Bedrock content-type validation exists here to branch on.
 #[must_use]
 pub fn error_display_text(error: &LlmError) -> String {
     if let LlmError::TlsCert { code, .. } = error {
@@ -283,6 +285,9 @@ pub fn error_display_text(error: &LlmError) -> String {
         return error.to_string();
     };
 
+    if crate::model::stream_watchdog::is_stream_suspended(error) {
+        return "Connection interrupted by system sleep".to_string();
+    }
     if matches!(error, LlmError::TransportTimeout { .. }) {
         return "Request timed out. Check your internet connection and proxy settings".to_string();
     }
@@ -399,6 +404,23 @@ mod api_error_status_tests {
             ssl("WAT"),
             "Unable to connect to API: SSL error (WAT)"
         );
+
+        // The suspend arm: the watchdog fired but the WALL clock ran far past
+        // the monotonic timeout, which only happens if the machine slept.
+        assert_eq!(
+            error_display_text(&crate::model::stream_watchdog::watchdog_abort_error(
+                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(900),
+            )),
+            "Connection interrupted by system sleep"
+        );
+        // No drift → an ordinary idle timeout, NOT a suspend.
+        assert!(!crate::model::stream_watchdog::is_stream_suspended(
+            &crate::model::stream_watchdog::watchdog_abort_error(
+                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(300),
+            )
+        ));
 
         // The ETIMEDOUT arm — reachable because `HttpError::Timeout` is typed
         // and `map_http_error` no longer collapses it into `Transport`.

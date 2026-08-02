@@ -3209,12 +3209,21 @@ impl ApiService {
                     let mut seed: Option<Result<Option<crate::RawStreamFrame>, LlmError>> = None;
                     if attempt_carried_dispatch {
                         let first = match stream_idle_timeout {
-                            Some(t) => match tokio::time::timeout(t, frames.next_frame()).await {
-                                Ok(r) => r,
-                                Err(_elapsed) => {
-                                    Err(crate::model::stream_watchdog::idle_timeout_error(t))
+                            Some(t) => {
+                                // Wall clock across the same wait the monotonic
+                                // timeout bounds: monotonic time stops while the
+                                // machine is suspended, so the excess IS the sleep.
+                                let wall = std::time::SystemTime::now();
+                                match tokio::time::timeout(t, frames.next_frame()).await {
+                                    Ok(r) => r,
+                                    Err(_elapsed) => Err(
+                                        crate::model::stream_watchdog::watchdog_abort_error(
+                                            t,
+                                            wall.elapsed().unwrap_or(t),
+                                        ),
+                                    ),
                                 }
-                            },
+                            }
                             None => frames.next_frame().await,
                         };
                         if let Err(first_err) = &first {

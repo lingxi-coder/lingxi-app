@@ -38,6 +38,56 @@ pub const STREAM_IDLE_TIMEOUT_FLOOR_MS: u64 = 300_000;
 /// received"` / `"Stream idle timeout - no chunks received"` @219649648).
 pub const STREAM_IDLE_TIMEOUT_PREFIX: &str = "Stream idle timeout";
 
+/// Marker prefix for a watchdog abort caused by the machine SUSPENDING.
+///
+/// The oracle raises a separate error class for this — `StreamSuspendedError`
+/// (`code = "StreamSuspended"`, carrying `sleptMs`), whose message reads
+/// "Stream watchdog detected system suspend; aborting to retry on a fresh
+/// connection" (@228830985). It is deliberately NOT the idle timeout: a stream
+/// that stalled because the laptop slept is not a stalled server, and `sir()`
+/// tells the user so.
+///
+/// Follows the same prefix idiom as [`STREAM_IDLE_TIMEOUT_PREFIX`] rather than
+/// adding an `LlmError` variant — this is our own marker on our own message,
+/// not an inference about a provider's wording.
+pub const STREAM_SUSPENDED_PREFIX: &str = "Stream watchdog detected system suspend";
+
+/// How much wall-clock drift past the monotonic timeout counts as a suspend.
+///
+/// During a real suspend the monotonic clock stops while the wall clock keeps
+/// running, so the gap is the sleep duration. A second of slack keeps ordinary
+/// scheduling jitter and NTP nudges out of the branch.
+const SUSPEND_DRIFT_FLOOR: Duration = Duration::from_secs(1);
+
+/// Classify a fired idle timeout: did the machine sleep through it?
+///
+/// `wall_elapsed` is measured with the system clock across the same wait the
+/// monotonic `timeout` bounded. Monotonic time does not advance while suspended,
+/// so a wall-clock excess beyond [`SUSPEND_DRIFT_FLOOR`] is the sleep.
+#[must_use]
+pub fn watchdog_abort_error(timeout: Duration, wall_elapsed: Duration) -> crate::LlmError {
+    let slept = wall_elapsed.saturating_sub(timeout);
+    if slept >= SUSPEND_DRIFT_FLOOR {
+        return crate::LlmError::StreamInterrupted {
+            message: format!(
+                "{STREAM_SUSPENDED_PREFIX}; aborting to retry on a fresh connection \
+                 (slept {}ms)",
+                slept.as_millis()
+            ),
+        };
+    }
+    idle_timeout_error(timeout)
+}
+
+/// Whether an [`crate::LlmError`] is a watchdog SUSPEND abort.
+#[must_use]
+pub fn is_stream_suspended(error: &crate::LlmError) -> bool {
+    matches!(
+        error,
+        crate::LlmError::StreamInterrupted { message } if message.starts_with(STREAM_SUSPENDED_PREFIX)
+    )
+}
+
 /// Whether an [`crate::LlmError`] is a watchdog idle-timeout abort.
 #[must_use]
 pub fn is_stream_idle_timeout(error: &crate::LlmError) -> bool {

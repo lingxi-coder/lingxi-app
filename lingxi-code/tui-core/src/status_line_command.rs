@@ -29,12 +29,10 @@
 //! usage-decomposition counters. See [`StatusLineInputs`] for the
 //! multi-provider semantics of `fast_mode`/`effort`/`thinking`.
 //!
-//! **Trust gating is simplified.** claude-code gates execution on workspace
-//! trust + managed-settings policy (`shouldDisableAllHooksIncludingManaged`,
-//! `shouldSkipHookDueToTrust`, `shouldAllowManagedHooksOnly`). The TUI settings
-//! loader does not expose those flags here, so [`StatusLineConfig::should_run`]
-//! gates only on `type == "command"` + a `trusted` bool the caller supplies
-//! (default-false fail-closed). Wiring the real trust store is a follow-up.
+//! **Trust and managed policy are evaluated before spawn.** The resolved config
+//! carries its source and an immutable [`StatusLineExecutionPolicy`]; untrusted
+//! workspaces, `disableAllHooks`, and managed-only violations produce no child
+//! process.
 //!
 //! **The execution pump is wired** (A6 batch-6 Task 2): the debounced,
 //! single-flight pump in `root.rs` calls `crate::state::build_pump_payload`
@@ -96,6 +94,59 @@ pub struct StatusLineConfig {
     /// `statusLine.padding` — horizontal cells padded on each side of the
     /// rendered text. Defaults to `0` when absent.
     pub padding: usize,
+    /// Settings tier that supplied the winning command.
+    pub source: StatusLineSource,
+    /// Frozen trust/hook-policy decision used at command spawn.
+    pub execution_policy: StatusLineExecutionPolicy,
+}
+
+/// Provenance of a configured status-line command.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StatusLineSource {
+    /// Parser-only/default provenance. Composition roots must replace this.
+    #[default]
+    Unknown,
+    /// User settings.
+    User,
+    /// Shared project settings.
+    Project,
+    /// Local project settings.
+    Local,
+    /// `--settings` flag input.
+    Flag,
+    /// Enterprise-managed settings.
+    Managed,
+}
+
+/// Spawn-time policy for status-line commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusLineExecutionPolicy {
+    /// Whether the current workspace passed the trust gate.
+    pub workspace_trusted: bool,
+    /// Effective all-hooks kill switch.
+    pub disable_all_hooks: bool,
+    /// Whether only managed hook-like commands may run.
+    pub managed_hooks_only: bool,
+}
+
+impl Default for StatusLineExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            workspace_trusted: true,
+            disable_all_hooks: false,
+            managed_hooks_only: false,
+        }
+    }
+}
+
+impl StatusLineExecutionPolicy {
+    /// Whether `source` may create a child process.
+    #[must_use]
+    pub fn allows(self, source: StatusLineSource) -> bool {
+        self.workspace_trusted
+            && !self.disable_all_hooks
+            && (!self.managed_hooks_only || source == StatusLineSource::Managed)
+    }
 }
 
 impl StatusLineConfig {
@@ -123,7 +174,21 @@ impl StatusLineConfig {
             kind,
             command,
             padding,
+            source: StatusLineSource::Unknown,
+            execution_policy: StatusLineExecutionPolicy::default(),
         })
+    }
+
+    /// Attach settings provenance and the already-resolved execution policy.
+    #[must_use]
+    pub fn with_execution_policy(
+        mut self,
+        source: StatusLineSource,
+        execution_policy: StatusLineExecutionPolicy,
+    ) -> Self {
+        self.source = source;
+        self.execution_policy = execution_policy;
+        self
     }
 
     /// claude-code `executeStatusLineCommand` runs only when
@@ -131,7 +196,10 @@ impl StatusLineConfig {
     /// trust/managed gating: fail-closed when the workspace is not trusted.
     #[must_use]
     pub fn should_run(&self, trusted: bool) -> bool {
-        trusted && self.kind == "command" && !self.command.is_empty()
+        trusted
+            && self.execution_policy.allows(self.source)
+            && self.kind == "command"
+            && !self.command.is_empty()
     }
 }
 

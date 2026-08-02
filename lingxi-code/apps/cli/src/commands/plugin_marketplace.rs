@@ -34,6 +34,7 @@ use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
 
 use crate::commands::plugin_policy;
+use crate::commands::plugin_policy::MarketplaceSourceIdentity;
 use crate::commands::plugin_settings::{Scope, SCOPES};
 
 /// The resolved-marketplaces registry file under the plugins root.
@@ -240,6 +241,71 @@ enum Source {
     },
     /// A hosted `marketplace.json` fetched over HTTP(S) (no git clone).
     Url { url: String },
+}
+
+fn source_identity(source: &Source) -> MarketplaceSourceIdentity {
+    match source {
+        Source::Directory(path) => MarketplaceSourceIdentity::Directory {
+            path: path.display().to_string(),
+        },
+        Source::Github { repo, git_ref } => MarketplaceSourceIdentity::Github {
+            repo: repo.clone(),
+            git_ref: git_ref.clone(),
+            path: None,
+        },
+        Source::Git { url, git_ref } => MarketplaceSourceIdentity::Git {
+            url: url.clone(),
+            git_ref: git_ref.clone(),
+            path: None,
+        },
+        Source::Url { url } => MarketplaceSourceIdentity::Url { url: url.clone() },
+    }
+}
+
+fn lexical_absolute(path: &Path, cwd: &Path) -> PathBuf {
+    let expanded = path
+        .to_str()
+        .and_then(|raw| raw.strip_prefix("~/"))
+        .and_then(|rest| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest)))
+        .unwrap_or_else(|| path.to_path_buf());
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Resolve only lexical source identity. This deliberately performs no
+/// filesystem or network access so managed policy can reject before side
+/// effects.
+fn preflight_source_identity(
+    source: &str,
+    cwd: &Path,
+) -> Result<MarketplaceSourceIdentity, String> {
+    let trimmed = source.trim();
+    if trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('~')
+    {
+        return Ok(MarketplaceSourceIdentity::Directory {
+            path: lexical_absolute(Path::new(trimmed), cwd)
+                .display()
+                .to_string(),
+        });
+    }
+    classify_source(source).map(|source| source_identity(&source))
 }
 
 /// The unclassifiable-source error (binary: `cli_marketplace_add_invalid_source`).
@@ -472,6 +538,9 @@ pub fn run_add(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    let policy_source = preflight_source_identity(source, cwd)?;
+    plugin_policy::ensure_marketplace_source_preflight(&policy_source)
+        .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
     // Classification (incl. local existence) is checked FIRST — before scope,
     // and before any "Adding marketplace…" progress line — matching the binary.
     let classified = classify_source(source)?;
@@ -529,7 +598,10 @@ fn add_directory(
             manifest_path.display()
         ));
     }
-    plugin_policy::ensure_marketplace_allowed(&name)
+    let identity = MarketplaceSourceIdentity::Directory {
+        path: abs.display().to_string(),
+    };
+    plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
         .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
 
     let source_value = source_object(&Source::Directory(abs.to_path_buf()));
@@ -578,7 +650,10 @@ fn add_remote(
     // From here the "Adding marketplace…" progress prefix is part of the line.
     let (name, clone_dir) = clone_marketplace(plugins_dir, &clone_url, &hint)
         .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
-    if let Err(reason) = plugin_policy::ensure_marketplace_allowed(&name) {
+    let identity = source_identity(remote);
+    if let Err(reason) =
+        plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
+    {
         let _ = std::fs::remove_dir_all(&clone_dir);
         return Err(format!(
             "Adding marketplace…✘ Failed to add marketplace: {reason}"
@@ -794,9 +869,16 @@ pub fn run_update(
     let mut registry = load_registry(plugins_dir);
 
     if let Some(name) = name {
-        plugin_policy::ensure_marketplace_allowed(name).map_err(|reason| {
-            format!("Updating marketplace: {name}...✘ Failed to update marketplace(s): {reason}")
-        })?;
+        let source = registry
+            .get(name)
+            .and_then(MarketplaceSourceIdentity::from_value);
+        plugin_policy::ensure_marketplace_source_allowed(Some(name), source.as_ref()).map_err(
+            |reason| {
+                format!(
+                    "Updating marketplace: {name}...✘ Failed to update marketplace(s): {reason}"
+                )
+            },
+        )?;
         if !registry.contains_key(name) {
             let available: Vec<&str> = registry.keys().map(String::as_str).collect();
             return Err(format!(
@@ -824,10 +906,14 @@ pub fn run_update(
     }
 
     let count = registry.len();
-    for marketplace in registry.keys() {
-        plugin_policy::ensure_marketplace_allowed(marketplace).map_err(|reason| {
-            format!("Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}")
-        })?;
+    for (marketplace, entry) in &registry {
+        let source = MarketplaceSourceIdentity::from_value(entry);
+        plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())
+            .map_err(|reason| {
+                format!(
+                    "Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}"
+                )
+            })?;
     }
     for entry in registry.values_mut() {
         if let Some(obj) = entry.as_object_mut() {

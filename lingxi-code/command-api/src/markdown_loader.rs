@@ -424,6 +424,16 @@ pub async fn load_command_markdown_files(
     deduplicate_by_inode(all_files)
 }
 
+/// Load only managed-policy markdown commands without touching user or project
+/// customization roots. Used by `strictPluginOnlyCustomization:["skills"]`.
+#[must_use]
+pub async fn load_managed_command_markdown_files(managed_dir: &Path) -> Vec<MarkdownCommandFile> {
+    deduplicate_by_inode(load_markdown_dir(
+        &managed_dir.join(branding::DOT_DIR).join("commands"),
+        CommandSource::Managed,
+    ))
+}
+
 /// Load directory-format `.lingxi/skills/<name>/SKILL.md` files from user and
 /// project skill directories.
 #[must_use]
@@ -466,6 +476,18 @@ pub async fn load_skill_markdown_files_with_roots(
         all_files.extend(load_skill_dir(dir, CommandSource::Project));
     }
     deduplicate_skill_files_by_inode(all_files)
+}
+
+/// Load only managed-policy skills without probing ambient customization
+/// directories.
+#[must_use]
+pub async fn load_managed_skill_markdown_files(
+    managed_dir: &Path,
+) -> Vec<SkillMarkdownCommandFile> {
+    deduplicate_skill_files_by_inode(load_skill_dir(
+        &managed_dir.join(branding::DOT_DIR).join("skills"),
+        CommandSource::Managed,
+    ))
 }
 
 fn load_skill_dir(dir: &Path, source: CommandSource) -> Vec<SkillMarkdownCommandFile> {

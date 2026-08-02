@@ -87,14 +87,10 @@ impl StrictPluginOnlyPolicy {
 
 fn all_components() -> HashSet<PluginComponent> {
     [
-        PluginComponent::Commands,
         PluginComponent::Agents,
         PluginComponent::Skills,
         PluginComponent::Hooks,
-        PluginComponent::OutputStyles,
         PluginComponent::McpServers,
-        PluginComponent::LspServers,
-        PluginComponent::Channels,
     ]
     .into_iter()
     .collect()
@@ -102,14 +98,10 @@ fn all_components() -> HashSet<PluginComponent> {
 
 fn component_from_slot(slot: &str) -> Option<PluginComponent> {
     Some(match slot {
-        "commands" => PluginComponent::Commands,
         "agents" => PluginComponent::Agents,
         "skills" => PluginComponent::Skills,
         "hooks" => PluginComponent::Hooks,
-        "outputStyles" => PluginComponent::OutputStyles,
         "mcp" | "mcpServers" => PluginComponent::McpServers,
-        "lsp" | "lspServers" => PluginComponent::LspServers,
-        "channels" => PluginComponent::Channels,
         _ => return None,
     })
 }

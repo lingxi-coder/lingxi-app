@@ -92,6 +92,18 @@ fn marketplace_of(id: &str) -> Option<&str> {
     id.split_once('@').map(|(_, marketplace)| marketplace)
 }
 
+fn marketplace_source(
+    home: &Path,
+    marketplace: &str,
+) -> Option<plugin_policy::MarketplaceSourceIdentity> {
+    std::fs::read_to_string(home.join("plugins").join("known_marketplaces.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|registry| registry.get(marketplace).cloned())
+        .as_ref()
+        .and_then(plugin_policy::MarketplaceSourceIdentity::from_value)
+}
+
 /// The `enabledPlugins` map from a scope's settings file (missing key / missing
 /// / malformed file ⇒ empty map).
 fn read_enabled(path: &Path) -> Map<String, Value> {
@@ -179,7 +191,8 @@ pub fn run_enable(
     let requested = parse_scope(scope)?;
     let id = resolve_id(plugin, home, cwd).map_err(|reason| fail("enable", plugin, &reason))?;
     if let Some(marketplace) = marketplace_of(&id) {
-        plugin_policy::ensure_marketplace_allowed(marketplace)
+        let source = marketplace_source(home, marketplace);
+        plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())
             .map_err(|reason| fail("enable", &id, &reason))?;
     }
     let scope = requested

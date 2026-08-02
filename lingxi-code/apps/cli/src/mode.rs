@@ -948,7 +948,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
     // only when the widget re-armed `dirty` on a turn boundary, set-only-on-
     // change). The slot is shared with the render thread via `run_app`.
-    let status_line = tui::status_line::new_slot(read_status_line_config());
+    let status_line = tui::status_line::new_slot(read_status_line_config().await);
     // Seed the boot-known 2.1.206 payload base fields (`Rf()`): session_id +
     // transcript_path (`<lingxi_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`).
     {
@@ -2456,35 +2456,100 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     (lingxi_home, project_dir)
 }
 
-/// Read + merge the `statusLine` setting from the USER
-/// (`~/.lingxi/settings.json`) and LOCAL (`<proj>/.lingxi/settings.local.json`)
-/// tiers, Local-over-User, and parse it into a [`StatusLineConfig`]. `None`
-/// when neither tier carries a `statusLine` object.
+/// Read the effective `statusLine` with source provenance and freeze the trust
+/// and hook-policy decision that must be checked before process creation.
 fn read_status_line_config_from(
     lingxi_home: &std::path::Path,
     project_dir: &std::path::Path,
+    managed_tiers: &[String],
+    workspace_trusted: bool,
 ) -> Option<tui_core::status_line_command::StatusLineConfig> {
-    use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
-    // Local-over-User: read User first, then let Local's `statusLine` override.
-    let mut status_line: Option<serde_json::Value> = None;
-    for source in [SettingsSource::User, SettingsSource::Local] {
-        let p = settings_path(source, lingxi_home, project_dir);
-        if let Ok(map) = read_settings_map(&p) {
-            if let Some(v) = map.get("statusLine") {
-                status_line = Some(v.clone());
+    use migrations::settings_update::read_settings_map;
+    use tui_core::status_line_command::{StatusLineExecutionPolicy, StatusLineSource};
+
+    let mut status_line: Option<(serde_json::Value, StatusLineSource)> = None;
+    let mut disable_all_hooks = false;
+    let mut managed_hooks_only = false;
+    let file_layers = [
+        (lingxi_home.join("settings.json"), StatusLineSource::User),
+        (
+            project_dir.join(branding::DOT_DIR).join("settings.json"),
+            StatusLineSource::Project,
+        ),
+        (
+            project_dir
+                .join(branding::DOT_DIR)
+                .join("settings.local.json"),
+            StatusLineSource::Local,
+        ),
+    ];
+    for (path, source) in file_layers {
+        if let Ok(map) = read_settings_map(&path) {
+            if let Some(value) = map.get("statusLine") {
+                status_line = Some((value.clone(), source));
+            }
+            if let Some(value) = map
+                .get("disableAllHooks")
+                .and_then(serde_json::Value::as_bool)
+            {
+                disable_all_hooks = value;
+            }
+            if let Some(value) = map
+                .get("allowManagedHooksOnly")
+                .and_then(serde_json::Value::as_bool)
+            {
+                managed_hooks_only = value;
             }
         }
     }
-    status_line
-        .as_ref()
-        .and_then(tui_core::status_line_command::StatusLineConfig::from_settings_value)
+    for raw in managed_tiers {
+        let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw)
+        else {
+            continue;
+        };
+        if let Some(value) = map.get("statusLine") {
+            status_line = Some((value.clone(), StatusLineSource::Managed));
+        }
+        if let Some(value) = map
+            .get("disableAllHooks")
+            .and_then(serde_json::Value::as_bool)
+        {
+            disable_all_hooks = value;
+        }
+        if let Some(value) = map
+            .get("allowManagedHooksOnly")
+            .and_then(serde_json::Value::as_bool)
+        {
+            managed_hooks_only = value;
+        }
+    }
+
+    let (value, source) = status_line?;
+    tui_core::status_line_command::StatusLineConfig::from_settings_value(&value).map(|config| {
+        config.with_execution_policy(
+            source,
+            StatusLineExecutionPolicy {
+                workspace_trusted,
+                disable_all_hooks,
+                managed_hooks_only,
+            },
+        )
+    })
 }
 
-/// Live wrapper over [`read_status_line_config_from`], resolving the User+Local
-/// settings roots via [`settings_dirs`].
-fn read_status_line_config() -> Option<tui_core::status_line_command::StatusLineConfig> {
+/// Live wrapper over [`read_status_line_config_from`].
+async fn read_status_line_config() -> Option<tui_core::status_line_command::StatusLineConfig> {
     let (lingxi_home, project_dir) = settings_dirs();
-    read_status_line_config_from(&lingxi_home, &project_dir)
+    let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
+    let workspace_trusted = migrations::global_config::global_config_path().is_none_or(|path| {
+        migrations::global_config::check_has_trust_dialog_accepted(&path, &project_dir)
+    });
+    read_status_line_config_from(
+        &lingxi_home,
+        &project_dir,
+        &managed_tiers,
+        workspace_trusted,
+    )
 }
 
 /// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user

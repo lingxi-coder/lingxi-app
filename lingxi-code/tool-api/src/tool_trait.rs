@@ -394,6 +394,10 @@ pub enum ToolError {
     /// Internal error: tool implementation bug or unexpected state.
     #[error("internal: {0}")]
     Internal(String),
+    /// The call requires a live user interaction channel that this host does
+    /// not provide. This is distinct from denial: no user decision was made.
+    #[error("interaction required: {0}")]
+    InteractionRequired(String),
     /// Edit attempted before the file was read in this session.
     /// Wired in Plan 10 via the file-state cache.
     #[error("edit before read: {path}")]
@@ -505,6 +509,7 @@ impl ToolError {
             | ToolError::PermissionDenied(s)
             | ToolError::Io(s)
             | ToolError::Internal(s)
+            | ToolError::InteractionRequired(s)
             | ToolError::SubagentFailed(s)
             | ToolError::LspFailure(s)
             | ToolError::Transport(s) => s.clone(),

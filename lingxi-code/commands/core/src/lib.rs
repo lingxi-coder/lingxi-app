@@ -117,7 +117,8 @@ pub use usage::UsageHandler;
 pub use version::VersionHandler;
 
 pub use custom_commands::{
-    load_and_register_custom_commands, load_and_register_skill_commands,
+    load_and_register_custom_commands, load_and_register_managed_custom_commands,
+    load_and_register_managed_skill_commands, load_and_register_skill_commands,
     load_and_register_skill_commands_with_roots,
 };
 pub use register::{

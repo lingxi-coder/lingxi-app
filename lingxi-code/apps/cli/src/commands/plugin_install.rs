@@ -505,12 +505,16 @@ pub fn run_install(
         .and_then(install_location)
         .and_then(|root| marketplace_entry_default_enabled(&root, name))
         .unwrap_or_else(|| plugin_default_enabled(&plugin_src));
-    plugin_policy::ensure_marketplace_allowed(&market_name).map_err(|reason| {
-        format!(
-            "Installing plugin \"{arg}\"...{}",
-            fail("install", arg, &reason)
-        )
-    })?;
+    let policy_source = registry
+        .get(&market_name)
+        .and_then(plugin_policy::MarketplaceSourceIdentity::from_value);
+    plugin_policy::ensure_marketplace_source_allowed(Some(&market_name), policy_source.as_ref())
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
 
     // `--config key=value` userConfig persistence. Parse + validate against the
     // plugin's declared schema (byte-faithful errors, no "Installing…" prefix —
@@ -821,7 +825,11 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
         .unwrap_or(base);
 
     if let Some(marketplace) = marketplace_of(&id) {
-        plugin_policy::ensure_marketplace_allowed(marketplace)?;
+        let registry = load_registry(plugins_dir);
+        let source = registry
+            .get(marketplace)
+            .and_then(plugin_policy::MarketplaceSourceIdentity::from_value);
+        plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())?;
     }
 
     // `iP`: the plugin must resolve to a marketplace source, else "not found".

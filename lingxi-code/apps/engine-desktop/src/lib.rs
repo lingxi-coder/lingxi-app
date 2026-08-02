@@ -1404,6 +1404,7 @@ pub fn desktop_tool_registry(
         ctx,
         coordinator,
         None,
+        true,
         None,
         cron_auth,
         None,
@@ -1702,6 +1703,7 @@ pub fn register_desktop_tools(
     ask_user_question_resolver: Option<
         Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>,
     >,
+    advertise_ask_user_question: bool,
     computer_access_resolver: Option<Arc<dyn tool_computer_use::ComputerAccessResolver>>,
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
@@ -1757,11 +1759,15 @@ pub fn register_desktop_tools(
     if coordinator.is_some() {
         if let Some(resolver) = ask_user_question_resolver.clone() {
             tool_ui::register_all_except_send_message_with_ask_resolver(reg, ctx.clone(), resolver);
+        } else if !advertise_ask_user_question {
+            tool_ui::register_all_except_send_message_without_ask_user_question(reg, ctx.clone());
         } else {
             tool_ui::register_all_except_send_message(reg, ctx.clone());
         }
     } else if let Some(resolver) = ask_user_question_resolver {
         tool_ui::register_all_with_ask_resolver(reg, ctx.clone(), resolver);
+    } else if !advertise_ask_user_question {
+        tool_ui::register_all_without_ask_user_question(reg, ctx.clone());
     } else {
         tool_ui::register_all(reg, ctx.clone());
     }
@@ -2725,6 +2731,7 @@ pub async fn desktop_command_registry(
     connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
     gates: CustomizationGates,
+    strict_plugin_only_skills: bool,
     // SKILLEXEC: the SAME shared command-registry slot the slash dispatcher and
     // `Skill` tool loader observe (filled by `build()` right after this returns).
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
@@ -2795,23 +2802,32 @@ pub async fn desktop_command_registry(
     if gates.disables_skills() {
         return reg;
     }
-    let registered = command_core::load_and_register_custom_commands(
-        &mut reg,
-        cwd,
-        lingxi_home,
-        &managed_dir,
-        &home,
-    )
-    .await;
-    let registered_skills = command_core::load_and_register_skill_commands_with_roots(
-        &mut reg,
-        cwd,
-        lingxi_home,
-        Some(&managed_dir),
-        &home,
-        &[],
-    )
-    .await;
+    let (registered, registered_skills) = if strict_plugin_only_skills {
+        (
+            command_core::load_and_register_managed_custom_commands(&mut reg, &managed_dir).await,
+            command_core::load_and_register_managed_skill_commands(&mut reg, &managed_dir).await,
+        )
+    } else {
+        (
+            command_core::load_and_register_custom_commands(
+                &mut reg,
+                cwd,
+                lingxi_home,
+                &managed_dir,
+                &home,
+            )
+            .await,
+            command_core::load_and_register_skill_commands_with_roots(
+                &mut reg,
+                cwd,
+                lingxi_home,
+                Some(&managed_dir),
+                &home,
+                &[],
+            )
+            .await,
+        )
+    };
     reg.register_builtin_handler(Arc::new(command_core::SkillsHandler::with_all_roots(
         cwd.to_path_buf(),
         lingxi_home.to_path_buf(),
@@ -3893,22 +3909,36 @@ fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Load the merged `askUserQuestionTimeout` (`60s`/`5m`/`10m`/`never`) across the
-/// project + user + env settings layers (the same `Settings::load` seam). The raw
-/// settings string is threaded into `BuiltinToolContext::ask_user_question_timeout`
-/// and parsed into `tool_ui::ask_user_question::AskUserQuestionTimeout` at tool
-/// registration (M-15). Returns `None` on any load failure or when the key is
-/// unset — the frozen default (`never` ⇒ block on the user, no auto-continue).
-fn load_merged_ask_user_question_timeout(project_dir: &std::path::Path) -> Option<String> {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
-        .and_then(|eff| eff.settings.ask_user_question_timeout)
+/// Resolve `askUserQuestionTimeout` from its allowed sources only: user,
+/// `--settings`, and managed policy. Project/local files are intentionally
+/// excluded because an untrusted checkout must not control interaction timing.
+async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
+    let managed_layers: Vec<engine::settings::SettingsJson> =
+        crate::settings_watch::managed_settings_raw_tiers()
+            .await
+            .into_iter()
+            .filter_map(|raw| serde_json::from_str(&raw).ok())
+            .collect();
+    let empty_env = std::collections::BTreeMap::new();
+    engine::settings::Settings::load_with_layers_from_user_path(
+        engine::settings::LoadInputs {
+            env: &empty_env,
+            project_dir: &cfg.cwd,
+            defaults: engine::settings::SettingsJson::default(),
+        },
+        engine::settings::FileLayerScope {
+            include_user: cfg.setting_source_scope.0,
+            include_project: false,
+            include_local: false,
+        },
+        engine::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers: &managed_layers,
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )
+    .ok()
+    .and_then(|effective| effective.settings.ask_user_question_timeout)
 }
 
 /// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
@@ -6410,6 +6440,8 @@ pub async fn build(
     let strict_plugin_only_mcp =
         strict_plugin_policy.is_locked(plugin::PluginComponent::McpServers);
     let strict_plugin_only_hooks = strict_plugin_policy.is_locked(plugin::PluginComponent::Hooks);
+    let strict_plugin_only_agents = strict_plugin_policy.is_locked(plugin::PluginComponent::Agents);
+    let strict_plugin_only_skills = strict_plugin_policy.is_locked(plugin::PluginComponent::Skills);
     let _ = subagent_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
     let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
     // CLI `--mcp-config` servers: highest precedence — override a discovered
@@ -6472,22 +6504,25 @@ pub async fn build(
     let user_agents_dir = cfg.lingxi_home.join("agents");
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
     // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
-    let mut agents = if cfg.customization_gates.disables_custom_agents() {
-        Vec::new()
-    } else {
-        agent::load_agents_from_dirs(&[
-            (user_agents_dir, agent::definition::AgentSource::UserDefined),
-            (project_agents_dir, agent::definition::AgentSource::Project),
-        ])
-        .await
-    };
+    let mut agents =
+        if cfg.customization_gates.disables_custom_agents() || strict_plugin_only_agents {
+            Vec::new()
+        } else {
+            agent::load_agents_from_dirs(&[
+                (user_agents_dir, agent::definition::AgentSource::UserDefined),
+                (project_agents_dir, agent::definition::AgentSource::Project),
+            ])
+            .await
+        };
     // (M4 cc2.1.198) `--agents <json>` flag agents — see
     // [`merge_cli_flag_agents`].
-    merge_cli_flag_agents(
-        &mut agents,
-        cfg.cli_agents_json.as_deref(),
-        cfg.customization_gates.safe_mode,
-    );
+    if !strict_plugin_only_agents {
+        merge_cli_flag_agents(
+            &mut agents,
+            cfg.cli_agents_json.as_deref(),
+            cfg.customization_gates.safe_mode,
+        );
+    }
 
     // (P2-02 cc2.1.207 / M7 cc2.1.220) The agent to apply to the MAIN loop: an
     // EXPLICIT `--agent` (fresh boot or re-passed on `--resume`) wins;
@@ -6619,6 +6654,7 @@ pub async fn build(
     //       root is `cfg.lingxi_home` (was `dirs::config_dir()/claude`).
     let mut hook_registry = hooks::HookRegistry::new();
     let project_settings_path = cwd.join(branding::DOT_DIR).join("settings.json");
+    let local_settings_path = cwd.join(branding::DOT_DIR).join("settings.local.json");
     let user_settings_path = cfg.lingxi_home.join("settings.json");
     // `--setting-sources` scope (default `(true, true)` = all tiers): skip the
     // user tier when `!include_user` and the project tier when `!include_project`
@@ -6641,8 +6677,13 @@ pub async fn build(
             hooks::definition::HookSource::Project,
             incl_project_settings,
         ),
+        (
+            local_settings_path,
+            hooks::definition::HookSource::Local,
+            incl_project_settings,
+        ),
     ] {
-        if !included || skip_settings_hooks {
+        if !included || skip_settings_hooks || strict_plugin_only_hooks {
             continue;
         }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
@@ -6656,6 +6697,24 @@ pub async fn build(
                     error = %e,
                     path = %path.display(),
                     "skipping malformed settings hooks"
+                ),
+            }
+        }
+    }
+    // Policy hooks remain authoritative under strict-plugin-only and safe
+    // mode. Bare mode disables hooks entirely.
+    if !cfg.customization_gates.bare {
+        for raw in &managed_settings_for_strict {
+            match hooks::parse_hooks_from_settings_json(raw, hooks::definition::HookSource::Managed)
+            {
+                Ok(hooks_vec) => {
+                    for hook in hooks_vec {
+                        hook_registry.register(hook);
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "skipping malformed managed settings hooks"
                 ),
             }
         }
@@ -7884,6 +7943,7 @@ pub async fn build(
     // tool's `readFileState.set` feeds the orchestrator's post-compact restore
     // (and the staleness / `/files` consumers).
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
+    let ask_user_question_timeout = load_ask_user_question_timeout(&cfg).await;
     let tool_ctx = BuiltinToolContext {
         // The live session, so tools that persist oversized output can write to
         // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
@@ -7916,7 +7976,7 @@ pub async fn build(
         // (M-15) `settings.askUserQuestionTimeout` → the AskUserQuestion resolver's
         // idle window. Read from the merged settings via the same `Settings::load`
         // seam; parsed into `AskUserQuestionTimeout` at `tool_ui` registration.
-        ask_user_question_timeout: load_merged_ask_user_question_timeout(&cwd),
+        ask_user_question_timeout,
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),
@@ -8243,6 +8303,7 @@ pub async fn build(
             tx,
         )) as Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>
     });
+    let advertise_ask_user_question = ask_user_question_resolver.is_some();
     let computer_access_resolver = cfg.computer_access_tx.clone().map(|tx| {
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
@@ -8252,6 +8313,7 @@ pub async fn build(
         tool_ctx,
         coordinator_wiring,
         ask_user_question_resolver,
+        advertise_ask_user_question,
         computer_access_resolver,
         Some(cron_auth),
         Some(skill_loader),
@@ -8960,6 +9022,7 @@ pub async fn build(
         connect_copilot.clone(),
         connect_chatgpt,
         cfg.customization_gates,
+        strict_plugin_only_skills,
         shared_command_registry.clone(),
     )
     .await;
@@ -9849,6 +9912,7 @@ mod tests {
             Arc::new(C),
             Arc::new(G),
             super::CustomizationGates::default(),
+            false,
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
         .await;
@@ -9955,6 +10019,7 @@ mod tests {
                 Arc::new(C),
                 Arc::new(G),
                 gates,
+                false,
                 Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
             )
             .await;

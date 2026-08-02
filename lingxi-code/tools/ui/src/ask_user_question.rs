@@ -22,17 +22,12 @@
 //! [`AskUserQuestionTimeout`].
 //!
 //! Resolvers:
-//! - [`FirstOptionResolver`] — the hermetic / test / **headless** default
+//! - [`FirstOptionResolver`] — a hermetic test helper
 //!   ([`AskUserQuestionTool::new`]). It synthesizes each question's first option
-//!   label (the TS prompt instructs models to put a recommended option first),
-//!   so batch `--print` runs never hang.
+//!   label so formatting tests stay deterministic.
 //! - [`DefaultTimeoutResolver`] — the **production** resolver wired at
-//!   `lib.rs` registration. It respects `askUserQuestionTimeout`: in an
-//!   interactive session `never` ⇒ do NOT synthesize an answer (returns a
-//!   `ToolError`, matching non-TUI hosts with no answering UI), while a duration ⇒
-//!   synthesize the afk auto-advance answer after the idle window elapses. In a
-//!   non-interactive (`--print`) session it falls back to first-option so
-//!   headless runs never block.
+//!   `lib.rs` registration. Without a live prompt broker it returns
+//!   [`ToolError::InteractionRequired`] rather than inventing an answer.
 //! - [`TuiBridgeResolver`] — a session-scoped interactive resolver for the
 //!   mounted Ratatui bottom-pane questionnaire view. It preserves the same
 //!   timeout semantics but routes the question set through the live UI.
@@ -62,6 +57,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
+use permission::result::PermissionPrompt;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
 use telemetry::pii::{PiiTagged, Verified};
@@ -226,9 +222,7 @@ pub struct Question {
 }
 
 /// Synthesize the first-option answer map — each question answered with its
-/// first option's label (the TS prompt instructs models to put a recommended
-/// option first). Shared by [`FirstOptionResolver`] and the afk auto-advance /
-/// headless fallback paths of [`DefaultTimeoutResolver`].
+/// first option's label. Used only by [`FirstOptionResolver`] in hermetic tests.
 fn first_option_answers(questions: &[Question]) -> HashMap<String, String> {
     let mut out = HashMap::with_capacity(questions.len());
     for q in questions {
@@ -241,11 +235,8 @@ fn first_option_answers(questions: &[Question]) -> HashMap<String, String> {
     out
 }
 
-/// `ToolError` returned when an interactive prompt would BLOCK forever
-/// (`askUserQuestionTimeout == never`) but no live TUI selection widget is
-/// wired yet — the honest substitute for the oracle's "wait on the user"
-/// behavior, and the point that stops the old silent auto-continue.
-const ASK_USER_QUESTION_BLOCKED_MESSAGE: &str = "AskUserQuestion requires an interactive user selection but no live prompt UI is available in this session (askUserQuestionTimeout=never ⇒ no auto-continue)";
+/// Model-facing explanation used when no live prompt transport exists.
+const ASK_USER_QUESTION_BLOCKED_MESSAGE: &str = "AskUserQuestion requires an interactive user selection but no live prompt UI is available in this session";
 
 fn to_bridge_questions(questions: &[Question]) -> Vec<AskQuestion> {
     questions
@@ -292,8 +283,8 @@ pub trait AskUserQuestionResolver: Send + Sync {
 
 /// Hermetic resolver — answers each question with its first option's label.
 ///
-/// This is the default for [`AskUserQuestionTool::new`] (tests, hermetic paths)
-/// and the headless fallback: it never blocks, ignoring `non_interactive`.
+/// This is the default for [`AskUserQuestionTool::new`] in hermetic tests. Live
+/// composition roots use a broker resolver or omit the tool entirely.
 pub struct FirstOptionResolver;
 
 #[async_trait]
@@ -311,14 +302,9 @@ impl AskUserQuestionResolver for FirstOptionResolver {
 /// `never` ⇒ do NOT auto-continue).
 ///
 /// Behavior:
-/// - **Non-interactive** session (`--print` / async / batch): fall back to
-///   first-option so headless runs never hang.
-/// - **Interactive**, timeout `never`: return a `ToolError`
-///   ([`ASK_USER_QUESTION_BLOCKED_MESSAGE`]) — the tool does NOT synthesize an
-///   answer when no live resolver is available.
-/// - **Interactive**, timeout `60s`/`5m`/`10m`: wait the idle window, then
-///   synthesize the afk auto-advance answer (first option per question),
-///   mirroring the oracle's "auto-continue with the answers selected so far".
+/// A resolver without a UI never has a set of user-confirmed answers, so every
+/// call returns [`ToolError::InteractionRequired`]. Timed auto-submit belongs
+/// to [`TuiBridgeResolver`], whose view owns the confirmed-answer state.
 ///
 /// The [`AskUserQuestionTimeout`] is fixed at construction. Registration
 /// (`tool_ui::register_with_options`, M-15) builds it from the live
@@ -375,26 +361,13 @@ impl TuiBridgeResolver {
 impl AskUserQuestionResolver for DefaultTimeoutResolver {
     async fn resolve(
         &self,
-        questions: &[Question],
-        non_interactive: bool,
+        _questions: &[Question],
+        _non_interactive: bool,
     ) -> Result<HashMap<String, String>, ToolError> {
-        // Headless (`--print`) / async sessions have no interactive UI and must
-        // not block a batch run — keep the hermetic first-option behavior.
-        if non_interactive {
-            return Ok(first_option_answers(questions));
-        }
-        match self.window {
-            // `never` ⇒ block on the user. No live widget yet ⇒ surface an error
-            // instead of silently auto-continuing.
-            None => Err(ToolError::Internal(
-                ASK_USER_QUESTION_BLOCKED_MESSAGE.to_string(),
-            )),
-            // A duration ⇒ auto-continue after the idle window elapses.
-            Some(window) => {
-                tokio::time::sleep(window).await;
-                Ok(first_option_answers(questions))
-            }
-        }
+        let _ = self.window;
+        Err(ToolError::InteractionRequired(
+            ASK_USER_QUESTION_BLOCKED_MESSAGE.to_string(),
+        ))
     }
 }
 
@@ -406,7 +379,9 @@ impl AskUserQuestionResolver for TuiBridgeResolver {
         non_interactive: bool,
     ) -> Result<HashMap<String, String>, ToolError> {
         if non_interactive {
-            return Ok(first_option_answers(questions));
+            return Err(ToolError::InteractionRequired(
+                ASK_USER_QUESTION_BLOCKED_MESSAGE.to_string(),
+            ));
         }
 
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -765,14 +740,16 @@ impl Tool for AskUserQuestionTool {
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        // TS uses `behavior:'ask'` ("Answer questions?"). The Rust headless
-        // path has no interactive approval substrate, so this stays Allow.
-        PermissionResult::Allow {
+        PermissionResult::Ask {
             reason: PermissionDecisionReason::Other {
-                reason: "AskUserQuestion is a user-prompt UI action (always allowed)".into(),
+                reason: ASK_USER_QUESTION_ASK_MESSAGE.into(),
             },
-            updated_input: None,
-            update_destination: None,
+            prompt: PermissionPrompt {
+                title: ASK_USER_QUESTION_TOOL_NAME.into(),
+                message: ASK_USER_QUESTION_ASK_MESSAGE.into(),
+                options: Vec::new(),
+            },
+            pending_classifier_check: None,
             metadata: PermissionMetadata::default(),
         }
     }
@@ -1408,8 +1385,8 @@ mod tests {
             .resolve(&qs, /* non_interactive */ false)
             .await
             .expect_err("never + interactive must block, not auto-pick");
-        assert!(matches!(err, ToolError::Internal(_)));
-        assert!(format!("{err}").contains("askUserQuestionTimeout=never"));
+        assert!(matches!(err, ToolError::InteractionRequired(_)));
+        assert!(format!("{err}").contains("no live prompt UI"));
     }
 
     #[tokio::test]
@@ -1452,6 +1429,6 @@ mod tests {
             .call(one_question(), fresh_ctx(), fresh_tx())
             .await
             .expect_err("interactive never must not auto-continue");
-        assert!(format!("{err}").contains("askUserQuestionTimeout=never"));
+        assert!(matches!(err, ToolError::InteractionRequired(_)));
     }
 }

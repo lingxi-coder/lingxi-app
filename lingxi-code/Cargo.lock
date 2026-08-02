@@ -1109,6 +1109,7 @@ dependencies = [
  "serde_yaml",
  "session",
  "sha2",
+ "shlex",
  "skill-api",
  "tasks",
  "telemetry",

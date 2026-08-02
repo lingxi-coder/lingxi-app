@@ -684,6 +684,22 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     }
 
+    // Freeze `processWrapper` before any command can spawn the daemon, a
+    // background worker, or another copy of this CLI. The resolver deliberately
+    // excludes project/local settings; descendants inherit this immutable argv
+    // snapshot instead of re-reading a possibly different working directory.
+    let wrapper_cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("lingxi-cli: failed to resolve cwd for processWrapper: {error}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    if let Err(error) = process_wrapper::configure(parsed.settings.as_deref(), &wrapper_cwd).await {
+        eprintln!("lingxi-cli: {error}");
+        return exit_codes::RUNTIME_ERROR;
+    }
+
     // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
     // command token, run that family and exit — this is what stops a bare `mcp`/

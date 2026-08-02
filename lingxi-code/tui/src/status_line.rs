@@ -224,4 +224,39 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&jsonstr).unwrap();
         assert_eq!(v["rate_limits"]["five_hour"]["used_percentage"], 50.0);
     }
+
+    #[test]
+    fn trust_and_managed_only_policy_prevent_spawn_payloads() {
+        use tui_core::status_line_command::{StatusLineExecutionPolicy, StatusLineSource};
+
+        let config = StatusLineConfig::from_settings_value(
+            &json!({"type": "command", "command": "must-not-run"}),
+        )
+        .unwrap()
+        .with_execution_policy(
+            StatusLineSource::Project,
+            StatusLineExecutionPolicy {
+                workspace_trusted: false,
+                disable_all_hooks: false,
+                managed_hooks_only: false,
+            },
+        );
+        let slot = new_slot(Some(config));
+        assert!(build_payload(&slot.lock().unwrap()).is_none());
+
+        let user_config = StatusLineConfig::from_settings_value(
+            &json!({"type": "command", "command": "must-not-run"}),
+        )
+        .unwrap()
+        .with_execution_policy(
+            StatusLineSource::User,
+            StatusLineExecutionPolicy {
+                workspace_trusted: true,
+                disable_all_hooks: false,
+                managed_hooks_only: true,
+            },
+        );
+        let slot = new_slot(Some(user_config));
+        assert!(build_payload(&slot.lock().unwrap()).is_none());
+    }
 }

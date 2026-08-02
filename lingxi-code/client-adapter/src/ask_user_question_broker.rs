@@ -37,16 +37,6 @@ fn lower_question(question: AskQuestion) -> AskQuestionDto {
     }
 }
 
-fn first_option_answers(questions: &[AskQuestion]) -> HashMap<String, String> {
-    let mut out = HashMap::with_capacity(questions.len());
-    for question in questions {
-        if let Some(first) = question.options.first() {
-            out.insert(question.question.clone(), first.label.clone());
-        }
-    }
-    out
-}
-
 /// Bridges the tool's session-scoped questionnaire channel to a client event
 /// stream and correlates inbound answers back to the parked tool call.
 pub struct BridgeAskUserQuestionBroker {
@@ -75,7 +65,6 @@ impl BridgeAskUserQuestionBroker {
                 timeout_secs,
                 resp_tx,
             } = exchange;
-            let fallback_answers = first_option_answers(&questions);
             {
                 let mut pending = self.pending.lock().await;
                 if pending.len() >= MAX_PENDING_ASK_USER_QUESTIONS {
@@ -110,7 +99,10 @@ impl BridgeAskUserQuestionBroker {
                     let Some(entry) = pending.lock().await.remove(&request_id) else {
                         return;
                     };
-                    let _ = entry.resp_tx.send(fallback_answers);
+                    // The client supplied no confirmed answers. Preserve that
+                    // fact instead of converting the highlighted first row into
+                    // a user decision.
+                    let _ = entry.resp_tx.send(HashMap::new());
                     sink.emit(ClientEvent::AskUserQuestionResolved { request_id })
                         .await;
                 });

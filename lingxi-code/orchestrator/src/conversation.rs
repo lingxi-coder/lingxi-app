@@ -6558,9 +6558,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => {
                 crate::api_error_copy::auth_failed_fallback(
                     self.config.interactive_session,
-                    &crate::api_error_copy::api_error_detail(
-                        err.provider_message().unwrap_or_default(),
-                    ),
+                    // Oracle: `let i = sir(e)` — the SAME normalizer the retry
+                    // banner uses, so both surfaces agree.
+                    &llm_client::error_display_text(err),
                 )
             }
             LlmError::ContextOverflow { .. } => {

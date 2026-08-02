@@ -734,7 +734,9 @@ impl ApiService {
     ) {
         if let Some(reporter) = &self.retry_reporter {
             reporter.report(RetryInfo {
-                message: error.to_string(),
+                // Oracle `OYr(e).formatted` = `sir(e)`, NOT the taxonomy's own
+                // `Display`. This is the text the retry banner shows.
+                message: crate::error::error_display_text(error),
                 attempt: state.attempt,
                 max_retries: ctl.max_retries,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),

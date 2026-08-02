@@ -210,6 +210,103 @@ impl LlmError {
     }
 }
 
+/// Oracle `sir(e)` @230583592 — the user-facing text for an error.
+///
+/// This is NOT `Display`. `Display` is the taxonomy's own wording
+/// ("provider internal error"); `sir` is what claude-code actually shows, and
+/// it has a live consumer here: `ApiService::report_retry` feeds it to the
+/// `ApiRetry` event that the TUI renders as the retry banner. That call site
+/// was passing `Display`.
+///
+/// Ported arms:
+/// - TLS/SSL codes → the seven `Unable to connect to API: …` forms, default
+///   `Unable to connect to API: SSL error ({code})`
+/// - `"Connection error."` → `Unable to connect to API…`
+/// - empty message → `API error (status …)`
+/// - a message embedding a JSON body → `FOu`: `body.error.message`, else
+///   `body.message`, re-prefixed with the status
+/// - otherwise the message unchanged
+///
+/// ⚠️ NOT ported: `StreamSuspended`, `ETIMEDOUT` and
+/// `BedrockUnexpectedContentType`. The oracle reads those from `x2(e)`'s
+/// cause-chain CODE; this taxonomy carries no code on [`LlmError::Transport`],
+/// so there is nothing to branch on. Guessing from message text would invent a
+/// predicate the oracle does not have. That needs a transport-code seam.
+#[must_use]
+pub fn error_display_text(error: &LlmError) -> String {
+    if let LlmError::TlsCert { code, .. } = error {
+        return match code.as_str() {
+            "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+            | "UNABLE_TO_GET_ISSUER_CERT"
+            | "UNABLE_TO_GET_ISSUER_CERT_LOCALLY" => "Unable to connect to API: SSL certificate \
+                 verification failed. Check your proxy or corporate SSL certificates"
+                .to_string(),
+            "CERT_HAS_EXPIRED" => "Unable to connect to API: SSL certificate has expired".to_string(),
+            "CERT_REVOKED" => {
+                "Unable to connect to API: SSL certificate has been revoked".to_string()
+            }
+            "DEPTH_ZERO_SELF_SIGNED_CERT" | "SELF_SIGNED_CERT_IN_CHAIN" => {
+                "Unable to connect to API: Self-signed certificate detected. Check your proxy or \
+                 corporate SSL certificates"
+                    .to_string()
+            }
+            "ERR_TLS_CERT_ALTNAME_INVALID" | "HOSTNAME_MISMATCH" => {
+                "Unable to connect to API: SSL certificate hostname mismatch".to_string()
+            }
+            "CERT_NOT_YET_VALID" => {
+                "Unable to connect to API: SSL certificate is not yet valid".to_string()
+            }
+            other => format!("Unable to connect to API: SSL error ({other})"),
+        };
+    }
+
+    let Some(message) = error.provider_message() else {
+        // No provider text at all — the taxonomy's own wording is all there is.
+        return error.to_string();
+    };
+
+    if message == "Connection error." {
+        return "Unable to connect to API. Check your internet connection".to_string();
+    }
+    if message.is_empty() {
+        return "API error (status unknown)".to_string();
+    }
+    api_error_detail(message)
+}
+
+/// Oracle `FOu(e)` + `sir`'s `includes('{"')` arm.
+///
+/// `api_error_message` stringifies the WHOLE body into the message, so the
+/// common error reads `403 {"type":"error","error":{"message":"…"}}`. Without
+/// this the raw JSON is what a user sees.
+#[must_use]
+pub fn api_error_detail(message: &str) -> String {
+    if !message.contains("{\"") {
+        return message.to_string();
+    }
+    let (status, body) = match message.split_once(' ') {
+        Some((head, rest)) if head.len() == 3 && head.bytes().all(|b| b.is_ascii_digit()) => {
+            (Some(head), rest)
+        }
+        _ => (None, message),
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
+        return message.to_string();
+    };
+    let extracted = parsed
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| parsed.get("message").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    match (status, extracted) {
+        (Some(status), Some(text)) => format!("{status} {text}"),
+        (None, Some(text)) => text.to_string(),
+        (_, None) => message.to_string(),
+    }
+}
+
 /// Parse the leading `${status} ` that `api_error_message` writes.
 ///
 /// Deliberately strict, because [`LlmError::InvalidRequest`] has ~200
@@ -242,6 +339,69 @@ pub fn api_error_status(message: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod api_error_status_tests {
+    use super::error_display_text;
+
+    /// `sir` is NOT `Display`: it is what claude-code shows, and the retry
+    /// banner consumes it. Every string byte-verified against 2.1.220 with a
+    /// control that must not match.
+    #[test]
+    fn sir_renders_the_ssl_family_and_unwraps_json_bodies() {
+        let ssl = |code: &str| error_display_text(&LlmError::tls_cert(code));
+        assert_eq!(
+            ssl("CERT_HAS_EXPIRED"),
+            "Unable to connect to API: SSL certificate has expired"
+        );
+        assert_eq!(
+            ssl("CERT_REVOKED"),
+            "Unable to connect to API: SSL certificate has been revoked"
+        );
+        assert_eq!(
+            ssl("CERT_NOT_YET_VALID"),
+            "Unable to connect to API: SSL certificate is not yet valid"
+        );
+        assert_eq!(
+            ssl("HOSTNAME_MISMATCH"),
+            "Unable to connect to API: SSL certificate hostname mismatch"
+        );
+        assert_eq!(
+            ssl("SELF_SIGNED_CERT_IN_CHAIN"),
+            "Unable to connect to API: Self-signed certificate detected. Check your proxy or \
+             corporate SSL certificates"
+        );
+        assert_eq!(
+            ssl("UNABLE_TO_GET_ISSUER_CERT"),
+            "Unable to connect to API: SSL certificate verification failed. Check your proxy or \
+             corporate SSL certificates"
+        );
+        // Unknown code keeps the oracle's parameterised default.
+        assert_eq!(
+            ssl("WAT"),
+            "Unable to connect to API: SSL error (WAT)"
+        );
+
+        // The connection-error arm.
+        assert_eq!(
+            error_display_text(&LlmError::Transport {
+                message: "Connection error.".to_string()
+            }),
+            "Unable to connect to API. Check your internet connection"
+        );
+
+        // The JSON arm — the common shape `api_error_message` produces.
+        assert_eq!(
+            error_display_text(&LlmError::PermissionDenied {
+                message: r#"403 {"type":"error","error":{"message":"revoked"}}"#.to_string()
+            }),
+            "403 revoked"
+        );
+
+        // A variant with no provider text falls back to the taxonomy wording.
+        assert_eq!(
+            error_display_text(&LlmError::QuotaExceeded),
+            "quota exceeded"
+        );
+    }
+
     use super::{api_error_status, LlmError};
 
     #[test]

@@ -231,58 +231,6 @@ pub(crate) fn account_display(profile: Option<&str>) -> String {
 /// `OAuth token revoked \xB7 Please run /login`.
 const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connect";
 
-/// Oracle `sir(e)`'s JSON arm plus `FOu(e)` (@230583346 / @230583592).
-///
-/// ```js
-/// if (e.message.includes('{"')) { let n = FOu(e); if (n) return e.status ? `${e.status} ${n}` : n }
-/// // FOu: body.error.message, else body.message
-/// ```
-///
-/// This matters because it IS the common path: `api_error_message` stringifies
-/// the whole body into the message (`403 {"type":"error","error":{…}}`), so
-/// without this arm the raw JSON blob is what the user sees. The oracle shows
-/// `403 OAuth token has been revoked`.
-///
-/// Everything else falls through to the message unchanged, matching the
-/// oracle's final `return … e.message`.
-///
-/// ⚠️ STILL UNPORTED from `sir`: the `x2()` cause-chain arms (StreamSuspended,
-/// ETIMEDOUT, BedrockUnexpectedContentType, the seven SSL codes) and the
-/// `"Connection error."` arm. They need a transport error CODE this port does
-/// not carry — see the handoff.
-#[must_use]
-pub(crate) fn api_error_detail(message: &str) -> String {
-    if !message.contains("{\"") {
-        return message.to_string();
-    }
-    // Split the SDK status prefix back off, so the JSON can be parsed.
-    let (status, body) = match message.split_once(' ') {
-        Some((head, rest))
-            if head.len() == 3 && head.bytes().all(|b| b.is_ascii_digit()) =>
-        {
-            (Some(head), rest)
-        }
-        _ => (None, message),
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(body.trim()) else {
-        return message.to_string();
-    };
-    // `FOu`: body.error.message wins, then body.message.
-    let extracted = parsed
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .or_else(|| parsed.get("message").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-    match (status, extracted) {
-        (Some(status), Some(text)) => format!("{status} {text}"),
-        (None, Some(text)) => text.to_string(),
-        // `FOu` returned null — the oracle keeps going and ends at `e.message`.
-        (_, None) => message.to_string(),
-    }
-}
-
 /// Oracle's TERMINAL 401/403 arm — reached when no specific auth branch
 /// matched (@230607344):
 ///
@@ -1052,22 +1000,22 @@ mod tests {
     #[test]
     fn the_api_error_detail_unwraps_the_stringified_body() {
         assert_eq!(
-            api_error_detail(
+            llm_client::api_error_detail(
                 r#"403 {"type":"error","error":{"type":"permission_error","message":"OAuth token has been revoked"}}"#
             ),
             "403 OAuth token has been revoked"
         );
         // `FOu` falls back to a top-level `message`.
         assert_eq!(
-            api_error_detail(r#"401 {"message":"bad key"}"#),
+            llm_client::api_error_detail(r#"401 {"message":"bad key"}"#),
             "401 bad key"
         );
         // No status prefix → the extracted text alone.
-        assert_eq!(api_error_detail(r#"{"message":"plain"}"#), "plain");
+        assert_eq!(llm_client::api_error_detail(r#"{"message":"plain"}"#), "plain");
         // Nothing extractable → unchanged, as the oracle's final return does.
-        assert_eq!(api_error_detail(r#"403 {"nope":1}"#), r#"403 {"nope":1}"#);
+        assert_eq!(llm_client::api_error_detail(r#"403 {"nope":1}"#), r#"403 {"nope":1}"#);
         // No JSON at all → unchanged.
-        assert_eq!(api_error_detail("403 forbidden"), "403 forbidden");
+        assert_eq!(llm_client::api_error_detail("403 forbidden"), "403 forbidden");
     }
 
     /// The terminal 401/403 arm, reached when no specific branch matched.

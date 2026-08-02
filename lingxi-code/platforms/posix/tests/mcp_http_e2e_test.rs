@@ -76,6 +76,7 @@ fn http_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Http {
         url,
         headers: traits::McpHeaders::new(),
+        headers_helper: None,
         oauth: None,
     }
 }

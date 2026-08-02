@@ -60,11 +60,13 @@ fn sample_spec(kind: McpTransportKind) -> McpTransportSpec {
         McpTransportKind::Http => McpTransportSpec::Http {
             url: "http://127.0.0.1:0/mcp".into(),
             headers: traits::McpHeaders::new(),
+            headers_helper: None,
             oauth: None,
         },
         McpTransportKind::WebSocket => McpTransportSpec::WebSocket {
             url: "ws://127.0.0.1:0".into(),
-            headers: HashMap::new(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: None,
         },
         McpTransportKind::InProcess => McpTransportSpec::InProcess {
             registry_key: "parity-probe".into(),

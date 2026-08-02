@@ -34,6 +34,7 @@ async fn connect_http_does_not_return_unsupported_transport() {
     let spec = McpTransportSpec::Http {
         url: "http://127.0.0.1:1/never-listens".into(),
         headers: McpHeaders::new(),
+        headers_helper: None,
         oauth: None,
     };
     if let Err(McpError::UnsupportedTransport(k)) = t.connect(&spec).await {

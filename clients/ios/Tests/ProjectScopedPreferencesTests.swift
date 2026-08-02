@@ -20,4 +20,17 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         XCTAssertEqual(preferences.activeSessionID(projectID: "A"), "session-a")
         XCTAssertEqual(preferences.activeSessionID(projectID: "B"), "session-b")
     }
+
+    func testStoredSessionDistinguishesLegacyMissingKeyFromExplicitNewChat() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+
+        XCTAssertNil(preferences.storedActiveSessionID(projectID: "legacy-project"))
+
+        preferences.setActiveSessionID("", projectID: "legacy-project")
+
+        XCTAssertEqual(preferences.storedActiveSessionID(projectID: "legacy-project"), "")
+    }
 }

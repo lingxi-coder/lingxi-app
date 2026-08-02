@@ -88,6 +88,22 @@ impl AdapterOutputStream {
         result.get("error").is_some()
     }
 
+    async fn emit_tool_result_event(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        result: &serde_json::Value,
+    ) {
+        self.sink
+            .emit(ClientEvent::ToolUseResult {
+                id: id.to_string(),
+                tool: tool.to_string(),
+                result_json: value_to_json_string(result),
+                is_error: Self::result_is_error(result),
+            })
+            .await;
+    }
+
     /// Map a model `stop_reason` to a [`TurnOutcomeDto`].
     ///
     /// Mirrors `BridgeOutputStream` (`orchestrator_bridge.rs:157-160`):
@@ -158,14 +174,30 @@ impl OutputStream for AdapterOutputStream {
         // derives structurally from the `{ "error": … }` payload shape. KNOWN
         // RESIDUAL: a migrated tool's model text is not carried on this DTO; if a
         // consumer needs it, a follow-up DTO field is required (out of scope).
-        self.sink
-            .emit(ClientEvent::ToolUseResult {
-                id: id.to_string(),
-                tool: tool.to_string(),
-                result_json: value_to_json_string(result),
-                is_error: Self::result_is_error(result),
-            })
-            .await;
+        self.emit_tool_result_event(id, tool, result).await;
+    }
+
+    async fn emit_tool_result_denied(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        _model_text: &str,
+        result: &serde_json::Value,
+        denial_kind: &str,
+    ) {
+        // Keep the frozen `ClientEvent` shape while carrying the engine's
+        // structured interruption provenance inside the already-extensible JSON
+        // payload. Existing clients ignore the additive key; newer clients can
+        // distinguish cancellation from a real tool failure without matching a
+        // localized error string.
+        let mut tagged = result.clone();
+        if let serde_json::Value::Object(fields) = &mut tagged {
+            fields.insert(
+                "tool_denial_kind".to_string(),
+                serde_json::Value::String(denial_kind.to_string()),
+            );
+        }
+        self.emit_tool_result_event(id, tool, &tagged).await;
     }
 
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
@@ -410,6 +442,36 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             ClientEvent::ToolUseResult { is_error, .. } => assert!(*is_error),
+            other => panic!("expected ToolUseResult, got {other:?}"),
+        }
+    }
+
+    /// An interrupted tool result preserves the ordinary error contract while
+    /// adding machine-readable cancellation provenance for newer clients.
+    #[tokio::test]
+    async fn emit_tool_result_denied_tags_interruption_kind() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        let id = protocol::ToolUseId::new();
+        let result = serde_json::json!({"error": "interrupted"});
+        stream
+            .emit_tool_result_denied(&id, "Bash", "interrupted", &result, "interrupted")
+            .await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClientEvent::ToolUseResult {
+                result_json,
+                is_error,
+                ..
+            } => {
+                assert!(*is_error);
+                let payload: serde_json::Value = serde_json::from_str(result_json).unwrap();
+                assert_eq!(payload["error"], "interrupted");
+                assert_eq!(payload["tool_denial_kind"], "interrupted");
+            }
             other => panic!("expected ToolUseResult, got {other:?}"),
         }
     }

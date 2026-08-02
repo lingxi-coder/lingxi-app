@@ -4858,8 +4858,8 @@ mod pre_cancel_tests {
     use tool_api::progress::ToolProgressSender;
     use tool_api::registry::ToolRegistry;
     use tool_api::tool_trait::{
-        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-        ValidationError,
+        DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+        ToolStaticContext, ValidationError,
     };
 
     /// A tool that always succeeds — if the pre-cancel guard lets it run, the
@@ -4926,6 +4926,157 @@ mod pre_cancel_tests {
         }
     }
 
+    /// Models the client-side WebSearch failure observed on a connected iPhone:
+    /// the tool declares `Cancel` but its awaited network future never checks the
+    /// token in `ToolUseContext`.
+    struct NonCooperativeCancelTool {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for NonCooperativeCancelTool {
+        fn name(&self) -> &str {
+            "NonCooperativeCancel"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn interrupt_behavior(&self, _: &serde_json::Value) -> InterruptBehavior {
+            InterruptBehavior::Cancel
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "non-cooperative-cancel".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.started.notify_one();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(ToolCallResult::from_data(
+                json!({ "unexpected": "completed" }),
+            ))
+        }
+    }
+
+    /// A mutation-boundary tool that must finish naturally after cancellation.
+    struct BlockingMutationTool {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for BlockingMutationTool {
+        fn name(&self) -> &str {
+            "BlockingMutation"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+        fn interrupt_behavior(&self, _: &serde_json::Value) -> InterruptBehavior {
+            InterruptBehavior::Block
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "blocking-mutation".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            _: ToolUseContext,
+            progress: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            // Model a tool-owned child task that accidentally retains its
+            // progress sender after the safe mutation boundary returns. The
+            // dispatcher must close its receiver and must not let this detached
+            // producer keep the parent turn alive.
+            tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                drop(progress);
+            });
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(ToolCallResult::from_data(json!({ "committed": true })))
+        }
+    }
+
     fn orch_with_never_run() -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(NeverShouldRunTool) as Arc<dyn Tool>);
@@ -4981,6 +5132,127 @@ mod pre_cancel_tests {
             !prevent_continuation,
             "a pre-cancelled tool must not set prevent_continuation"
         );
+    }
+
+    /// The dispatcher must enforce a Cancel tool's interrupt contract even when
+    /// the tool implementation itself ignores the cancellation token.
+    #[tokio::test]
+    async fn in_flight_non_cooperative_cancel_tool_stops_at_dispatch_boundary() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NonCooperativeCancelTool {
+            started: started.clone(),
+        }) as Arc<dyn Tool>);
+        let output = MockOutputStream::new();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(output.clone()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let cancel = CancellationToken::new();
+        let cancel_after_start = cancel.clone();
+        let cancel_task = tokio::spawn(async move {
+            started.notified().await;
+            cancel_after_start.cancel();
+        });
+        let id = ToolUseId::new();
+        let uses = vec![(
+            id.clone(),
+            "NonCooperativeCancel".to_string(),
+            json!({}),
+            None,
+        )];
+
+        let (results, _, _, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch_tool_uses_tracked(&orch, &uses, Some(cancel)),
+        )
+        .await
+        .expect("dispatcher must not wait for the ignored 30-second tool future")
+        .expect("dispatch");
+        cancel_task.await.expect("cancel task");
+
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &results[0]
+        else {
+            panic!("expected ToolResult");
+        };
+        assert!(*is_error);
+        assert!(content.contains("aborted"));
+        assert_eq!(
+            output.denial_snapshot().await,
+            vec![(id, "interrupted".to_string())]
+        );
+    }
+
+    /// A Block tool keeps the dispatch future occupied after cancellation and
+    /// publishes its real completed result only after its safe boundary exits.
+    #[tokio::test]
+    async fn in_flight_block_tool_finishes_naturally_after_cancel() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(BlockingMutationTool {
+            started: started.clone(),
+            release: release.clone(),
+        }) as Arc<dyn Tool>);
+        let output = MockOutputStream::new();
+        let orch = Arc::new(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(output.clone()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let cancel = CancellationToken::new();
+        let task_orch = orch.clone();
+        let task_cancel = cancel.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_tool_uses_tracked(
+                &task_orch,
+                &[(
+                    ToolUseId::new(),
+                    "BlockingMutation".to_string(),
+                    json!({}),
+                    None,
+                )],
+                Some(task_cancel),
+            )
+            .await
+        });
+
+        started.notified().await;
+        cancel.cancel();
+        tokio::task::yield_now().await;
+        assert!(
+            !dispatch.is_finished(),
+            "cancellation must not drop a Block tool future"
+        );
+
+        release.notify_one();
+        let (results, _, _, _) = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch)
+            .await
+            .expect("a detached progress sender must not keep dispatch alive")
+            .expect("dispatch joined")
+            .expect("dispatch");
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &results[0]
+        else {
+            panic!("expected ToolResult");
+        };
+        assert!(!is_error);
+        assert!(content.contains("committed"));
+        assert!(output.denial_snapshot().await.is_empty());
     }
 }
 // RECOV.4: the `max_output_tokens` recovery-reset helper used by both the

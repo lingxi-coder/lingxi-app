@@ -94,6 +94,10 @@ import XCTest
         func onRequest(request: PermissionRequest) async {}
     }
 
+    final class NoopEventListener: IosEventListener, @unchecked Sendable {
+        func onEvent(event: ClientEvent) async {}
+    }
+
     /// A test listener that fulfils a distinct expectation for each model event
     /// kind (SHIP-BLOCKER #2). Used to prove the OUT-OF-BAND model-state path:
     /// `ListModels`→`ModelList` and `SetModel`→`ModelChanged` flow over the same
@@ -127,6 +131,50 @@ import XCTest
     }
 
     final class EngineRoundtripTests: XCTestCase {
+
+        @MainActor
+        func testOfficialDeepSeekSnapshotBuildsEngineWithoutDuplicateProfile() throws {
+            let sandbox = FileManager.default.temporaryDirectory
+                .appendingPathComponent("LingxiCodeDeepSeekTest-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: sandbox) }
+
+            let repository = ProviderRepository(
+                persistenceURL: sandbox.appendingPathComponent("provider-settings.json")
+            )
+            let deepSeek = repository.addProfile(presetID: "deepseek")
+            repository.setDefaultProfile(deepSeek)
+            let snapshot = repository.makeLaunchSnapshot()
+
+            let config = IosEngineLaunchConfigFfi(
+                apiBase: "https://api.anthropic.com",
+                apiKey: "",
+                model: snapshot.defaultModelID ?? "",
+                appSandboxRoot: sandbox.path,
+                projectCwd: nil,
+                providerConfig: IosProviderConfigFfi(
+                    providerProfilesJson: snapshot.providerProfilesJSON,
+                    routingJson: snapshot.routingJSON
+                ),
+                mobileLinux: nil
+            )
+
+            XCTAssertNoThrow(
+                try buildIosEngineWithConfig(
+                    config: config,
+                    listener: NoopEventListener(),
+                    stt: SttImpl(),
+                    tts: TtsImpl(),
+                    camera: CameraImpl(),
+                    share: ShareImpl(),
+                    voice: VoiceImpl(),
+                    notifications: NotificationImpl(),
+                    clipboard: ClipboardImpl(),
+                    permissions: NoopPermissionSink(),
+                    secureStorage: nil
+                )
+            )
+        }
 
         func testModelDisplayGroupsOnlyInputByProviderAndPreservesReferences() {
             let references = [

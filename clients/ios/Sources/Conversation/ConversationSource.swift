@@ -20,6 +20,7 @@
 // plaintext here.
 
 import Foundation
+import OSLog
 import SwiftUI
 
 #if canImport(engine_mobileFFI)
@@ -118,6 +119,16 @@ enum TurnNotice: Equatable {
 
 /// The observable conversation state ChatView renders. Both sources mutate it on
 /// the main actor: the mock with canned timers, the engine from listener events.
+struct SessionRestoreRecovery: Equatable, Identifiable {
+    let id = UUID()
+    let unavailableSessionID: String
+}
+
+struct SessionTransitionFailure: Equatable, Identifiable {
+    let id = UUID()
+    let requestedSessionID: String
+}
+
 @MainActor
 final class ConversationModel: ObservableObject {
     /// The full visible transcript (user + assistant turns).
@@ -131,6 +142,10 @@ final class ConversationModel: ObservableObject {
     /// True while a turn is in flight (drives the streaming dots row + gates
     /// overlapping sends and the Send→Stop swap, PR-4 items 1 & 2).
     @Published var streaming: Bool = false
+    /// True after Stop is requested and until the engine confirms that the
+    /// matching turn released its owner slot. The composer remains editable but
+    /// cannot submit another turn during this interval.
+    @Published var isCancelling: Bool = false
     /// True when the session is brand-new and empty (drives the empty state).
     @Published var isNew: Bool = false
     /// The currently selected model chip.
@@ -166,6 +181,23 @@ final class ConversationModel: ObservableObject {
     /// The engine session id currently driving the connection — set by
     /// `SessionStarted` / `SessionResumed`. Empty until the engine reports one.
     @Published var activeSessionId: String = ""
+    /// A NewSession / ResumeSession command has been issued but has not yet been
+    /// confirmed by SessionStarted / SessionResumed. While true, an older
+    /// SessionList must not replace the persisted project index.
+    @Published var sessionTransitionPending: Bool = false
+    /// Emitted only when ResumeSession proves that a persisted session no longer
+    /// exists. RootView consumes this before adopting the replacement NewSession,
+    /// clearing the stale project/UserDefaults selection without hiding other
+    /// resume failures.
+    @Published var sessionRestoreRecovery: SessionRestoreRecovery? = nil
+    /// Emitted when a requested ResumeSession fails without a recoverable
+    /// missing-session migration. RootView uses it to roll optimistic drawer
+    /// selection back to the last engine-confirmed session.
+    @Published var sessionTransitionFailure: SessionTransitionFailure? = nil
+    /// Monotonic signal emitted after a new session is confirmed or a real turn
+    /// settles. The composition root responds with ListSessions, allowing the
+    /// provisional SessionStarted row to be replaced by the durable JSONL catalog.
+    @Published var sessionRefreshRevision: UInt64 = 0
     /// Real MCP servers from the engine (`McpServers` listing, lowered to the UI
     /// `MCPServer` model). Empty ⇒ the settings page keeps its mock list. Refreshed
     /// out-of-band via `refreshMcpServers()` when the MCP settings page opens.
@@ -210,8 +242,13 @@ protocol ConversationSource: AnyObject {
     /// can't start an overlapping turn (PR-4 item 1).
     func send(_ text: String)
     /// Cancel the in-flight turn (PR-4 item 2): the engine submits `.cancel(...)`
-    /// and resets streaming state. A no-op when nothing is streaming.
+    /// and keeps ownership until the engine confirms safe completion. A no-op
+    /// when nothing is streaming.
     func cancel()
+    /// Cancel the in-flight turn and return only after the engine has released
+    /// its single-turn slot. Engine/configuration swaps use this barrier so an
+    /// old Block-behavior tool cannot overlap a replacement engine.
+    func cancelAndWait() async throws
     /// Dismiss the persistent error banner (PR-4 item 4).
     func dismissError()
     /// Switch the active model (SHIP-BLOCKER #2). The engine source submits
@@ -254,7 +291,10 @@ protocol ConversationSource: AnyObject {
     /// clean. The UI also selects the row locally so the choice reflects
     /// immediately even if engine-side resume is still a follow-up. A no-op on the
     /// mock.
-    func resumeSession(_ uuid: String)
+    /// `emptySessionTitle` is supplied only when the persisted project index
+    /// proves this is a zero-message legacy session. The engine can then restore
+    /// the empty anchor without assigning a different UUID.
+    func resumeSession(_ uuid: String, emptySessionTitle: String?)
     /// Ask the engine for its real MCP server listing (submit
     /// `RefreshListings(.mcp)`). The reply (`McpServers`) lands out-of-band and
     /// populates `model.mcpServers`. A no-op on the mock (keeps the canned list).
@@ -284,11 +324,15 @@ protocol ConversationSource: AnyObject {
 extension ConversationSource {
     func warmUp() {}
     func prepare() async throws {}
+    func cancelAndWait() async throws { cancel() }
     func handleForeground() {}
     /// Default session ops for sources with no engine catalog (the mock): no-ops,
     /// so the mock keeps its canned drawer lists and ignores resume requests.
     func listSessions() {}
-    func resumeSession(_ uuid: String) {}
+    func resumeSession(_ uuid: String) {
+        resumeSession(uuid, emptySessionTitle: nil)
+    }
+    func resumeSession(_ uuid: String, emptySessionTitle: String?) {}
     func refreshMcpServers() {}
 }
 
@@ -351,7 +395,9 @@ enum ConversationSourceFactory {
     static func make(options: LaunchOptions = .init()) -> any ConversationSource {
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
-                return MockConversationSource.uiTestFixture()
+                return MockConversationSource.uiTestFixture(
+                    cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1"
+                )
             }
         #endif
         #if canImport(engine_mobileFFI)
@@ -406,8 +452,11 @@ final class MockConversationSource: ConversationSource {
     private var turnToken = 0
 
     #if DEBUG
-        static func uiTestFixture() -> MockConversationSource {
+        static func uiTestFixture(cancelledRun: Bool = false) -> MockConversationSource {
             let source = MockConversationSource()
+            let terminalToolStatus: ConversationToolStatus = cancelledRun ? .cancelled : .completed
+            let terminalShellStatus: ConversationShellStatus = cancelledRun ? .cancelled : .completed
+            let terminalRunStatus: ConversationExecutionStatus = cancelledRun ? .cancelled : .completed
             let shell = ConversationShellCard(
                 sessionId: "ui-session",
                 turnId: 1,
@@ -418,25 +467,35 @@ final class MockConversationSource: ConversationSource {
                 stderr: "",
                 exitCode: 0,
                 durationMs: 42,
-                status: .completed,
+                status: terminalShellStatus,
                 truncated: false
             )
+            let shellTrace = ConversationToolTrace(
+                id: "ui-shell",
+                tool: "shell",
+                status: terminalToolStatus,
+                inputSummary: "pwd",
+                outputSummary: cancelledRun ? "Shell 已取消" : "Shell 完成",
+                elapsedMs: 42
+            )
+            let toolTraces = cancelledRun ? [
+                ConversationToolTrace(
+                    id: "ui-web-search",
+                    tool: "WebSearch",
+                    status: .cancelled,
+                    inputSummary: "Wuhan weather today",
+                    outputSummary: nil,
+                    elapsedMs: 1_234
+                ),
+                shellTrace,
+            ] : [shellTrace]
             let run = ConversationExecutionRun(
                 id: "ui-run",
                 sessionId: "ui-session",
                 turnId: 1,
-                status: .completed,
+                status: terminalRunStatus,
                 reasoning: "检查当前项目工作区。",
-                tools: [
-                    ConversationToolTrace(
-                        id: "ui-shell",
-                        tool: "shell",
-                        status: .completed,
-                        inputSummary: "pwd",
-                        outputSummary: "Shell 完成",
-                        elapsedMs: 42
-                    ),
-                ],
+                tools: toolTraces,
                 shellCards: [shell],
                 usage: ConversationUsageSnapshot(
                     inputTokens: 12,
@@ -445,8 +504,13 @@ final class MockConversationSource: ConversationSource {
                     cacheCreationTokens: 0
                 )
             )
-            source.model.messages = []
-            source.model.items = [.run(run)]
+            let user = Message(role: .user, text: "Hello")
+            let assistant = Message(
+                role: .ai,
+                text: "Hello! I'm ready to help with your software engineering tasks."
+            )
+            source.model.messages = [user, assistant]
+            source.model.items = [.message(user), .run(run), .message(assistant)]
             source.model.messageDetails = [:]
             source.model.isNew = false
             return source
@@ -599,6 +663,14 @@ final class MockConversationSource: ConversationSource {
     /// `ToolUse*` / `TurnEnded` back through the listener.
     @MainActor
     final class EngineConversationSource: ConversationSource {
+        private static let turnLog = Logger(
+            subsystem: "com.lingxi.code",
+            category: "conversation-turn"
+        )
+        /// Project persistence replaces its cached index from SessionList, so
+        /// iOS must override the host's five-row default with the full u32 range.
+        private static let completeSessionListLimit = UInt32.max
+
         typealias HandleBuilder = @MainActor (
             _ config: IosEngineLaunchConfigFfi,
             _ listener: IosEventListener,
@@ -634,20 +706,37 @@ final class MockConversationSource: ConversationSource {
         /// changes so late events from an abandoned session/turn are ignored.
         private var sessionEpoch: UInt64 = 1
         private var activeTurnEpoch: UInt64?
-        /// Cancelled / abandoned turns whose matching terminal event has not yet
-        /// arrived. While non-empty, a newer prompt is DEFERRED instead of being
-        /// submitted, so old/new event streams can never overlap on uncorrelated
-        /// protocol variants.
-        private var quarantinedTurnIds: [UInt64] = []
-        /// A locally-rendered user prompt waiting for the quarantined turn's
-        /// terminal event before it is actually submitted to the engine.
-        private var pendingPrompt: PendingPrompt?
         private var activeRunItemIndex: Int?
         private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
+        private var testEmptySessionResumer: ((String, String) async throws -> Void)?
+        private var cancellationOperation: CancellationOperation?
+        private var nextCancellationOperationID: UInt64 = 1
+        private var activeSessionTransitionOperationID: UInt64?
+        private var nextSessionTransitionOperationID: UInt64 = 1
 
-        private struct PendingPrompt: Equatable {
+        private enum PendingSessionTransition: Equatable {
+            case new
+            case resume(String)
+        }
+
+        private enum SessionTransitionSubmission {
+            case command(ClientCommand)
+            case resumeEmpty(sessionID: String, title: String)
+        }
+
+        private var pendingSessionTransition: PendingSessionTransition?
+
+        private struct TurnPrompt: Equatable {
             let text: String
             let turnId: UInt64
+        }
+
+        private struct CancellationOperation {
+            let id: UInt64
+            let turnId: UInt64
+            let epoch: UInt64
+            let pendingPermissions: [PendingPermission]
+            let task: Task<Void, Error>
         }
 
         init(
@@ -673,71 +762,219 @@ final class MockConversationSource: ConversationSource {
 
         func startNewConversation() {
             let turnIdToCancel = inFlightTurnForSessionSwitch()
-            // Reset the local transcript immediately so the UI reflects a fresh
-            // chat without waiting for the engine round-trip. The engine confirms
-            // with `SessionStarted` (which re-resets + adopts the new id); doing
-            // it here too keeps the UI snappy and correct on the mock-fallback /
-            // no-op host path.
-            resetTranscriptForSessionSwitch(isNew: true)
+            model.sessionRestoreRecovery = nil
+            model.sessionTransitionFailure = nil
+            let transitionOperationID = beginSessionTransition(.new)
+            prepareSessionTransition(cancelling: turnIdToCancel, isNew: true)
             // Tell the engine to begin a fresh session (no cwd/model override —
             // the engine keeps its configured defaults). The new id arrives back
             // out-of-band via `SessionStarted`.
             submitSessionTransition(
                 cancelling: turnIdToCancel,
-                command: .newSession(cwd: nil, model: nil),
-                failurePrefix: "新建会话失败"
+                submission: .command(.newSession(cwd: nil, model: nil)),
+                failurePrefix: "新建会话失败",
+                transitionOperationID: transitionOperationID,
+                isNew: true
             )
         }
 
-        /// Capture the old turn before a session reset clears its correlator.
-        /// The caller submits this cancellation and the transition command in
-        /// one task, preserving engine-side ordering.
+        /// Capture the old turn before a session transition. Its correlator stays
+        /// live until Cancel succeeds so a delivery failure can restore the same
+        /// retryable Stop state instead of discarding the old transcript.
         private func inFlightTurnForSessionSwitch() -> UInt64? {
+            if let cancellationOperation { return cancellationOperation.turnId }
             guard model.streaming else { return nil }
             return currentTurnId
         }
 
+        private func prepareSessionTransition(cancelling turnId: UInt64?, isNew: Bool) {
+            guard let turnId else {
+                resetTranscriptForSessionSwitch(isNew: isNew)
+                return
+            }
+            _ = operationForCancelling(turnId: turnId)
+            model.isCancelling = true
+            model.statusLine = "正在停止…"
+            model.pendingPermissions = []
+        }
+
         private func submitSessionTransition(
             cancelling turnId: UInt64?,
-            command: ClientCommand,
-            failurePrefix: String
+            submission: SessionTransitionSubmission,
+            failurePrefix: String,
+            transitionOperationID: UInt64,
+            resumeTargetID: String? = nil,
+            allowsMissingSessionReplacement: Bool = false,
+            isNew: Bool
         ) {
             Task { [weak self] in
                 guard let self else { return }
-                do {
-                    if let turnId {
-                        try await self.submitCommand(.cancel(turnId: turnId))
+                if let turnId {
+                    do {
+                        try await self.awaitCancellation(turnId)
+                    } catch {
+                        guard self.activeSessionTransitionOperationID == transitionOperationID else {
+                            return
+                        }
+                        // `finishCancellation` has already restored the original
+                        // visible turn and retryable Stop state. Abandon only the
+                        // requested session transition; treating this as a turn-
+                        // terminal host error would incorrectly clear ownership.
+                        if let resumeTargetID {
+                            self.model.sessionTransitionFailure = SessionTransitionFailure(
+                                requestedSessionID: resumeTargetID
+                            )
+                        }
+                        self.setPendingSessionTransition(nil)
+                        if self.model.error == nil {
+                            self.model.error = ConversationError(
+                                kind: .host,
+                                message: "取消旧会话失败：\(error)"
+                            )
+                        }
+                        return
                     }
-                    try await self.submitCommand(command)
+                    guard self.activeSessionTransitionOperationID == transitionOperationID else {
+                        return
+                    }
+                    self.resetTranscriptForSessionSwitch(isNew: isNew)
+                }
+                guard self.activeSessionTransitionOperationID == transitionOperationID else {
+                    return
+                }
+                do {
+                    try await self.submitSessionTransition(submission)
                 } catch {
-                    await self.fail(.host, "\(failurePrefix)：\(error)")
+                    guard self.activeSessionTransitionOperationID == transitionOperationID else {
+                        return
+                    }
+                    if let resumeTargetID {
+                        // A slower failed restore must not clobber a newer drawer
+                        // selection that has already replaced the pending target.
+                        guard self.pendingSessionTransition == .resume(resumeTargetID) else {
+                            return
+                        }
+                        if allowsMissingSessionReplacement,
+                           Self.isMissingSessionResumeError(error) {
+                            await self.replaceUnavailableSession(resumeTargetID)
+                            return
+                        }
+                        self.model.sessionTransitionFailure = SessionTransitionFailure(
+                            requestedSessionID: resumeTargetID
+                        )
+                    }
+                    self.setPendingSessionTransition(nil)
+                    self.fail(.host, "\(failurePrefix)：\(error)")
                 }
             }
         }
 
-        private func submitSessionCancellation(_ turnId: UInt64?) {
-            guard let turnId else { return }
+        private func submitSessionTransition(
+            _ submission: SessionTransitionSubmission
+        ) async throws {
+            switch submission {
+            case let .command(command):
+                try await submitCommand(command)
+            case let .resumeEmpty(sessionID, title):
+                if let testEmptySessionResumer {
+                    try await testEmptySessionResumer(sessionID, title)
+                    return
+                }
+                let handle = try await ensureHandle()
+                try await handle.resumeEmptySession(sessionId: sessionID, title: title)
+            }
+        }
+
+        /// A missing on-disk session is recoverable startup state, not an engine
+        /// outage. Keep the transition pending while a replacement is created so
+        /// an older SessionList cannot erase the cached drawer index in between.
+        private func replaceUnavailableSession(_ unavailableSessionID: String) async {
+            model.sessionRestoreRecovery = SessionRestoreRecovery(
+                unavailableSessionID: unavailableSessionID
+            )
+            setPendingSessionTransition(.new)
+            resetTranscriptForSessionSwitch(isNew: true)
+            do {
+                try await submitCommand(.newSession(cwd: nil, model: nil))
+                model.statusLine = "原会话已不存在，已创建新对话"
+            } catch {
+                setPendingSessionTransition(nil)
+                fail(.host, "原会话已不存在，且新建会话失败：\(error)")
+            }
+        }
+
+        /// Branch on the generated protocol error first. Older hosts may still
+        /// report a missing resume target as Rejected, whose message is matched
+        /// narrowly; unrelated transport/protocol failures stay visible.
+        private static func isMissingSessionResumeError(_ error: Error) -> Bool {
+            guard let clientError = error as? ClientError else { return false }
+            switch clientError {
+            case .NotFound:
+                return true
+            case let .Rejected(message):
+                let normalized = message.lowercased()
+                guard normalized.contains("not resumable") else { return false }
+                return normalized.contains("was not found")
+                    || normalized.contains("session not found")
+                    || normalized.contains("sessionnotfound")
+            case .Transport, .Protocol, .Internal:
+                return false
+            @unknown default:
+                return false
+            }
+        }
+
+        private func setPendingSessionTransition(_ transition: PendingSessionTransition?) {
+            pendingSessionTransition = transition
+            model.sessionTransitionPending = transition != nil
+            if transition == nil {
+                activeSessionTransitionOperationID = nil
+            }
+        }
+
+        private func beginSessionTransition(
+            _ transition: PendingSessionTransition
+        ) -> UInt64 {
+            let operationID = nextSessionTransitionOperationID
+            nextSessionTransitionOperationID &+= 1
+            activeSessionTransitionOperationID = operationID
+            setPendingSessionTransition(transition)
+            return operationID
+        }
+
+        private func submitSessionCancellation(_ turnId: UInt64?, isNew: Bool) {
+            guard let turnId else {
+                resetTranscriptForSessionSwitch(isNew: isNew)
+                return
+            }
+            prepareSessionTransition(cancelling: turnId, isNew: isNew)
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.submitCommand(.cancel(turnId: turnId))
+                    try await self.awaitCancellation(turnId)
+                    self.resetTranscriptForSessionSwitch(isNew: isNew)
                 } catch {
-                    await self.fail(.host, "取消旧会话失败：\(error)")
+                    if self.model.error == nil {
+                        self.model.error = ConversationError(
+                            kind: .host,
+                            message: "取消旧会话失败：\(error)"
+                        )
+                    }
                 }
             }
         }
 
-        /// Shared transcript reset used by new/resume/open-session: clears the
-        /// in-flight turn bookkeeping and the visible transcript so a turn that
-        /// completes after the switch can't bleed its deltas/notice/permission
-        /// into the session we just moved to. `isNew` drives the empty-state vs.
-        /// a placeholder transcript.
+        /// Shared transcript reset used by new/resume/open-session after any old
+        /// turn has safely released its engine slot. Incrementing the epoch also
+        /// makes late transport delivery harmless. `isNew` drives the empty-state
+        /// versus a placeholder transcript.
         private func resetTranscriptForSessionSwitch(isNew: Bool) {
             invalidateTurnContext()
             model.messages = []
             model.items = model.messages.map(ConversationRenderItem.message)
             model.messageDetails = [:]
             model.streaming = false
+            model.isCancelling = false
             model.isNew = isNew
             model.statusLine = nil
             model.error = nil
@@ -753,8 +990,6 @@ final class MockConversationSource: ConversationSource {
             streamingItemIndex = nil
             currentTurnId = nil
             activeTurnEpoch = nil
-            quarantinedTurnIds = []
-            pendingPrompt = nil
             activeRunItemIndex = nil
         }
 
@@ -877,17 +1112,41 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        /// Close every transient row owned by the active turn. This mirrors
+        /// Android's `AgentRunState.finish`: a terminal turn must never retain a
+        /// tool, shell process, or coordinator count that still claims to run.
+        private func finishActiveRun(_ status: ConversationExecutionStatus) {
+            let toolStatus: ConversationToolStatus
+            let shellStatus: ConversationShellStatus
+            switch status {
+            case .running:
+                toolStatus = .running
+                shellStatus = .running
+            case .completed, .maxTurns:
+                toolStatus = .completed
+                shellStatus = .completed
+            case .failed:
+                toolStatus = .failed
+                shellStatus = .failed
+            case .cancelled:
+                toolStatus = .cancelled
+                shellStatus = .cancelled
+            }
+            updateActiveRun { run in
+                run.status = status
+                run.activeWorkers = 0
+                for index in run.tools.indices where run.tools[index].status == .running {
+                    run.tools[index].status = toolStatus
+                }
+                for index in run.shellCards.indices where run.shellCards[index].status == .running {
+                    run.shellCards[index].status = shellStatus
+                }
+            }
+        }
+
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
             guard let currentTurnId, let activeTurnEpoch, activeTurnEpoch == sessionEpoch else {
                 return false
-            }
-            if quarantinedTurnIds.contains(currentTurnId), !model.streaming {
-                switch event {
-                case .turnEnded, .error:
-                    return true
-                default:
-                    return false
-                }
             }
             switch event {
             case let .turnStarted(turnId):
@@ -895,15 +1154,6 @@ final class MockConversationSource: ConversationSource {
             default:
                 return true
             }
-        }
-
-        private func quarantineCurrentTurn(_ turnId: UInt64) {
-            guard !quarantinedTurnIds.contains(turnId) else { return }
-            quarantinedTurnIds.append(turnId)
-        }
-
-        private func consumeQuarantinedTurn(_ turnId: UInt64) {
-            quarantinedTurnIds.removeAll { $0 == turnId }
         }
 
         private func submitCommand(_ command: ClientCommand) async throws {
@@ -915,19 +1165,100 @@ final class MockConversationSource: ConversationSource {
             try await handle.submit(command: command)
         }
 
-        private func pendingStatusLine() -> String {
-            "正在等待上一轮取消完成…"
+        private func operationForCancelling(turnId: UInt64) -> CancellationOperation {
+            if let operation = cancellationOperation, operation.turnId == turnId {
+                return operation
+            }
+            let operationID = nextCancellationOperationID
+            nextCancellationOperationID &+= 1
+            let epoch = activeTurnEpoch ?? sessionEpoch
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                try await self.submitCommand(.cancel(turnId: turnId))
+            }
+            let operation = CancellationOperation(
+                id: operationID,
+                turnId: turnId,
+                epoch: epoch,
+                pendingPermissions: model.pendingPermissions,
+                task: task
+            )
+            cancellationOperation = operation
+            return operation
         }
 
-        private func startPrompt(_ prompt: PendingPrompt) {
-            pendingPrompt = nil
+        private func finishCancellation(
+            _ operation: CancellationOperation,
+            error: Error?
+        ) {
+            guard cancellationOperation?.id == operation.id else { return }
+            cancellationOperation = nil
+
+            let stillOwnsVisibleTurn = currentTurnId == operation.turnId
+                && activeTurnEpoch == operation.epoch
+                && operation.epoch == sessionEpoch
+            model.isCancelling = false
+
+            if let error {
+                if stillOwnsVisibleTurn {
+                    // Delivery failed before the engine confirmed release. Keep
+                    // the original turn live so Stop can be retried safely.
+                    model.streaming = true
+                    model.statusLine = nil
+                    if model.pendingPermissions.isEmpty {
+                        model.pendingPermissions = operation.pendingPermissions
+                    }
+                    model.error = ConversationError(kind: .host, message: "取消失败：\(error)")
+                } else if model.statusLine == "正在停止…" {
+                    model.statusLine = nil
+                }
+                Self.turnLog.error(
+                    "cancel failed turn=\(operation.turnId, privacy: .public) error=\(String(describing: error), privacy: .private(mask: .hash))"
+                )
+                return
+            }
+
+            if stillOwnsVisibleTurn {
+                // The host only returns after all event producers have joined and
+                // the single-turn slot is released. This is also a fallback for a
+                // transport that failed to deliver its terminal event.
+                model.streaming = false
+                model.statusLine = nil
+                model.notice = .cancelled
+                finishActiveRun(.cancelled)
+                clearTurnPointers(keepEpoch: false)
+            } else if model.statusLine == "正在停止…" {
+                model.statusLine = nil
+            }
+            requestSessionCatalogRefreshAfterSettledTurn()
+            Self.turnLog.debug(
+                "cancel returned turn=\(operation.turnId, privacy: .public)"
+            )
+        }
+
+        private func awaitCancellation(_ turnId: UInt64) async throws {
+            let operation = operationForCancelling(turnId: turnId)
+            do {
+                try await operation.task.value
+                finishCancellation(operation, error: nil)
+            } catch {
+                finishCancellation(operation, error: error)
+                throw error
+            }
+        }
+
+        private func startPrompt(_ prompt: TurnPrompt) {
             model.notice = nil
             model.streaming = true
+            model.isCancelling = false
             model.statusLine = nil
             streamingIndex = nil
             streamingItemIndex = nil
             currentTurnId = prompt.turnId
             activeTurnEpoch = sessionEpoch
+            Self.turnLog.debug(
+                "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
+            )
 
             Task { [weak self] in
                 guard let self else { return }
@@ -938,27 +1269,31 @@ final class MockConversationSource: ConversationSource {
                         images: [],
                         turnId: prompt.turnId))
                 } catch {
-                    await self.fail(.host, "\(error)")
+                    self.fail(.host, "\(error)")
                 }
             }
         }
 
-        private func finishQuarantinedTurnAndStartPendingIfNeeded() {
-            let completedTurnId = currentTurnId
-            if let completedTurnId {
-                consumeQuarantinedTurn(completedTurnId)
-            }
-            clearTurnPointers(keepEpoch: false)
-            model.statusLine = nil
-            guard quarantinedTurnIds.isEmpty, let pendingPrompt else { return }
-            startPrompt(pendingPrompt)
+        private func requestSessionCatalogRefreshAfterSettledTurn() {
+            guard
+                !model.streaming,
+                !model.isCancelling,
+                !model.isNew,
+                !model.activeSessionId.isEmpty,
+                !model.sessionTransitionPending
+            else { return }
+            model.sessionRefreshRevision &+= 1
         }
 
         func send(_ text: String) {
             // PR-4 item 1: a turn is already in flight — ignore the tap so we
             // never start an overlapping turn (which would corrupt appendDelta's
             // single `streamingIndex`). The Stop button is how you interrupt.
-            guard !model.streaming, pendingPrompt == nil else { return }
+            guard
+                !model.streaming,
+                !model.isCancelling,
+                !model.sessionTransitionPending
+            else { return }
 
             model.isNew = false
             model.notice = nil
@@ -966,34 +1301,37 @@ final class MockConversationSource: ConversationSource {
 
             let turnId = nextTurnId
             nextTurnId &+= 1
-            let prompt = PendingPrompt(text: text, turnId: turnId)
+            startPrompt(TurnPrompt(text: text, turnId: turnId))
+        }
 
-            if !quarantinedTurnIds.isEmpty {
-                pendingPrompt = prompt
-                model.statusLine = pendingStatusLine()
-                return
+        func cancelAndWait() async throws {
+            let operation: CancellationOperation
+            if let currentOperation = cancellationOperation {
+                operation = currentOperation
+            } else {
+                // PR-4 item 2: nothing in flight — no-op.
+                guard model.streaming, let turnId = currentTurnId else { return }
+                operation = operationForCancelling(turnId: turnId)
             }
-            startPrompt(prompt)
+            Self.turnLog.debug(
+                "cancel requested turn=\(operation.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
+            )
+            model.isCancelling = true
+            model.statusLine = "正在停止…"
+            model.pendingPermissions = []
+            do {
+                try await operation.task.value
+                finishCancellation(operation, error: nil)
+            } catch {
+                finishCancellation(operation, error: error)
+                throw error
+            }
         }
 
         func cancel() {
-            // PR-4 item 2: nothing in flight — no-op.
-            guard model.streaming, let turnId = currentTurnId else { return }
-            // Optimistically reset streaming state; the engine will also stream a
-            // `TurnEnded(.cancelled)` which sets the notice (idempotent).
-            model.streaming = false
-            streamingIndex = nil
-            streamingItemIndex = nil
-            quarantineCurrentTurn(turnId)
-            model.statusLine = pendingPrompt == nil ? nil : pendingStatusLine()
-            updateActiveRun { $0.status = .cancelled }
             Task { [weak self] in
                 guard let self else { return }
-                do {
-                    try await self.submitCommand(.cancel(turnId: turnId))
-                } catch {
-                    await self.fail(.host, "取消失败：\(error)")
-                }
+                try? await self.cancelAndWait()
             }
         }
 
@@ -1064,7 +1402,9 @@ final class MockConversationSource: ConversationSource {
                 // Bootstrap listings are part of construction: never publish a
                 // handle that failed halfway through initialization.
                 try await handle.submit(command: .listModels)
-                try await handle.submit(command: .listSessions(limit: nil))
+                try await handle.submit(
+                    command: .listSessions(limit: EngineConversationSource.completeSessionListLimit)
+                )
                 return handle
             }
             handleBuildTask = buildTask
@@ -1117,7 +1457,7 @@ final class MockConversationSource: ConversationSource {
             Task { [weak self] in
                 guard let self else { return }
                 do { _ = try await self.ensureHandle() }
-                catch { await self.fail(.host, "\(error)") }
+                catch { self.fail(.host, "\(error)") }
             }
         }
 
@@ -1136,9 +1476,11 @@ final class MockConversationSource: ConversationSource {
                 guard let self else { return }
                 do {
                     let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .listSessions(limit: nil))
+                    try await handle.submit(
+                        command: .listSessions(limit: Self.completeSessionListLimit)
+                    )
                 } catch {
-                    await self.fail(.host, "\(error)")
+                    self.fail(.host, "\(error)")
                 }
             }
         }
@@ -1152,7 +1494,7 @@ final class MockConversationSource: ConversationSource {
                     let handle = try await self.ensureHandle()
                     try await handle.submit(command: .refreshListings(which: [.mcp]))
                 } catch {
-                    await self.fail(.host, "\(error)")
+                    self.fail(.host, "\(error)")
                 }
             }
         }
@@ -1198,7 +1540,11 @@ final class MockConversationSource: ConversationSource {
                 model.statusLine = message
 
             case let .toolUseStarted(id, tool, inputJson):
-                guard acceptTurnEvent(event) else { return }
+                let accepted = acceptTurnEvent(event)
+                Self.turnLog.debug(
+                    "tool started id=\(id, privacy: .public) name=\(tool, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public)"
+                )
+                guard accepted else { return }
                 if ConversationExecutionParsing.isShellTool(tool) {
                     let started = ConversationExecutionParsing.shellStarted(id: id, inputJson: inputJson)
                     upsertShellCard(id: id, create: {
@@ -1231,7 +1577,11 @@ final class MockConversationSource: ConversationSource {
                 }
 
             case let .toolHeartbeat(id, tool, elapsedMs):
-                guard acceptTurnEvent(event) else { return }
+                let accepted = acceptTurnEvent(event)
+                Self.turnLog.debug(
+                    "tool heartbeat id=\(id, privacy: .public) name=\(tool, privacy: .public) elapsed_ms=\(elapsedMs, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public) cancelling=\(self.model.isCancelling, privacy: .public)"
+                )
+                guard accepted else { return }
                 if ConversationExecutionParsing.isShellTool(tool) {
                     upsertShellCard(id: id, create: {
                         ConversationShellCard(
@@ -1259,9 +1609,17 @@ final class MockConversationSource: ConversationSource {
                 }
 
             case let .toolUseResult(id, tool, resultJson, isError):
-                guard acceptTurnEvent(event) else { return }
+                let accepted = acceptTurnEvent(event)
+                Self.turnLog.debug(
+                    "tool result id=\(id, privacy: .public) name=\(tool, privacy: .public) is_error=\(isError, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public)"
+                )
+                guard accepted else { return }
+                let wasCancelled = ConversationExecutionParsing.isCancellationResult(resultJson)
                 if ConversationExecutionParsing.isShellTool(tool) {
                     let finished = ConversationExecutionParsing.shellFinished(id: id, resultJson: resultJson, isError: isError)
+                    let resolvedShellStatus: ConversationShellStatus = wasCancelled
+                        ? .cancelled
+                        : (finished?.status ?? (isError ? .failed : .completed))
                     upsertShellCard(id: id, create: {
                         ConversationShellCard(
                             sessionId: model.activeSessionId,
@@ -1275,32 +1633,32 @@ final class MockConversationSource: ConversationSource {
                             card.stderr = finished.stderr
                             card.exitCode = finished.exitCode
                             card.durationMs = finished.durationMs ?? card.durationMs
-                            card.status = finished.status
+                            card.status = resolvedShellStatus
                             card.truncated = finished.truncated
                         } else {
-                            card.status = isError ? .failed : .completed
+                            card.status = resolvedShellStatus
                         }
                     })
                     upsertTool(id: id, tool: "Shell", fallbackSummary: nil) { trace in
                         trace.tool = "Shell"
-                        trace.status = finished?.status.asToolStatus ?? (isError ? .failed : .completed)
+                        trace.status = resolvedShellStatus.asToolStatus
                         trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
                         trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
                     }
-                    model.statusLine = ConversationExecutionParsing.shellStatusLabel(
-                        finished?.status ?? (isError ? .failed : .completed)
-                    )
+                    model.statusLine = ConversationExecutionParsing.shellStatusLabel(resolvedShellStatus)
                 } else {
                     upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
                         trace.tool = tool
-                        trace.status = isError ? .failed : .completed
+                        trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
                         trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
                             resultJson,
                             isError: isError,
                             tool: tool
                         )
                     }
-                    model.statusLine = isError ? "工具 \(tool) 失败" : "工具 \(tool) 完成"
+                    model.statusLine = wasCancelled
+                        ? "工具 \(tool) 已取消"
+                        : (isError ? "工具 \(tool) 失败" : "工具 \(tool) 完成")
                 }
 
             case let .usageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
@@ -1373,46 +1731,45 @@ final class MockConversationSource: ConversationSource {
                 }
 
             case let .turnEnded(outcome, _, _):
-                guard acceptTurnEvent(event) else { return }
-                let completedQuarantinedTurn = currentTurnId.map { quarantinedTurnIds.contains($0) } ?? false
+                let accepted = acceptTurnEvent(event)
+                Self.turnLog.debug(
+                    "turn ended turn=\(self.currentTurnId ?? 0, privacy: .public) outcome=\(String(describing: outcome), privacy: .public) accepted=\(accepted, privacy: .public)"
+                )
+                guard accepted else { return }
                 // PR-4 item 3: don't treat every outcome as a clean end. A normal
                 // `endTurn` just stops streaming; `maxTurns` / `cancelled` surface
                 // a distinct notice so the user knows the turn was interrupted.
                 model.streaming = false
                 streamingIndex = nil
                 streamingItemIndex = nil
-                model.statusLine = nil
+                if !model.isCancelling { model.statusLine = nil }
                 switch outcome {
                 case .endTurn:
                     model.notice = nil
-                    updateActiveRun { $0.status = .completed }
+                    finishActiveRun(.completed)
                 case .maxTurns:
                     model.notice = .maxTurns
-                    updateActiveRun { $0.status = .maxTurns }
+                    finishActiveRun(.maxTurns)
                 case .cancelled:
-                    model.notice = completedQuarantinedTurn && pendingPrompt != nil ? nil : .cancelled
-                    updateActiveRun { $0.status = .cancelled }
+                    model.notice = .cancelled
+                    finishActiveRun(.cancelled)
                 @unknown default:
                     // `#[non_exhaustive]` — a future outcome falls back to a clean
                     // end rather than crashing.
                     model.notice = nil
-                }
-                if completedQuarantinedTurn {
-                    finishQuarantinedTurnAndStartPendingIfNeeded()
-                    return
+                    finishActiveRun(.completed)
                 }
                 clearTurnPointers(keepEpoch: false)
+                requestSessionCatalogRefreshAfterSettledTurn()
 
             case let .error(kind, message):
-                guard acceptTurnEvent(event) else { return }
-                let completedQuarantinedTurn = currentTurnId.map { quarantinedTurnIds.contains($0) } ?? false
-                if completedQuarantinedTurn {
-                    updateActiveRun { $0.status = .failed }
-                    finishQuarantinedTurnAndStartPendingIfNeeded()
-                    return
-                }
+                let accepted = acceptTurnEvent(event)
+                Self.turnLog.error(
+                    "turn error turn=\(self.currentTurnId ?? 0, privacy: .public) kind=\(String(describing: kind), privacy: .public) accepted=\(accepted, privacy: .public) message=\(message, privacy: .private(mask: .hash))"
+                )
+                guard accepted else { return }
                 // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
-                updateActiveRun { $0.status = .failed }
+                finishActiveRun(.failed)
                 fail(Self.kind(from: kind), message)
 
             case let .modelList(models, current):
@@ -1453,10 +1810,22 @@ final class MockConversationSource: ConversationSource {
                 // `startNewConversation` already reset locally for the user-driven
                 // case; this confirms + adopts the engine-assigned id.
                 let isSwitch = !sessionId.isEmpty && sessionId != model.activeSessionId
+                let confirmedNewSession = pendingSessionTransition == .new
                 model.activeSessionId = sessionId
+                if case let .resume(targetID) = pendingSessionTransition,
+                   targetID != sessionId {
+                    // A bootstrap SessionStarted can be delivered after the host
+                    // has already requested ResumeSession. It is not confirmation
+                    // of that restore and must not unlock catalog replacement.
+                } else {
+                    setPendingSessionTransition(nil)
+                }
                 if isSwitch && !model.streaming {
                     resetTranscriptForSessionSwitch(isNew: true)
                     model.activeSessionId = sessionId
+                }
+                if confirmedNewSession {
+                    model.sessionRefreshRevision &+= 1
                 }
 
             case let .sessionResumed(sessionId, messages):
@@ -1470,8 +1839,13 @@ final class MockConversationSource: ConversationSource {
                 // placeholder transcript `resumeSession` left in place and append
                 // each restored message as a completed bubble — the out-of-band
                 // session-state sibling of `SessionList` / `SessionStarted`.
+                if let pendingSessionTransition {
+                    guard case let .resume(targetID) = pendingSessionTransition,
+                          targetID == sessionId else { return }
+                }
                 invalidateTurnContext()
                 model.activeSessionId = sessionId
+                setPendingSessionTransition(nil)
                 let restored = messages.map(Self.message(from:))
                 model.messages = restored.map(\.message)
                 model.items = restored.map { .message($0.message) }
@@ -1484,11 +1858,16 @@ final class MockConversationSource: ConversationSource {
                 model.streaming = false
                 model.statusLine = nil
                 model.notice = nil
+                // A migration-safe empty resume may have just created its JSONL
+                // anchor. Refresh so the full catalog and persisted project index
+                // immediately include that preserved UUID.
+                model.sessionRefreshRevision &+= 1
 
             case .sessionEnded:
                 // The current session ended (e.g. cleared). Drop the active id;
                 // the next `SessionStarted`/`SessionResumed` re-establishes one.
                 model.activeSessionId = ""
+                setPendingSessionTransition(nil)
                 invalidateTurnContext()
 
             case let .mcpServers(servers):
@@ -1533,17 +1912,20 @@ final class MockConversationSource: ConversationSource {
         }
 
         func cancelForTesting() {
-            guard model.streaming, let turnId = currentTurnId else { return }
-            model.streaming = false
-            streamingIndex = nil
-            streamingItemIndex = nil
-            quarantineCurrentTurn(turnId)
-            model.statusLine = pendingPrompt == nil ? nil : pendingStatusLine()
-            updateActiveRun { $0.status = .cancelled }
+            guard model.streaming, currentTurnId != nil else { return }
+            model.isCancelling = true
+            model.statusLine = "正在停止…"
+            model.pendingPermissions = []
         }
 
         func setCommandSubmitterForTesting(_ submitter: ((ClientCommand) async throws -> Void)?) {
             testCommandSubmitter = submitter
+        }
+
+        func setEmptySessionResumerForTesting(
+            _ resumer: ((String, String) async throws -> Void)?
+        ) {
+            testEmptySessionResumer = resumer
         }
 
         /// Append streamed text into the in-flight assistant message, creating it
@@ -1672,6 +2054,7 @@ final class MockConversationSource: ConversationSource {
         }
 
         private func fail(_ kind: ConversationError.Kind, _ message: String) {
+            let settledTurn = currentTurnId != nil
             model.error = ConversationError(kind: kind, message: message)
             model.streaming = false
             model.statusLine = nil
@@ -1680,6 +2063,9 @@ final class MockConversationSource: ConversationSource {
             // stranded.
             model.pendingPermissions = []
             clearTurnPointers(keepEpoch: false)
+            if settledTurn {
+                requestSessionCatalogRefreshAfterSettledTurn()
+            }
         }
 
         // MARK: model selection (SHIP-BLOCKER #2)
@@ -1714,7 +2100,7 @@ final class MockConversationSource: ConversationSource {
                     let handle = try await self.ensureHandle()
                     try await handle.submit(command: .setModel(model: id))
                 } catch {
-                    await self.fail(.host, "切换模型失败：\(error)")
+                    self.fail(.host, "切换模型失败：\(error)")
                 }
             }
         }
@@ -1722,39 +2108,47 @@ final class MockConversationSource: ConversationSource {
         // MARK: session + lifecycle
 
         /// Switch the active conversation to another session (iOS analog of
-        /// Android `ChatViewModel.openSession`). Cancels the in-flight turn FIRST
-        /// — clearing `streaming` / `streamingIndex` / `currentTurnId` and
-        /// submitting `.cancel(turnId:)` — so a turn that completes after the
-        /// switch can't append its deltas (or its `TurnEnded` notice) into the new
-        /// session. Then resets the transcript to the session's default.
+        /// Android `ChatViewModel.openSession`). Cancels the in-flight turn first,
+        /// retaining the old transcript and correlator until the host confirms
+        /// release. Only then is the transcript reset for the selected session.
         func openSession(_ session: SessionRef) {
             let turnIdToCancel = inFlightTurnForSessionSwitch()
-            resetTranscriptForSessionSwitch(isNew: false)
-            submitSessionCancellation(turnIdToCancel)
+            submitSessionCancellation(turnIdToCancel, isNew: false)
         }
 
         /// Resume a prior engine session by UUID (the drawer-tap path for a REAL
-        /// history row). Cancels any in-flight turn FIRST and resets the
-        /// transcript to a placeholder (so a late delta can't bleed into the
-        /// resumed session), optimistically marks the row active so the UI
-        /// reflects the choice immediately, then submits `ResumeSession`. The
+        /// history row). Cancels any in-flight turn first, resets the transcript
+        /// only after the safe owner slot is released, then submits
+        /// `ResumeSession`. The drawer owns the
+        /// optimistic selection; the model changes only when the engine confirms
+        /// the transition, preventing a stale SessionList from winning the race. The
         /// engine hot-restores the prior transcript into the running orchestrator
         /// and confirms with `SessionResumed{session_id, messages}`, which
         /// re-adopts the id AND replaces the placeholder with the real restored
         /// conversation (oldest-first) so the next turn continues with full prior
-        /// context visible. No-op when already active.
-        func resumeSession(_ uuid: String) {
-            guard !uuid.isEmpty, uuid != model.activeSessionId else { return }
+        /// context visible. Re-requesting the active id is intentional: process
+        /// restoration still needs the engine to replay its transcript.
+        func resumeSession(_ uuid: String, emptySessionTitle: String?) {
+            guard !uuid.isEmpty else { return }
             let turnIdToCancel = inFlightTurnForSessionSwitch()
-            resetTranscriptForSessionSwitch(isNew: false)
-            // Optimistic local select (the task's "select it locally" requirement)
-            // so the drawer marks the row even if engine-side resume is a
-            // follow-up; `SessionResumed` confirms the same id.
-            model.activeSessionId = uuid
+            model.sessionRestoreRecovery = nil
+            model.sessionTransitionFailure = nil
+            let transitionOperationID = beginSessionTransition(.resume(uuid))
+            prepareSessionTransition(cancelling: turnIdToCancel, isNew: false)
+            let submission: SessionTransitionSubmission
+            if let emptySessionTitle {
+                submission = .resumeEmpty(sessionID: uuid, title: emptySessionTitle)
+            } else {
+                submission = .command(.resumeSession(sessionId: uuid, cwd: nil))
+            }
             submitSessionTransition(
                 cancelling: turnIdToCancel,
-                command: .resumeSession(sessionId: uuid, cwd: nil),
-                failurePrefix: "恢复会话失败"
+                submission: submission,
+                failurePrefix: "恢复会话失败",
+                transitionOperationID: transitionOperationID,
+                resumeTargetID: uuid,
+                allowsMissingSessionReplacement: emptySessionTitle == nil,
+                isNew: false
             )
         }
 
@@ -1773,7 +2167,10 @@ final class MockConversationSource: ConversationSource {
         /// sink). De-dupes by `requestId` so a re-delivered request can't stack two
         /// prompts. The chat view renders the head of the queue.
         fileprivate func enqueuePermission(_ request: PermissionRequest) {
-            guard !model.pendingPermissions.contains(where: { $0.requestId == request.requestId })
+            guard model.streaming,
+                  !model.isCancelling,
+                  currentTurnId != nil,
+                  !model.pendingPermissions.contains(where: { $0.requestId == request.requestId })
             else { return }
             model.pendingPermissions.append(PendingPermission(request: request))
         }
@@ -1800,7 +2197,7 @@ final class MockConversationSource: ConversationSource {
                     let handle = try await self.ensureHandle()
                     try await handle.submit(command: command)
                 } catch {
-                    await self.fail(.host, "权限响应失败：\(error)")
+                    self.fail(.host, "权限响应失败：\(error)")
                 }
             }
         }

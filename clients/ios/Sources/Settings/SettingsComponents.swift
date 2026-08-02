@@ -166,6 +166,7 @@ struct DashedAddButton: View {
             .frame(maxWidth: .infinity).padding(13)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4,3])))
         }
+        .buttonStyle(.plain)
     }
 }
 

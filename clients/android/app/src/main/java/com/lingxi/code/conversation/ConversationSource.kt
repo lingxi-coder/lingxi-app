@@ -45,6 +45,83 @@ import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.transformWhile
 
 /**
+ * Linearizes permission callback ingress with turn cancellation. Checking a
+ * standalone boolean and then assigning the StateFlow allowed a callback to
+ * republish a stale prompt after Cancel had cleared it. Every phase transition
+ * and prompt mutation now shares one monitor and one turn generation.
+ */
+internal class PermissionIngress(
+    private val permissions: MutableStateFlow<PermissionPromptState?>,
+) {
+    private enum class Phase { IDLE, ACCEPTING, CANCELLING, ENDED }
+
+    internal class CancellationSnapshot internal constructor(
+        internal val generation: Long,
+        internal val wasAccepting: Boolean,
+        internal val pending: PermissionPromptState?,
+    )
+
+    private var phase = Phase.IDLE
+    private var generation = 0L
+
+    @Synchronized
+    fun beginTurn() {
+        generation += 1
+        phase = Phase.ACCEPTING
+        permissions.value = null
+    }
+
+    @Synchronized
+    fun confirmTurnStarted() {
+        if (phase == Phase.CANCELLING || phase == Phase.ACCEPTING) return
+        generation += 1
+        phase = Phase.ACCEPTING
+        permissions.value = null
+    }
+
+    @Synchronized
+    fun beginCancellation(): CancellationSnapshot {
+        val snapshot = CancellationSnapshot(
+            generation = generation,
+            wasAccepting = phase == Phase.ACCEPTING,
+            pending = permissions.value,
+        )
+        phase = Phase.CANCELLING
+        permissions.value = null
+        return snapshot
+    }
+
+    @Synchronized
+    fun restoreAfterFailedCancellation(snapshot: CancellationSnapshot) {
+        if (phase != Phase.CANCELLING || generation != snapshot.generation) return
+        phase = if (snapshot.wasAccepting) Phase.ACCEPTING else Phase.IDLE
+        if (snapshot.wasAccepting && permissions.value == null) {
+            permissions.value = snapshot.pending
+        }
+    }
+
+    @Synchronized
+    fun endTurn() {
+        phase = Phase.ENDED
+        permissions.value = null
+    }
+
+    @Synchronized
+    fun publish(request: PermissionRequest) {
+        if (phase == Phase.ACCEPTING) {
+            permissions.value = permissionRequestToPrompt(request)
+        }
+    }
+
+    @Synchronized
+    fun resolve(requestId: ULong) {
+        if (permissions.value?.requestId == requestId) {
+            permissions.value = null
+        }
+    }
+}
+
+/**
  * The seam between the [ChatViewModel] and whatever produces turns. The
  * ViewModel talks ONLY to a [ConversationSource] — it never reaches into mock
  * data, a network, or the engine handle directly. Two implementations back it:
@@ -659,6 +736,7 @@ class EngineConversationSource private constructor(
     private val eventRelay: LosslessEventRelay<ClientEvent>,
     private val eventScope: CoroutineScope,
     private val permissions: MutableStateFlow<PermissionPromptState?>,
+    private val permissionIngress: PermissionIngress,
     private val models: MutableStateFlow<EngineModelState>,
     private val sessions: MutableStateFlow<EngineSessionState>,
     private val activeSession: MutableStateFlow<ActivatedSession?>,
@@ -789,10 +867,7 @@ class EngineConversationSource private constructor(
             // The gate may have already unwound (cancel / timeout); dropping the
             // prompt below keeps the UI consistent regardless.
         }
-        permissions.compareAndSet(
-            expect = permissions.value?.takeIf { it.requestId == requestId },
-            update = null,
-        )
+        permissionIngress.resolve(requestId)
     }
 
     override fun submit(text: String): Flow<ReplyEvent> =
@@ -807,12 +882,14 @@ class EngineConversationSource private constructor(
         mapReplyStream(
             events.onSubscription {
                 try {
+                    permissionIngress.beginTurn()
                     handle.submit(
                         ClientCommand.SendPrompt(
                             text = text, promptMode = null, images = emptyList(), turnId = null,
                         ),
                     )
                 } catch (t: Throwable) {
+                    permissionIngress.endTurn()
                     // Inject the build/submit failure into the same stream the
                     // collector is already reading, so the mapper terminates it.
                     emit(
@@ -829,7 +906,18 @@ class EngineConversationSource private constructor(
         // Narrow `Cancel(turnId = null)` cancels the current turn (bindings doc:
         // "None cancels the current one"). The engine emits `TurnEnded`, which
         // flows back through the active `submit` stream as `ReplyEvent.End`.
-        handle.submit(ClientCommand.Cancel(turnId = null))
+        // Clear the client prompt before awaiting Block-behavior tools: the host
+        // drains the matching permission gate as part of cancellation, so keeping
+        // an actionable stale approval card would be both misleading and unsafe.
+        val permissionSnapshot = permissionIngress.beginCancellation()
+        try {
+            handle.submit(ClientCommand.Cancel(turnId = null))
+        } catch (error: Throwable) {
+            // The host did not confirm release, so the original turn still owns
+            // the slot and may legitimately ask again before Stop is retried.
+            permissionIngress.restoreAfterFailedCancellation(permissionSnapshot)
+            throw error
+        }
     }
 
     override fun close() {
@@ -859,6 +947,7 @@ class EngineConversationSource private constructor(
             // StateFlow (latest wins) is fine: only one request is parked per gate
             // at a time in the foundation (no concurrent worker permissions yet).
             val permissions = MutableStateFlow<PermissionPromptState?>(null)
+            val permissionIngress = PermissionIngress(permissions)
             // The engine's REAL model catalog + active id (SHIP-BLOCKER #2). The
             // listener below folds every inbound `ModelList` / `ModelChanged`
             // into this StateFlow via the pure `reduceModelEvent`, so the picker
@@ -916,9 +1005,15 @@ class EngineConversationSource private constructor(
                     sessionActivationFrom(event)?.let { activeSession.value = it }
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
+                    if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
+                    if (event is ClientEvent.TurnEnded || event is ClientEvent.Error) {
+                        permissionIngress.endTurn()
+                    }
                     eventRelay.offer(event)
                 },
-                onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
+                onPermission = { request ->
+                    permissionIngress.publish(request)
+                },
             ) ?: run {
                 eventRelay.close()
                 eventScope.cancel()
@@ -954,6 +1049,7 @@ class EngineConversationSource private constructor(
                 eventRelay = eventRelay,
                 eventScope = eventScope,
                 permissions = permissions,
+                permissionIngress = permissionIngress,
                 models = models,
                 sessions = sessions,
                 activeSession = activeSession,

@@ -142,11 +142,12 @@ struct ConversationExecutionRunCard: View {
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(t.surface.opacity(0.72))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(t.border, lineWidth: 0.5))
-        .padding(.leading, 41)
         .padding(.bottom, 18)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation.agent-run")
     }
 

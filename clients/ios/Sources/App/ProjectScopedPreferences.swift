@@ -19,7 +19,13 @@ struct ProjectScopedPreferences {
     }
 
     func activeSessionID(projectID: String?) -> String {
-        defaults.string(forKey: key("active-session", projectID: projectID)) ?? ""
+        storedActiveSessionID(projectID: projectID) ?? ""
+    }
+
+    /// Unlike `activeSessionID`, preserves the distinction between a missing
+    /// legacy key and an explicitly saved empty id (the user chose New Chat).
+    func storedActiveSessionID(projectID: String?) -> String? {
+        defaults.string(forKey: key("active-session", projectID: projectID))
     }
 
     func setActiveSessionID(_ value: String, projectID: String?) {

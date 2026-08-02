@@ -229,6 +229,13 @@ enum ConversationExecutionParsing {
         return isError ? "工具失败" : "工具完成"
     }
 
+    static func isCancellationResult(_ resultJson: String) -> Bool {
+        guard let object = jsonObject(from: resultJson),
+              let kind = stringValue(object["tool_denial_kind"])?.lowercased()
+        else { return false }
+        return kind == "interrupted" || kind == "cancelled"
+    }
+
     static func shellStarted(id: String, inputJson: String) -> ConversationShellCard {
         let object = jsonObject(from: inputJson) ?? [:]
         return ConversationShellCard(

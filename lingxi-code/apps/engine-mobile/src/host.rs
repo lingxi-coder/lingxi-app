@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use client_adapter::{
@@ -46,7 +46,7 @@ use client_protocol::commands::{
     ClientCommand, ListingKindDto as ProtocolListingKind, ProviderCredentialSecretDto,
 };
 use client_protocol::error::ClientError;
-use client_protocol::events::ClientEvent;
+use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppTemplateKindDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
@@ -2023,24 +2023,48 @@ pub struct MobileEngineHandle {
 /// passes `5`).
 const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
 
-/// Maximum time an FFI `Cancel` waits for the owned turn to unwind and release
-/// the connection slot.
-const CANCEL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Connection-scoped ownership record for one streamed turn.
 struct ActiveTurn {
+    /// Optional client correlator supplied by `SendPrompt`. `Cancel(Some(id))`
+    /// may only affect the owner carrying the same id; Android's legacy
+    /// `Cancel(None)` intentionally targets whichever turn is current.
+    turn_id: Option<u64>,
     cancel: CancellationToken,
+    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     completed: AtomicBool,
+    /// Set before the terminal event is forwarded to the foreign listener.
+    /// Any subsequent live-turn event is stale and must be discarded.
+    terminal_emitted: AtomicBool,
     completion: Notify,
 }
 
 impl ActiveTurn {
-    fn new() -> Self {
+    fn new(turn_id: Option<u64>) -> Self {
         Self {
+            turn_id,
             cancel: CancellationToken::new(),
+            task: StdMutex::new(None),
             completed: AtomicBool::new(false),
+            terminal_emitted: AtomicBool::new(false),
             completion: Notify::new(),
         }
+    }
+
+    fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut task = self
+            .task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *task = Some(handle);
+    }
+
+    fn take_task_handle(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let task = self
+            .task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        task
     }
 
     async fn wait_completed(&self) {
@@ -2063,6 +2087,100 @@ impl ActiveTurn {
     fn mark_completed(&self) {
         self.completed.store(true, Ordering::Release);
         self.completion.notify_waiters();
+    }
+
+    fn matches_cancel(&self, requested_turn_id: Option<u64>) -> bool {
+        requested_turn_id.is_none() || self.turn_id == requested_turn_id
+    }
+}
+
+/// Mobile-only lifecycle guard around the foreign listener. The core protocol
+/// intentionally keeps its frozen event shapes, so the host enforces the
+/// single-owner invariant at the delivery boundary: one terminal event closes
+/// the turn, cancellation rewrites that terminal outcome, and live-turn events
+/// emitted after terminal/slot release are discarded.
+struct TurnLifecycleListener {
+    inner: Arc<dyn ClientEventListener>,
+    active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+}
+
+impl TurnLifecycleListener {
+    fn new(
+        inner: Arc<dyn ClientEventListener>,
+        active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+    ) -> Self {
+        Self { inner, active_turn }
+    }
+
+    fn is_live_turn_payload(event: &ClientEvent) -> bool {
+        matches!(
+            event,
+            ClientEvent::AskUserQuestion { .. }
+                | ClientEvent::SystemNotice { .. }
+                | ClientEvent::TextDelta { .. }
+                | ClientEvent::ToolUseStarted { .. }
+                | ClientEvent::ToolHeartbeat { .. }
+                | ClientEvent::ToolUseResult { .. }
+                | ClientEvent::MessageComplete { .. }
+                | ClientEvent::CostUpdate { .. }
+                | ClientEvent::CompactionCompleted { .. }
+                | ClientEvent::CoordinatorStatus { .. }
+                | ClientEvent::CoordinatorWorker { .. }
+                | ClientEvent::ThinkingDelta { .. }
+                | ClientEvent::UsageUpdate { .. }
+                | ClientEvent::Attachment { .. }
+                | ClientEvent::ApiRetry { .. }
+        )
+    }
+}
+
+#[async_trait]
+impl ClientEventListener for TurnLifecycleListener {
+    async fn on_event(&self, mut event: ClientEvent) {
+        let active = self.active_turn.lock().await.clone();
+        let is_live_turn_payload = Self::is_live_turn_payload(&event);
+        let should_forward = match &mut event {
+            ClientEvent::TurnEnded {
+                outcome,
+                stop_reason,
+                ..
+            } => {
+                if let Some(turn) = active.as_ref() {
+                    if turn.terminal_emitted.swap(true, Ordering::AcqRel) {
+                        return;
+                    }
+                    if turn.cancel.is_cancelled() {
+                        *outcome = TurnOutcomeDto::Cancelled;
+                        *stop_reason = Some("cancelled".to_string());
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            ClientEvent::Error { .. } => {
+                if let Some(turn) = active.as_ref() {
+                    !turn.terminal_emitted.swap(true, Ordering::AcqRel)
+                } else {
+                    true
+                }
+            }
+            ClientEvent::TurnStarted { turn_id } => active.as_ref().is_some_and(|turn| {
+                turn.turn_id == *turn_id && !turn.terminal_emitted.load(Ordering::Acquire)
+            }),
+            _ if is_live_turn_payload => active
+                .as_ref()
+                .is_some_and(|turn| !turn.terminal_emitted.load(Ordering::Acquire)),
+            // Listing, session, app, task and explicit resolution events are
+            // connection-scoped rather than owned by a live conversation turn.
+            _ => true,
+        };
+
+        if should_forward {
+            self.inner.on_event(event).await;
+        } else {
+            tracing::debug!("mobile: dropped stale live-turn event");
+        }
     }
 }
 
@@ -2330,16 +2448,78 @@ impl MobileEngineHandle {
     }
 
     /// Reserve the connection's single turn slot without replacing its owner.
-    async fn reserve_turn(&self) -> Result<Arc<ActiveTurn>, ClientError> {
+    async fn reserve_turn(&self, turn_id: Option<u64>) -> Result<Arc<ActiveTurn>, ClientError> {
         let mut active = self.active_cancel.lock().await;
         if active.is_some() {
             return Err(ClientError::Rejected {
                 message: "a turn is already in flight".into(),
             });
         }
-        let turn = Arc::new(ActiveTurn::new());
+        let turn = Arc::new(ActiveTurn::new(turn_id));
         *active = Some(turn.clone());
         Ok(turn)
+    }
+
+    /// Cooperatively cancel exactly the requested turn and wait until every
+    /// owned tool/event producer has unwound. `Block` tools deliberately finish
+    /// naturally; force-aborting the outer task would violate their mutation
+    /// safety contract. A stale specific id is a no-op and cannot drain or
+    /// otherwise disturb the current turn.
+    async fn cancel_active_turn(&self, requested_turn_id: Option<u64>) -> Result<(), ClientError> {
+        let active = self.active_cancel.lock().await.clone();
+        let Some(turn) = active else {
+            tracing::debug!(
+                requested_turn_id,
+                "mobile: ignored cancel without an active turn"
+            );
+            return Ok(());
+        };
+        if !turn.matches_cancel(requested_turn_id) {
+            tracing::debug!(
+                requested_turn_id,
+                active_turn_id = turn.turn_id,
+                "mobile: ignored stale turn cancellation"
+            );
+            return Ok(());
+        }
+
+        let permission_count = self.inner.permission_gate.drain().await;
+        let question_count = self.ask_user_question_broker.drain().await;
+        self.tool_names.lock().await.clear();
+        turn.cancel.cancel();
+        tracing::debug!(
+            requested_turn_id,
+            active_turn_id = turn.turn_id,
+            permission_count,
+            question_count,
+            "mobile: waiting for cancelled turn to release its owner slot"
+        );
+
+        if let Some(task) = turn.take_task_handle() {
+            if task.await.is_err() {
+                let mut active = self.active_cancel.lock().await;
+                if active
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+                {
+                    *active = None;
+                }
+                drop(active);
+                turn.mark_completed();
+                self.event_sink
+                    .emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: "turn task terminated unexpectedly".to_string(),
+                    })
+                    .await;
+            }
+        } else {
+            // Another concurrent Cancel may own the JoinHandle. The completion
+            // notification still gives every caller the same release guarantee.
+            turn.wait_completed().await;
+        }
+        tracing::debug!(active_turn_id = turn.turn_id, "mobile: cancel completed");
+        Ok(())
     }
 
     /// Start one streamed turn and release its slot on every normal return path
@@ -2350,7 +2530,13 @@ impl MobileEngineHandle {
         text: String,
         turn_id: Option<u64>,
     ) -> Result<(), ClientError> {
-        let turn = self.reserve_turn().await?;
+        let turn = self.reserve_turn(turn_id).await?;
+
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[turn-diagnostic] turn started client_turn_id={}",
+            turn_id.map_or_else(|| "none".to_string(), |id| id.to_string())
+        );
 
         let wrapper = TurnWrapper::new(self.event_sink.clone());
         wrapper.emit_turn_started(turn_id).await;
@@ -2358,27 +2544,35 @@ impl MobileEngineHandle {
         let orch = self.inner.orchestrator.clone();
         let sink = self.event_sink.clone();
         let active_cancel = self.active_cancel.clone();
-        self.runtime.spawn(async move {
+        let task_turn = turn.clone();
+        let task = self.runtime.spawn(async move {
             let result = orch
-                .run_turn_streaming_with_cancel(&text, turn.cancel.clone())
+                .run_turn_streaming_with_cancel(&text, task_turn.cancel.clone())
                 .await;
-            if let Err(err) = result {
-                sink.emit(client_adapter::map_orchestrator_error(&err))
-                    .await;
+            if let Err(err) = &result {
+                sink.emit(client_adapter::map_orchestrator_error(err)).await;
             }
+
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[turn-diagnostic] turn future returned cancelled={} result_ok={}",
+                task_turn.cancel.is_cancelled(),
+                result.is_ok()
+            );
 
             let mut active = active_cancel.lock().await;
             if active
                 .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+                .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
             {
                 *active = None;
             }
             drop(active);
             // Notify only after the slot is released: Cancel returning is the
             // guarantee that New/Resume/Clear can no longer observe this turn.
-            turn.mark_completed();
+            task_turn.mark_completed();
         });
+        turn.set_task_handle(task);
         Ok(())
     }
 
@@ -2837,25 +3031,7 @@ impl MobileEngineHandle {
                 self.start_streaming_turn(text, turn_id).await
             }
 
-            ClientCommand::Cancel { .. } => {
-                let turn = self.active_cancel.lock().await.clone();
-                if let Some(turn) = turn {
-                    turn.cancel.cancel();
-                    if tokio::time::timeout(CANCEL_WAIT_TIMEOUT, turn.wait_completed())
-                        .await
-                        .is_err()
-                        && !turn.completed.load(Ordering::Acquire)
-                    {
-                        return Err(ClientError::Internal {
-                            message: format!(
-                                "cancel timed out after {} seconds while waiting for the turn to stop",
-                                CANCEL_WAIT_TIMEOUT.as_secs()
-                            ),
-                        });
-                    }
-                }
-                Ok(())
-            }
+            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
 
             // ── Permission resolution (resolve the parked oneshot, F1-14) ───
             ClientCommand::ApprovePermission {
@@ -4876,6 +5052,12 @@ pub fn build_mobile_engine_inner(
     // runtime per fired job (the same pattern as `lingxi_home`/`session_cwd`/`fs`).
     let firer_cfg = cfg.clone();
     let firer_platform = platform.clone();
+    // Construct turn ownership before the runtime so every adapter-originated
+    // event is filtered/reclassified by the same connection-scoped lifecycle
+    // listener used by the eventual handle.
+    let active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>> = Arc::new(Mutex::new(None));
+    let lifecycle_listener: Arc<dyn ClientEventListener> =
+        Arc::new(TurnLifecycleListener::new(listener, active_cancel.clone()));
 
     // `build_mobile` is async; drive it on the owned runtime so any spawned work
     // it does is owned by this handle's runtime, not an ambient one.
@@ -4885,7 +5067,7 @@ pub fn build_mobile_engine_inner(
         .block_on(build_mobile_inner_with_ask(
             cfg,
             platform,
-            listener,
+            lifecycle_listener,
             recording_sink,
             streaming_override,
             Some(ask_user_question_tx),
@@ -4960,7 +5142,7 @@ pub fn build_mobile_engine_inner(
         runtime,
         inner,
         event_sink,
-        active_cancel: Arc::new(Mutex::new(None)),
+        active_cancel,
         tool_names,
         ask_user_question_broker,
         skill_count,
@@ -5830,6 +6012,175 @@ mod tests {
         });
     }
 
+    /// A Block-behavior tool owns its mutation boundary until natural
+    /// completion. Cancel must wait instead of aborting the outer turn.
+    #[test]
+    fn submit_cancel_waits_for_blocking_owner_to_finish() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let turn = handle.reserve_turn(Some(7)).await.expect("reserve turn");
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let active = handle.active_cancel.clone();
+            let task_turn = turn.clone();
+            let parked = handle.runtime().spawn(async move {
+                let _ = release_rx.await;
+                let mut owner = active.lock().await;
+                if owner
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &task_turn))
+                {
+                    *owner = None;
+                }
+                drop(owner);
+                task_turn.mark_completed();
+            });
+            turn.set_task_handle(parked);
+
+            let cancelling_handle = handle.clone();
+            let cancel_task =
+                tokio::spawn(async move { cancelling_handle.cancel_active_turn(Some(7)).await });
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !turn.cancel.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancel task must fire the matching token");
+            assert!(
+                !cancel_task.is_finished(),
+                "Cancel must remain pending while the Block owner is active"
+            );
+
+            release_tx.send(()).expect("release Block owner");
+            cancel_task
+                .await
+                .expect("cancel task joined")
+                .expect("cancel completed");
+
+            assert!(
+                handle.active_cancel.lock().await.is_none(),
+                "natural completion must release the single-turn slot"
+            );
+            assert!(turn.completed.load(std::sync::atomic::Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn stale_specific_cancel_does_not_touch_current_turn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let turn = handle.reserve_turn(Some(8)).await.expect("reserve turn");
+            handle
+                .cancel_active_turn(Some(7))
+                .await
+                .expect("stale cancel is a no-op");
+
+            assert!(!turn.cancel.is_cancelled());
+            assert!(
+                handle
+                    .active_cancel
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &turn)),
+                "stale cancellation must retain the current owner"
+            );
+
+            *handle.active_cancel.lock().await = None;
+            turn.mark_completed();
+        });
+    }
+
+    #[tokio::test]
+    async fn lifecycle_listener_rewrites_cancelled_terminal_and_drops_late_events() {
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(None));
+        let turn = Arc::new(super::ActiveTurn::new(Some(12)));
+        *active.lock().await = Some(turn.clone());
+        let listener = super::TurnLifecycleListener::new(inner.clone(), active.clone());
+
+        turn.cancel.cancel();
+        listener
+            .on_event(Ev::TurnEnded {
+                outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+                stop_reason: Some("end_turn".to_string()),
+                cost: client_protocol::events::CostDto {
+                    total_usd: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    api_calls: 0,
+                    session_duration_secs: 0,
+                    formatted: "$0.00".to_string(),
+                },
+            })
+            .await;
+        listener
+            .on_event(Ev::ToolHeartbeat {
+                id: "tool-1".to_string(),
+                tool: "Bash".to_string(),
+                elapsed_ms: 2_000,
+            })
+            .await;
+        listener
+            .on_event(Ev::ThinkingDelta {
+                thinking: "late".to_string(),
+                signature: None,
+            })
+            .await;
+        listener
+            .on_event(Ev::SystemNotice {
+                message: "late notice".to_string(),
+                is_error: false,
+            })
+            .await;
+
+        let events = inner.received.lock().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.first(),
+            Some(Ev::TurnEnded {
+                outcome: client_protocol::events::TurnOutcomeDto::Cancelled,
+                stop_reason: Some(reason),
+                ..
+            }) if reason == "cancelled"
+        ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_listener_drops_unowned_live_turn_payloads() {
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(None));
+        let listener = super::TurnLifecycleListener::new(inner.clone(), active);
+
+        listener
+            .on_event(Ev::ToolUseStarted {
+                id: "stale-tool".to_string(),
+                tool: "Read".to_string(),
+                input_json: "{}".to_string(),
+            })
+            .await;
+        listener
+            .on_event(Ev::ApiRetry {
+                message: "late retry".to_string(),
+                attempt: 1,
+                max_retries: 3,
+                delay_ms: 100,
+            })
+            .await;
+        listener
+            .on_event(Ev::SystemNotice {
+                message: "unowned notice".to_string(),
+                is_error: false,
+            })
+            .await;
+
+        assert!(inner.received.lock().await.is_empty());
+    }
+
     /// A connection owns at most one live turn. A second `SendPrompt` must be
     /// rejected instead of replacing the first turn's cancellation token,
     /// otherwise Cancel and session guards start controlling the wrong task.
@@ -5839,7 +6190,7 @@ mod tests {
         let (handle, _listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            *handle.active_cancel.lock().await = Some(Arc::new(super::ActiveTurn::new()));
+            *handle.active_cancel.lock().await = Some(Arc::new(super::ActiveTurn::new(None)));
 
             let result = handle
                 .submit(ClientCommand::SendPrompt {

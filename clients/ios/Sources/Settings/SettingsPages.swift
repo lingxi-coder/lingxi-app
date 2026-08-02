@@ -22,6 +22,7 @@ struct SettingsPages: View {
         case .language:                   LanguagePage(store: store)
         case .notifications:              NotificationsPage(store: store)
         case .input:                      InputPage()
+        case .appIntegration:             AppIntegrationPage()
         case .privacy:                    PrivacyPage()
         case .skills:                     SkillsPage(store: store, host: host)
         case .skillDetail(let id):        SkillDetailPage(store: store, host: host, skillId: id)
@@ -97,6 +98,10 @@ struct MainSettingsPage: View {
                             value: langMap[store.language], onTap: { host.push(.language) })
                 SettingsRow(icon: .cog, iconColor: t.text3, label: "通知",
                             value: "\(store.notifs.enabledCount) 项开启", onTap: { host.push(.notifications) })
+                SettingsRow(icon: .workflow, iconColor: t.accent, label: "应用接入",
+                            sub: "Siri · 快捷指令 · 自动化", value: "3 个动作",
+                            onTap: { host.push(.appIntegration) })
+                    .accessibilityIdentifier("settings.appIntegration")
                 SettingsRow(icon: .paperclip, iconColor: Color(srgb: 0.9351,0.5079,0.4015), label: "键盘与输入",
                             sub: "语音输入 · 候选词", isLast: true, onTap: { host.push(.input) })
             }

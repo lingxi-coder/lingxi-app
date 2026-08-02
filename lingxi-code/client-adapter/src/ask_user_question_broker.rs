@@ -156,12 +156,21 @@ impl BridgeAskUserQuestionBroker {
 
     /// Fail closed on disconnect/session teardown.
     pub async fn drain(&self) -> usize {
-        let mut pending = self.pending.lock().await;
-        let count = pending.len();
-        for entry in pending.drain().map(|(_, entry)| entry) {
+        let drained = {
+            let mut pending = self.pending.lock().await;
+            pending.drain().collect::<Vec<_>>()
+        };
+        let count = drained.len();
+        for (request_id, entry) in drained {
             if let Some(task) = entry.timeout_task {
                 task.abort();
             }
+            // Drop the response sender before notifying the client so the
+            // blocked tool is already guaranteed to unwind when the UI clears.
+            drop(entry.resp_tx);
+            self.sink
+                .emit(ClientEvent::AskUserQuestionResolved { request_id })
+                .await;
         }
         count
     }
@@ -224,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn drain_drops_parked_reply() {
         let sink = MockSink::arc();
-        let broker = Arc::new(BridgeAskUserQuestionBroker::new(sink));
+        let broker = Arc::new(BridgeAskUserQuestionBroker::new(sink.clone()));
         let (tx, rx) = mpsc::channel(1);
         let runner = broker.clone();
         tokio::spawn(async move { runner.run(rx).await });
@@ -241,6 +250,10 @@ mod tests {
         }
         assert_eq!(broker.drain().await, 1);
         assert!(resp_rx.await.is_err());
+        assert!(sink.events().await.into_iter().any(|event| matches!(
+            event,
+            ClientEvent::AskUserQuestionResolved { request_id: 1 }
+        )));
     }
 
     #[tokio::test]

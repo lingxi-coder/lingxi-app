@@ -72,11 +72,10 @@ struct ChatView: View {
 
             VStack(spacing: 0) {
                 topBar
-                WorkflowBar()
                 // Offline banner: shown only while the device is offline. Sits
-                // between the workflow bar and the transcript so it's visible
-                // without obscuring the conversation; the retry re-warms the
-                // engine source (rebuilds the handle / re-lists models).
+                // above the transcript so it's visible without obscuring the
+                // conversation; the retry re-warms the engine source (rebuilds
+                // the handle / re-lists models).
                 if connectivity.isOffline {
                     OfflineBanner(onRetry: retryConnection)
                         .padding(.horizontal, 14).padding(.bottom, 8)
@@ -93,6 +92,8 @@ struct ChatView: View {
                          draft: $draft,
                          onSend: send,
                          streaming: convo.streaming,
+                         isCancelling: convo.isCancelling,
+                         sendEnabled: !convo.sessionTransitionPending,
                          onStop: stop,
                          onCameraClick: captureFromCamera,
                          attachment: attachment,
@@ -116,6 +117,7 @@ struct ChatView: View {
                 .animation(.easeOut(duration: 0.2), value: convo.pendingPermissions.first)
             #endif
         }
+        .buttonStyle(.plain)
         // Voice flow: hold anywhere 0.6s to enter immersive recording; release sends.
         // A LongPress sequenced into a Drag keeps the same touch, so the
         // .updating/onEnded of the drag fire only after the 0.6s press succeeds
@@ -193,7 +195,7 @@ struct ChatView: View {
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
                     ForEach(convo.items) { item in
                         switch item {
@@ -218,6 +220,8 @@ struct ChatView: View {
                     if let err = convo.error { ErrorBanner(error: err, onDismiss: dismissError) }
                     Color.clear.frame(height: 1).id("bottom")
                 }
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
             .onChange(of: convo.items.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }

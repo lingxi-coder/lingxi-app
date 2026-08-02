@@ -13,7 +13,7 @@ struct MessageBubble: View {
 
     var body: some View {
         if message.role == .user {
-            HStack {
+            HStack(alignment: .top, spacing: 0) {
                 Spacer(minLength: 0)
                 Text(message.text)
                     // Dynamic Type: scale the body relative to .body so the
@@ -26,9 +26,13 @@ struct MessageBubble: View {
                     .background(t.surface)
                     .clipShape(BubbleShape(topRightSharp: true))
                     .overlay(BubbleShape(topRightSharp: true).stroke(t.border, lineWidth: 0.5))
-                    .frame(maxWidth: 300, alignment: .trailing)
+                    .frame(maxWidth: 320, alignment: .trailing)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.bottom, 22)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("conversation.message.user")
         } else {
             HStack(alignment: .top, spacing: 11) {
                 AssistantAvatar()
@@ -51,10 +55,14 @@ struct MessageBubble: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("分享回复")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .opacity(dimmed ? 0.4 : 1)
             .padding(.bottom, 26)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("conversation.message.assistant")
         }
     }
 }

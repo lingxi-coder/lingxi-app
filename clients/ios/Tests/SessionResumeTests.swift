@@ -55,6 +55,203 @@ import XCTest
             XCTAssertTrue(source.model.engineSessionsLoaded)
         }
 
+        func testSessionIndexPreservesPendingRestoreAndUnlistedActiveSession() {
+            XCTAssertFalse(
+                ConversationSessionIndexPolicy.shouldSynchronize(
+                    transitionPending: true,
+                    activeSessionID: "old-session",
+                    listedSessionIDs: []
+                )
+            )
+            XCTAssertFalse(
+                ConversationSessionIndexPolicy.shouldSynchronize(
+                    transitionPending: false,
+                    activeSessionID: "new-session",
+                    listedSessionIDs: ["old-session"]
+                )
+            )
+            XCTAssertFalse(
+                ConversationSessionIndexPolicy.shouldSynchronize(
+                    transitionPending: false,
+                    restorePending: true,
+                    activeSessionID: "saved-session",
+                    listedSessionIDs: []
+                )
+            )
+            XCTAssertTrue(
+                ConversationSessionIndexPolicy.shouldSynchronize(
+                    transitionPending: false,
+                    activeSessionID: "saved-session",
+                    listedSessionIDs: ["saved-session"]
+                )
+            )
+        }
+
+        func testPendingRestoreRejectsTransientStartupSessionUntilTargetArrives() {
+            XCTAssertFalse(
+                ConversationSessionRestorePolicy.shouldAdopt(
+                    candidateSessionID: "startup-session",
+                    pendingRestoreID: "saved-session"
+                )
+            )
+            XCTAssertTrue(
+                ConversationSessionRestorePolicy.shouldAdopt(
+                    candidateSessionID: "saved-session",
+                    pendingRestoreID: "saved-session"
+                )
+            )
+            XCTAssertTrue(
+                ConversationSessionRestorePolicy.shouldAdopt(
+                    candidateSessionID: "fresh-session",
+                    pendingRestoreID: nil
+                )
+            )
+            XCTAssertTrue(
+                ConversationSessionRestorePolicy.shouldClearUnavailableSession(
+                    unavailableSessionID: "saved-session",
+                    pendingRestoreID: "saved-session",
+                    activeSessionID: "saved-session"
+                )
+            )
+            XCTAssertFalse(
+                ConversationSessionRestorePolicy.shouldClearUnavailableSession(
+                    unavailableSessionID: "old-session",
+                    pendingRestoreID: "new-session",
+                    activeSessionID: "new-session"
+                )
+            )
+            XCTAssertEqual(
+                ConversationSessionRestorePolicy.rollbackSelection(
+                    failedSessionID: "new-session",
+                    pendingRestoreID: "new-session",
+                    activeSessionID: "new-session",
+                    confirmedSessionID: "previous-session"
+                ),
+                "previous-session"
+            )
+            XCTAssertNil(
+                ConversationSessionRestorePolicy.rollbackSelection(
+                    failedSessionID: "stale-failure",
+                    pendingRestoreID: "new-session",
+                    activeSessionID: "new-session",
+                    confirmedSessionID: "previous-session"
+                )
+            )
+        }
+
+        func testMissingResumeCreatesReplacementWithoutShowingEngineError() async {
+            let source = makeSource()
+            let recorder = SessionTransitionRecorder(failure: .missing)
+            source.setCommandSubmitterForTesting { command in
+                try await recorder.submit(command)
+            }
+
+            source.resumeSession("missing-session")
+            let receivedCommands = await recorder.waitForCommandCount(2)
+            XCTAssertTrue(receivedCommands)
+
+            let commands = await recorder.snapshot()
+            XCTAssertEqual(commands, [.resume, .new])
+            XCTAssertEqual(
+                source.model.sessionRestoreRecovery?.unavailableSessionID,
+                "missing-session"
+            )
+            XCTAssertTrue(source.model.sessionTransitionPending)
+            XCTAssertTrue(source.model.isNew)
+            XCTAssertNil(source.model.error)
+            XCTAssertEqual(source.model.statusLine, "原会话已不存在，已创建新对话")
+
+            source.applyForTesting(.sessionStarted(sessionId: "replacement-session"))
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertEqual(source.model.activeSessionId, "replacement-session")
+            XCTAssertEqual(source.model.sessionRefreshRevision, 1)
+        }
+
+        func testNonMissingResumeFailureRemainsVisible() async {
+            let source = makeSource()
+            let recorder = SessionTransitionRecorder(failure: .generic)
+            source.setCommandSubmitterForTesting { command in
+                try await recorder.submit(command)
+            }
+
+            source.resumeSession("saved-session")
+            let receivedCommand = await recorder.waitForCommandCount(1)
+            XCTAssertTrue(receivedCommand)
+            let transitionSettled = await waitForSessionTransitionToSettle(source)
+            XCTAssertTrue(transitionSettled)
+
+            let commands = await recorder.snapshot()
+            XCTAssertEqual(commands, [.resume])
+            XCTAssertNil(source.model.sessionRestoreRecovery)
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertNotNil(source.model.error)
+            XCTAssertEqual(
+                source.model.sessionTransitionFailure?.requestedSessionID,
+                "saved-session"
+            )
+        }
+
+        func testRejectedMissingResumeUsesTypedFallback() async {
+            let source = makeSource()
+            let recorder = SessionTransitionRecorder(failure: .missingRejected)
+            source.setCommandSubmitterForTesting { command in
+                try await recorder.submit(command)
+            }
+
+            source.resumeSession("missing-session")
+            let receivedCommands = await recorder.waitForCommandCount(2)
+            XCTAssertTrue(receivedCommands)
+
+            let commands = await recorder.snapshot()
+            XCTAssertEqual(commands, [.resume, .new])
+            XCTAssertNil(source.model.error)
+        }
+
+        func testConfirmedEmptyResumePreservesSessionIDThroughDedicatedEntryPoint() async {
+            let source = makeSource()
+            let recorder = EmptySessionResumeRecorder()
+            source.setCommandSubmitterForTesting { _ in
+                XCTFail("a confirmed empty session must not use ResumeSession")
+            }
+            source.setEmptySessionResumerForTesting { sessionID, title in
+                await recorder.resume(sessionID: sessionID, title: title)
+            }
+
+            source.resumeSession("empty-session", emptySessionTitle: "空会话")
+            let didResume = await recorder.waitForResume()
+            XCTAssertTrue(didResume)
+
+            let request = await recorder.snapshot()
+            XCTAssertEqual(
+                request,
+                .init(sessionID: "empty-session", title: "空会话")
+            )
+            XCTAssertTrue(source.model.sessionTransitionPending)
+
+            source.applyForTesting(.sessionResumed(sessionId: "empty-session", messages: []))
+            XCTAssertEqual(source.model.activeSessionId, "empty-session")
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertEqual(source.model.sessionRefreshRevision, 1)
+        }
+
+        func testBootstrapSessionStartedDoesNotClearPendingResume() {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in }
+
+            source.resumeSession("saved-session")
+            XCTAssertTrue(source.model.sessionTransitionPending)
+
+            source.applyForTesting(.sessionStarted(sessionId: "startup-session"))
+            XCTAssertTrue(
+                source.model.sessionTransitionPending,
+                "a delayed bootstrap SessionStarted is not ResumeSession confirmation"
+            )
+
+            source.applyForTesting(.sessionResumed(sessionId: "saved-session", messages: []))
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertEqual(source.model.activeSessionId, "saved-session")
+        }
+
         /// The loaded transition is the persistence trigger. It must never be
         /// observable before the rows carried by the same engine event, or a
         /// crash between the two publications can durably erase the old index.
@@ -197,10 +394,43 @@ import XCTest
             XCTAssertEqual(buildCount, 1)
             await gate.releaseFirstSubmit()
             try await prepare.value
-            await gate.waitForSubmitCount(4)
+            let receivedCommands = await gate.waitForSubmitCount(4)
+            XCTAssertTrue(receivedCommands)
 
             XCTAssertEqual(buildCount, 1,
                            "warm-up, prepare, list and send must await the same engine build")
+            let commands = await gate.snapshot()
+            var sessionListCommandCount = 0
+            for command in commands {
+                guard case let .listSessions(limit) = command else { continue }
+                sessionListCommandCount += 1
+                XCTAssertEqual(limit, UInt32.max,
+                               "bootstrap and drawer refresh must both request the full catalog")
+            }
+            XCTAssertGreaterThan(sessionListCommandCount, 0)
+        }
+
+        func testBootstrapRequestsTheCompleteSessionCatalog() async throws {
+            let gate = EngineSubmitGate()
+            let handle = TestMobileEngineHandle { command in
+                try await gate.submit(command)
+            }
+            let source = makeSource(handleBuilder: { _, _, _ in handle })
+
+            let prepare = Task { try await source.prepare() }
+            await gate.waitForFirstSubmit()
+            await gate.releaseFirstSubmit()
+            try await prepare.value
+            let receivedCommands = await gate.waitForSubmitCount(2)
+            XCTAssertTrue(receivedCommands)
+
+            let commands = await gate.snapshot()
+            guard commands.count >= 2 else { return }
+            guard case let .listSessions(limit) = commands[1] else {
+                return XCTFail("engine bootstrap must request the session catalog")
+            }
+            XCTAssertEqual(limit, UInt32.max,
+                           "project persistence requires an uncapped catalog")
         }
 
         func testFailedSharedEngineBuildCanRetryWithoutCachingPartialHandle() async throws {
@@ -259,10 +489,102 @@ import XCTest
                 // Expected.
             }
         }
+
+        private func waitForSessionTransitionToSettle(
+            _ source: EngineConversationSource
+        ) async -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while source.model.sessionTransitionPending, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            return !source.model.sessionTransitionPending
+        }
     }
 
     private enum EngineBuildTestError: Error {
         case bootstrapFailed
+    }
+
+    private enum SessionTransitionTestError: Error {
+        case missing
+        case missingRejected
+        case generic
+    }
+
+    private actor SessionTransitionRecorder {
+        enum Command: Equatable {
+            case resume
+            case new
+            case other
+        }
+
+        private let failure: SessionTransitionTestError
+        private var commands: [Command] = []
+
+        init(failure: SessionTransitionTestError) {
+            self.failure = failure
+        }
+
+        func submit(_ command: ClientCommand) throws {
+            switch command {
+            case .resumeSession:
+                commands.append(.resume)
+                switch failure {
+                case .missing:
+                    throw ClientError.NotFound(message: "Session missing-session was not found.")
+                case .missingRejected:
+                    throw ClientError.Rejected(
+                        message: "resume: session missing-session not resumable: Session missing-session was not found."
+                    )
+                case .generic:
+                    throw ClientError.Transport(message: "resume transport rejected")
+                }
+            case .newSession:
+                commands.append(.new)
+            default:
+                commands.append(.other)
+            }
+        }
+
+        func waitForCommandCount(_ count: Int) async -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while commands.count < count, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            return commands.count >= count
+        }
+
+        func snapshot() -> [Command] {
+            commands
+        }
+    }
+
+    private actor EmptySessionResumeRecorder {
+        struct Request: Equatable {
+            let sessionID: String
+            let title: String
+        }
+
+        private var request: Request?
+
+        func resume(sessionID: String, title: String) {
+            request = Request(sessionID: sessionID, title: title)
+        }
+
+        func waitForResume() async -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while request == nil, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            return request != nil
+        }
+
+        func snapshot() -> Request? {
+            request
+        }
     }
 
     private final class TestMobileEngineHandle: MobileEngineHandle {
@@ -305,18 +627,25 @@ import XCTest
         }
 
         func waitForFirstSubmit() async {
-            await waitForSubmitCount(1)
+            _ = await waitForSubmitCount(1)
         }
 
-        func waitForSubmitCount(_ expectedCount: Int) async {
-            while commands.count < expectedCount {
-                await Task.yield()
+        func waitForSubmitCount(_ expectedCount: Int) async -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while commands.count < expectedCount, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(1))
             }
+            return commands.count >= expectedCount
         }
 
         func releaseFirstSubmit() {
             firstSubmitContinuation?.resume()
             firstSubmitContinuation = nil
+        }
+
+        func snapshot() -> [ClientCommand] {
+            commands
         }
     }
 

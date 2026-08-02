@@ -89,7 +89,7 @@ is linked (not embedded — it wraps a static archive); both are referenced from
 | `Sources/Theme` | `DesignTokens` (oklch→sRGB palettes), `Theme` env + `AppState` (theme/accent persistence) |
 | `Sources/Models` | Domain models, verbatim mock data, settings store |
 | `Sources/Components` | `LXIcon` (SVG icon set), `Pill`, `LXToggle`, status bar, home indicator, `color-mix` helper |
-| `Sources/Conversation` | `ChatView`, `Composer`, `MessageBubble`, `WorkflowBar`, and the `ConversationSource` seam (`MockConversationSource` + `EngineConversationSource` over UniFFI) |
+| `Sources/Conversation` | `ChatView`, `Composer`, `MessageBubble`, and the `ConversationSource` seam (`MockConversationSource` + `EngineConversationSource` over UniFFI) |
 | `Sources/Bridge` | `EngineModule` — UniFFI linkage smoke (force-links the engine static archive) |
 | `Sources/Drawer` | `Drawer` (workspace pills, chats/projects/crons, knowledge/memory, account) |
 | `Sources/Settings` | Settings sheet host + every page (LLM/search/fetch providers, voice, skills, MCP, dream, appearance, language, etc.) |

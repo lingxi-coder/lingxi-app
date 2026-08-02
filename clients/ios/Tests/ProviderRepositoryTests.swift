@@ -21,7 +21,7 @@ final class ProviderRepositoryTests: XCTestCase {
         }
     }
 
-    func testLaunchSnapshotMapsProfilesToJSONAndDefaultModel() async throws {
+    func testLaunchSnapshotUsesBuiltInProfileForOfficialEndpoint() async throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let anthropic = repository.addProfile(presetID: "anthropic")
         let openAI = repository.addProfile(presetID: "openai")
@@ -41,12 +41,32 @@ final class ProviderRepositoryTests: XCTestCase {
 
         XCTAssertEqual(snapshot.defaultModelID, "openai/gpt-4o")
         XCTAssertEqual(snapshot.enabledProfileIDs, ["openai"])
-        XCTAssertTrue(snapshot.providerProfilesJSON.contains("\"openai\""))
-        XCTAssertTrue(snapshot.providerProfilesJSON.contains("\"type\":\"openai-responses\""))
-        XCTAssertTrue(snapshot.providerProfilesJSON.contains("\"apiKeyEnv\":\"OPENAI_API_KEY\""))
+        XCTAssertEqual(try jsonObject(from: snapshot.providerProfilesJSON)?.count, 0)
         XCTAssertTrue(snapshot.routingJSON.contains("\"mobileEnabledProfiles\":[\"openai\"]"))
         XCTAssertTrue(snapshot.routingJSON.contains("\"retry\":{\"backoffMs\":500,\"maxAttempts\":10}"))
-        XCTAssertTrue(snapshot.providerProfilesJSON.contains("\"models\":[{\"id\":\"gpt-4o\"},{\"id\":\"gpt-4o-mini\"},{\"id\":\"o1-preview\"}]"))
+    }
+
+    func testLaunchSnapshotCreatesIndependentProfileForCustomOfficialPresetEndpoint() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let openAI = repository.addProfile(presetID: "openai")
+        repository.updateProfile(openAI) {
+            $0.baseURL = "https://proxy.example.com/v1"
+            $0.modelID = "gpt-4o"
+        }
+
+        let snapshot = repository.makeLaunchSnapshot()
+        let profiles = try XCTUnwrap(jsonObject(from: snapshot.providerProfilesJSON))
+        let customProfile = try XCTUnwrap(profiles["openai-user"] as? [String: Any])
+
+        XCTAssertEqual(snapshot.defaultModelID, "openai-user/gpt-4o")
+        XCTAssertEqual(snapshot.enabledProfileIDs, ["openai-user"])
+        XCTAssertEqual(customProfile["type"] as? String, "openai-responses")
+        XCTAssertEqual(customProfile["baseUrl"] as? String, "https://proxy.example.com/v1")
+        XCTAssertEqual(customProfile["apiKeyEnv"] as? String, "OPENAI_API_KEY")
+        XCTAssertEqual(
+            (customProfile["models"] as? [[String: String]])?.map { $0["id"] },
+            ["gpt-4o", "gpt-4o-mini", "o1-preview"]
+        )
     }
 
     func testApplyValidationRequiresCredentialForEnabledProfile() async throws {
@@ -104,6 +124,50 @@ final class ProviderRepositoryTests: XCTestCase {
         let profile = try XCTUnwrap(repository.state(for: deepSeek)?.profile)
         XCTAssertEqual(profile.baseURL, "https://api.deepseek.com")
         XCTAssertEqual(profile.modelID, "deepseek-v4-flash")
+    }
+
+    func testDeepSeekOfficialEndpointDoesNotDuplicateBuiltInEngineProfile() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let deepSeek = repository.addProfile(presetID: "deepseek")
+        repository.setDefaultProfile(deepSeek)
+
+        let snapshot = repository.makeLaunchSnapshot()
+
+        XCTAssertEqual(snapshot.defaultModelID, "deepseek/deepseek-v4-flash")
+        XCTAssertEqual(snapshot.enabledProfileIDs, ["deepseek"])
+        XCTAssertEqual(try jsonObject(from: snapshot.providerProfilesJSON)?.count, 0)
+    }
+
+    func testCredentialCommandsUseEngineProfileIDAndUpdateSettingsRow() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let openAI = repository.addProfile(presetID: "openai")
+        repository.updateProfile(openAI) {
+            $0.baseURL = "https://proxy.example.com/v1"
+        }
+        repository.stageSecret("sk-proxy", for: openAI)
+        repository.configure(submitCommand: { command in
+            try await recorder.submit(command: command)
+        })
+
+        let apply = Task { await repository.applyChanges(openAI) }
+        await waitForCommandCount(1, recorder: recorder)
+        guard case let .setProviderCredential(operationId, providerId, _) = try XCTUnwrap(recorder.commands.last) else {
+            return XCTFail("expected set provider credential")
+        }
+        XCTAssertEqual(providerId, "openai-user")
+
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationId,
+            configuredProviderIds: ["openai-user"],
+            unavailableProviderIds: [],
+            storageEncrypted: true,
+            error: nil
+        ))
+        await apply.value
+
+        XCTAssertEqual(repository.state(for: openAI)?.credentialState, .configured)
+        XCTAssertEqual(repository.state(for: openAI)?.pendingSecret, "")
     }
 
     func testLegacyDeepSeekProfileMigratesToCurrentEndpointAndModel() throws {

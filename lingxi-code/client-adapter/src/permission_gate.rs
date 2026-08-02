@@ -189,7 +189,21 @@ impl AdapterPermissionGate {
             return false;
         };
 
-        if matches!(response, PermissionResponseDto::AllowAlways) {
+        let allow_always = matches!(response, PermissionResponseDto::AllowAlways);
+        let mapped = match response {
+            PermissionResponseDto::AllowOnce => PermissionResponse::AllowOnce,
+            PermissionResponseDto::AllowAlways => PermissionResponse::AllowAlways,
+            // `#[non_exhaustive]` — any future/`Deny` response fails closed.
+            _ => PermissionResponse::Deny,
+        };
+        // The parked receiver is the turn-ownership proof. A cancellation drain
+        // or timeout drops it; in that case a late AllowAlways must not create a
+        // session or durable rule for a tool call that no longer exists.
+        if sender.send(mapped).is_err() {
+            return false;
+        }
+
+        if allow_always {
             // NARROW the persisted grant to the specific command / path / domain
             // the call used (claude-code `ruleSuggestions`), not a tool-wide allow.
             let rule = permission::allow_suggestion(tool_name, &input);
@@ -207,20 +221,16 @@ impl AdapterPermissionGate {
                     destination: PermissionUpdateDestination::LocalSettings,
                 };
                 if let Err(e) = persist_permission_update(&update, paths).await {
-                    tracing::warn!(error = %e, tool = tool_name, "failed to persist AllowAlways permission rule");
+                    tracing::warn!(
+                        tool = tool_name,
+                        error_kind = std::any::type_name_of_val(&e),
+                        "failed to persist AllowAlways permission rule"
+                    );
                 }
             }
         }
 
-        let mapped = match response {
-            PermissionResponseDto::AllowOnce => PermissionResponse::AllowOnce,
-            PermissionResponseDto::AllowAlways => PermissionResponse::AllowAlways,
-            // `#[non_exhaustive]` — any future/`Deny` response fails closed.
-            _ => PermissionResponse::Deny,
-        };
-        // If the receiver vanished (timed out first), the send simply fails;
-        // that path already resolved `Deny`, so it is safe to ignore.
-        sender.send(mapped).is_ok()
+        true
     }
 
     /// Fail-closed drain: drop every parked sender so all in-flight `check()`
@@ -656,6 +666,30 @@ mod tests {
             }
             PermissionDecision::Allow => panic!("expected Deny after drain"),
         }
+    }
+
+    /// A response whose parked receiver has already disappeared must not
+    /// convert a stale AllowAlways tap into a session or durable grant.
+    #[tokio::test]
+    async fn late_allow_always_does_not_write_rule() {
+        let sink = MockRequestSink::arc();
+        let gate = AdapterPermissionGate::new(sink);
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        gate.pending.lock().await.insert(
+            41,
+            ParkedRequest {
+                sender,
+                input: json!({"command": "dangerous"}),
+            },
+        );
+
+        assert!(
+            !gate
+                .resolve(41, PermissionResponseDto::AllowAlways, "Bash")
+                .await
+        );
+        assert!(gate.session_allow_rules.lock().await.is_empty());
     }
 
     /// `timeout_resolves_deny` — a `check()` parked past the per-request timeout

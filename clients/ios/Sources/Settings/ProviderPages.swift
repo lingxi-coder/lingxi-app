@@ -148,6 +148,7 @@ struct ProviderListPage: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
                 .disabled(!hasPendingRoutingChanges)
+                .buttonStyle(.plain)
             }
             .padding(.vertical, 4)
         }
@@ -404,6 +405,7 @@ struct ProviderEditPage: View {
             }
             .padding(.top, 8)
             .disabled(editing.operationInFlight || editing.connectionState == .testing)
+            .buttonStyle(.plain)
 
             Button {
                 Task {
@@ -421,6 +423,7 @@ struct ProviderEditPage: View {
             }
             .padding(.top, 10)
             .disabled(editing.operationInFlight || editing.connectionState == .testing)
+            .buttonStyle(.plain)
             }
             .task(id: repository.syncRevision) {
                 store.llmProviders = repository.legacyProviders()
@@ -465,6 +468,7 @@ struct ProviderEditPage: View {
                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(t.border, lineWidth: 0.5))
                 }
                 .disabled(p.operationInFlight || p.connectionState == .testing)
+                .buttonStyle(.plain)
 
                 if p.clearCredentialOnApply {
                     Button("撤销清除") {
@@ -472,6 +476,7 @@ struct ProviderEditPage: View {
                     }
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(t.text3)
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -483,34 +488,77 @@ struct ProviderEditPage: View {
     }
 
     private func keyField(_ p: ProviderProfileState, _ preset: ProviderPreset) -> some View {
-        ZStack(alignment: .trailing) {
-            SettingsField(
-                text: Binding(
-                    get: { repository.state(for: providerId)?.pendingSecret ?? "" },
-                    set: { repository.stageSecret($0, for: providerId) }
-                ),
-                placeholder: p.clearCredentialOnApply ? "将在应用后删除" : (p.hasStoredCredential ? "已保存于安全存储" : preset.keyPrefix + "..."),
-                          secure: !showKey, trailingPadding: 76)
-            HStack(spacing: 2) {
-                Button { showKey.toggle() } label: {
-                    Text(showKey ? "隐藏" : "显示").font(.system(size: 11, weight: .medium)).foregroundColor(t.text3)
-                        .padding(.horizontal, 7).padding(.vertical, 5)
-                }
-                Button {
-                    if p.clearCredentialOnApply {
-                        repository.cancelCredentialClear(for: providerId)
-                    } else {
-                        repository.clearCredentialRequest(for: providerId)
-                    }
-                } label: {
-                    Text(p.clearCredentialOnApply ? "保留" : "清除")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(p.clearCredentialOnApply ? t.text3 : t.danger)
-                        .padding(.horizontal, 7).padding(.vertical, 5)
+        HStack(spacing: 0) {
+            Group {
+                if showKey {
+                    TextField(keyPlaceholder(p, preset), text: pendingSecretBinding)
+                } else {
+                    SecureField(keyPlaceholder(p, preset), text: pendingSecretBinding)
                 }
             }
-            .padding(.trailing, 6)
+            .font(.system(size: 13.5, design: .monospaced))
+            .foregroundColor(t.text)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .lineLimit(1)
+            .padding(.vertical, 11)
+            .padding(.leading, 12)
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity)
+            .layoutPriority(1)
+            .accessibilityIdentifier("provider.api-key")
+
+            keyFieldDivider
+
+            Button { showKey.toggle() } label: {
+                Text(showKey ? "隐藏" : "显示")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(t.text3)
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(showKey ? "隐藏 API Key" : "显示 API Key")
+            .accessibilityIdentifier("provider.api-key.visibility")
+
+            keyFieldDivider
+
+            Button {
+                if p.clearCredentialOnApply {
+                    repository.cancelCredentialClear(for: providerId)
+                } else {
+                    repository.clearCredentialRequest(for: providerId)
+                }
+            } label: {
+                Text(p.clearCredentialOnApply ? "保留" : "清除")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(p.clearCredentialOnApply ? t.text3 : t.danger)
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("provider.api-key.clear")
         }
+        .background(t.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+    }
+
+    private var pendingSecretBinding: Binding<String> {
+        Binding(
+            get: { repository.state(for: providerId)?.pendingSecret ?? "" },
+            set: { repository.stageSecret($0, for: providerId) }
+        )
+    }
+
+    private func keyPlaceholder(_ p: ProviderProfileState, _ preset: ProviderPreset) -> String {
+        if p.clearCredentialOnApply { return "将在应用后删除" }
+        if p.hasStoredCredential { return "已保存于安全存储" }
+        return preset.keyPrefix + "..."
+    }
+
+    private var keyFieldDivider: some View {
+        Rectangle()
+            .fill(t.border)
+            .frame(width: 0.5, height: 24)
     }
 
     private func modelPicker(_ p: ProviderProfileState, _ preset: ProviderPreset) -> some View {

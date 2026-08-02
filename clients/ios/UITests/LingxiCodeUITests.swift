@@ -13,7 +13,17 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
     func testStructuredShellCardOpensProjectTerminal() {
+        XCTAssertFalse(app.staticTexts["理解需求"].exists)
+        let userMessage = app.descendants(matching: .any)["conversation.message.user"]
+        let agentRun = app.descendants(matching: .any)["conversation.agent-run"]
+        let assistantMessage = app.descendants(matching: .any)["conversation.message.assistant"]
+        XCTAssertTrue(userMessage.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Agent 运行"].waitForExistence(timeout: 5))
+        XCTAssertTrue(agentRun.exists)
+        XCTAssertTrue(assistantMessage.exists)
+        XCTAssertLessThanOrEqual(userMessage.frame.maxY, agentRun.frame.minY + 0.5)
+        XCTAssertLessThanOrEqual(agentRun.frame.maxY, assistantMessage.frame.minY + 0.5)
+        XCTAssertEqual(agentRun.frame.minX, assistantMessage.frame.minX, accuracy: 1)
         XCTAssertTrue(app.staticTexts["/workspace/ui-test"].exists)
 
         let openTerminal = app.buttons["在终端打开"]
@@ -23,6 +33,24 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["终端"].waitForExistence(timeout: 8))
         app.buttons["关闭"].tap()
         XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 5))
+    }
+
+    func testCancelledRunClosesEveryRunningRow() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_CANCELLED_RUN"] = "1"
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["WebSearch"].waitForExistence(timeout: 8), app.debugDescription)
+        let cancelledLabels = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "已取消")
+        )
+        XCTAssertGreaterThan(cancelledLabels.count, 0)
+        XCTAssertFalse(app.staticTexts["运行中"].exists, app.debugDescription)
+
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "取消后工具终态"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
     func testDrawerTabsCreateAndSwitchProject() {
@@ -86,6 +114,21 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["OpenAI"].exists)
         XCTAssertTrue(app.staticTexts["Kimi"].exists)
 
+        let deepSeekPreset = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "DeepSeek")
+        ).firstMatch
+        XCTAssertTrue(deepSeekPreset.waitForExistence(timeout: 5), app.debugDescription)
+        deepSeekPreset.tap()
+
+        let keyField = app.secureTextFields["provider.api-key"]
+        let visibility = app.buttons["provider.api-key.visibility"]
+        let clear = app.buttons["provider.api-key.clear"]
+        XCTAssertTrue(keyField.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(visibility.exists)
+        XCTAssertTrue(clear.exists)
+        XCTAssertLessThanOrEqual(keyField.frame.maxX, visibility.frame.minX + 0.5)
+        XCTAssertLessThanOrEqual(visibility.frame.maxX, clear.frame.minX + 0.5)
+
         app.buttons["完成"].tap()
         app.buttons["关闭设置"].tap()
         openDrawer()
@@ -96,6 +139,42 @@ final class LingxiCodeUITests: XCTestCase {
             NSPredicate(format: "label CONTAINS %@", "系统调度")
         ).firstMatch
         XCTAssertTrue(schedulingNote.exists)
+    }
+
+    func testAppIntegrationExposesRealSystemActions() {
+        openDrawer()
+        app.buttons["drawer.settings"].tap()
+        XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 1)
+
+        let integration = app.buttons["settings.appIntegration"]
+        if !integration.exists || !integration.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(integration.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(integration, timeout: 5), app.debugDescription)
+        integration.tap()
+
+        XCTAssertTrue(app.navigationBars["应用接入"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["打开灵犀"].exists)
+        XCTAssertTrue(app.staticTexts["新建对话"].exists)
+        XCTAssertTrue(app.staticTexts["向灵犀提问"].exists)
+        let topScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        topScreenshot.name = "应用接入-顶部"
+        topScreenshot.lifetime = .keepAlways
+        add(topScreenshot)
+
+        app.swipeUp()
+        let openShortcuts = app.descendants(matching: .any)["settings.appIntegration.openShortcuts"]
+        XCTAssertTrue(openShortcuts.waitForExistence(timeout: 5), app.debugDescription)
+
+        app.swipeUp()
+        let platformBoundary = app.staticTexts["不会读取、点击或控制其他 App 的界面。"]
+        XCTAssertTrue(platformBoundary.waitForExistence(timeout: 5), app.debugDescription)
+        let lowerScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        lowerScreenshot.name = "应用接入-下半部"
+        lowerScreenshot.lifetime = .keepAlways
+        add(lowerScreenshot)
     }
 
     func testOnboardingHeaderStaysAtTopAndPrimaryActionIsVisible() {

@@ -96,7 +96,6 @@ struct Drawer: View {
                 .background(t.sidebarBg)
                 .overlay(Rectangle().frame(width: 0.5).foregroundColor(t.border), alignment: .trailing)
                 .shadow(color: .black.opacity(0.3), radius: 15, x: 8)
-                .transition(.move(edge: .leading))
                 .onAppear {
                     source.listSessions()
                     if let active = projectStore.activeProjectId { openProjects.insert(active) }
@@ -143,6 +142,7 @@ struct Drawer: View {
             Button(action: onClose) {
                 LXIcon(name: .x, size: 20, color: t.text3, stroke: 1.8).frame(width: 36, height: 36)
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("关闭抽屉")
         }
         .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 12)
@@ -174,6 +174,7 @@ struct Drawer: View {
                 .clipShape(Capsule())
                 .overlay(Capsule().stroke(active ? t.accent.opacity(0.4) : t.border, lineWidth: 0.5))
         }
+        .buttonStyle(.plain)
         .accessibilityIdentifier(id == nil ? "drawer.scope.global" : "drawer.scope.project.\(name)")
         .accessibilityValue(active ? "当前项目" : "")
     }
@@ -227,6 +228,7 @@ struct Drawer: View {
             .background(active ? t.surfaceActive : .clear)
             .clipShape(RoundedRectangle(cornerRadius: 9))
         }
+        .buttonStyle(.plain)
         .accessibilityIdentifier("drawer.tab.\(id.rawValue)")
     }
 
@@ -302,6 +304,7 @@ struct Drawer: View {
                 .frame(maxWidth: .infinity, alignment: .leading).padding(10)
                 .background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10))
         }
+        .buttonStyle(.plain)
     }
 
     private var projectsSection: some View {
@@ -358,6 +361,7 @@ struct Drawer: View {
                 }
                 .padding(10).background(active ? t.surfaceActive : .clear).clipShape(RoundedRectangle(cornerRadius: 10))
             }
+            .buttonStyle(.plain)
             if expanded {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(project.sessions.filter { matches($0.title, $0.relativeTime) }) { session in
@@ -370,6 +374,7 @@ struct Drawer: View {
                     } label: {
                         Label("项目新会话", systemImage: "plus").font(.caption).foregroundColor(t.text3).padding(8)
                     }
+                    .buttonStyle(.plain)
                     projectActions(project)
                     if !conflicts.isEmpty { conflictActions(project, count: conflicts.count) }
                 }
@@ -424,6 +429,7 @@ struct Drawer: View {
             .frame(maxWidth: .infinity, alignment: .leading).padding(9)
             .background(active ? t.surfaceActive : .clear).clipShape(RoundedRectangle(cornerRadius: 8))
         }
+        .buttonStyle(.plain)
     }
 
     private var cronsSection: some View {
@@ -471,8 +477,10 @@ struct Drawer: View {
     private var shortcuts: some View {
         HStack(spacing: 4) {
             Button(action: openTerminal) { shortcut(.workflow, "终端") }
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("drawer.shortcut.terminal")
             Button { openCron(nil, nil) } label: { shortcut(.clock, "定时任务") }
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("drawer.shortcut.cron")
         }
         .padding(.horizontal, 12).padding(.top, 4)
@@ -498,7 +506,9 @@ struct Drawer: View {
                 LXIcon(name: .chevronR, size: 14, color: t.text4, stroke: 1.7)
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .accessibilityIdentifier("drawer.settings")
         .padding(.horizontal, 12).padding(.vertical, 10)
         .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .top)

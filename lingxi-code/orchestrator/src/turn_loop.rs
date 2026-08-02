@@ -13,6 +13,24 @@ use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
 use tool_api::ContextModifier;
 
+async fn forward_tool_progress(
+    output: &dyn traits::OutputStream,
+    parent_tool_use_id: &str,
+    progress: tool_api::progress::ToolProgress,
+) {
+    if let Some(text) = progress
+        .data
+        .get("subagent_activity")
+        .and_then(serde_json::Value::as_str)
+    {
+        output.emit_subagent_activity(text).await;
+    } else if let Some(message) = progress.data.get("forward_subagent_message") {
+        output
+            .emit_forwarded_subagent_message(message, parent_tool_use_id)
+            .await;
+    }
+}
+
 /// Registry name of the worktree-creation tool (`tool_worktree::ENTER_TOOL_NAME`).
 /// A successful invocation of this tool is the port's sole worktree-creation
 /// path, so it is where the turn loop fires the `WorktreeCreate` hook. Held as a
@@ -3859,23 +3877,39 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // the same `ToolUseId::as_str` form the stream-json tool_use block id
         // carries, so a forwarded child frame correlates to its parent Task call.
         let progress_parent_tool_use_id = tool_use_id.as_str().to_string();
-        let progress_consumer = tokio::spawn(async move {
-            while let Some(p) = progress_rx.recv().await {
-                if let Some(text) = p
-                    .data
-                    .get("subagent_activity")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    progress_output.emit_subagent_activity(text).await;
-                } else if let Some(message) = p.data.get("forward_subagent_message") {
-                    // (2.1.212 `--forward-subagent-text`) A spawned subagent's
-                    // raw assistant message, forwarded by the Agent tool. The
-                    // stream-json sink re-emits its text/thinking blocks as an
-                    // `assistant` frame with this parent Task tool_use_id; every
-                    // other sink ignores it (default no-op).
-                    progress_output
-                        .emit_forwarded_subagent_message(message, &progress_parent_tool_use_id)
-                        .await;
+        // A JoinSet owns every auxiliary event producer. Dropping this dispatch
+        // scope (runtime shutdown, panic, or future host cancellation changes)
+        // aborts the children instead of detaching them and allowing stale
+        // heartbeat/progress events to escape into a later turn.
+        let mut event_tasks = tokio::task::JoinSet::new();
+        let event_tasks_done = tokio_util::sync::CancellationToken::new();
+        let progress_done = event_tasks_done.clone();
+        event_tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    () = progress_done.cancelled() => {
+                        // A tool is allowed to retain a progress sender in work it
+                        // spawned. Close the receiver so those detached producers
+                        // cannot keep this turn alive, then drain progress that was
+                        // already accepted before the tool reached its terminal state.
+                        progress_rx.close();
+                        while let Some(progress) = progress_rx.recv().await {
+                            forward_tool_progress(
+                                progress_output.as_ref(),
+                                &progress_parent_tool_use_id,
+                                progress,
+                            ).await;
+                        }
+                        break;
+                    }
+                    progress = progress_rx.recv() => {
+                        let Some(progress) = progress else { break; };
+                        forward_tool_progress(
+                            progress_output.as_ref(),
+                            &progress_parent_tool_use_id,
+                            progress,
+                        ).await;
+                    }
                 }
             }
         });
@@ -3885,9 +3919,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let heartbeat_output = orch.output.clone();
         let heartbeat_id = tool_use_id.clone();
         let heartbeat_tool = name.to_string();
-        let (heartbeat_done_tx, mut heartbeat_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let _heartbeat_cancel = cancel.clone();
+        let heartbeat_done = event_tasks_done.clone();
         let heartbeat_started = std::time::Instant::now();
-        let heartbeat_task = tokio::spawn(async move {
+        event_tasks.spawn(async move {
             // (review #10) `interval` fires its FIRST tick immediately, which
             // would emit a spurious `elapsed_ms≈0` heartbeat on EVERY tool call
             // (even instant ones), defeating the "long-running" intent. Start the
@@ -3898,10 +3933,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    _ = &mut heartbeat_done_rx => break,
+                    () = heartbeat_done.cancelled() => break,
                     _ = ticker.tick() => {
                         #[allow(clippy::cast_possible_truncation)]
                         let elapsed_ms = heartbeat_started.elapsed().as_millis() as u64;
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "[turn-diagnostic] tool heartbeat id={} name={} elapsed_ms={} cancelled={}",
+                            heartbeat_id.as_str(),
+                            heartbeat_tool,
+                            elapsed_ms,
+                            _heartbeat_cancel
+                                .as_ref()
+                                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                        );
                         heartbeat_output
                             .emit_tool_heartbeat(&heartbeat_id, &heartbeat_tool, elapsed_ms)
                             .await;
@@ -3914,13 +3959,56 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // the Post hooks below) — surfaced to PostToolUse/Failure hooks as
         // `duration_ms` (claude-code 2.1.195).
         let tool_started = std::time::Instant::now();
-        let tool_outcome = tool_handle
-            .call(effective_input.clone(), ctx, progress_tx)
-            .await;
-        let _ = heartbeat_done_tx.send(());
-        let _ = heartbeat_task.await;
-        // The tool has dropped `progress_tx`; drain the consumer to completion.
-        let _ = progress_consumer.await;
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[turn-diagnostic] tool call started id={} name={} cancel_present={} cancelled={}",
+            tool_use_id.as_str(),
+            name,
+            ctx.cancel.is_some(),
+            ctx.cancel
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        );
+        // `InterruptBehavior::Cancel` is a dispatcher contract, not merely a
+        // suggestion that every tool implementation must remember to honor.
+        // Some network-backed tools (notably client-side WebSearch) await an
+        // HTTP future that does not observe `ToolUseContext.cancel`. Race that
+        // future at the boundary so a user cancellation always drops it and
+        // yields the same `ToolError::Aborted` path as a cooperative tool.
+        // `Block` tools intentionally keep their existing wait-to-completion
+        // behavior.
+        let interrupt_behavior = tool_handle.interrupt_behavior(&effective_input);
+        let dispatch_cancel = ctx.cancel.clone();
+        let tool_outcome = {
+            // Keep the call future in this inner scope. When cancellation wins,
+            // leaving the scope drops the non-cooperative future (and its
+            // progress sender) before we await the progress consumer below.
+            let tool_call = tool_handle.call(effective_input.clone(), ctx, progress_tx);
+            tokio::pin!(tool_call);
+            match (interrupt_behavior, dispatch_cancel) {
+                (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) => {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => Err(tool_api::ToolError::Aborted),
+                        outcome = &mut tool_call => outcome,
+                    }
+                }
+                _ => tool_call.await,
+            }
+        };
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[turn-diagnostic] tool call returned id={} name={} elapsed_ms={} outcome={}",
+            tool_use_id.as_str(),
+            name,
+            tool_started.elapsed().as_millis(),
+            if tool_outcome.is_ok() { "ok" } else { "error" }
+        );
+        event_tasks_done.cancel();
+        // Drain buffered progress and stop the heartbeat before publishing the
+        // terminal tool result. The JoinSet aborts both tasks automatically if
+        // this dispatch future is dropped by a parent turn/runtime shutdown.
+        while event_tasks.join_next().await.is_some() {}
         #[allow(clippy::cast_possible_truncation)]
         let tool_duration_ms = tool_started.elapsed().as_millis() as u64;
 

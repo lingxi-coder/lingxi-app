@@ -33,6 +33,15 @@ import XCTest
             for _ in 0..<count { await Task.yield() }
         }
 
+        private func waitForSubmittedCommands(
+            _ expectedCount: Int,
+            commands: @autoclosure () -> [ClientCommand]
+        ) async {
+            for _ in 0..<50 where commands().count < expectedCount {
+                await Task.yield()
+            }
+        }
+
         func testShellLifecycleBuildsStructuredRunCard() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 7, sessionId: "session-a")
@@ -70,6 +79,27 @@ import XCTest
             XCTAssertEqual(run.tools.first?.tool, "Shell")
             XCTAssertEqual(run.tools.first?.status, .completed)
             XCTAssertEqual(source.model.statusLine, "Shell 完成")
+        }
+
+        func testSettledDurableTurnRequestsAuthoritativeSessionRefresh() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 31, sessionId: "session-a")
+
+            XCTAssertEqual(source.model.sessionRefreshRevision, 0)
+            source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+
+            XCTAssertEqual(source.model.sessionRefreshRevision, 1)
+            XCTAssertFalse(source.model.streaming)
+        }
+
+        func testPendingSessionTransitionDoesNotRequestPrematureCatalogRefresh() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 32, sessionId: "session-a")
+            source.model.sessionTransitionPending = true
+
+            source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+
+            XCTAssertEqual(source.model.sessionRefreshRevision, 0)
         }
 
         func testTelemetryAndCoordinatorEventsAccumulateOnActiveRun() {
@@ -168,88 +198,246 @@ import XCTest
             })
         }
 
-        func testCancelledTurnDefersNextSendUntilTerminalThenStartsExactlyOnce() async {
+        func testCancellationKeepsTurnOwnedAndDraftSendBlockedUntilHostReturns() async {
             let source = makeSource()
             var submittedCommands: [ClientCommand] = []
+            var releaseCancellation: CheckedContinuation<Void, Never>?
             source.setCommandSubmitterForTesting { command in
                 await MainActor.run {
                     submittedCommands.append(command)
+                }
+                if case .cancel = command {
+                    await withCheckedContinuation { continuation in
+                        releaseCancellation = continuation
+                    }
                 }
             }
 
             source.beginTurnForTesting(turnId: 1, sessionId: "session-a")
             source.applyForTesting(.turnStarted(turnId: 1))
+            source.applyForTesting(.toolUseStarted(
+                id: "tool-a",
+                tool: "WebSearch",
+                inputJson: #"{"query":"weather"}"#
+            ))
             source.cancel()
             await flushTasks()
 
             source.send("B prompt")
             await flushTasks()
 
-            XCTAssertEqual(submittedCommands.count, 1, "B must not submit before A terminal drains")
+            XCTAssertTrue(source.model.isCancelling)
+            XCTAssertTrue(source.model.streaming, "the current owner remains live while Cancel awaits Block tools")
+            XCTAssertEqual(source.model.statusLine, "正在停止…")
+            XCTAssertEqual(submittedCommands.count, 1, "the next prompt must stay local while Cancel is pending")
             if case let .cancel(turnId)? = submittedCommands.first {
                 XCTAssertEqual(turnId, 1)
             } else {
-                XCTFail("expected only cancel submission before A terminal")
+                XCTFail("expected the matching cancel submission")
             }
-            XCTAssertEqual(source.model.messages.count, 1, "B user message should still render immediately")
-            XCTAssertEqual(source.model.messages.first?.role, .user)
-            XCTAssertEqual(source.model.messages.first?.text, "B prompt")
-            XCTAssertFalse(source.model.streaming, "B must stay deferred while A is quarantined")
+            XCTAssertTrue(source.model.messages.isEmpty, "a blocked send must not append or consume the draft")
 
-            source.applyForTesting(.textDelta(text: "late-a"))
-            source.applyForTesting(.toolUseStarted(
-                id: "late-tool",
-                tool: "Read",
-                inputJson: #"{"path":"/tmp/late"}"#
-            ))
-            source.applyForTesting(.apiRetry(message: "late retry", attempt: 1, maxRetries: 3, delayMs: 500))
-            source.applyForTesting(.turnStarted(turnId: nil))
-
-            XCTAssertEqual(source.model.messages.count, 1, "late A events must not open assistant content for B")
-            XCTAssertEqual(source.model.statusLine, "正在等待上一轮取消完成…", "late A events must not replace deferred-send waiting state")
-            guard case let .run(gatedRun)? = source.model.items.first(where: {
+            source.applyForTesting(.toolHeartbeat(id: "tool-a", tool: "WebSearch", elapsedMs: 2_000))
+            guard case let .run(stoppingRun)? = source.model.items.first(where: {
                 if case .run = $0 { return true }
                 return false
             }) else {
-                return XCTFail("expected A run item to remain isolated")
+                releaseCancellation?.resume()
+                return XCTFail("expected the active run")
             }
-            XCTAssertTrue(gatedRun.tools.isEmpty, "late tool activity must stay quarantined")
-            XCTAssertNil(gatedRun.retry, "late retry must stay quarantined")
+            XCTAssertEqual(stoppingRun.tools.first?.status, .running)
+            XCTAssertEqual(stoppingRun.tools.first?.elapsedMs, 2_000, "heartbeat must keep advancing during safe cancellation")
 
             source.applyForTesting(.turnEnded(outcome: .cancelled, stopReason: nil, cost: zeroCost))
             await flushTasks()
+            XCTAssertFalse(source.model.streaming, "terminal may settle the visible run")
+            XCTAssertTrue(source.model.isCancelling, "terminal must not release send before Cancel FFI returns")
 
-            XCTAssertEqual(submittedCommands.count, 2, "B should submit exactly once after A terminal")
+            releaseCancellation?.resume()
+            releaseCancellation = nil
+            await flushTasks(8)
+
+            XCTAssertFalse(source.model.isCancelling)
+            source.send("B prompt")
+            await flushTasks()
+
+            XCTAssertEqual(submittedCommands.count, 2, "B should submit exactly once after cancellation returns")
             if case let .sendPrompt(text, _, _, turnId)? = submittedCommands.last {
                 XCTAssertEqual(text, "B prompt")
                 XCTAssertEqual(turnId, 2)
             } else {
-                XCTFail("expected deferred B sendPrompt after A terminal")
+                XCTFail("expected B sendPrompt after cancellation completion")
             }
-            XCTAssertTrue(source.model.streaming, "B should become active only after A terminal")
+            XCTAssertEqual(source.model.messages.last?.text, "B prompt")
+            XCTAssertTrue(source.model.streaming)
+        }
 
-            source.applyForTesting(.turnStarted(turnId: nil))
-            source.applyForTesting(.textDelta(text: "reply-b"))
+        func testCancellingTurnKeepsRowsLiveUntilTerminalThenClosesThem() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 8, sessionId: "session-a")
+            source.applyForTesting(.turnStarted(turnId: 8))
             source.applyForTesting(.toolUseStarted(
-                id: "tool-b",
-                tool: "Read",
-                inputJson: #"{"path":"/tmp/current"}"#
+                id: "search-1",
+                tool: "WebSearch",
+                inputJson: #"{"query":"Wuhan weather today"}"#
             ))
-            source.applyForTesting(.apiRetry(message: "retry-b", attempt: 2, maxRetries: 5, delayMs: 700))
-            source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+            source.applyForTesting(.toolUseStarted(
+                id: "shell-1",
+                tool: "Bash",
+                inputJson: #"{"command":"sleep 30"}"#
+            ))
 
-            XCTAssertEqual(source.model.messages.last?.text, "reply-b", "B should accept normal uncorrelated stream after deferred start")
-            XCTAssertEqual(source.model.statusLine, nil, "B terminal should clear transient status")
-            guard case let .run(openRun)? = source.model.items.last(where: {
+            source.cancelForTesting()
+            source.applyForTesting(.toolHeartbeat(id: "search-1", tool: "WebSearch", elapsedMs: 3_000))
+
+            guard case let .run(stoppingRun)? = source.model.items.first(where: {
                 if case .run = $0 { return true }
                 return false
             }) else {
-                return XCTFail("expected run item after quarantine drain")
+                return XCTFail("expected a run render item")
             }
-            XCTAssertEqual(openRun.tools.first?.tool, "Read")
-            XCTAssertEqual(openRun.retry?.message, "retry-b")
-            XCTAssertEqual(openRun.status, .completed)
-            XCTAssertEqual(submittedCommands.count, 2, "prompt must not be submitted twice")
+            XCTAssertEqual(stoppingRun.status, .running)
+            XCTAssertEqual(stoppingRun.tools.map(\.status), [.running, .running])
+            XCTAssertEqual(stoppingRun.tools.first?.elapsedMs, 3_000)
+            XCTAssertEqual(stoppingRun.shellCards.first?.status, .running)
+
+            source.applyForTesting(.turnEnded(outcome: .cancelled, stopReason: "cancelled", cost: zeroCost))
+
+            guard case let .run(run)? = source.model.items.first(where: {
+                if case .run = $0 { return true }
+                return false
+            }) else {
+                return XCTFail("expected the settled run")
+            }
+            XCTAssertEqual(run.status, .cancelled)
+            XCTAssertEqual(run.tools.map(\.status), [.cancelled, .cancelled])
+            XCTAssertEqual(run.shellCards.first?.status, .cancelled)
+            XCTAssertFalse(run.tools.contains(where: { $0.status == .running }))
+            XCTAssertFalse(run.shellCards.contains(where: { $0.status == .running }))
+        }
+
+        func testCancellationFailureRestoresRetryableStopState() async {
+            enum CancelFailure: Error { case rejected }
+
+            let source = makeSource()
+            var cancelAttempts = 0
+            source.setCommandSubmitterForTesting { command in
+                if case .cancel = command {
+                    await MainActor.run { cancelAttempts += 1 }
+                    throw CancelFailure.rejected
+                }
+            }
+            source.beginTurnForTesting(turnId: 44, sessionId: "session-a")
+
+            source.cancel()
+            await flushTasks(8)
+
+            XCTAssertFalse(source.model.isCancelling)
+            XCTAssertTrue(source.model.streaming, "failed delivery must preserve the original turn owner")
+            XCTAssertEqual(source.model.error?.kind, .host)
+            XCTAssertEqual(cancelAttempts, 1)
+
+            source.cancel()
+            await flushTasks(8)
+            XCTAssertEqual(cancelAttempts, 2, "Stop must become retryable after a Cancel submission failure")
+        }
+
+        func testCancellationFailureRestoresParkedPermission() async {
+            enum CancelFailure: Error { case rejected }
+
+            let source = makeSource()
+            let permission = PendingPermission(request: PermissionRequest(
+                requestId: 91,
+                kind: .toolUseConfirm(
+                    toolName: "Bash",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: nil
+            ))
+            source.setCommandSubmitterForTesting { command in
+                if case .cancel = command { throw CancelFailure.rejected }
+            }
+            source.beginTurnForTesting(turnId: 46, sessionId: "session-a")
+            source.model.pendingPermissions = [permission]
+
+            source.cancel()
+            await flushTasks(8)
+
+            XCTAssertFalse(source.model.isCancelling)
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.pendingPermissions, [permission])
+        }
+
+        func testTerminalBeforeFailedCancellationClearsStoppingStatus() async {
+            enum CancelFailure: Error { case rejected }
+
+            let source = makeSource()
+            var releaseCancellation: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                guard case .cancel = command else { return }
+                await withCheckedContinuation { continuation in
+                    releaseCancellation = continuation
+                }
+                throw CancelFailure.rejected
+            }
+            source.beginTurnForTesting(turnId: 47, sessionId: "session-a")
+
+            source.cancel()
+            await flushTasks()
+            source.applyForTesting(.turnEnded(
+                outcome: .cancelled,
+                stopReason: "cancelled",
+                cost: zeroCost
+            ))
+            releaseCancellation?.resume()
+            releaseCancellation = nil
+            await flushTasks(8)
+
+            XCTAssertFalse(source.model.isCancelling)
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertNil(source.model.statusLine)
+        }
+
+        func testSessionSwitchCancellationFailureKeepsOriginalTurnRetryable() async {
+            enum CancelFailure: Error { case rejected }
+
+            let source = makeSource()
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                await MainActor.run { commands.append(command) }
+                if case .cancel = command { throw CancelFailure.rejected }
+            }
+            source.beginTurnForTesting(turnId: 45, sessionId: "session-a")
+            source.applyForTesting(.textDelta(text: "still owned"))
+            let originalItems = source.model.items
+
+            source.resumeSession("session-b")
+            await flushTasks(12)
+
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertFalse(source.model.isCancelling)
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.items, originalItems)
+            XCTAssertEqual(commands.count, 1)
+            guard let first = commands.first else { return }
+            guard case let .cancel(turnId) = first else {
+                return XCTFail("a failed cancellation must not submit ResumeSession")
+            }
+            XCTAssertEqual(turnId, 45)
+
+            source.cancel()
+            await flushTasks(8)
+            XCTAssertEqual(commands.count, 2, "the same visible turn must expose a retryable Stop")
+        }
+
+        func testInterruptionMetadataMarksOnlyInterruptedToolCancelled() {
+            XCTAssertTrue(ConversationExecutionParsing.isCancellationResult(
+                #"{"error":"interrupted","tool_denial_kind":"interrupted"}"#
+            ))
+            XCTAssertFalse(ConversationExecutionParsing.isCancellationResult(
+                #"{"error":"network unavailable"}"#
+            ))
         }
 
         func testResumeSerializesCancelBeforeSessionTransition() async {
@@ -261,9 +449,10 @@ import XCTest
             source.beginTurnForTesting(turnId: 17, sessionId: "session-a")
 
             source.resumeSession("session-b")
-            await flushTasks()
+            await waitForSubmittedCommands(2, commands: submittedCommands)
 
             XCTAssertEqual(submittedCommands.count, 2)
+            guard submittedCommands.count == 2 else { return }
             if case let .cancel(turnId) = submittedCommands[0] {
                 XCTAssertEqual(turnId, 17)
             } else {
@@ -277,6 +466,44 @@ import XCTest
             }
         }
 
+        func testRapidResumeSubmitsOnlyLatestSessionAfterSharedCancellation() async {
+            let source = makeSource()
+            var submittedCommands: [ClientCommand] = []
+            var releaseCancellation: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                await MainActor.run { submittedCommands.append(command) }
+                if case .cancel = command {
+                    await withCheckedContinuation { continuation in
+                        releaseCancellation = continuation
+                    }
+                }
+            }
+            source.beginTurnForTesting(turnId: 18, sessionId: "session-a")
+
+            source.resumeSession("session-b")
+            await waitForSubmittedCommands(1, commands: submittedCommands)
+            source.resumeSession("session-c")
+            await flushTasks()
+            releaseCancellation?.resume()
+            releaseCancellation = nil
+            await waitForSubmittedCommands(2, commands: submittedCommands)
+            await flushTasks(8)
+
+            XCTAssertEqual(submittedCommands.count, 2)
+            guard submittedCommands.count == 2 else { return }
+            if case let .cancel(turnId) = submittedCommands[0] {
+                XCTAssertEqual(turnId, 18)
+            } else {
+                XCTFail("the shared cancellation must be submitted first")
+            }
+            if case let .resumeSession(sessionId, cwd) = submittedCommands[1] {
+                XCTAssertEqual(sessionId, "session-c")
+                XCTAssertNil(cwd)
+            } else {
+                XCTFail("only the latest resume target may be submitted")
+            }
+        }
+
         func testNewSessionSerializesCancelBeforeSessionTransition() async {
             let source = makeSource()
             var submittedCommands: [ClientCommand] = []
@@ -286,9 +513,10 @@ import XCTest
             source.beginTurnForTesting(turnId: 23, sessionId: "session-a")
 
             source.startNewConversation()
-            await flushTasks()
+            await waitForSubmittedCommands(2, commands: submittedCommands)
 
             XCTAssertEqual(submittedCommands.count, 2)
+            guard submittedCommands.count == 2 else { return }
             if case let .cancel(turnId) = submittedCommands[0] {
                 XCTAssertEqual(turnId, 23)
             } else {

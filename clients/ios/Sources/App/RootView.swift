@@ -17,6 +17,10 @@ struct RootView: View {
     @State private var source: any ConversationSource
     @State private var sourceGeneration = UUID()
     @State private var activeSession: String
+    /// Last session confirmed by SessionStarted/SessionResumed. Drawer taps may
+    /// update `activeSession` optimistically, but only this value is persisted.
+    @State private var confirmedSession: String
+    @State private var pendingSessionRestoreID: String?
     @State private var draft: String
     @State private var voiceActive = false
     @State private var flowActive = false
@@ -93,7 +97,12 @@ struct RootView: View {
         _cronRepository = State(initialValue: cron)
         _providerRepository = State(initialValue: providers)
         _source = State(initialValue: conversation)
-        _activeSession = State(initialValue: preferences.activeSessionID(projectID: projectID))
+        let storedSessionID = preferences.storedActiveSessionID(projectID: projectID)
+            ?? projects.activeProject?.record.lastActiveSessionId
+            ?? ""
+        _activeSession = State(initialValue: storedSessionID)
+        _confirmedSession = State(initialValue: storedSessionID)
+        _pendingSessionRestoreID = State(initialValue: storedSessionID.isEmpty ? nil : storedSessionID)
         _draft = State(initialValue: preferences.draft(projectID: projectID))
         appSandboxRoot = root
         scopedPreferences = preferences
@@ -128,18 +137,36 @@ struct RootView: View {
                 navigation.openCronRun(runID)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .lingxiAppActionPending)) { _ in
+            Task { await consumePendingAppActions() }
+        }
         .task(id: sourceGeneration) {
+            let generation = sourceGeneration
+            let current = source
+            let sessionToRestore = pendingSessionRestoreID ?? activeSession
             wireCurrentSource()
             do {
-                try await source.prepare()
-                source.listSessions()
+                try await current.prepare()
+                guard generation == sourceGeneration else { return }
+                current.listSessions()
+                if !sessionToRestore.isEmpty, !current.model.sessionTransitionPending {
+                    requestSessionResume(
+                        sessionToRestore,
+                        projectID: projectStore.activeProjectId,
+                        using: current
+                    )
+                }
                 await providerRepository.refreshCredentialStatus()
             } catch {
-                source.warmUp()
+                guard generation == sourceGeneration else { return }
+                current.warmUp()
             }
         }
         .task {
             await cronRepository.handleLaunch()
+        }
+        .task {
+            await consumePendingAppActions()
         }
         .sheet(
             isPresented: Binding(
@@ -195,7 +222,11 @@ struct RootView: View {
                 model: source.model,
                 projectStore: projectStore,
                 projectID: projectStore.activeProjectId,
-                onSessionChanged: adoptEngineSession
+                pendingRestoreID: pendingSessionRestoreID,
+                onSessionChanged: adoptEngineSession,
+                onUnavailableSession: clearUnavailableSession,
+                onSessionTransitionFailed: rollbackFailedSession,
+                onRefreshSessions: { source.listSessions() }
             )
             .id(sourceGeneration)
 
@@ -206,14 +237,24 @@ struct RootView: View {
                     activeSession: $activeSession,
                     source: source,
                     onClose: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { navigation.closeDrawer() } },
-                    openSettings: { navigation.showSettings() },
-                    openTerminal: { navigation.openTerminal(projectID: projectStore.activeProjectId) },
-                    openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
+                    openSettings: { closeDrawerThen { navigation.showSettings() } },
+                    openTerminal: {
+                        closeDrawerThen {
+                            navigation.openTerminal(projectID: projectStore.activeProjectId)
+                        }
+                    },
+                    openCron: { scopeID, taskID in
+                        closeDrawerThen { navigation.openCron(scopeID: scopeID, taskID: taskID) }
+                    },
                     onSelectProject: { switchProject(to: $0) },
                     onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
                     onNewChat: { switchProject(to: $0, startNew: true) }
                 )
                 .id(sourceGeneration)
+                // The conditional insertion happens here, so the transition
+                // must live on this boundary (a transition inside Drawer never
+                // participates in RootView's if/else transaction).
+                .transition(.move(edge: .leading).combined(with: .opacity))
                 .zIndex(50)
             }
 
@@ -246,6 +287,21 @@ struct RootView: View {
                     .zIndex(100)
                     .transition(.opacity)
             }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: navigation.drawerOpen)
+    }
+
+    /// Presentation state must change in a fresh transaction after the drawer
+    /// starts leaving. Updating a sheet/full-screen route in the same animated
+    /// transaction can make SwiftUI discard the presentation on iOS 26.
+    private func closeDrawerThen(_ action: @escaping @MainActor () -> Void) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            navigation.closeDrawer()
+        }
+        Task { @MainActor in
+            await Task.yield()
+            guard !navigation.drawerOpen else { return }
+            action()
         }
     }
 
@@ -350,7 +406,7 @@ struct RootView: View {
     private func rebuildSource(snapshot: ProviderLaunchSnapshot) async throws {
         persistConversationScope()
         let old = source
-        old.cancel()
+        try await old.cancelAndWait()
         let replacement = makeSource(projectID: projectStore.activeProjectId, snapshot: snapshot)
         #if canImport(engine_mobileFFI)
             replacement.setExternalEventHandler { event in
@@ -358,9 +414,17 @@ struct RootView: View {
             }
         #endif
         try await replacement.prepare()
+        activeSession = confirmedSession
+        pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
         source = replacement
         sourceGeneration = UUID()
-        if !activeSession.isEmpty { replacement.resumeSession(activeSession) }
+        if !confirmedSession.isEmpty {
+            requestSessionResume(
+                confirmedSession,
+                projectID: projectStore.activeProjectId,
+                using: replacement
+            )
+        }
         old.handleBackground()
     }
 
@@ -369,11 +433,13 @@ struct RootView: View {
         if projectID == projectStore.activeProjectId {
             navigation.closeDrawer()
             if let resumeSessionID {
+                pendingSessionRestoreID = resumeSessionID
                 activeSession = resumeSessionID
-                scopedPreferences.setActiveSessionID(resumeSessionID, projectID: projectID)
-                source.resumeSession(resumeSessionID)
+                requestSessionResume(resumeSessionID, projectID: projectID, using: source)
             } else if startNew {
+                pendingSessionRestoreID = nil
                 activeSession = ""
+                confirmedSession = ""
                 scopedPreferences.setActiveSessionID("", projectID: projectID)
                 source.startNewConversation()
             }
@@ -382,12 +448,12 @@ struct RootView: View {
 
         persistConversationScope()
         let previousSource = source
-        previousSource.cancel()
         projectSwitching = true
         navigation.closeDrawer()
         Task { @MainActor in
             var rollback: ProjectActiveSelectionRollback?
             do {
+                try await previousSource.cancelAndWait()
                 rollback = try await projectStore.persistActiveForSwitch(projectId: projectID)
                 let replacement = makeSource(projectID: projectID, snapshot: providerRepository.makeLaunchSnapshot())
                 #if canImport(engine_mobileFFI)
@@ -396,15 +462,21 @@ struct RootView: View {
                     }
                 #endif
                 try await replacement.prepare()
+                draft = scopedPreferences.draft(projectID: projectID)
+                let restoredSession = restoredSessionID(projectID: projectID)
+                confirmedSession = restoredSession
+                activeSession = resumeSessionID ?? restoredSession
+                pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
                 source = replacement
                 sourceGeneration = UUID()
-                draft = scopedPreferences.draft(projectID: projectID)
-                activeSession = resumeSessionID ?? scopedPreferences.activeSessionID(projectID: projectID)
                 if startNew {
+                    pendingSessionRestoreID = nil
                     activeSession = ""
+                    confirmedSession = ""
+                    scopedPreferences.setActiveSessionID("", projectID: projectID)
                     replacement.startNewConversation()
                 } else if !activeSession.isEmpty {
-                    replacement.resumeSession(activeSession)
+                    requestSessionResume(activeSession, projectID: projectID, using: replacement)
                 }
                 previousSource.handleBackground()
                 await cronRepository.refresh()
@@ -418,14 +490,95 @@ struct RootView: View {
         }
     }
 
-    private func adoptEngineSession(_ sessionID: String) {
+    @discardableResult
+    private func adoptEngineSession(_ sessionID: String) -> Bool {
+        guard ConversationSessionRestorePolicy.shouldAdopt(
+            candidateSessionID: sessionID,
+            pendingRestoreID: pendingSessionRestoreID
+        ) else {
+            return false
+        }
         activeSession = sessionID
+        confirmedSession = sessionID
         scopedPreferences.setActiveSessionID(sessionID, projectID: projectStore.activeProjectId)
+        if pendingSessionRestoreID == sessionID {
+            pendingSessionRestoreID = nil
+        }
+        return true
+    }
+
+    @discardableResult
+    private func clearUnavailableSession(_ sessionID: String) -> Bool {
+        guard ConversationSessionRestorePolicy.shouldClearUnavailableSession(
+            unavailableSessionID: sessionID,
+            pendingRestoreID: pendingSessionRestoreID,
+            activeSessionID: activeSession
+        ) else {
+            return false
+        }
+        if confirmedSession == sessionID {
+            confirmedSession = ""
+        }
+        pendingSessionRestoreID = nil
+        activeSession = confirmedSession
+        scopedPreferences.setActiveSessionID(confirmedSession, projectID: projectStore.activeProjectId)
+        return true
+    }
+
+    @discardableResult
+    private func rollbackFailedSession(_ sessionID: String) -> Bool {
+        guard let rollbackSelection = ConversationSessionRestorePolicy.rollbackSelection(
+            failedSessionID: sessionID,
+            pendingRestoreID: pendingSessionRestoreID,
+            activeSessionID: activeSession,
+            confirmedSessionID: confirmedSession
+        ) else {
+            return false
+        }
+        pendingSessionRestoreID = nil
+        activeSession = rollbackSelection
+        scopedPreferences.setActiveSessionID(confirmedSession, projectID: projectStore.activeProjectId)
+        return true
+    }
+
+    private func restoredSessionID(projectID: String?) -> String {
+        if let stored = scopedPreferences.storedActiveSessionID(projectID: projectID) {
+            return stored
+        }
+        return projectID.flatMap { id in
+            projectStore.projects.first(where: { $0.record.id == id })?.record.lastActiveSessionId
+        } ?? ""
+    }
+
+    /// A zero message count in the durable project index is the proof required
+    /// by the migration-safe engine entrypoint. If a live catalog row is
+    /// available it wins over the cache; otherwise startup/project switching can
+    /// still restore legacy empty sessions before ListSessions replies.
+    private func requestSessionResume(
+        _ sessionID: String,
+        projectID: String?,
+        using conversation: any ConversationSource
+    ) {
+        let emptyTitle: String?
+        if let live = conversation.model.engineSessions.first(where: { $0.id == sessionID }) {
+            emptyTitle = live.messageCount == 0 ? live.title : nil
+        } else {
+            let cachedRows = projectID.flatMap { id in
+                projectStore.projects.first(where: { $0.record.id == id })?.sessions
+            } ?? projectStore.globalSessions
+            if let cached = cachedRows.first(where: { $0.sessionId == sessionID }),
+               cached.messageCount == 0 {
+                emptyTitle = cached.title
+            } else {
+                emptyTitle = nil
+            }
+        }
+        conversation.resumeSession(sessionID, emptySessionTitle: emptyTitle)
     }
 
     private func persistConversationScope() {
         scopedPreferences.setDraft(draft, projectID: projectStore.activeProjectId)
-        scopedPreferences.setActiveSessionID(activeSession, projectID: projectStore.activeProjectId)
+        scopedPreferences.setActiveSessionID(confirmedSession, projectID: projectStore.activeProjectId)
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
@@ -440,9 +593,93 @@ struct RootView: View {
             source.handleForeground()
             Task { await VoiceAudioSessionCoordinator.shared.resumeAfterForeground() }
             Task { await cronRepository.handleSceneBecameActive() }
+            Task { await consumePendingAppActions() }
         default:
             break
         }
+    }
+
+    private func consumePendingAppActions() async {
+        let actions = await LingxiAppActionStore.shared.drain()
+        for action in actions {
+            applyAppAction(action)
+        }
+    }
+
+    private func applyAppAction(_ action: LingxiAppAction) {
+        navigation.closeDrawer()
+        navigation.closeSettings()
+        navigation.closePresentedRoute()
+        navigation.path.removeAll()
+
+        switch action {
+        case .openApp:
+            break
+        case .newConversation:
+            beginAppIntegratedConversation(draftText: "")
+        case let .ask(question):
+            let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+            beginAppIntegratedConversation(draftText: trimmed)
+        }
+    }
+
+    private func beginAppIntegratedConversation(draftText: String) {
+        pendingSessionRestoreID = nil
+        activeSession = ""
+        confirmedSession = ""
+        scopedPreferences.setActiveSessionID("", projectID: projectStore.activeProjectId)
+        draft = draftText
+        source.startNewConversation()
+    }
+}
+
+enum ConversationSessionIndexPolicy {
+    static func shouldSynchronize(
+        transitionPending: Bool,
+        restorePending: Bool = false,
+        activeSessionID: String,
+        listedSessionIDs: Set<String>
+    ) -> Bool {
+        guard !transitionPending, !restorePending else { return false }
+        // Even with a full catalog request, an in-flight new/restore transition
+        // can briefly make the active row absent. Preserve the cached index until
+        // the active row is enumerated.
+        let activeSessionMayNotBeListed = !activeSessionID.isEmpty
+            && !listedSessionIDs.contains(activeSessionID)
+        return !activeSessionMayNotBeListed
+    }
+}
+
+enum ConversationSessionRestorePolicy {
+    static func shouldAdopt(candidateSessionID: String, pendingRestoreID: String?) -> Bool {
+        guard !candidateSessionID.isEmpty else { return false }
+        return pendingRestoreID == nil || pendingRestoreID == candidateSessionID
+    }
+
+    static func shouldClearUnavailableSession(
+        unavailableSessionID: String,
+        pendingRestoreID: String?,
+        activeSessionID: String
+    ) -> Bool {
+        guard !unavailableSessionID.isEmpty else { return false }
+        return pendingRestoreID == unavailableSessionID
+            || activeSessionID == unavailableSessionID
+    }
+
+    static func rollbackSelection(
+        failedSessionID: String,
+        pendingRestoreID: String?,
+        activeSessionID: String,
+        confirmedSessionID: String
+    ) -> String? {
+        guard shouldClearUnavailableSession(
+            unavailableSessionID: failedSessionID,
+            pendingRestoreID: pendingRestoreID,
+            activeSessionID: activeSessionID
+        ) else {
+            return nil
+        }
+        return confirmedSessionID
     }
 }
 
@@ -453,15 +690,28 @@ private struct ConversationProjectBridge: View {
     @ObservedObject var model: ConversationModel
     @Bindable var projectStore: ProjectStore
     let projectID: String?
-    let onSessionChanged: (String) -> Void
+    let pendingRestoreID: String?
+    let onSessionChanged: (String) -> Bool
+    let onUnavailableSession: (String) -> Bool
+    let onSessionTransitionFailed: (String) -> Bool
+    let onRefreshSessions: () -> Void
     @State private var sessionSyncTask: Task<Void, Never>?
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
             .onAppear {
+                consumeRestoreRecovery(model.sessionRestoreRecovery)
+                consumeSessionTransitionFailure(model.sessionTransitionFailure)
+                handleActiveSession(model.activeSessionId)
                 guard model.engineSessionsLoaded else { return }
                 synchronizeSessions(model.engineSessions)
+            }
+            .onChange(of: model.sessionRestoreRecovery) { _, recovery in
+                consumeRestoreRecovery(recovery)
+            }
+            .onChange(of: model.sessionTransitionFailure) { _, failure in
+                consumeSessionTransitionFailure(failure)
             }
             .onChange(of: model.engineSessionsLoaded) { _, loaded in
                 guard loaded else { return }
@@ -471,37 +721,76 @@ private struct ConversationProjectBridge: View {
                 guard model.engineSessionsLoaded else { return }
                 synchronizeSessions(rows)
             }
+            .onChange(of: model.sessionTransitionPending) { _, pending in
+                guard !pending, model.engineSessionsLoaded else { return }
+                synchronizeSessions(model.engineSessions)
+            }
+            .onChange(of: pendingRestoreID) { _, pending in
+                guard pending == nil, model.engineSessionsLoaded else { return }
+                synchronizeSessions(model.engineSessions)
+            }
+            .onChange(of: model.sessionRefreshRevision) { _, _ in
+                onRefreshSessions()
+            }
             .onDisappear {
                 sessionSyncTask?.cancel()
                 sessionSyncTask = nil
             }
             .onChange(of: model.activeSessionId) { _, sessionID in
-                guard !sessionID.isEmpty else { return }
-                onSessionChanged(sessionID)
-                let isIndexed: Bool
-                if let projectID {
-                    isIndexed = projectStore.projects
-                        .first(where: { $0.record.id == projectID })?
-                        .sessions.contains(where: { $0.sessionId == sessionID }) == true
-                } else {
-                    isIndexed = projectStore.globalSessions.contains(where: { $0.sessionId == sessionID })
-                }
-                Task { @MainActor in
-                    if !isIndexed {
-                        try? await projectStore.recordStartedSession(
-                            projectId: projectID,
-                            sessionId: sessionID,
-                            title: "新对话"
-                        )
-                    }
-                    if let projectID {
-                        try? await projectStore.markActiveSession(projectId: projectID, sessionId: sessionID)
-                    }
-                }
+                handleActiveSession(sessionID)
             }
     }
 
+    private func handleActiveSession(_ sessionID: String) {
+        consumeRestoreRecovery(model.sessionRestoreRecovery)
+        // A replacement engine can emit its bootstrap SessionStarted before an
+        // explicit New/Resume command confirms. Never persist that transient id.
+        guard !model.sessionTransitionPending,
+              !sessionID.isEmpty,
+              onSessionChanged(sessionID)
+        else { return }
+        let isIndexed: Bool
+        if let projectID {
+            isIndexed = projectStore.projects
+                .first(where: { $0.record.id == projectID })?
+                .sessions.contains(where: { $0.sessionId == sessionID }) == true
+        } else {
+            isIndexed = projectStore.globalSessions.contains(where: { $0.sessionId == sessionID })
+        }
+        Task { @MainActor in
+            if !isIndexed {
+                try? await projectStore.recordStartedSession(
+                    projectId: projectID,
+                    sessionId: sessionID,
+                    title: "新对话"
+                )
+            }
+            if let projectID {
+                try? await projectStore.markActiveSession(projectId: projectID, sessionId: sessionID)
+            }
+        }
+    }
+
+    private func consumeRestoreRecovery(_ recovery: SessionRestoreRecovery?) {
+        guard let recovery,
+              onUnavailableSession(recovery.unavailableSessionID)
+        else { return }
+        model.sessionRestoreRecovery = nil
+    }
+
+    private func consumeSessionTransitionFailure(_ failure: SessionTransitionFailure?) {
+        guard let failure else { return }
+        _ = onSessionTransitionFailed(failure.requestedSessionID)
+        model.sessionTransitionFailure = nil
+    }
+
     private func synchronizeSessions(_ rows: [EngineSession]) {
+        guard ConversationSessionIndexPolicy.shouldSynchronize(
+            transitionPending: model.sessionTransitionPending,
+            restorePending: pendingRestoreID != nil,
+            activeSessionID: model.activeSessionId,
+            listedSessionIDs: Set(rows.map(\.id))
+        ) else { return }
         let summaries = rows.map {
             ProjectSessionSummary(
                 sessionId: $0.id,

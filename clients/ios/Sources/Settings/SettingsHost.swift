@@ -7,7 +7,7 @@ enum SettingsPage: Hashable {
     case providerPicker(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
     case voice, linuxRuntime, knowledge, memory, workflows
-    case appearance, language, notifications, input, privacy
+    case appearance, language, notifications, input, appIntegration, privacy
     case skills, skillDetail(String)
     case mcpList, mcpEdit(String)
     case dream
@@ -64,6 +64,9 @@ struct SettingsHost: View {
                 }
         }
         .background(t.windowBg)
+        // Settings controls draw their own cards and fills. Avoid the automatic
+        // tinted capsule that newer iOS versions add around custom labels.
+        .buttonStyle(.plain)
         // Pull the real MCP listing when the sheet opens; mirror it into the store
         // (so the existing MCP page renders real servers) once it arrives.
         .onAppear { onRefreshMcp() }
@@ -125,6 +128,7 @@ struct SettingsHost: View {
         case .language: return "语言"
         case .notifications: return "通知"
         case .input: return "键盘与输入"
+        case .appIntegration: return "应用接入"
         case .privacy: return "数据与隐私"
         case .skills: return "Skills"
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"

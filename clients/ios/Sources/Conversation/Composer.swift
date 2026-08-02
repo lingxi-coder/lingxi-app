@@ -27,6 +27,10 @@ struct Composer: View {
     // PR-4 items 1 & 2: while a turn is in flight the send affordance becomes a
     // Stop button (interrupt the turn), and we never start an overlapping turn.
     var streaming: Bool = false
+    var isCancelling: Bool = false
+    /// Session transitions and cancellation can temporarily make a draft
+    /// non-submittable even though the text field remains editable.
+    var sendEnabled: Bool = true
     var onStop: () -> Void = {}
 
     // Camera affordance (the + / attach button) — mirrors Android `onCameraClick`
@@ -79,7 +83,12 @@ struct Composer: View {
                     .accessibilityLabel("添加附件")
                     modelChip
                     Spacer()
-                    if streaming {
+                    if isCancelling {
+                        ProgressView()
+                            .tint(t.text3)
+                            .frame(width: 34, height: 34)
+                            .accessibilityLabel("正在停止")
+                    } else if streaming {
                         // PR-4 item 2: the Stop button replaces Send while a turn
                         // is in flight — tapping it cancels the in-flight turn.
                         Button(action: onStop) {
@@ -113,6 +122,8 @@ struct Composer: View {
                                 .shadow(color: t.accent.tint(0.40), radius: 6, y: 4)
                         }
                         .accessibilityLabel("发送")
+                        .disabled(!sendEnabled)
+                        .opacity(sendEnabled ? 1 : 0.45)
                     }
                 }
             }
@@ -306,7 +317,7 @@ struct Composer: View {
 
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty, !streaming, !isCancelling, sendEnabled else { return }
         onSend(draft); draft = ""
     }
 }

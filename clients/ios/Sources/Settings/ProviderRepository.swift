@@ -57,6 +57,9 @@ enum ProviderConnectionState: Equatable {
 }
 
 struct ProviderLaunchProfile: Equatable {
+    /// Stable identifier used by the settings UI and persisted profile row.
+    let settingsID: String
+    /// Provider profile / secure-credential identifier understood by the engine.
     let id: String
     let presetID: String
     let providerType: String
@@ -222,16 +225,21 @@ private struct ProviderPersistenceEnvelope: Codable, Equatable {
 }
 
 private enum PendingCredentialOperation: Equatable {
-    case list(providerIDs: [String])
-    case set(providerID: String)
-    case delete(providerID: String)
+    case list(targets: [ProviderCredentialTarget])
+    case set(target: ProviderCredentialTarget)
+    case delete(target: ProviderCredentialTarget)
 
     var providerIDs: [String] {
         switch self {
-        case .list(let providerIDs): return providerIDs
-        case .set(let providerID), .delete(let providerID): return [providerID]
+        case .list(let targets): return targets.map(\.settingsID)
+        case .set(let target), .delete(let target): return [target.settingsID]
         }
     }
+}
+
+private struct ProviderCredentialTarget: Equatable {
+    let settingsID: String
+    let credentialID: String
 }
 
 private struct ProviderPresetMetadata {
@@ -242,6 +250,14 @@ private struct ProviderPresetMetadata {
 private enum ProviderRepositoryDefaults {
     static let anthropicLegacyProfileID = "anthropic"
     static let routingMobileEnabledProfilesKey = "mobileEnabledProfiles"
+    static let builtInProfileIDsByPreset: [String: String] = [
+        "anthropic": "anthropic",
+        "openai": "openai",
+        "deepseek": "deepseek",
+        "kimi": "kimi",
+        "kimi-code": "kimi-code",
+        "openrouter": "openrouter",
+    ]
 }
 
 @MainActor
@@ -339,15 +355,15 @@ final class ProviderRepository {
             switch operation {
             case .list:
                 return nil
-            case .set(let providerID):
-                if unavailable.contains(providerID) { return "安全存储不可用" }
-                if !configured.contains(providerID) {
+            case .set(let target):
+                if unavailable.contains(target.credentialID) { return "安全存储不可用" }
+                if !configured.contains(target.credentialID) {
                     return "安全存储未确认密钥已保存。"
                 }
                 return nil
-            case .delete(let providerID):
-                if unavailable.contains(providerID) { return "安全存储不可用" }
-                if configured.contains(providerID) {
+            case .delete(let target):
+                if unavailable.contains(target.credentialID) { return "安全存储不可用" }
+                if configured.contains(target.credentialID) {
                     return "安全存储仍报告该密钥存在。"
                 }
                 return nil
@@ -355,19 +371,19 @@ final class ProviderRepository {
         }()
 
         switch operation {
-        case .list(let providerIDs):
-            for providerID in providerIDs {
-                guard let index = indexOfProfile(id: providerID) else { continue }
-                if unavailable.contains(providerID) {
+        case .list(let targets):
+            for target in targets {
+                guard let index = indexOfProfile(id: target.settingsID) else { continue }
+                if unavailable.contains(target.credentialID) {
                     continue
                 }
-                profiles[index].credentialState = configured.contains(providerID) ? .configured : .missing
-                if configured.contains(providerID), profiles[index].connectionState == .idle {
+                profiles[index].credentialState = configured.contains(target.credentialID) ? .configured : .missing
+                if configured.contains(target.credentialID), profiles[index].connectionState == .idle {
                     profiles[index].detailMessage = nil
                 }
             }
-        case .set(let providerID):
-            guard let index = indexOfProfile(id: providerID) else { break }
+        case .set(let target):
+            guard let index = indexOfProfile(id: target.settingsID) else { break }
             if let operationFailure {
                 profiles[index].connectionState = .failed
                 profiles[index].detailMessage = operationFailure
@@ -377,8 +393,8 @@ final class ProviderRepository {
                 profiles[index].clearCredentialOnApply = false
                 profiles[index].detailMessage = "密钥已保存到安全存储。"
             }
-        case .delete(let providerID):
-            guard let index = indexOfProfile(id: providerID) else { break }
+        case .delete(let target):
+            guard let index = indexOfProfile(id: target.settingsID) else { break }
             if let operationFailure {
                 profiles[index].connectionState = .failed
                 profiles[index].detailMessage = operationFailure
@@ -556,8 +572,13 @@ final class ProviderRepository {
     }
 
     func refreshCredentialStatus() async {
-        let ids = profiles.map(\.id)
-        guard !ids.isEmpty else {
+        let targets = profiles.map { state in
+            ProviderCredentialTarget(
+                settingsID: state.id,
+                credentialID: engineProfileID(for: state.profile)
+            )
+        }
+        guard !targets.isEmpty else {
             lastRepositoryError = nil
             return
         }
@@ -566,11 +587,16 @@ final class ProviderRepository {
         }
         cancelPendingListOperations()
         let operationID = takeOperationID()
-        pendingOperations[operationID] = .list(providerIDs: ids)
-        setOperationInFlight(true, for: ids)
+        pendingOperations[operationID] = .list(targets: targets)
+        setOperationInFlight(true, for: targets.map(\.settingsID))
         scheduleCredentialOperationTimeout(operationID)
         do {
-            try await commandSubmitter(.listProviderCredentials(operationId: operationID, providerIds: ids))
+            let credentialIDs = targets.reduce(into: [String]()) { result, target in
+                if !result.contains(target.credentialID) {
+                    result.append(target.credentialID)
+                }
+            }
+            try await commandSubmitter(.listProviderCredentials(operationId: operationID, providerIds: credentialIDs))
         } catch {
             failCredentialOperation(operationID, error: error)
             return
@@ -631,7 +657,10 @@ final class ProviderRepository {
             mirrorLegacyAnthropicSettingsIfNeeded(for: launchProfile, state: profiles[index])
 
             if isClearingCredential {
-                try await deleteCredentialIfPossible(for: launchProfile.id)
+                try await deleteCredentialIfPossible(
+                    settingsID: launchProfile.settingsID,
+                    credentialID: launchProfile.id
+                )
                 if let updatedIndex = indexOfProfile(id: id) {
                     profiles[updatedIndex].profile.enabled = false
                     profiles[updatedIndex].profile.isDefault = false
@@ -639,7 +668,11 @@ final class ProviderRepository {
                     persistProfiles()
                 }
             } else if let secret = effectiveSecret(for: profiles[index]) {
-                try await storeCredentialIfPossible(secret, for: launchProfile.id)
+                try await storeCredentialIfPossible(
+                    secret,
+                    settingsID: launchProfile.settingsID,
+                    credentialID: launchProfile.id
+                )
             }
 
             if let applyReconnectHandler {
@@ -708,7 +741,10 @@ final class ProviderRepository {
         let shouldDeleteCredential = commandSubmitter != nil || state.hasStoredCredential || state.clearCredentialOnApply
         if shouldDeleteCredential {
             do {
-                try await deleteCredentialIfPossible(for: state.id)
+                try await deleteCredentialIfPossible(
+                    settingsID: state.id,
+                    credentialID: engineProfileID(for: state.profile)
+                )
             } catch {
                 guard let currentIndex = indexOfProfile(id: id) else { return }
                 profiles[currentIndex].connectionState = .failed
@@ -740,13 +776,17 @@ final class ProviderRepository {
                 }
                 return lhs.id < rhs.id
             }
-        let enabledIDs = launchProfiles.filter(\.enabled).map(\.id)
-        let providerProfilesObject = Dictionary(uniqueKeysWithValues: launchProfiles.map { profile in
-            (
-                profile.id,
-                providerSettingsJSONValue(for: profile)
-            )
-        })
+        let enabledIDs = launchProfiles
+            .filter(\.enabled)
+            .reduce(into: [String]()) { result, profile in
+                if !result.contains(profile.id) {
+                    result.append(profile.id)
+                }
+            }
+        let providerProfilesObject = launchProfiles.reduce(into: [String: [String: Any]]()) { result, profile in
+            guard !usesBuiltInProfile(profile) else { return }
+            result[profile.id] = providerSettingsJSONValue(for: profile)
+        }
         let providerProfilesJSON = Self.encodeJSONObject(providerProfilesObject) ?? "{}"
         let defaultModelID = launchProfiles.first(where: { $0.isDefault && $0.enabled })?.qualifiedModelID
         let routingJSON = Self.encodeJSONObject(
@@ -768,7 +808,8 @@ final class ProviderRepository {
     private func buildLaunchProfile(from profile: ProviderStoredProfile) -> ProviderLaunchProfile {
         let metadata = metadata(for: profile.presetID)
         return ProviderLaunchProfile(
-            id: profile.id,
+            settingsID: profile.id,
+            id: engineProfileID(for: profile),
             presetID: profile.presetID,
             providerType: metadata.providerType,
             displayName: profile.name,
@@ -822,31 +863,37 @@ final class ProviderRepository {
         return nil
     }
 
-    private func storeCredentialIfPossible(_ secret: String, for providerID: String) async throws {
+    private func storeCredentialIfPossible(
+        _ secret: String,
+        settingsID: String,
+        credentialID: String
+    ) async throws {
         if let commandSubmitter {
             let operationID = takeOperationID()
-            pendingOperations[operationID] = .set(providerID: providerID)
-            if let index = indexOfProfile(id: providerID) {
+            pendingOperations[operationID] = .set(
+                target: .init(settingsID: settingsID, credentialID: credentialID)
+            )
+            if let index = indexOfProfile(id: settingsID) {
                 profiles[index].operationInFlight = true
             }
             try await awaitCredentialOperation(operationID) {
                 try await commandSubmitter(
                     .setProviderCredential(
                         operationId: operationID,
-                        providerId: providerID,
+                        providerId: credentialID,
                         credential: ProviderCredentialSecretDto(value: secret)
                     )
                 )
             }
             return
         }
-        if providerID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
+        if settingsID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
             guard Keychain.set(.apiKey, secret) else {
                 throw NSError(domain: "ProviderRepository", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "旧版 Keychain 密钥写入失败。",
                 ])
             }
-            if let index = indexOfProfile(id: providerID) {
+            if let index = indexOfProfile(id: settingsID) {
                 profiles[index].credentialState = .configured
                 profiles[index].pendingSecret = ""
                 profiles[index].hasLegacyAnthropicCredential = true
@@ -859,25 +906,30 @@ final class ProviderRepository {
         ])
     }
 
-    private func deleteCredentialIfPossible(for providerID: String) async throws {
+    private func deleteCredentialIfPossible(
+        settingsID: String,
+        credentialID: String
+    ) async throws {
         if let commandSubmitter {
             let operationID = takeOperationID()
-            pendingOperations[operationID] = .delete(providerID: providerID)
-            if let index = indexOfProfile(id: providerID) {
+            pendingOperations[operationID] = .delete(
+                target: .init(settingsID: settingsID, credentialID: credentialID)
+            )
+            if let index = indexOfProfile(id: settingsID) {
                 profiles[index].operationInFlight = true
             }
             try await awaitCredentialOperation(operationID) {
-                try await commandSubmitter(.deleteProviderCredential(operationId: operationID, providerId: providerID))
+                try await commandSubmitter(.deleteProviderCredential(operationId: operationID, providerId: credentialID))
             }
             return
         }
-        if providerID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
+        if settingsID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
             guard Keychain.clear(.apiKey) else {
                 throw NSError(domain: "ProviderRepository", code: 3, userInfo: [
                     NSLocalizedDescriptionKey: "旧版 Keychain 密钥删除失败。",
                 ])
             }
-            if let index = indexOfProfile(id: providerID) {
+            if let index = indexOfProfile(id: settingsID) {
                 profiles[index].credentialState = .missing
                 profiles[index].hasLegacyAnthropicCredential = false
                 profiles[index].clearCredentialOnApply = false
@@ -890,7 +942,7 @@ final class ProviderRepository {
     }
 
     private func mirrorLegacyAnthropicSettingsIfNeeded(for profile: ProviderLaunchProfile, state: ProviderProfileState) {
-        guard profile.id == ProviderRepositoryDefaults.anthropicLegacyProfileID else { return }
+        guard profile.settingsID == ProviderRepositoryDefaults.anthropicLegacyProfileID else { return }
         Keychain.set(.apiBase, profile.baseURL)
         Keychain.set(.model, profile.modelID)
         if state.clearCredentialOnApply {
@@ -919,6 +971,47 @@ final class ProviderRepository {
         ]
     }
 
+    /// Android and Rust both treat catalog-default endpoints as built-ins. Do
+    /// not emit a second user profile with the same engine name: llm-client
+    /// rejects duplicate profile names before a connection probe can run.
+    private func usesBuiltInProfile(_ profile: ProviderLaunchProfile) -> Bool {
+        usesBuiltInProfile(presetID: profile.presetID, baseURL: profile.baseURL)
+    }
+
+    private func engineProfileID(for profile: ProviderStoredProfile) -> String {
+        if usesBuiltInProfile(presetID: profile.presetID, baseURL: profile.baseURL),
+           let builtInID = ProviderRepositoryDefaults.builtInProfileIDsByPreset[profile.presetID] {
+            return builtInID
+        }
+
+        let normalizedID = profile.id
+            .lowercased()
+            .map { character in
+                character.isLetter || character.isNumber || "_-.".contains(character)
+                    ? character
+                    : "_"
+            }
+            .reduce(into: "") { $0.append($1) }
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        let boundedID = String(normalizedID.prefix(64))
+        let fallbackID = boundedID.isEmpty ? "mobile-provider" : boundedID
+        let reservedIDs = Set(ProviderRepositoryDefaults.builtInProfileIDsByPreset.values)
+        return reservedIDs.contains(fallbackID) ? "\(fallbackID)-user" : fallbackID
+    }
+
+    private func usesBuiltInProfile(presetID: String, baseURL: String) -> Bool {
+        guard ProviderRepositoryDefaults.builtInProfileIDsByPreset[presetID] != nil else {
+            return false
+        }
+        let defaultURL = preset(for: presetID).defaultUrl
+        let configuredURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return configuredURL.isEmpty || normalizedProviderURL(configuredURL) == normalizedProviderURL(defaultURL)
+    }
+
+    private func normalizedProviderURL(_ rawValue: String) -> String {
+        rawValue.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "/")))
+    }
+
     private func buildRoutingJSONObject(
         enabledProfileIDs: [String],
         defaultModelID: String?,
@@ -936,10 +1029,10 @@ final class ProviderRepository {
         else {
             return routing
         }
-        let launchProfilesByID = Dictionary(uniqueKeysWithValues: launchProfiles.map { ($0.id, $0) })
+        let launchProfilesByID = Dictionary(uniqueKeysWithValues: launchProfiles.map { ($0.settingsID, $0) })
         let fallbackTargets = routingSettings.fallbackProfileIDs.compactMap { profileID -> String? in
-            guard enabledProfileIDs.contains(profileID),
-                  let profile = launchProfilesByID[profileID]
+            guard let profile = launchProfilesByID[profileID],
+                  enabledProfileIDs.contains(profile.id)
             else {
                 return nil
             }

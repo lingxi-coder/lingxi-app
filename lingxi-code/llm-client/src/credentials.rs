@@ -158,7 +158,9 @@ impl CredentialProvider for EnvCredentialProvider {
     ) -> BoxFuture<'a, Result<Credential, LlmError>> {
         let result = std::env::var(&self.variable_name)
             .map(Credential::ApiKey)
-            .map_err(|_| LlmError::Authentication);
+            .map_err(|_| LlmError::Authentication {
+                message: String::new(),
+            });
         Box::pin(async move { result })
     }
 }

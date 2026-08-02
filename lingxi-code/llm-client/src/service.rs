@@ -1763,9 +1763,9 @@ impl ApiService {
             // "unauthorized" — api-client `Unauthorized(_) => "unauthorized"` (:1153).
             // A dead OAuth session is an auth failure like any other here; it
             // differs only in the copy the orchestrator renders for it.
-            LlmError::Authentication
+            LlmError::Authentication { .. }
             | LlmError::OAuthRefreshDead
-            | LlmError::PermissionDenied => "unauthorized",
+            | LlmError::PermissionDenied { .. } => "unauthorized",
             // "server" — api-client `Server { .. } => "server"` (:1157)
             LlmError::ProviderInternal => "server",
             // "http" — api-client `Http(_) => "http"` (:1146)
@@ -2132,7 +2132,7 @@ impl ApiService {
     /// variants that carry an HTTP status are non-None).
     fn status_of(err: &LlmError) -> Option<u16> {
         match err {
-            LlmError::Authentication | LlmError::PermissionDenied => Some(401),
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => Some(401),
             LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. } => Some(400),
             LlmError::RequestTooLarge => Some(413),
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),

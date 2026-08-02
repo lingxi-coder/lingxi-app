@@ -2740,11 +2740,11 @@ mod tests {
     fn error_kind_labels_match_api_client_originals() {
         // api-client: Unauthorized → "unauthorized"
         assert_eq!(
-            ApiService::error_kind(&LlmError::Authentication),
+            ApiService::error_kind(&LlmError::Authentication { message: String::new() }),
             "unauthorized"
         );
         assert_eq!(
-            ApiService::error_kind(&LlmError::PermissionDenied),
+            ApiService::error_kind(&LlmError::PermissionDenied { message: String::new() }),
             "unauthorized"
         );
         // api-client: Server → "server"
@@ -5040,7 +5040,7 @@ mod tests {
             .messages_create("model", None, None, Vec::new(), Vec::new())
             .await;
         assert!(
-            matches!(out, Err(LlmError::Authentication)),
+            matches!(out, Err(LlmError::Authentication { .. })),
             "exhausted refresh budget surfaces the auth error: {out:?}"
         );
         assert_eq!(
@@ -5073,7 +5073,7 @@ mod tests {
                 Vec::new(),
             )
             .await;
-        assert!(matches!(out, Err(LlmError::Authentication)));
+        assert!(matches!(out, Err(LlmError::Authentication { .. })));
         assert_eq!(
             aws.calls.load(std::sync::atomic::Ordering::SeqCst),
             0,

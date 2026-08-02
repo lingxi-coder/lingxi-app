@@ -226,7 +226,9 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
     match code {
         "insufficient_quota" => LlmError::QuotaExceeded,
         "context_length_exceeded" => LlmError::ContextOverflow { token_gap: 0 },
-        "invalid_api_key" | "invalid_authentication" => LlmError::Authentication,
+        "invalid_api_key" | "invalid_authentication" => LlmError::Authentication {
+            message: super::api_error_message(response.status, &response.body_json, &message),
+        },
         "model_not_found" => LlmError::ModelUnavailable,
         _ => super::map_error_status(
             response.status,

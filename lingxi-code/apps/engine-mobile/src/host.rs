@@ -5816,7 +5816,9 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let streaming: Arc<dyn orchestrator::StreamingApiClient> =
             Arc::new(MockStreamingApiClient::with_open_error(
-                llm_client::LlmError::Authentication,
+                llm_client::LlmError::Authentication {
+                    message: String::new(),
+                },
                 Vec::new(),
             ));
         let handle = new_engine_with_streaming(

@@ -531,7 +531,7 @@ async fn upload_file_maps_error_statuses_through_the_gemini_taxonomy() {
         .upload_file("gemini", vec![1], "image/png", "f", &transport)
         .await
         .expect_err("must map status");
-    assert!(matches!(error, LlmError::PermissionDenied));
+    assert!(matches!(error, LlmError::PermissionDenied { .. }));
 }
 
 // ── Integration shape: uploaded uri plugs into the batch-2 ImageUrl encoding ──

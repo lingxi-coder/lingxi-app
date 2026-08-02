@@ -315,7 +315,7 @@ async fn host_managed_credentials_without_provider_fail_authentication() {
             .prepare(&LlmRequest::new("p-model"))
             .await
             .unwrap_err(),
-        LlmError::Authentication
+        LlmError::Authentication { .. }
     ));
 }
 

@@ -122,8 +122,11 @@ pub(crate) fn map_error_status(
     retry_after: Option<Duration>,
 ) -> LlmError {
     match status {
-        401 => LlmError::Authentication,
-        403 => LlmError::PermissionDenied,
+        // The provider's text is STORED, not just classified on: the auth copy
+        // downstream gates on this wording. Dropping it here is what made the
+        // whole family unreachable.
+        401 => LlmError::Authentication { message: display },
+        403 => LlmError::PermissionDenied { message: display },
         404 => LlmError::ModelUnavailable,
         // 413 split (parity 2.1.212): "context window" in the message means a
         // token overflow (prompt-too-long / compaction path); anything else is

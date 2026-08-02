@@ -1101,7 +1101,9 @@ impl DefaultLlmClient {
                     fedramp,
                 } = secret
                 else {
-                    return Err(LlmError::Authentication);
+                    return Err(LlmError::Authentication {
+                        message: String::new(),
+                    });
                 };
                 let authenticator = ChatGptAuthenticator::new(access_token, account_id, fedramp);
                 request = authenticator.apply(request)?;
@@ -1179,7 +1181,9 @@ impl DefaultLlmClient {
             CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => {
                 self.credentials
                     .as_ref()
-                    .ok_or(LlmError::Authentication)?
+                    .ok_or(LlmError::Authentication {
+                        message: String::new(),
+                    })?
                     .load(
                         &CredentialScope::new(entry.provider_id.clone(), profile_name)
                             .with_credential_id(id.clone()),

@@ -262,7 +262,9 @@ mod tests {
     async fn other_error_maps_to_query_error() {
         let api = Arc::new(MockApi {
             recorded: Mutex::new(Vec::new()),
-            response: Mutex::new(Some(Err(LlmError::Authentication))),
+            response: Mutex::new(Some(Err(LlmError::Authentication {
+                message: String::new(),
+            }))),
         });
         let runner = ApiClientHookPromptRunner::new(api);
 

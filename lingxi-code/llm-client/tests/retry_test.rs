@@ -102,8 +102,8 @@ fn retry_after_ms_header_takes_precedence_over_seconds() {
 fn non_retryable_errors_do_not_retry() {
     let policy = RetryPolicy;
     let errors = [
-        LlmError::Authentication,
-        LlmError::PermissionDenied,
+        LlmError::Authentication { message: String::new() },
+        LlmError::PermissionDenied { message: String::new() },
         LlmError::InvalidRequest {
             message: "bad".to_string(),
         },

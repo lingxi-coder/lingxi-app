@@ -6,8 +6,24 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LlmError {
     /// Authentication failed or credentials are missing/invalid.
+    ///
+    /// `message` preserves the PROVIDER's own text (with the SDK status prefix,
+    /// see `providers::api_error_message`). It exists because the whole
+    /// user-facing auth-copy family gates on that text — "OAuth token has been
+    /// revoked", "api key authentication is disabled", "x-api-key",
+    /// "OAuth authentication is currently not allowed for this organization".
+    /// While this was a UNIT variant the decoder dropped the message at the
+    /// provider boundary, so every one of those branches was unreachable and
+    /// the user got the bare `Display` instead.
+    ///
+    /// `Display` deliberately stays the fixed string: consumers that render or
+    /// match on it are unaffected. Read the provider text via
+    /// [`LlmError::provider_message`].
     #[error("authentication failed")]
-    Authentication,
+    Authentication {
+        /// Provider error text, empty when constructed internally.
+        message: String,
+    },
     /// The stored OAuth refresh token was REJECTED by the IdP — the session is
     /// dead and only a fresh `/login` can revive it.
     ///
@@ -20,8 +36,14 @@ pub enum LlmError {
     #[error("oauth session expired")]
     OAuthRefreshDead,
     /// Caller is authenticated but not allowed to perform the request.
+    ///
+    /// Carries the provider's text for the same reason as
+    /// [`Self::Authentication`]; `Display` is unchanged.
     #[error("permission denied")]
-    PermissionDenied,
+    PermissionDenied {
+        /// Provider error text, empty when constructed internally.
+        message: String,
+    },
     /// Provider rejected the request as invalid.
     #[error("invalid request: {message}")]
     InvalidRequest {
@@ -165,11 +187,24 @@ impl LlmError {
     /// numeric status.
     #[must_use]
     pub fn http_status(&self) -> Option<u16> {
+        self.provider_message().and_then(api_error_status)
+    }
+
+    /// The PROVIDER's own error text, for variants that preserved it.
+    ///
+    /// `Display` is not a substitute: several variants render a fixed string
+    /// (`"permission denied"`), which is precisely why the auth branches that
+    /// gate on the server's wording were unreachable before these variants
+    /// carried a message. Returns `None` when the variant has no provider text.
+    #[must_use]
+    pub fn provider_message(&self) -> Option<&str> {
         match self {
-            LlmError::InvalidRequest { message }
+            LlmError::Authentication { message }
+            | LlmError::PermissionDenied { message }
+            | LlmError::InvalidRequest { message }
             | LlmError::Transport { message }
             | LlmError::StreamInterrupted { message }
-            | LlmError::CostUnavailable { message } => api_error_status(message),
+            | LlmError::CostUnavailable { message } => Some(message),
             _ => None,
         }
     }
@@ -249,7 +284,7 @@ mod api_error_status_tests {
             Some(422)
         );
         // A variant with no message can never carry a prefix.
-        assert_eq!(LlmError::Authentication.http_status(), None);
+        assert_eq!(LlmError::Authentication { message: String::new() }.http_status(), None);
         assert_eq!(LlmError::ProviderInternal.http_status(), None);
     }
 }

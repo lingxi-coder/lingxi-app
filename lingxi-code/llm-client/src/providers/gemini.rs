@@ -150,8 +150,8 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
     let display = super::api_error_message(response.status, &response.body_json, &message);
 
     match google_status {
-        "UNAUTHENTICATED" => LlmError::Authentication,
-        "PERMISSION_DENIED" => LlmError::PermissionDenied,
+        "UNAUTHENTICATED" => LlmError::Authentication { message: display },
+        "PERMISSION_DENIED" => LlmError::PermissionDenied { message: display },
         "NOT_FOUND" => LlmError::ModelUnavailable,
         "RESOURCE_EXHAUSTED" => LlmError::RateLimited {
             retry_after,

@@ -55,7 +55,7 @@ fn anthropic_error_envelope_maps_to_taxonomy() {
                 "invalid x-api-key"
             ))
             .unwrap_err(),
-        LlmError::Authentication
+        LlmError::Authentication { .. }
     ));
     assert!(matches!(
         codec
@@ -117,7 +117,7 @@ fn openai_error_envelope_maps_to_taxonomy() {
                 "Incorrect API key provided"
             ))
             .unwrap_err(),
-        LlmError::Authentication
+        LlmError::Authentication { .. }
     ));
     assert!(matches!(
         codec
@@ -173,13 +173,13 @@ fn gemini_error_envelope_maps_to_taxonomy() {
         codec
             .decode_response(gemini_error(401, "UNAUTHENTICATED", "API key not valid"))
             .unwrap_err(),
-        LlmError::Authentication
+        LlmError::Authentication { .. }
     ));
     assert!(matches!(
         codec
             .decode_response(gemini_error(403, "PERMISSION_DENIED", "no access"))
             .unwrap_err(),
-        LlmError::PermissionDenied
+        LlmError::PermissionDenied { .. }
     ));
     assert!(matches!(
         codec
@@ -207,7 +207,7 @@ fn error_status_without_envelope_falls_back_to_status_mapping() {
         anthropic_codec()
             .decode_response(ProviderResponse::json(401, serde_json::Value::Null))
             .unwrap_err(),
-        LlmError::Authentication
+        LlmError::Authentication { .. }
     ));
     assert!(matches!(
         openai_codec()

@@ -1078,7 +1078,7 @@ fn decode_response_http_401_maps_authentication() {
             serde_json::json!({"error": {"message": "bad key", "code": "invalid_api_key"}}),
         ))
         .unwrap_err();
-    assert!(matches!(err, llm_client::LlmError::Authentication));
+    assert!(matches!(err, llm_client::LlmError::Authentication { .. }));
 }
 
 #[test]

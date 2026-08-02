@@ -107,7 +107,9 @@ impl MultiCredentialProvider {
         if let Ok(Some(key)) = self.credentials.get_anthropic_api_key().await {
             return Ok(Credential::ApiKey(key.expose_secret().clone()));
         }
-        Err(helper_error.unwrap_or(LlmError::Authentication))
+        Err(helper_error.unwrap_or(LlmError::Authentication {
+            message: String::new(),
+        }))
     }
 
     /// Resolve a non-Anthropic provider key: keychain[id] → env[var] → Authentication.
@@ -132,7 +134,9 @@ impl MultiCredentialProvider {
                 return Ok(Credential::ApiKey(val));
             }
         }
-        Err(LlmError::Authentication)
+        Err(LlmError::Authentication {
+            message: String::new(),
+        })
     }
 }
 
@@ -143,7 +147,9 @@ impl CredentialProvider for MultiCredentialProvider {
     ) -> BoxFuture<'a, Result<Credential, LlmError>> {
         Box::pin(async move {
             let Some(credential_id) = scope.credential_id.as_deref() else {
-                return Err(LlmError::Authentication);
+                return Err(LlmError::Authentication {
+                    message: String::new(),
+                });
             };
             // Any registered OAuth delegate wins for its credential_id
             // (anthropic-oauth, openai-chatgpt, …).
@@ -328,7 +334,12 @@ mod tests {
             ))
             .await
             .expect_err("no key configured");
-        assert_eq!(err, LlmError::Authentication);
+        assert_eq!(
+            err,
+            LlmError::Authentication {
+                message: String::new()
+            }
+        );
     }
 
     #[tokio::test]
@@ -387,7 +398,12 @@ mod tests {
             ))
             .await
             .expect_err("no credential id");
-        assert_eq!(err, LlmError::Authentication);
+        assert_eq!(
+            err,
+            LlmError::Authentication {
+                message: String::new()
+            }
+        );
     }
 
     #[tokio::test]
@@ -489,7 +505,12 @@ mod tests {
             ))
             .await
             .expect_err("nothing configured");
-        assert_eq!(err, LlmError::Authentication);
+        assert_eq!(
+            err,
+            LlmError::Authentication {
+                message: String::new()
+            }
+        );
     }
 
     #[tokio::test]
@@ -570,7 +591,12 @@ mod tests {
             ))
             .await
             .expect_err("no delegate");
-        assert_eq!(err, LlmError::Authentication);
+        assert_eq!(
+            err,
+            LlmError::Authentication {
+                message: String::new()
+            }
+        );
     }
 
     /// A stub that always returns the fixed `Credential` it was constructed with.

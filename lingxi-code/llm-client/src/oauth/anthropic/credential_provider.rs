@@ -36,7 +36,9 @@ pub(crate) fn llm_error_for(err: &OAuthHookError) -> LlmError {
     match err {
         OAuthHookError::RefreshFailed(_) => LlmError::OAuthRefreshDead,
         OAuthHookError::TokenStale | OAuthHookError::ProviderUnreachable(_) => {
-            LlmError::Authentication
+            LlmError::Authentication {
+                message: String::new(),
+            }
         }
     }
 }
@@ -120,12 +122,12 @@ mod tests {
         // Another caller rotated first — the retry succeeds, nothing expired.
         assert_eq!(
             llm_error_for(&OAuthHookError::TokenStale),
-            LlmError::Authentication
+            LlmError::Authentication { message: String::new() }
         );
         // The IdP was unreachable; the refresh token may be perfectly valid.
         assert_eq!(
             llm_error_for(&OAuthHookError::ProviderUnreachable("dns".into())),
-            LlmError::Authentication
+            LlmError::Authentication { message: String::new() }
         );
     }
 }

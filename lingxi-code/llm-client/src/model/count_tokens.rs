@@ -379,7 +379,7 @@ mod tests {
             .expect_err("must fail");
 
         assert!(
-            matches!(err, LlmError::Authentication),
+            matches!(err, LlmError::Authentication { .. }),
             "expected Authentication, got {err:?}"
         );
     }

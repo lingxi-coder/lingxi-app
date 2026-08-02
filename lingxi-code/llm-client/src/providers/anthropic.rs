@@ -796,8 +796,8 @@ fn map_error(
     retry_after: Option<Duration>,
 ) -> LlmError {
     match error_type {
-        "authentication_error" => LlmError::Authentication,
-        "permission_error" => LlmError::PermissionDenied,
+        "authentication_error" => LlmError::Authentication { message: display },
+        "permission_error" => LlmError::PermissionDenied { message: display },
         "not_found_error" => LlmError::ModelUnavailable,
         "rate_limit_error" => LlmError::RateLimited {
             retry_after,

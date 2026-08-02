@@ -231,6 +231,32 @@ pub(crate) fn account_display(profile: Option<&str>) -> String {
 /// `OAuth token revoked \xB7 Please run /login`.
 const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connect";
 
+/// Oracle `ce_` (returned by `de_()`) — the org has switched OFF the Claude
+/// SUBSCRIPTION path, so an API key is the way in.
+///
+/// Distinct from [`ORG_DISABLED_PREFIX`], which is the mirror image: that one
+/// fires when the org disabled API-KEY auth and pushes the user toward signing
+/// in. Getting them confused would tell a blocked user to do the exact thing
+/// their org turned off.
+///
+/// ⚠️ DELIBERATE DIVERGENCE: the oracle names its own product ("for Claude
+/// Code"); this port rebrands the product throughout its user copy. "Claude
+/// subscription" is NOT rebranded — that names Anthropic's subscription, which
+/// is what the org actually disabled.
+pub(crate) const OAUTH_ORG_NOT_ALLOWED: &str =
+    "Your organization has disabled Claude subscription access for LingXi \u{b7} \
+     Use an Anthropic API key instead, or ask your admin to enable access";
+
+/// Oracle gate: `(status===401||status===403)` AND the message names the block.
+///
+/// Both halves matter — the phrase is the server's, and the status range keeps
+/// an unrelated 4xx carrying similar prose out of this branch.
+#[must_use]
+pub(crate) fn is_oauth_org_not_allowed(status: Option<u16>, message: &str) -> bool {
+    matches!(status, Some(401 | 403))
+        && message.contains("OAuth authentication is currently not allowed for this organization")
+}
+
 /// Oracle `Uke` — `status===403 && message.includes("OAuth token has been revoked")`.
 ///
 /// Both halves matter: a 403 alone is an ordinary permission failure, and the
@@ -934,6 +960,37 @@ mod tests {
             oauth_revoked_text(false, Some("anthropic")),
             "Your account does not have access to Claude. Please login again or \
              contact your administrator."
+        );
+    }
+
+    /// Oracle `de_()` → `ce_`, gated on a 401/403 whose message names the
+    /// org-level OAuth block. Distinct from the API-KEY disablement below: this
+    /// one says the SUBSCRIPTION path is off and an API key is the way in.
+    #[test]
+    fn the_org_oauth_block_has_its_own_copy_and_gate() {
+        assert!(is_oauth_org_not_allowed(
+            Some(401),
+            "401 OAuth authentication is currently not allowed for this organization"
+        ));
+        assert!(is_oauth_org_not_allowed(
+            Some(403),
+            "403 OAuth authentication is currently not allowed for this organization"
+        ));
+        // The oracle's gate is `status===401||status===403` AND the phrase.
+        assert!(!is_oauth_org_not_allowed(
+            Some(429),
+            "OAuth authentication is currently not allowed for this organization"
+        ));
+        assert!(!is_oauth_org_not_allowed(Some(403), "403 forbidden"));
+
+        // Byte-exact but for the product name: the oracle says "Claude Code",
+        // and this port rebrands the product throughout its user-facing copy.
+        // "Claude subscription" is NOT rebranded — that names Anthropic's
+        // subscription, not this product.
+        assert_eq!(
+            OAUTH_ORG_NOT_ALLOWED,
+            "Your organization has disabled Claude subscription access for LingXi \u{b7} \
+             Use an Anthropic API key instead, or ask your admin to enable access"
         );
     }
 

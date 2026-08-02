@@ -661,11 +661,11 @@ pub fn next_step_with_backoff(
         // SSL/cert failures (parity 2.1.201 `isSSLError` short-circuit: a cert
         // error is terminal immediately, never consuming the retry budget).
         LlmError::TlsCert { .. }
-        | LlmError::Authentication
+        | LlmError::Authentication { .. }
         // A rejected refresh token cannot be retried into validity; the user
         // has to sign in again.
         | LlmError::OAuthRefreshDead
-        | LlmError::PermissionDenied
+        | LlmError::PermissionDenied { .. }
         | LlmError::ContextOverflow { .. }
         | LlmError::RequestTooLarge
         | LlmError::QuotaExceeded

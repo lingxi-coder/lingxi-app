@@ -630,9 +630,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             // `"overloaded"`. Carved out for the non-streaming path.
             LlmError::Overloaded { .. } => (Some("server_error"), Some(529)),
             // x-api-key / 401 → "authentication_failed".
-            LlmError::Authentication => (Some("authentication_failed"), Some(401)),
+            LlmError::Authentication { .. } => (Some("authentication_failed"), Some(401)),
             // 403 → "authentication_failed".
-            LlmError::PermissionDenied => (Some("authentication_failed"), Some(403)),
+            LlmError::PermissionDenied { .. } => (Some("authentication_failed"), Some(403)),
             // Dead OAuth session (`e instanceof qQt`) → the oracle renders it
             // with `yu({error:"authentication_failed"})` and passes NO status:
             // the refresh call failed against the IdP, so there is no
@@ -6472,10 +6472,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // provider profile: this renderer is shared by every provider, and
             // the oracle's hardcoded "Claude" would be wrong for a session
             // routed elsewhere.
-            LlmError::Authentication | LlmError::PermissionDenied
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. }
                 if crate::api_error_copy::is_oauth_revoked(
                     err.http_status(),
-                    &err.to_string(),
+                    err.provider_message().unwrap_or_default(),
                 ) =>
             {
                 let profile = self.session.lock().await.model_profile.clone();
@@ -6484,13 +6484,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     profile.as_deref(),
                 )
             }
+            // Org policy turned the SUBSCRIPTION path off (`de_()` → `ce_`, a
+            // 401/403 naming it). The oracle checks this BEFORE the API-key
+            // disablement below, and the two are mirror images: this one sends
+            // the user to an API key, that one sends them to sign-in. Ordering
+            // them wrongly would hand a blocked user the remedy their org just
+            // disabled.
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. }
+                if crate::api_error_copy::is_oauth_org_not_allowed(
+                    err.http_status(),
+                    err.provider_message().unwrap_or_default(),
+                ) =>
+            {
+                crate::api_error_copy::OAUTH_ORG_NOT_ALLOWED.to_string()
+            }
             // Org policy turned API-key auth off (403 naming it). Checked
             // before the generic credential branch, and names the specific
             // thing THIS user has to unset.
-            LlmError::Authentication | LlmError::PermissionDenied
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. }
                 if crate::api_error_copy::is_api_key_auth_disabled(
                     err.http_status(),
-                    &err.to_string(),
+                    err.provider_message().unwrap_or_default(),
                 ) =>
             {
                 let profile = self.session.lock().await.model_profile.clone();
@@ -6507,8 +6521,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             //
             // A 401/403 that does NOT name the header falls through to the
             // variant's own text, matching the oracle's outer `if`.
-            LlmError::Authentication | LlmError::PermissionDenied
-                if crate::api_error_copy::mentions_api_key_header(&err.to_string()) =>
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. }
+                if crate::api_error_copy::mentions_api_key_header(err.provider_message().unwrap_or_default()) =>
             {
                 // A cloud-hosted route names ITS credential problem instead —
                 // "run gcloud auth ..." is useful advice, "/login" is not. The
@@ -19278,7 +19292,9 @@ mod persist_with_parent_tests {
 
         // A variant carrying no message can never gain a prefix, so its
         // canonical status is unaffected.
-        let auth = OrchestratorError::ApiCall(LlmError::Authentication);
+        let auth = OrchestratorError::ApiCall(LlmError::Authentication {
+            message: String::new(),
+        });
         assert_eq!(classify_api_error(&auth).api_error_status, Some(401));
     }
 
@@ -19302,12 +19318,16 @@ mod persist_with_parent_tests {
                 Some(529),
             ),
             (
-                LlmError::Authentication,
+                LlmError::Authentication {
+                    message: String::new(),
+                },
                 Some("authentication_failed"),
                 Some(401),
             ),
             (
-                LlmError::PermissionDenied,
+                LlmError::PermissionDenied {
+                    message: String::new(),
+                },
                 Some("authentication_failed"),
                 Some(403),
             ),
@@ -20926,6 +20946,83 @@ mod main_thread_agent_tests {
         );
     }
 
+    /// A real provider 403 now KEEPS its message, so the auth-copy family is
+    /// reachable. Before `Authentication`/`PermissionDenied` carried a message,
+    /// the decoder dropped it at the provider boundary and every branch below
+    /// gated on `Display` ("permission denied") — none could ever match.
+    #[tokio::test]
+    async fn a_real_403_keeps_the_message_the_auth_branches_gate_on() {
+        // Exactly what `providers::map_error_status(403, …)` now produces.
+        let revoked = LlmError::PermissionDenied {
+            message: "403 OAuth token has been revoked".to_string(),
+        };
+        assert_eq!(revoked.http_status(), Some(403), "prefix survives");
+        assert!(crate::api_error_copy::is_oauth_revoked(
+            revoked.http_status(),
+            revoked.provider_message().unwrap_or_default()
+        ));
+
+        let orch = orch_with_config(OrchestratorConfig::default());
+        assert_eq!(
+            orch.model_error_text(&revoked).await,
+            "Your account does not have access to Claude. Please login again or \
+             contact your administrator."
+        );
+
+        // The org-level OAuth block reaches its own copy too.
+        let org_block = LlmError::PermissionDenied {
+            message: "403 OAuth authentication is currently not allowed for this organization"
+                .to_string(),
+        };
+        assert_eq!(
+            orch.model_error_text(&org_block).await,
+            crate::api_error_copy::OAUTH_ORG_NOT_ALLOWED
+        );
+
+        // A 403 with unrelated text still falls through to the bare Display.
+        let plain = LlmError::PermissionDenied {
+            message: "403 forbidden".to_string(),
+        };
+        assert_eq!(orch.model_error_text(&plain).await, "permission denied");
+    }
+
+    /// The org-level OAuth block must reach the user as its own copy, and must
+    /// NOT be confused with the API-key disablement — they prescribe opposite
+    /// remedies.
+    #[tokio::test]
+    async fn an_org_oauth_block_tells_the_user_to_use_an_api_key() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        let err = LlmError::InvalidRequest {
+            message: "403 OAuth authentication is currently not allowed for this organization"
+                .to_string(),
+        };
+        // The gate keys on Authentication/PermissionDenied, so route it the way
+        // a real decode would.
+        let denied = LlmError::PermissionDenied {
+            message: String::new(),
+        };
+        assert!(
+            !crate::api_error_copy::is_oauth_org_not_allowed(
+                denied.http_status(),
+                &denied.to_string()
+            ),
+            "a bare PermissionDenied carries no message and must not match"
+        );
+        assert!(crate::api_error_copy::is_oauth_org_not_allowed(
+            Some(403),
+            &err.to_string()
+        ));
+        let text = orch
+            .model_error_text(&LlmError::PermissionDenied {
+                message: String::new(),
+            })
+            .await;
+        assert!(
+            !text.contains("disabled Claude subscription access"),
+            "a bare 403 with no message must not claim an org block: {text}"
+        );
+    }
+
     /// The sibling failures must NOT claim the login expired: a plain auth
     /// failure keeps its own text, so the new arm cannot swallow them.
     #[tokio::test]
@@ -20933,7 +21030,9 @@ mod main_thread_agent_tests {
         let mut config = OrchestratorConfig::default();
         config.interactive_session = true;
         let orch = orch_with_config(config);
-        let text = orch.model_error_text(&LlmError::Authentication).await;
+        let text = orch.model_error_text(&LlmError::Authentication {
+            message: String::new(),
+        }).await;
         assert!(
             !text.contains("Login expired"),
             "a generic auth failure must not be rendered as an expired login: {text}"

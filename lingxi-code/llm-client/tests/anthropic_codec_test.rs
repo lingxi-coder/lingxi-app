@@ -903,7 +903,7 @@ fn stream_error_events_map_to_error_taxonomy() {
             br#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#
                 .to_vec(),
         )),
-        Err(llm_client::LlmError::Authentication)
+        Err(llm_client::LlmError::Authentication { .. })
     ));
     assert!(matches!(
         decoder.decode_frame(llm_client::RawStreamFrame::new(
@@ -1111,5 +1111,5 @@ fn count_tokens_error_status_maps_through_taxonomy() {
         ))
         .unwrap_err();
 
-    assert!(matches!(err, llm_client::LlmError::Authentication));
+    assert!(matches!(err, llm_client::LlmError::Authentication { .. }));
 }

@@ -297,8 +297,12 @@ mod tests {
     #[test]
     fn non_overloaded_llm_errors_convert_to_api_call() {
         let variants: Vec<LlmError> = vec![
-            LlmError::Authentication,
-            LlmError::PermissionDenied,
+            LlmError::Authentication {
+                message: String::new(),
+            },
+            LlmError::PermissionDenied {
+                message: String::new(),
+            },
             LlmError::ProviderInternal,
             LlmError::Transport {
                 message: "t".into(),

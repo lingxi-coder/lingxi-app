@@ -32,7 +32,9 @@ pub(crate) fn llm_error_for(err: &OAuthHookError) -> LlmError {
     match err {
         OAuthHookError::RefreshFailed(_) => LlmError::OAuthRefreshDead,
         OAuthHookError::TokenStale | OAuthHookError::ProviderUnreachable(_) => {
-            LlmError::Authentication
+            LlmError::Authentication {
+                message: String::new(),
+            }
         }
     }
 }

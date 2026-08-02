@@ -41,6 +41,7 @@
 //! on its configured cadence. The payload's OPTIONAL `rate_limits` comes from
 //! `AppState.raw_utilization`.
 
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -66,6 +67,11 @@ fn format_custom_status_line(stdout: &str) -> String {
 
 /// Default (and claude-code's) status-line command timeout: 5 seconds.
 pub const STATUS_LINE_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Status-line commands are UI helpers, not bulk-output transports. Drain their
+// pipe concurrently so a verbose command cannot deadlock before exit, but
+// reject unreasonably large output instead of retaining it in the TUI process.
+const MAX_STATUS_LINE_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Raw per-window utilization snapshot mirrored from
 /// `OutputEvent::RawUtilization` (orchestrator `rawUtilization` track).
@@ -640,6 +646,30 @@ fn run_command_stdout(
     }
 
     let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut overflowed = false;
+        let mut chunk = [0_u8; 8 * 1024];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let remaining = MAX_STATUS_LINE_OUTPUT_BYTES.saturating_sub(output.len());
+                    let retained = remaining.min(read);
+                    output.extend_from_slice(&chunk[..retained]);
+                    overflowed |= retained != read;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    let _ = stdout_tx.send(None);
+                    return;
+                }
+            }
+        }
+        let _ = stdout_tx.send(Some((output, overflowed)));
+    });
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(stdin_json.as_bytes());
     }
@@ -648,11 +678,15 @@ fn run_command_stdout(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child.wait_with_output().ok()?;
                 if !status.success() {
                     return None;
                 }
-                return Some(String::from_utf8_lossy(&output.stdout).into_owned());
+                let remaining = timeout.saturating_sub(start.elapsed());
+                let (output, overflowed) = stdout_rx.recv_timeout(remaining).ok()??;
+                if overflowed {
+                    return None;
+                }
+                return Some(String::from_utf8_lossy(&output).into_owned());
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
@@ -971,6 +1005,16 @@ mod tests {
         // A command that sleeps past the (tiny) timeout returns None and is killed.
         let out = run_status_line_command("sleep 5", "{}", Duration::from_millis(50));
         assert!(out.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_status_line_command_drains_and_rejects_oversized_stdout() {
+        let started = Instant::now();
+        let out =
+            run_status_line_command("head -c 1048577 /dev/zero", "{}", Duration::from_secs(2));
+        assert!(out.is_none());
+        assert!(started.elapsed() < Duration::from_millis(1500));
     }
 
     #[cfg(unix)]

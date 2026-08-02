@@ -2730,15 +2730,23 @@ fn read_status_line_configs_from(
 }
 
 /// Live wrapper over [`read_status_line_configs_from`].
+fn workspace_is_trusted(
+    global_config_path: Option<&std::path::Path>,
+    project_dir: &std::path::Path,
+) -> bool {
+    global_config_path.is_some_and(|path| {
+        migrations::global_config::check_has_trust_dialog_accepted(path, project_dir)
+    })
+}
+
 async fn read_status_line_configs(
     flag_settings: Option<&engine::settings::SettingsJson>,
     source_scope: (bool, bool, bool),
 ) -> ResolvedStatusLineConfigs {
     let (lingxi_home, project_dir) = settings_dirs();
     let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
-    let workspace_trusted = migrations::global_config::global_config_path().is_none_or(|path| {
-        migrations::global_config::check_has_trust_dialog_accepted(&path, &project_dir)
-    });
+    let global_config_path = migrations::global_config::global_config_path();
+    let workspace_trusted = workspace_is_trusted(global_config_path.as_deref(), &project_dir);
     read_status_line_configs_from(
         &lingxi_home,
         &project_dir,
@@ -3349,6 +3357,12 @@ mod tests {
             configs.subagent.is_none(),
             "disabled file scopes may not contribute subagentStatusLine"
         );
+    }
+
+    #[test]
+    fn absent_trust_store_path_is_not_implicitly_trusted() {
+        let project = tempfile::tempdir().unwrap();
+        assert!(!workspace_is_trusted(None, project.path()));
     }
 
     #[test]

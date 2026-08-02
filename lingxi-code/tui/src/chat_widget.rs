@@ -5175,9 +5175,13 @@ mod tests {
     /// `~/.lingxi/settings.json`.
     #[test]
     fn config_shorthand_agents_view_keys_follow_the_enablement_gate() {
-        // Serialize the shared-process env mutation against itself.
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // Take the CRATE-WIDE env lock, not a private one. A lock scoped to a
+        // single test serializes it against itself, which cannot happen — it
+        // excludes nothing. The real contender is any other test mutating or
+        // reading the environ block concurrently (`rate_limit_messages` does).
+        let _env = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let var = traits::agent_view::DISABLE_AGENT_VIEW_ENV;
         std::env::remove_var(var);
 
@@ -5220,6 +5224,10 @@ mod tests {
 
     #[test]
     fn config_shorthand_agents_view_keys_are_unknown_under_maple_sundial() {
+        // Same global as the enablement-gate test below reads; one lock.
+        let _state = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         telemetry::test_set_flag("tengu_maple_sundial", true);
         for key in ["leftArrowOpensAgents", "defaultToAgentsView"] {
             let mut w = widget();

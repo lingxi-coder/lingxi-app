@@ -102,3 +102,22 @@ pub fn restore_terminal(terminal: &mut AgentsTerminal) -> std::io::Result<()> {
     )?;
     terminal.show_cursor()
 }
+
+/// Test-only: serializes every test in this crate that reads or writes
+/// PROCESS-GLOBAL state — environment variables AND telemetry flags.
+///
+/// Scope the lock to the STATE, not to whichever test needed it first. Two
+/// separate mistakes here proved the point: a lock private to one test (which
+/// excludes nothing), and an env-only lock that missed the telemetry flag
+/// `tengu_maple_sundial` feeding the very same `/config` gate.
+///
+/// For the environment specifically, the unit is the whole environ BLOCK, not
+/// any one variable. `set_var` /
+/// `remove_var` mutate the whole environ block, so a mutation of `FOO` on one
+/// thread races a `var("BAR")` read on another — the C library may reallocate
+/// the block mid-read. Reasoning per-variable ("no other test touches this
+/// var, so it is race-free") is the mistake that produced an intermittent
+/// failure here: `rate_limit_messages` and `chat_widget` each mutated a
+/// different variable, under no shared lock, in one test binary.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

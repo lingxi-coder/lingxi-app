@@ -2647,13 +2647,25 @@ mod tests {
     // other test in this crate touches that var, so clearing it here is
     // deterministic and race-free under the parallel test harness.
 
-    fn clear_rate_limit_env() {
+    /// Clear the var AND hold the crate-wide env lock for the caller's whole
+    /// body — the returned guard must be bound (`let _env = …`).
+    ///
+    /// The previous comment here claimed this was "deterministic and race-free"
+    /// because no other test touches this variable. That reasoning is about the
+    /// VARIABLE; the race is on the environ BLOCK, which `chat_widget`'s
+    /// agent-view test mutates concurrently. Reads here could tear.
+    #[must_use]
+    fn clear_rate_limit_env() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var("DISABLE_EXTRA_USAGE_COMMAND");
+        guard
     }
 
     #[test]
     fn e2e_overage_allowed_warning_close_to_credit_limit() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // rejected + overageStatus allowed_warning → isUsingOverage → the
         // 2.1.206 close-to-limit copy, non-usage-based default snapshot.
         let info = RateLimitInfo {
@@ -2668,7 +2680,7 @@ mod tests {
 
     #[test]
     fn e2e_rejected_out_of_credits_personal_upsell_wired_through_gid() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // overageStatus rejected, reason out_of_credits, non-usage-based
         // (pro, stripe billing) → "You're out of usage credits · resets
         // {t}", and — unlike the pure-core tests above — the upsell here is
@@ -2704,7 +2716,7 @@ mod tests {
 
     #[test]
     fn e2e_rejected_out_of_credits_org_usage_based_billing_add_funds() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // Team admin, usage-based org billing, out_of_credits →
         // "Your org is out of usage · add funds to continue"; the Gid
         // upsell for this exact shape is the team admin-enable copy (the
@@ -2730,7 +2742,7 @@ mod tests {
 
     #[test]
     fn e2e_seven_day_overage_included_fable5_jid_suppresses_upsell() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // `jid = rateLimitType==="seven_day_overage_included" ||
         // errorCode==="credits_required"` hard-nulls the upsell BEFORE
         // `Gid` ever runs — even for a pro subscriber who would otherwise
@@ -2751,7 +2763,7 @@ mod tests {
 
     #[test]
     fn e2e_credits_required_jid_suppresses_upsell() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // Same `jid` gate, driven by `credits_required` instead of the
         // rate-limit-type disjunct.
         let info = RateLimitInfo {
@@ -2768,7 +2780,7 @@ mod tests {
 
     #[test]
     fn e2e_approaching_five_hour_pro_early_warning_with_upgrade_upsell() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // allowed_warning, utilization >= 0.7, five_hour, pro subscriber →
         // the early-warning text (getEarlyWarningText / `jcg`) with the
         // `/upgrade to keep using LingXi` suffix appended by
@@ -2796,7 +2808,7 @@ mod tests {
 
     #[test]
     fn e2e_inert_non_subscriber_rejected_has_no_upsell_leakage() {
-        clear_rate_limit_env();
+        let _env = clear_rate_limit_env();
         // `Gid` `shouldShowUpsell = Eyt()||Bo()` reduces to
         // `sub.is_subscriber` (Eyt() is a hard `false` constant in 2.1.206).
         // A default (non-subscriber / non-Anthropic-session) snapshot on a

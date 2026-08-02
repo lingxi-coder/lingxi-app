@@ -1037,6 +1037,11 @@ mod tests {
 
     #[test]
     fn maple_sundial_collapses_agents_settings_to_managed_row() {
+        // `tengu_maple_sundial` is process-global and `chat_widget`'s tests
+        // read it; take the crate-wide lock so neither observes the other's.
+        let _state = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         telemetry::test_set_flag("tengu_maple_sundial", true);
         let lines = settings_lines(
             ThemeName::Dark,

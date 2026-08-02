@@ -2360,16 +2360,44 @@ impl ChatWidget {
     /// `/status`: open the session status screen (snapshot facts + live
     /// editor toggles).
     pub(crate) fn cmd_status(&mut self, _args: &str) -> ChatOutcome {
+        let current = self.session.models.iter().find(|m| m.is_current);
+        // Oracle `htf()` runs when the panel MOUNTS, against the live memory
+        // set and the live model — a LINGXI.md that grew past the limit this
+        // session, or a `/model` switch that lowered the threshold, both change
+        // the answer. The launch-time capture could only ever report the state
+        // at startup. Same throwaway-`block_on` fs-scan bridge `/mcp` and
+        // `/reload-skills` use; falls back to the captured rows if the reload
+        // cannot run, so the panel never loses warnings it already had.
+        let warnings = self
+            .recomputed_large_memory_warnings(current.map(|m| m.request_model.as_str()))
+            .unwrap_or_else(|| self.session.large_memory_warnings.clone());
         let view = ScreenView::status(
             &self.session.doctor,
-            self.session.models.iter().find(|m| m.is_current),
+            current,
             self.bottom_pane.vim_enabled(),
             self.transcript.verbose(),
             self.theme_name,
-            &self.session.large_memory_warnings,
+            &warnings,
         );
         self.bottom_pane.show_view(Box::new(view));
         ChatOutcome::Continue
+    }
+
+    /// Recompute the `/status` oversized-memory warnings against the CURRENT
+    /// memory set, or `None` when no runtime can be built.
+    ///
+    /// Reloads through the same provider the system prompt is built from, so
+    /// every membership gate (the `LINGXI_DISABLE_LINGXI_MDS` kill switch, the
+    /// Managed tier, `@import` expansion, the 4 MiB skip) is the provider's,
+    /// not restated here.
+    fn recomputed_large_memory_warnings(&self, model: Option<&str>) -> Option<Vec<String>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        let _ = model;
+        let handle = self.orchestrator.clone()?;
+        runtime.block_on(handle.large_memory_warnings())
     }
 
     /// `/config`: bare → open the settings screen; `key=value [key=value …]` →

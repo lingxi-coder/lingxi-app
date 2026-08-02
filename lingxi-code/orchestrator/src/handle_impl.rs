@@ -575,6 +575,28 @@ impl OrchestratorHandle for ConversationOrchestrator {
         self.snapshot_cost_real().await
     }
 
+    /// Oracle `htf()` — recomputed on demand, against the LIVE memory set and
+    /// the LIVE model.
+    ///
+    /// Reads through `self.memory`, the same provider the system prompt's
+    /// memory block is built from, so every membership gate (the
+    /// `LINGXI_DISABLE_LINGXI_MDS` kill switch, the Managed tier, `@import`
+    /// expansion, the 4 MiB skip) belongs to the provider rather than being
+    /// restated here.
+    async fn large_memory_warnings(&self) -> Option<Vec<String>> {
+        let (model, cwd) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), self.session_cwd.cwd())
+        };
+        let files = self.memory.load(&cwd).await;
+        Some(crate::prompt::large_memory_warning_rows(
+            &files,
+            &cwd,
+            dirs::home_dir().as_deref(),
+            &model,
+        ))
+    }
+
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
         let mut s = self.session.lock().await;
         s.model = model.to_string();

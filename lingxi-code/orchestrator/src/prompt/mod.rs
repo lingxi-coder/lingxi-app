@@ -25,6 +25,9 @@ pub mod task_notification;
 pub mod todo_reminder;
 pub mod tools_block;
 
+pub mod large_memory;
+pub use large_memory::{large_memory_warning_rows, shorten_memory_path};
+
 pub use memory_block::{
     build_memdir_prefetch, build_memdir_prefetch_from_anthropic, build_session_memory_handle,
     real_provider, real_provider_with_excludes, MemoryHierarchyProvider,

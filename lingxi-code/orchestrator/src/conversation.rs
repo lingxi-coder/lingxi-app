@@ -21038,6 +21038,61 @@ mod main_thread_agent_tests {
         );
     }
 
+    /// `/status` warnings must reflect the CURRENT memory set, not a launch
+    /// snapshot: a LINGXI.md that grows past the limit mid-session is exactly
+    /// the case the panel exists to report.
+    #[tokio::test]
+    async fn large_memory_warnings_are_recomputed_from_the_live_memory_set() {
+        use traits::OrchestratorHandle as _;
+
+        // The default model is `claude-opus-4-8`, a 1M-context model, so the
+        // threshold is 200_000 chars — NOT the 40_000 floor. Sizing the fixture
+        // against the floor would have made this pass for the wrong reason.
+        let big = "x".repeat(250_000);
+        let file = crate::prompt::MemoryFile {
+            path: std::path::PathBuf::from("/work/repo/LINGXI.md"),
+            body: big,
+            is_local_override: false,
+            tier: crate::prompt::LingxiMdTier::Project,
+            globs: None,
+            raw_content: String::new(),
+            content_differs_from_disk: false,
+        };
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![file])),
+            PathBuf::from("/work/repo"),
+        );
+        let rows = orch
+            .large_memory_warnings()
+            .await
+            .expect("production orchestrator can recompute memory warnings");
+        assert_eq!(rows.len(), 1, "the oversized file must be reported: {rows:?}");
+        assert!(
+            rows[0].starts_with("Large ") && rows[0].contains("will impact performance"),
+            "oracle row shape: {}",
+            rows[0]
+        );
+
+        // An empty memory set reports nothing — the panel stays byte-identical.
+        let empty = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        );
+        assert_eq!(empty.large_memory_warnings().await, Some(Vec::new()));
+    }
+
     /// The org-level OAuth block must reach the user as its own copy, and must
     /// NOT be confused with the API-key disablement — they prescribe opposite
     /// remedies.

@@ -1348,6 +1348,21 @@ pub trait OrchestratorHandle: Send + Sync {
     /// turns use the new model; the profile disambiguates shared model ids
     /// across providers (e.g. `"gpt-5.2"` on `"github-copilot"` vs `"openai"`).
     /// `None` profile = resolve unscoped (default / legacy behaviour).
+    /// The `/status` oversized-memory warnings, recomputed NOW.
+    ///
+    /// Oracle `htf()` runs when the panel MOUNTS, against the live memory set
+    /// and the live model — a LINGXI.md that grew this session, or a `/model`
+    /// switch that moved the threshold, both change the answer, and a
+    /// launch-time capture can see neither. The engine owns the memory
+    /// provider, so it owns this.
+    ///
+    /// **Default unavailable**: `None` means the implementation cannot
+    /// recompute the live set, while `Some(Vec::new())` is an authoritative
+    /// result saying that all previously captured warnings have cleared.
+    async fn large_memory_warnings(&self) -> Option<Vec<String>> {
+        None
+    }
+
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
     /// Read the session's fast-mode flag (`/fast`; the priority `speed:"fast"`

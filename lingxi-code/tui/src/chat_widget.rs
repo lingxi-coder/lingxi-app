@@ -1210,6 +1210,16 @@ impl ChatWidget {
                 self.with_status_line(|s| s.data.cost = cost_str.clone());
                 self.cost = Some(cost_str);
             }
+            TurnEvent::Attachment { attachment } => {
+                // The oracle's `k$o` returns attachment RECORDS; the reminder
+                // text the model sees and this transcript line are two
+                // renderings of the same record. The renderer and the
+                // `RenderedMessage::Attachment` -> `AttachmentCell` mapping
+                // already existed here — only the producer was missing, so
+                // nothing but a test fixture ever constructed one.
+                self.transcript
+                    .push_message(RenderedMessage::Attachment { attachment });
+            }
             TurnEvent::ApiRetry {
                 message,
                 attempt,
@@ -7813,6 +7823,41 @@ mod tests {
             rows.iter().any(|row| row.starts_with('›')),
             "composer visible:\n{}",
             rows.join("\n")
+        );
+    }
+
+    /// The last leg of the attachment chain: an emitted record must reach the
+    /// transcript as a drawable cell. The renderer and the
+    /// `RenderedMessage::Attachment` mapping already existed; before this the
+    /// only thing constructing one was a test fixture, so the cells could never
+    /// appear in a real session.
+    #[test]
+    fn an_attachment_event_reaches_the_transcript() {
+        let mut widget = widget();
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::Attachment {
+            attachment: tui_core::message::Attachment::NestedMemory {
+                display_path: "sub/LINGXI.md".to_string(),
+            },
+        });
+        // Assert on what the USER sees, not just that a cell was stored: the
+        // renderer draws `Loaded {display_path}`.
+        let rendered = widget
+            .transcript
+            .visible_fullscreen_lines(80, &Theme::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("Loaded sub/LINGXI.md"),
+            "the attachment must be drawn in the transcript; got:\n{rendered}"
         );
     }
 

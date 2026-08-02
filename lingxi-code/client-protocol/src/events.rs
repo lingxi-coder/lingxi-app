@@ -549,6 +549,13 @@ pub enum ClientEvent {
         cache_creation_tokens: u64,
     },
 
+    /// A user-visible attachment surfaced during a turn (oracle `k$o`'s
+    /// records, rendered as the "Listed directory …" family).
+    Attachment {
+        /// Which attachment this is.
+        attachment: AttachmentDto,
+    },
+
     /// The live API retry/backoff status: a request failed with a retry-worthy
     /// error and is sleeping before the next attempt.
     ApiRetry {
@@ -560,6 +567,20 @@ pub enum ClientEvent {
         max_retries: u32,
         /// Backoff before the next attempt, in ms.
         delay_ms: u64,
+    },
+}
+
+/// A user-visible attachment. Internally tagged on `type`, `snake_case`, and
+/// `#[non_exhaustive]` so the remaining oracle kinds are additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AttachmentDto {
+    /// A nested LINGXI.md surfaced because a file under its directory was read.
+    NestedMemory {
+        /// Path shown to the user, relative to cwd.
+        display_path: String,
     },
 }
 

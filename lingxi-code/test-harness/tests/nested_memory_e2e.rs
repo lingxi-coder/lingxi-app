@@ -87,13 +87,14 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
         Arc::new(UnusedHttp),
         Arc::new(UnusedRuntime),
     ));
+    let output = Arc::new(MockOutputStream::new());
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         Arc::new(ToolRegistry::new()),
         hooks,
         Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
+        Arc::clone(&output) as Arc<dyn traits::OutputStream>,
         Arc::new(StaticMemoryProvider::with_files(vec![])),
         cwd.clone(),
     )
@@ -164,4 +165,19 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
          seeding it, and it only works if the seed used the CANONICAL path"
     );
     assert_eq!(after.data["source"], "seeded");
+
+    // The oracle's `k$o` returns RECORDS; the reminder is one rendering of them
+    // and the UI attachment line is the other. The port originally emitted only
+    // the reminder, so the TUI's attachment cell had no producer. Assert the
+    // record actually reaches the output stream, with the cwd-relative
+    // `displayPath` the oracle computes.
+    let attachments = output.attachment_snapshot().await;
+    assert!(
+        attachments.iter().any(|a| matches!(
+            a,
+            traits::AttachmentKind::NestedMemory { display_path }
+                if display_path.ends_with("LINGXI.md") && !display_path.starts_with('/')
+        )),
+        "the surfaced nested memory must emit an attachment record, cwd-relative; got {attachments:?}"
+    );
 }

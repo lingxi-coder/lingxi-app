@@ -261,6 +261,22 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
+    async fn emit_attachment(&self, attachment: traits::AttachmentKind) {
+        let dto = match attachment {
+            traits::AttachmentKind::NestedMemory { display_path } => {
+                client_protocol::events::AttachmentDto::NestedMemory { display_path }
+            }
+            // `AttachmentKind` is `#[non_exhaustive]`: a kind added upstream
+            // without a DTO here must not be silently swallowed into a wrong
+            // variant. Dropping it renders nothing, which is visible; guessing
+            // would render something false.
+            _ => return,
+        };
+        self.sink
+            .emit(ClientEvent::Attachment { attachment: dto })
+            .await;
+    }
+
     async fn emit_api_retry(&self, message: &str, attempt: u32, max_retries: u32, delay_ms: u64) {
         self.sink
             .emit(ClientEvent::ApiRetry {

@@ -361,6 +361,12 @@ pub enum TurnEvent {
         /// Backoff before the next attempt, in ms (the countdown seed).
         delay_ms: u64,
     },
+    /// A user-visible attachment surfaced during the turn — the oracle's `k$o`
+    /// records, drawn as the "Listed directory …" family.
+    Attachment {
+        /// Which attachment this is.
+        attachment: crate::message::Attachment,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -415,6 +421,18 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::SubagentActivity {
             text: text.to_string(),
         });
+    }
+
+    async fn emit_attachment(&self, attachment: traits::AttachmentKind) {
+        let attachment = match attachment {
+            traits::AttachmentKind::NestedMemory { display_path } => {
+                crate::message::Attachment::NestedMemory { display_path }
+            }
+            // Unmodelled kind: drop rather than guess a variant. Dropping draws
+            // nothing, which is visible; guessing draws something false.
+            _ => return,
+        };
+        let _ = self.tx.send(TurnEvent::Attachment { attachment });
     }
 
     async fn emit_api_retry(&self, message: &str, attempt: u32, max_retries: u32, delay_ms: u64) {

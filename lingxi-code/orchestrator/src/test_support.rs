@@ -284,6 +284,11 @@ pub struct MockOutputStream {
     /// silently inherit the default, drop `denial_kind`, and let every
     /// deny-path test pass no matter what the turn loop computed.
     denials: Arc<Mutex<Vec<(protocol::ToolUseId, String)>>>,
+    /// Attachments observed via `emit_attachment`, same rationale as `denials`:
+    /// the trait method is DEFAULTED, so without this override the mock would
+    /// inherit the no-op and every attachment test would pass whether or not
+    /// the orchestrator emitted anything.
+    attachments: Arc<Mutex<Vec<traits::AttachmentKind>>>,
 }
 
 impl MockOutputStream {
@@ -293,7 +298,13 @@ impl MockOutputStream {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
+            attachments: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot the attachments emitted so far, in emission order.
+    pub async fn attachment_snapshot(&self) -> Vec<traits::AttachmentKind> {
+        self.attachments.lock().await.clone()
     }
 
     /// Snapshot the `(tool_use_id, denial_kind)` pairs captured so far.
@@ -405,6 +416,10 @@ impl OutputStream for MockOutputStream {
             result: result.clone(),
         });
     }
+    async fn emit_attachment(&self, attachment: traits::AttachmentKind) {
+        self.attachments.lock().await.push(attachment);
+    }
+
     async fn emit_tool_result_denied(
         &self,
         id: &protocol::ToolUseId,

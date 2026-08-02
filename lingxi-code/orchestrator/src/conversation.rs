@@ -11878,6 +11878,22 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         if surfaced.is_empty() {
             return None;
         }
+        // The oracle's `k$o` returns RECORDS, not text — the reminder is one
+        // rendering of them and the UI attachment line is the other. The port
+        // originally took only the text half, so the attachment cells the TUI
+        // already knows how to draw had no producer. `displayPath` is the
+        // oracle's `relative(cwd, path)`.
+        for file in &surfaced {
+            let display_path = file
+                .path
+                .strip_prefix(&cwd)
+                .unwrap_or(&file.path)
+                .display()
+                .to_string();
+            self.output
+                .emit_attachment(traits::AttachmentKind::NestedMemory { display_path })
+                .await;
+        }
         self.seed_nested_memory_read_state(&surfaced).await;
         let content = surfaced
             .iter()

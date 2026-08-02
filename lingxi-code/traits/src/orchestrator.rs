@@ -1252,6 +1252,26 @@ mod curated_model_tests {
     }
 }
 
+/// A user-visible attachment surfaced during a turn.
+///
+/// Oracle `k$o` (@237714543) does not return reminder TEXT — it returns records
+/// `{type, path, content, displayPath}` which the renderer turns into the
+/// "Listed directory …" / "Referenced file …" lines. The port took only the
+/// render-to-text half, so the records were dropped and the TUI's attachment
+/// cells had no producer.
+///
+/// `#[non_exhaustive]`: the oracle has nine of these. Only the one whose
+/// producer is already ported is modelled; the rest arrive with their producers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AttachmentKind {
+    /// A nested LINGXI.md surfaced because a file under its directory was read.
+    NestedMemory {
+        /// Path shown to the user, relative to cwd (oracle `displayPath`).
+        display_path: String,
+    },
+}
+
 /// Public handle to the orchestrator that slash commands operate against.
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
@@ -2217,6 +2237,12 @@ pub trait OutputStream: Send + Sync {
         _parent_tool_use_id: &str,
     ) {
     }
+
+    /// Emit a user-visible attachment record surfaced during this turn.
+    ///
+    /// **Default no-op**: sinks that render no attachments keep compiling; the
+    /// client adapter overrides it.
+    async fn emit_attachment(&self, _attachment: AttachmentKind) {}
 
     /// Emit a retry-backoff status while an API request is being retried, so the
     /// UI can show Claude Code's `SystemAPIErrorMessage` line —

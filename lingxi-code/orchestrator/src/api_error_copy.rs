@@ -575,17 +575,32 @@ impl ErrorRouteTag {
     /// Resolve the route from the environment — oracle `xn()` @227682549:
     ///
     /// ```js
-    /// return Z.CLAUDE_CODE_USE_BEDROCK?"bedrock"
+    /// function xn(){
+    ///   if (C_()) return "gateway";          // ← FIRST, outranks every env var
+    ///   return Z.CLAUDE_CODE_USE_BEDROCK?"bedrock"
     ///      : Z.CLAUDE_CODE_USE_FOUNDRY?"foundry"
     ///      : Z.CLAUDE_CODE_USE_ANTHROPIC_AWS?"anthropicAws"
     ///      : Z.CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD?"anthropicGoogleCloud"
     ///      : Z.CLAUDE_CODE_USE_MANTLE?"mantle"
     ///      : Z.CLAUDE_CODE_USE_VERTEX?"vertex"
     ///      : "firstParty";
+    /// }
     /// ```
     ///
     /// ORDER MATTERS — it is a chain, not a set, so `USE_BEDROCK` wins over
     /// `USE_VERTEX` when both are set.
+    ///
+    /// ⚠️ The chain is NOT the whole function. `xn()` checks `C_()` FIRST and
+    /// returns `"gateway"` ahead of every environment variable. This port has
+    /// no gateway-auth state (`C_()` is `Mt.gatewayAuth`, a runtime credential
+    /// object written by `U5e()`), so that arm is genuinely unreachable here —
+    /// but an earlier version of this doc showed only the env chain, which
+    /// reads as though the env vars were the top of the precedence. **If
+    /// gateway auth is ever added, it belongs BEFORE this chain, not appended
+    /// to it**, and the `Epo` copy
+    /// (`Authentication error · The gateway could not authenticate with its
+    /// upstream provider — contact your gateway administrator`, @230618923)
+    /// becomes reachable at the same time.
     ///
     /// These keep their `CLAUDE_CODE_` names: they are the PROVIDER's variables,
     /// which the rebrand deliberately preserves (the same call sites already

@@ -19,8 +19,12 @@ struct SettingsSection<Content: View>: View {
             }
             VStack(spacing: 0) { content }
                 .background(t.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
+                .clipShape(.rect(cornerRadius: 16))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(t.border, lineWidth: 0.5)
+                }
+                .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
             if let footer {
                 Text(footer).font(.system(size: 11)).foregroundColor(t.text4)
                     .lineSpacing(4).padding(.horizontal, 4).padding(.top, 8)
@@ -30,7 +34,7 @@ struct SettingsSection<Content: View>: View {
     }
 }
 
-/// A settings list row. Mirrors the prototype's `<Row>` exactly:
+/// A settings list row with separate semantics for interactive and static content:
 /// optional leading icon tile, title, sub, trailing value/accessory, chevron.
 struct SettingsRow<Trailing: View>: View {
     @Environment(\.theme) private var t
@@ -60,10 +64,14 @@ struct SettingsRow<Trailing: View>: View {
         self.trailing = trailing()
     }
 
+    @ViewBuilder
     var body: some View {
-        Button(action: { onTap?() }) { content }
-            .buttonStyle(.plain)
-            .disabled(onTap == nil)
+        if let onTap {
+            Button(action: onTap) { content }
+                .buttonStyle(SettingsRowButtonStyle(pressedFill: t.surfaceHover))
+        } else {
+            content
+        }
     }
 
     private var content: some View {
@@ -72,10 +80,13 @@ struct SettingsRow<Trailing: View>: View {
                 if let icon {
                     let c = iconColor ?? t.accent
                     LXIcon(name: icon, size: 14, color: c, stroke: 1.8)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 32, height: 32)
                         .background(c.mix(with: t.surface, amount: 0.16))
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(c.tint(0.28), lineWidth: 0.5))
+                        .clipShape(.rect(cornerRadius: 9))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(c.tint(0.28), lineWidth: 0.5)
+                        }
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     if let labelView { labelView }
@@ -97,10 +108,20 @@ struct SettingsRow<Trailing: View>: View {
                     LXIcon(name: .chevronR, size: 13, color: t.text4)
                 }
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
+            .padding(.horizontal, 14).padding(.vertical, 11)
             if !isLast { Rectangle().fill(t.border).frame(height: 0.5) }
         }
         .contentShape(Rectangle())
+    }
+}
+
+private struct SettingsRowButtonStyle: ButtonStyle {
+    let pressedFill: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? pressedFill : .clear)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

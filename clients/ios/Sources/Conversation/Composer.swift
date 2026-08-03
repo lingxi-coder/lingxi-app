@@ -117,7 +117,7 @@ struct Composer: View {
 
                 TextField("", text: $draft, prompt: Text("向灵犀提问…").foregroundColor(t.text4), axis: .vertical)
                     .font(.system(size: 15.5))
-                    .foregroundColor(t.text)
+                    .foregroundStyle(t.text)
                     .lineLimit(1...5)
                     .focused($inputFocused)
                     .submitLabel(.send)
@@ -127,32 +127,34 @@ struct Composer: View {
                     .accessibilityIdentifier("composer.input")
                     .padding(.horizontal, 4).padding(.vertical, 2)
 
-                HStack(spacing: 2) {
+                HStack(spacing: 4) {
                     // Attach / camera: drives a real on-device capture through the
                     // same CameraImpl the engine bridges onto `traits::CameraControl`;
                     // the result surfaces as the attachment chip above.
                     Button(action: onCameraClick) {
                         LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
-                            .frame(width: 34, height: 34)
+                            .frame(width: 40, height: 40)
                     }
+                    .buttonStyle(ComposerActionButtonStyle())
                     .accessibilityLabel("添加附件")
                     modelChip
                     Spacer()
                     if isCancelling {
                         ProgressView()
                             .tint(t.text3)
-                            .frame(width: 34, height: 34)
+                            .frame(width: 40, height: 40)
                             .accessibilityLabel("正在停止")
                     } else if streaming {
                         // PR-4 item 2: the Stop button replaces Send while a turn
                         // is in flight — tapping it cancels the in-flight turn.
                         Button(action: onStop) {
                             LXIcon(name: .stop, size: 14, color: .white)
-                                .frame(width: 34, height: 34)
+                                .frame(width: 40, height: 40)
                                 .background(t.danger)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .clipShape(.rect(cornerRadius: 12))
                                 .shadow(color: t.danger.tint(0.40), radius: 6, y: 4)
                         }
+                        .buttonStyle(ComposerActionButtonStyle())
                         .accessibilityLabel("停止")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Match Android: ordinary recording and Flow Mode are
@@ -162,7 +164,7 @@ struct Composer: View {
                                 if voiceCapturePhase == .finishing {
                                     ProgressView()
                                         .tint(t.text2)
-                                        .frame(width: 34, height: 34)
+                                        .frame(width: 40, height: 40)
                                 } else {
                                     LXIcon(
                                         name: cancellingHold || isDictationListening ? .stop : .mic,
@@ -171,9 +173,16 @@ struct Composer: View {
                                             : (holding || isDictationListening ? t.accent : t.text2),
                                         stroke: 1.8
                                     )
-                                    .frame(width: 34, height: 34)
+                                    .frame(width: 40, height: 40)
+                                    .background(
+                                        isDictationListening || holding
+                                            ? t.accent.tint(0.15)
+                                            : t.surfaceHover.opacity(0.72),
+                                        in: Circle()
+                                    )
                                 }
                             }
+                            .buttonStyle(ComposerActionButtonStyle())
                             .simultaneousGesture(micHoldGesture)
                             .accessibilityLabel(
                                 isDictationListening ? "结束普通录音" : "普通录音"
@@ -189,9 +198,17 @@ struct Composer: View {
                             Button(action: onFlowModeTap) {
                                 LXIcon(name: .audioWave, size: 18, color: .white, stroke: 1.8)
                                     .frame(width: 40, height: 40)
-                                    .background(t.text)
+                                    .background(
+                                        LinearGradient(
+                                            colors: [t.accent, t.accent2],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
                                     .clipShape(Circle())
+                                    .shadow(color: t.accent.tint(0.28), radius: 7, y: 4)
                             }
+                            .buttonStyle(ComposerActionButtonStyle())
                             .accessibilityLabel("开启心流模式")
                             .accessibilityIdentifier("composer.flow")
                             .disabled(!sendEnabled || voiceInteractionMode != nil)
@@ -200,11 +217,12 @@ struct Composer: View {
                     } else {
                         Button(action: send) {
                             LXIcon(name: .arrowUp, size: 16, color: .white)
-                                .frame(width: 34, height: 34)
+                                .frame(width: 40, height: 40)
                                 .background(t.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .clipShape(.rect(cornerRadius: 12))
                                 .shadow(color: t.accent.tint(0.40), radius: 6, y: 4)
                         }
+                        .buttonStyle(ComposerActionButtonStyle())
                         .accessibilityLabel("发送")
                         .disabled(!sendEnabled)
                         .opacity(sendEnabled ? 1 : 0.45)
@@ -213,9 +231,18 @@ struct Composer: View {
             }
             .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
             .background(t.composerBg)
-            .clipShape(RoundedRectangle(cornerRadius: 22))
-            .overlay(RoundedRectangle(cornerRadius: 22).stroke(t.borderStrong, lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+            .clipShape(.rect(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(inputFocused ? t.accent.tint(0.52) : t.borderStrong,
+                            lineWidth: inputFocused ? 1 : 0.5)
+            }
+            .shadow(
+                color: inputFocused ? t.accent.tint(0.12) : .black.opacity(0.06),
+                radius: inputFocused ? 12 : 8,
+                y: 4
+            )
+            .animation(.easeOut(duration: 0.18), value: inputFocused)
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
         .overlay(alignment: .bottomLeading) {
@@ -346,10 +373,12 @@ struct Composer: View {
                 LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
             }
             .foregroundColor(t.text2)
-            .padding(.horizontal, 9).padding(.vertical, 5)
+            .padding(.horizontal, 9)
+            .frame(minHeight: 40)
             .background(modelOpen ? t.surfaceHover : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(.rect(cornerRadius: 10))
         }
+        .buttonStyle(ComposerActionButtonStyle())
         .disabled(availableModels.isEmpty)
     }
 
@@ -420,6 +449,17 @@ struct Composer: View {
     }
 }
 
+private struct ComposerActionButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.86 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 // MARK: - Attachment thumbnail chip
 
 /// A captured-photo thumbnail chip with a remove (×) affordance — mirrors
@@ -444,8 +484,9 @@ private struct AttachmentThumb: View {
             Spacer()
             Button(action: onRemove) {
                 LXIcon(name: .x, size: 14, color: t.text3, stroke: 2)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 40, height: 40)
             }
+            .buttonStyle(ComposerActionButtonStyle())
             .accessibilityLabel("移除附件")
         }
         .padding(.horizontal, 4).padding(.vertical, 2)

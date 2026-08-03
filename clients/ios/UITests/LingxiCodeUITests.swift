@@ -90,7 +90,9 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(configure.exists)
         configure.tap()
         XCTAssertTrue(app.navigationBars["语音 TTS"].waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.buttons["settings.voice.save"].exists)
+        let saveVoiceConfiguration = app.buttons["settings.voice.save"]
+        XCTAssertTrue(saveVoiceConfiguration.exists)
+        XCTAssertTrue(saveVoiceConfiguration.isEnabled)
     }
 
     func testCancelledRunClosesEveryRunningRow() {

@@ -56,7 +56,7 @@ struct AppIntegrationPage: View {
                     Label("跨 App 数据通过快捷指令输入或系统分享完成。", systemImage: "square.and.arrow.up")
                 }
                 .font(.system(size: 12.5))
-                .foregroundColor(t.text3)
+                .foregroundStyle(t.text2)
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -75,6 +75,7 @@ struct AppIntegrationPage: View {
             label: title,
             sub: detail,
             value: "可用",
+            valueColor: t.ok,
             chevron: false,
             isLast: isLast
         )

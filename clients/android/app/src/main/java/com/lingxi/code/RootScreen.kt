@@ -328,7 +328,7 @@ fun RootScreen(
             PackageManager.PERMISSION_GRANTED
         if (canSherpa) scope.launch { cb(SherpaVoice.transcribe(voiceLang)) } else orbSystemListen(cb)
     }
-    val orbAssistantText = state.messages.lastOrNull()
+    val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
 
     // Mirror the engine's REAL MCP listing into the activity-scoped SettingsStore

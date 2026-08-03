@@ -1,7 +1,7 @@
 import SwiftUI
 
 // MARK: - Message bubble (user right-aligned, AI left with avatar)
-struct MessageBubble: View {
+struct MessageBubble: View, Equatable {
     @Environment(\.theme) private var t
     let message: Message
     var detail: ConversationMessageDetail? = nil
@@ -10,6 +10,12 @@ struct MessageBubble: View {
     /// Tapping the assistant bubble's share affordance surfaces the native share
     /// sheet for this reply's text (mirrors Android `MessageBubble onShare`).
     var onShare: (String) -> Void = { _ in }
+
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message == rhs.message &&
+            lhs.detail == rhs.detail &&
+            lhs.dimmed == rhs.dimmed
+    }
 
     var body: some View {
         if message.role == .user {
@@ -42,6 +48,7 @@ struct MessageBubble: View {
                         StructuredAIBlocks(detail: detail, fallback: message.text)
                     } else {
                         AIText(markdown: message.text)
+                            .equatable()
                     }
                     // Share affordance: surfaces the native chooser for this
                     // reply's text through the same ShareImpl the engine bridges
@@ -78,6 +85,7 @@ private struct StructuredAIBlocks: View {
                 switch block {
                 case let .text(text):
                     AIText(markdown: text)
+                        .equatable()
                 case let .thinking(text, _):
                     panel(title: "思考", body: text, icon: .brain)
                 case .redactedThinking:
@@ -103,6 +111,7 @@ private struct StructuredAIBlocks: View {
         .overlay {
             if detail.blocks.isEmpty && !fallback.isEmpty {
                 AIText(markdown: fallback)
+                    .equatable()
             }
         }
     }
@@ -212,11 +221,15 @@ private enum MDLine: Equatable {
     case numbered(marker: String, String)
 }
 
-struct AIText: View {
+struct AIText: View, Equatable {
     @Environment(\.theme) private var t
     let markdown: String
 
     private static let bodySize: CGFloat = 15.5
+
+    static func == (lhs: AIText, rhs: AIText) -> Bool {
+        lhs.markdown == rhs.markdown
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

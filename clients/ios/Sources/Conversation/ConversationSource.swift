@@ -1139,22 +1139,32 @@ final class MockConversationSource: ConversationSource {
                 return
             }
             let oldMessage = model.messages[streamingIndex]
-            model.messages[streamingIndex] = message
+            // A streamed assistant reply is one logical list row. Keep its
+            // identity stable while text/tag/detail are replaced; otherwise
+            // SwiftUI treats every token as a row deletion + insertion and
+            // re-lays out the transcript from scratch.
+            let stableMessage = Message(
+                id: oldMessage.id,
+                role: message.role,
+                tag: message.tag,
+                text: message.text
+            )
+            model.messages[streamingIndex] = stableMessage
             if let itemIndex = streamingItemIndex,
                model.items.indices.contains(itemIndex) {
-                model.items[itemIndex] = .message(message)
+                model.items[itemIndex] = .message(stableMessage)
             } else if let itemIndex = model.items.firstIndex(where: { item in
                 if case let .message(existing) = item {
                     return existing.id == oldMessage.id
                 }
                 return false
             }) {
-                model.items[itemIndex] = .message(message)
+                model.items[itemIndex] = .message(stableMessage)
                 streamingItemIndex = itemIndex
             }
             model.messageDetails.removeValue(forKey: oldMessage.id)
             if let detail {
-                model.messageDetails[message.id] = detail
+                model.messageDetails[stableMessage.id] = detail
             }
         }
 

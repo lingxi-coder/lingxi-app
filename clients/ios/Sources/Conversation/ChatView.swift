@@ -16,6 +16,7 @@ struct ChatView: View {
     @ObservedObject private var convo: ConversationModel
 
     @State private var dotPulse = false
+    @State private var followsLatestMessage = true
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
     // RootScreen's `draft`) so a hold-to-talk transcription can route its
@@ -127,6 +128,7 @@ struct ChatView: View {
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {
+            followsLatestMessage = true
             withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true }
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
@@ -181,6 +183,7 @@ struct ChatView: View {
                                 detail: convo.messageDetails[message.id],
                                 onShare: shareMessage
                             )
+                            .equatable()
                         case let .run(run):
                             ConversationExecutionRunCard(run: run, onOpenShellTask: onOpenShellTask)
                         }
@@ -194,7 +197,15 @@ struct ChatView: View {
                     // PR-4 item 4: a persistent, dismissible, kind-aware error
                     // banner (not the old transient dim line).
                     if let err = convo.error { ErrorBanner(error: err, onDismiss: dismissError) }
-                    Color.clear.frame(height: 1).id("bottom")
+                    Color.clear
+                        .frame(height: 1)
+                        .id("bottom")
+                        .onAppear {
+                            if !followsLatestMessage { followsLatestMessage = true }
+                        }
+                        .onDisappear {
+                            if followsLatestMessage { followsLatestMessage = false }
+                        }
                 }
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
@@ -202,16 +213,23 @@ struct ChatView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("conversation.message-list")
-            .onChange(of: convo.items.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
-            .onChange(of: convo.streaming) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
-            .onChange(of: convo.error) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
-            .onChange(of: convo.notice) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: convo.items.count) { _, _ in scrollToLatest(using: proxy) }
+            .onChange(of: convo.streaming) { _, _ in scrollToLatest(using: proxy) }
+            .onChange(of: convo.error) { _, _ in scrollToLatest(using: proxy) }
+            .onChange(of: convo.notice) { _, _ in scrollToLatest(using: proxy) }
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
+        }
+    }
+
+    private func scrollToLatest(using proxy: ScrollViewProxy) {
+        guard followsLatestMessage else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo("bottom", anchor: .bottom)
         }
     }
 

@@ -382,7 +382,7 @@ class SessionStateTest {
 
         // Seed a stale transcript (a prior turn), then resume swaps it wholesale.
         vm.reduce(ReplyEvent.Delta("stale turn"))
-        assertEquals(1, vm.state.value.messages.size)
+        assertEquals("stale turn", vm.state.value.streamingMessage?.text)
 
         resumed.value = ActivatedSession(
             sessionId = "uuid-77",
@@ -391,6 +391,7 @@ class SessionStateTest {
         )
 
         assertEquals(listOf("restored"), vm.state.value.messages.map { it.text })
+        assertNull(vm.state.value.streamingMessage)
     }
 
     @Test

@@ -38,7 +38,15 @@ import java.util.Locale
  */
 data class ChatState(
     val session: SessionRef,
+    /** Completed/user transcript rows. The in-flight assistant row is separate. */
     val messages: List<Message>,
+    /**
+     * Assistant row currently receiving text deltas.
+     *
+     * Keeping it outside [messages] avoids copying the entire transcript for
+     * every streamed token when a conversation has a large history.
+     */
+    val streamingMessage: Message? = null,
     /** A brand-new (empty) chat shows the empty-state hero instead of a list. */
     val isNew: Boolean = false,
     /** True while the assistant reply streams — keeps the run trace live. */
@@ -207,9 +215,6 @@ class ChatViewModel(
     fun onDraftChanged(draft: String) {
         savedState?.set(KEY_DRAFT, draft)
     }
-
-    /** Index of the assistant message currently receiving streamed deltas. */
-    private var streamingIndex: Int? = null
 
     /** Collector for the active reply stream. */
     private var turnJob: Job? = null
@@ -540,6 +545,7 @@ class ChatViewModel(
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
                 messages = restored.transcript, // clear-then-restore (oldest-first)
+                streamingMessage = null,
                 isNew = restored.kind == SessionActivationKind.Started && restored.transcript.isEmpty(),
                 streaming = false,
                 sessionTransitioning = false,
@@ -582,7 +588,6 @@ class ChatViewModel(
         turnToken++
         val job = turnJob
         turnJob = null
-        streamingIndex = null
         return job
     }
 
@@ -626,6 +631,7 @@ class ChatViewModel(
             it.copy(
                 session = target,
                 messages = emptyList(),
+                streamingMessage = null,
                 isNew = newSession || resumeEmpty,
                 streaming = false,
                 sessionTransitioning = true,
@@ -739,7 +745,6 @@ class ChatViewModel(
         // capture this turn's token so its own events are accepted.
         turnToken++
         val token = turnToken
-        streamingIndex = null
         savedState?.set(KEY_DRAFT, "") // the draft was just sent — clear the persisted copy
         _state.update {
             it.copy(
@@ -748,6 +753,7 @@ class ChatViewModel(
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
                 messages = it.messages + Message(role = Role.User, text = trimmed),
+                streamingMessage = null,
                 agentRun = AgentRunState(turnId = token),
             )
         }
@@ -770,8 +776,11 @@ class ChatViewModel(
         // round-trip must not re-open streaming on the now-idle transcript.
         val job = abandonLocalTurn()
         _state.update {
+            val settledMessages = it.streamingMessage?.let { live -> it.messages + live } ?: it.messages
             it.copy(
                 streaming = false,
+                messages = settledMessages,
+                streamingMessage = null,
                 statusLine = "正在停止…",
                 agentRun = it.agentRun?.finish(AgentRunOutcome.Cancelled),
             )
@@ -856,18 +865,20 @@ class ChatViewModel(
 
             is ReplyEvent.Delta -> _state.update { s ->
                 val run = (s.agentRun ?: AgentRunState(turnId = token)).markGenerating()
-                val i = streamingIndex
-                if (i != null && s.messages.indices.contains(i)) {
-                    // Append into the in-flight assistant message.
-                    val updated = s.messages.toMutableList()
-                    val prev = updated[i]
-                    updated[i] = prev.copy(text = prev.text + event.text)
-                    s.copy(streaming = true, messages = updated, agentRun = run)
+                val live = s.streamingMessage
+                if (live != null) {
+                    s.copy(
+                        streaming = true,
+                        streamingMessage = live.copy(text = live.text + event.text),
+                        agentRun = run,
+                    )
                 } else {
                     // First delta of the turn: open a new assistant message.
-                    val opened = s.messages + Message(role = Role.Ai, text = event.text)
-                    streamingIndex = opened.size - 1
-                    s.copy(streaming = true, messages = opened, agentRun = run)
+                    s.copy(
+                        streaming = true,
+                        streamingMessage = Message(role = Role.Ai, text = event.text),
+                        agentRun = run,
+                    )
                 }
             }
 
@@ -1003,14 +1014,16 @@ class ChatViewModel(
             }
 
             is ReplyEvent.Error -> {
-                streamingIndex = null
                 turnJob = null
                 // Surface as the PERSISTENT, kind-aware banner — not the dim,
                 // overwritable statusLine. Clear the status line so a stale tool
                 // label doesn't linger beneath the error.
                 _state.update {
+                    val settledMessages = it.streamingMessage?.let { live -> it.messages + live } ?: it.messages
                     it.copy(
                         streaming = false,
+                        messages = settledMessages,
+                        streamingMessage = null,
                         statusLine = null,
                         error = ChatError(event.message, classifyError(event.message)),
                         agentRun = (it.agentRun ?: AgentRunState(turnId = token))
@@ -1021,37 +1034,30 @@ class ChatViewModel(
             }
 
             is ReplyEvent.Completed -> {
-                val completedIndex = streamingIndex
-                streamingIndex = null
                 turnJob = null
                 _state.update { s ->
-                    if (completedIndex != null && s.messages.indices.contains(completedIndex)) {
-                        val updated = s.messages.toMutableList()
-                        updated[completedIndex] = event.message
-                        s.copy(
-                            streaming = false,
-                            messages = updated,
-                            agentRun = (s.agentRun ?: AgentRunState(turnId = token))
-                                .finish(AgentRunOutcome.Completed),
-                        )
-                    } else {
-                        s.copy(
-                            streaming = false,
-                            messages = s.messages + event.message,
-                            agentRun = (s.agentRun ?: AgentRunState(turnId = token))
-                                .finish(AgentRunOutcome.Completed),
-                        )
-                    }
+                    val completed = s.streamingMessage?.let { live ->
+                        event.message.copy(id = live.id)
+                    } ?: event.message
+                    s.copy(
+                        streaming = false,
+                        messages = s.messages + completed,
+                        streamingMessage = null,
+                        agentRun = (s.agentRun ?: AgentRunState(turnId = token))
+                            .finish(AgentRunOutcome.Completed),
+                    )
                 }
             }
 
             is ReplyEvent.End -> {
-                streamingIndex = null
                 turnJob = null
                 _state.update {
                     val run = it.agentRun ?: AgentRunState(turnId = token)
+                    val settledMessages = it.streamingMessage?.let { live -> it.messages + live } ?: it.messages
                     it.copy(
                         streaming = false,
+                        messages = settledMessages,
+                        streamingMessage = null,
                         agentRun = if (run.outcome == AgentRunOutcome.Running) {
                             run.finish(AgentRunOutcome.Completed)
                         } else {

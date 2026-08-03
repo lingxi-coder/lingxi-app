@@ -29,9 +29,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -121,18 +123,30 @@ fun ChatScreen(
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
+    val followsLatest by remember {
+        derivedStateOf {
+            val layout = listState.layoutInfo
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index
+            layout.totalItemsCount == 0 ||
+                (lastVisible != null && lastVisible >= layout.totalItemsCount - 3)
+        }
+    }
 
-    // Auto-scroll to the latest turn / when streaming toggles (mirrors the iOS
-    // ScrollViewReader.scrollTo("bottom")).
+    // Follow new output only while the user is already at the bottom. Forcing
+    // an animated jump from old history on every update is expensive on long
+    // transcripts and prevents the user from reading earlier messages.
     LaunchedEffect(
         state.messages.size,
+        state.streamingMessage?.id,
         state.shellTools.size,
         state.agentRun?.revision,
         state.streaming,
     ) {
-        val liveRows = if (state.agentRun != null || state.streaming) 1 else 0
-        val count = state.messages.size + state.shellTools.size + liveRows
-        if (count > 0) listState.animateScrollToItem(count - 1)
+        if (!followsLatest) return@LaunchedEffect
+        val streamingMessageRows = if (state.streamingMessage != null) 1 else 0
+        val activityRows = if (state.agentRun != null || state.streaming) 1 else 0
+        val count = state.messages.size + streamingMessageRows + state.shellTools.size + activityRows
+        if (count > 0) listState.scrollToItem(count - 1)
     }
 
     Box(modifier = modifier.fillMaxSize().background(t.windowBg)) {
@@ -317,6 +331,24 @@ private fun MessageList(
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
+    val currentOnShare by rememberUpdatedState(onShare)
+    val stableOnShare = remember { { text: String -> currentOnShare(text) } }
+    val currentOnOpenTerminal by rememberUpdatedState(onOpenTerminal)
+    val currentSessionId by rememberUpdatedState(state.session.id)
+    val stableOnOpenLink = remember {
+        { link: String ->
+            val uri = runCatching { android.net.Uri.parse(link) }.getOrNull()
+            if (uri?.scheme == "lingxi" && uri.host == "open_terminal") {
+                currentOnOpenTerminal(
+                    uri.getQueryParameter("sessionId")
+                        ?.takeIf(String::isNotBlank)
+                        ?: currentSessionId,
+                    uri.getQueryParameter("initCommand").orEmpty(),
+                )
+            }
+        }
+    }
+
     LazyColumn(
         state = listState,
         modifier = modifier
@@ -329,22 +361,25 @@ private fun MessageList(
         if (state.isNew && state.messages.isEmpty() && !state.streaming) {
             item(key = "empty") { EmptyState() }
         }
-        items(state.messages, key = { it.id }) { m ->
+        items(
+            items = state.messages,
+            key = { it.id },
+            contentType = { "message" },
+        ) { m ->
             MessageBubble(
                 message = m,
-                onShare = onShare,
-                onOpenLink = { link ->
-                    val uri = runCatching { android.net.Uri.parse(link) }.getOrNull()
-                    if (uri?.scheme == "lingxi" && uri.host == "open_terminal") {
-                        onOpenTerminal(
-                            uri.getQueryParameter("sessionId")
-                                ?.takeIf(String::isNotBlank)
-                                ?: state.session.id,
-                            uri.getQueryParameter("initCommand").orEmpty(),
-                        )
-                    }
-                },
+                onShare = stableOnShare,
+                onOpenLink = stableOnOpenLink,
             )
+        }
+        state.streamingMessage?.let { message ->
+            item(key = message.id, contentType = "message") {
+                MessageBubble(
+                    message = message,
+                    onShare = stableOnShare,
+                    onOpenLink = stableOnOpenLink,
+                )
+            }
         }
         items(state.shellTools, key = { "shell-${it.taskId}" }) { shell ->
             ShellToolCard(

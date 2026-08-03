@@ -169,6 +169,30 @@ import XCTest
             }
         }
 
+        func testStreamingMessageKeepsStableIdentityAcrossUpdates() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 10, sessionId: "session-a")
+
+            source.applyForTesting(.textDelta(text: "Hel"))
+            let initialMessageID = source.model.messages[0].id
+            let initialRenderID = source.model.items[0].id
+
+            source.applyForTesting(.textDelta(text: "lo"))
+
+            XCTAssertEqual(source.model.messages[0].id, initialMessageID)
+            XCTAssertEqual(source.model.items[0].id, initialRenderID)
+            XCTAssertEqual(source.model.messages[0].text, "Hello")
+
+            source.applyForTesting(.messageComplete(
+                stopReason: "end_turn",
+                message: MessageDto(role: "assistant", blocks: [.text(text: "Hello!")])
+            ))
+
+            XCTAssertEqual(source.model.messages[0].id, initialMessageID)
+            XCTAssertEqual(source.model.items[0].id, initialRenderID)
+            XCTAssertEqual(source.model.messages[0].text, "Hello!")
+        }
+
         func testLateEventsDroppedAfterSessionResume() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 4, sessionId: "old-session")

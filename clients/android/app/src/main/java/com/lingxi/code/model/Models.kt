@@ -1,5 +1,6 @@
 package com.lingxi.code.model
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import java.util.UUID
 
@@ -137,6 +138,7 @@ enum class Role { User, Ai }
  * A single conversation turn. [id] is a fresh UUID so list diffing is stable
  * even when two messages share text (matches the iOS `Message` `let id = UUID()`).
  */
+@Immutable
 data class Message(
     val role: Role,
     val text: String,

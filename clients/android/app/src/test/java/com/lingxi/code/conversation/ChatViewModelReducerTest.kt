@@ -23,6 +23,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -45,9 +46,11 @@ class ChatViewModelReducerTest {
     @After fun tearDown() = Dispatchers.resetMain()
 
     /** A source that supplies an empty transcript and never streams (reduce is driven directly). */
-    private class StubSource : ConversationSource {
+    private class StubSource(
+        private val seededMessages: List<Message> = emptyList(),
+    ) : ConversationSource {
         var closed = false
-        override fun initialMessages(): List<Message> = emptyList()
+        override fun initialMessages(): List<Message> = seededMessages
         override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
         override fun close() {
             closed = true
@@ -161,22 +164,60 @@ class ChatViewModelReducerTest {
 
         val s = vm.state.value
         assertTrue(s.streaming)
-        assertEquals(1, s.messages.size)
-        assertEquals(Role.Ai, s.messages[0].role)
-        assertEquals("Hel", s.messages[0].text)
+        assertEquals(Role.Ai, s.streamingMessage?.role)
+        assertEquals("Hel", s.streamingMessage?.text)
     }
 
     @Test
     fun subsequentDeltas_appendIntoSameMessage() {
         val vm = newVm()
         vm.reduce(ReplyEvent.Delta("Hel"))
+        val unchangedTranscript = vm.state.value.messages
+        val streamingId = vm.state.value.streamingMessage?.id
         vm.reduce(ReplyEvent.Delta("lo "))
         vm.reduce(ReplyEvent.Delta("world"))
 
         val s = vm.state.value
-        assertEquals(1, s.messages.size)
-        assertEquals("Hello world", s.messages[0].text)
+        assertSame(unchangedTranscript, s.messages)
+        assertEquals(streamingId, s.streamingMessage?.id)
+        assertEquals("Hello world", s.streamingMessage?.text)
         assertTrue(s.streaming)
+    }
+
+    @Test
+    fun largeTranscript_deltasDoNotCopyCompletedMessages() {
+        val history = List(10_000) { index ->
+            Message(
+                role = if (index % 2 == 0) Role.User else Role.Ai,
+                text = "message-$index",
+            )
+        }
+        val vm = ChatViewModel(StubSource(history))
+
+        vm.reduce(ReplyEvent.Delta("a"))
+        val transcript = vm.state.value.messages
+        val streamingId = vm.state.value.streamingMessage?.id
+        repeat(100) { vm.reduce(ReplyEvent.Delta("b")) }
+
+        val state = vm.state.value
+        assertSame(history, transcript)
+        assertSame(transcript, state.messages)
+        assertEquals(streamingId, state.streamingMessage?.id)
+        assertEquals(101, state.streamingMessage?.text?.length)
+    }
+
+    @Test
+    fun completedMessageKeepsStreamingRowIdentity() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.Delta("draft"))
+        val streamingId = vm.state.value.streamingMessage?.id
+
+        vm.reduce(ReplyEvent.Completed(Message(role = Role.Ai, text = "final")))
+
+        val state = vm.state.value
+        assertNull(state.streamingMessage)
+        assertEquals(streamingId, state.messages.last().id)
+        assertEquals("final", state.messages.last().text)
     }
 
     @Test
@@ -321,9 +362,9 @@ class ChatViewModelReducerTest {
         vm.reduce(ReplyEvent.Delta("turn2"))
 
         val s = vm.state.value
-        assertEquals(2, s.messages.size)
+        assertEquals(1, s.messages.size)
         assertEquals("turn1", s.messages[0].text)
-        assertEquals("turn2", s.messages[1].text)
+        assertEquals("turn2", s.streamingMessage?.text)
     }
 
     @Test
@@ -339,7 +380,7 @@ class ChatViewModelReducerTest {
     }
 
     @Test
-    fun newChat_resetsStreamingIndex_soNextDeltaOpensFresh() {
+    fun newChat_clearsStreamingMessage_soNextDeltaOpensFresh() {
         val vm = newVm()
         vm.reduce(ReplyEvent.Delta("old turn"))
         vm.newChat()
@@ -347,8 +388,8 @@ class ChatViewModelReducerTest {
 
         val s = vm.state.value
         assertTrue(s.isNew)
-        assertEquals(1, s.messages.size)
-        assertEquals("brand new", s.messages[0].text)
+        assertTrue(s.messages.isEmpty())
+        assertEquals("brand new", s.streamingMessage?.text)
         assertNull("statusLine cleared on newChat", ChatViewModel(StubSource()).state.value.statusLine)
     }
 
@@ -522,7 +563,7 @@ class ChatViewModelReducerTest {
         vm.send("hi from A")
         src.stream.emit(ReplyEvent.Delta("partial A"))
         assertTrue(vm.state.value.streaming)
-        assertEquals("partial A", vm.state.value.messages.last { it.role == Role.Ai }.text)
+        assertEquals("partial A", vm.state.value.streamingMessage?.text)
 
         // Switch to a DIFFERENT session mid-stream (the orphaned-turn scenario).
         val sessB = SessionRef(id = "B", title = "会话 B")

@@ -264,10 +264,17 @@ enum ModelDisplay {
 enum Role { case user, ai }
 
 struct Message: Identifiable, Equatable {
-    let id = UUID()
+    let id: UUID
     let role: Role
     var tag: String? = nil
     let text: String
+
+    init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String) {
+        self.id = id
+        self.role = role
+        self.tag = tag
+        self.text = text
+    }
 }
 
 /// A unified "session" reference used by ChatView's title bar.

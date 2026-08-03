@@ -209,7 +209,7 @@ private enum LinuxRuntimeBridge {
                     env: [:],
                     stdin: nil,
                     timeoutMs: 30_000,
-                    network: .disabled,
+                    network: .allowed,
                     mounts: []
                 )
             )
@@ -295,6 +295,7 @@ private enum LinuxRuntimeBridge {
             installedSizeBytes: status.installedSizeBytes,
             available: capability.available,
             terminalSupported: capability.pty,
+            backgroundTasksSupported: capability.backgroundProcesses,
             verifyAllowed: capability.rootfsIntegrity,
             repairAllowed: capability.rootfsIntegrity,
             resetAllowed: capability.rootfsIntegrity,
@@ -401,7 +402,7 @@ struct LinuxRuntimePage: View {
     }
 
     private var blurb: some View {
-        Text("iOS phase-1 只接入运行时管理面板。未取得额外书面授权时，Mobile Linux 后端不会被链接进商店构建；Simulator 继续走 unavailable stub。")
+        Text("真机内置 iSH ARM64 与 Alpine Linux，可运行 shell、Python、包管理器和项目文件；Simulator 继续使用明确的 unavailable stub。")
             .font(.system(size: 11.5))
             .foregroundStyle(t.text3)
             .lineSpacing(4)
@@ -412,8 +413,8 @@ struct LinuxRuntimePage: View {
         SettingsSection(label: "后端选择") {
             RadioList(
                 options: [
-                    .init(value: LinuxRuntimeMode.legacy.rawValue, label: "Legacy", sub: "继续使用当前 unavailable shell stub"),
-                    .init(value: LinuxRuntimeMode.mobileLinux.rawValue, label: "Mobile Linux", sub: "预留 iSH + fakefs + Alpine 运行时接缝"),
+                    .init(value: LinuxRuntimeMode.mobileLinux.rawValue, label: "Mobile Linux", sub: "iSH ARM64 + fakefs + Alpine（真机）"),
+                    .init(value: LinuxRuntimeMode.legacy.rawValue, label: "Legacy", sub: "禁用 Linux 后端并保留 unavailable shell stub"),
                 ],
                 value: Binding(
                     get: { store.linuxRuntime.selectedMode.rawValue },
@@ -444,7 +445,7 @@ struct LinuxRuntimePage: View {
     private var maintenanceSection: some View {
         SettingsSection(
             label: "维护",
-            footer: "商店版不提供 Alpine / pip / npm 动态原生包安装入口。verify / repair / reset 在 phase-1 中仅返回受控状态，不会改动用户项目、会话或密钥。"
+            footer: "校验会检查 fakefs 元数据与基础命令；修复会从应用内置归档恢复缺失文件；重置只重建托管 rootfs，不会删除项目、会话或密钥。"
         ) {
             actionRow("刷新状态", action: .refresh, enabled: store.linuxRuntime.busyAction == nil)
             actionRow("校验 rootfs", action: .verify,
@@ -526,7 +527,7 @@ struct LinuxRuntimePage: View {
                         chevron: false,
                         isLast: index == store.linuxRuntime.tasks.count - 1
                     ) {
-                        if task.state == .running {
+                        if task.state == .running && store.linuxRuntime.backgroundTasksSupported {
                             if taskOperations.isStopping(task.id) {
                                 ProgressView().controlSize(.small)
                             } else {
@@ -567,8 +568,10 @@ struct LinuxRuntimePage: View {
                         sub: "iSH / fakefs 不是安全边界；真实边界仍是 iOS App 沙箱与宿主策略",
                         chevron: false)
             SettingsRow(icon: .stop, label: "停止当前任务",
-                        sub: "仅对 runtime 当前已报告的 running task 开放停止；不伪造 boot/install/mount apply 操作",
-                        value: store.linuxRuntime.tasks.contains(where: { $0.state == .running }) ? "可用" : "空闲",
+                        sub: store.linuxRuntime.backgroundTasksSupported
+                            ? "仅停止 runtime 当前报告的 guest 进程组；不会影响 iOS App 内其他任务"
+                            : "当前原生桥未提供可靠的后台进程终止能力",
+                        value: store.linuxRuntime.backgroundTasksSupported ? "可用" : "未支持",
                         chevron: false, isLast: true)
         }
     }

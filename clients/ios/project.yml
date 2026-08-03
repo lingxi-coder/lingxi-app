@@ -36,6 +36,14 @@ targets:
       # the iOS SDK; static XCFrameworks cannot encode these transitive links.
       - sdk: libz.tbd
       - sdk: libiconv.tbd
+      # Device-only iSH uses SQLite-backed fakefs, the host resolver, and
+      # SystemConfiguration for live DNS updates. The iSH archives themselves
+      # are generated from the pinned OpenMinis source by
+      # scripts/build-linux-runtime.sh and linked through conditional flags
+      # below so simulator builds keep using the unavailable runtime stub.
+      - sdk: libsqlite3.tbd
+      - sdk: libresolv.tbd
+      - sdk: SystemConfiguration.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
@@ -45,6 +53,33 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/build/linux-runtime/openminis/include $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/iSH $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/NativeOffloads"
+        "OTHER_CFLAGS[sdk=iphoneos*]": "$(inherited) -DISH_INTERNAL=1"
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": "$(inherited) $(SRCROOT)/build/linux-runtime/openminis/libs"
+        "OTHER_LDFLAGS[sdk=iphoneos*]": "$(inherited) -lish_emu -lish -lfakefs -ObjC -all_load"
+    preBuildScripts:
+      - name: Stage Alpine rootfs
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "${PLATFORM_NAME}" != "iphoneos" ]; then
+            exit 0
+          fi
+          RUNTIME_RESOURCES="${SRCROOT}/build/linux-runtime/openminis/resources"
+          ROOTFS_ARCHIVE="${RUNTIME_RESOURCES}/alpine-rootfs.zip"
+          if [ ! -f "${ROOTFS_ARCHIVE}" ]; then
+            echo "error: Alpine rootfs is missing. Run clients/ios/scripts/build-linux-runtime.sh first."
+            exit 1
+          fi
+          DESTINATION="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          mkdir -p "${DESTINATION}"
+          cp "${ROOTFS_ARCHIVE}" "${DESTINATION}/alpine-rootfs.zip"
+          if [ -d "${RUNTIME_RESOURCES}/default_mount" ]; then
+            rm -rf "${DESTINATION}/default_mount"
+            cp -R "${RUNTIME_RESOURCES}/default_mount" "${DESTINATION}/default_mount"
+          fi
+          if [ -f "${RUNTIME_RESOURCES}/libvdso.so.elf" ]; then
+            cp "${RUNTIME_RESOURCES}/libvdso.so.elf" "${DESTINATION}/libvdso.so.elf"
+          fi
 
   # XCTest simulator e2e (M10 A2 / P4): builds the in-process engine via
   # `buildIosEngine`, submits a prompt, and asserts the streamed ClientEvent path

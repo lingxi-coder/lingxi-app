@@ -973,14 +973,24 @@ fn ios_mobile_linux_runtime(
 
 #[cfg(feature = "uniffi")]
 fn linked_ios_mobile_linux_runtime(
-    _cfg: &IosMobileLinuxConfigFfi,
+    cfg: &IosMobileLinuxConfigFfi,
 ) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
-    // August 2, 2026: this repository does not contain a concrete iOS
-    // `MobileLinuxRuntime` implementation (only AndroidProotRuntime plus the
-    // unavailable iSH bridge object). Keep the seam explicit so a future
-    // linkable iOS backend can be injected here without changing the exported
-    // handle/state architecture on either side of the FFI boundary.
-    None
+    let app_sandbox_root = infer_mobile_linux_app_sandbox_root(cfg).ok()?;
+    let (workspace_host_path, stable_workspace_id) =
+        validate_mobile_linux_workspace_config(app_sandbox_root.to_string_lossy().as_ref(), cfg)
+            .ok()?;
+    Some(platform_ios_ish_runtime::linked_runtime(
+        platform_ios_ish_runtime::IosIshRuntimeConfig {
+            managed_root: std::path::PathBuf::from(&cfg.managed_root),
+            app_sandbox_root,
+            workspace_host_path,
+            stable_workspace_id,
+            abi: cfg.abi.clone(),
+            rootfs_version: cfg.rootfs_version.clone(),
+            archive_sha256: cfg.archive_sha256.clone(),
+            authorization_file: cfg.authorization_file.clone(),
+        },
+    ))
 }
 
 #[cfg(feature = "uniffi")]
@@ -3156,7 +3166,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_linux_command_api_fails_closed_without_authorization() {
+    fn mobile_linux_command_api_reports_unavailable_on_host_without_device_bridge() {
         let err = super::run_ios_mobile_linux_command(
             Some(super::IosMobileLinuxConfigFfi {
                 mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
@@ -3175,15 +3185,15 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 stdin: None,
                 timeout_ms: Some(1000),
-                network: super::MobileLinuxNetworkPolicyFfi::Disabled,
+                network: super::MobileLinuxNetworkPolicyFfi::Allowed,
                 mounts: vec![],
             },
         )
-        .expect_err("command should fail closed");
+        .expect_err("command should fail on host without the device bridge");
 
         assert!(matches!(
             err,
-            super::MobileLinuxOperationFfiError::LicenseBlocked { .. }
+            super::MobileLinuxOperationFfiError::Unavailable { .. }
         ));
     }
 
@@ -3221,12 +3231,11 @@ mod tests {
                 rows: 24,
                 mounts: vec![],
             }))
-            .expect_err("pty must fail closed without a linked iOS runtime");
+            .expect_err("pty must be unavailable on host/simulator");
 
         assert!(matches!(
             err,
-            super::MobileLinuxOperationFfiError::LicenseBlocked { .. }
-                | super::MobileLinuxOperationFfiError::Unavailable { .. }
+            super::MobileLinuxOperationFfiError::Unavailable { .. }
         ));
     }
 

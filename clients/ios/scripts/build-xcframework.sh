@@ -72,6 +72,15 @@ log() { printf '\033[1;34m[build-xcframework]\033[0m %s\n' "$*"; }
 for tool in cargo rustc xcrun xcodebuild; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
+
+# Build the device-only iSH archives and bundled Alpine fakefs before the Rust
+# device slice. The helper is idempotent and sources everything from the pinned
+# OpenMinis submodule; no generated binary or rootfs is committed.
+LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
+if [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
+  log "Building iSH ARM64 + Alpine Linux runtime…"
+  "${LINUX_RUNTIME_BUILD}"
+fi
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
 # Resolve the toolchain cargo/rustc actually use here (the workspace pins one via

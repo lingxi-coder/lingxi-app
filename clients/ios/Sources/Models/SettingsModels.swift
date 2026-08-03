@@ -128,20 +128,21 @@ enum LinuxRuntimeRootfsState: Equatable {
 }
 
 struct LinuxRuntimeState: Equatable {
-    var selectedMode: LinuxRuntimeMode = .legacy
-    var backend: String = "ios-posix"
-    var rootfsState: LinuxRuntimeRootfsState = .unsupported
+    var selectedMode: LinuxRuntimeMode = .mobileLinux
+    var backend: String = "ios-ish"
+    var rootfsState: LinuxRuntimeRootfsState = .missing
     var version: String? = nil
     var managedRoot: String? = nil
     var installedSizeBytes: UInt64? = nil
     var available: Bool = false
     var terminalSupported: Bool = false
+    var backgroundTasksSupported: Bool = false
     var verifyAllowed: Bool = false
     var repairAllowed: Bool = false
     var resetAllowed: Bool = false
     var writableGuestPaths: [String] = []
-    var summary: String = "当前仍使用 iOS unavailable shell stub"
-    var detail: String = "iSH / fakefs 运行时仅接入到 phase-1 管理面板，未授权时不会链接进商店构建。"
+    var summary: String = "正在检查设备上的 Alpine Linux 环境"
+    var detail: String = "真机使用 iSH ARM64 + fakefs；首次启动会安装应用内置的 Alpine rootfs。"
     var lastAction: LinuxRuntimeAction? = nil
     var lastActionMessage: String? = nil
     var busyAction: LinuxRuntimeAction? = nil

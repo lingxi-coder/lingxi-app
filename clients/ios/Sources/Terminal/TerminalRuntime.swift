@@ -118,7 +118,9 @@ extension TerminalRuntimeDescriptor {
             abi: "arm64",
             rootfsVersion: linuxRuntime.version ?? "1.0.0",
             archiveSha256: nil,
-            authorizationFile: nil
+            authorizationFile: Bundle.main
+                .url(forResource: "AUTHORIZATION_MANIFEST", withExtension: "json")?
+                .path
         )
 
         let requestedResolution = resolveRequestedCwd(

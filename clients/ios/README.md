@@ -32,6 +32,16 @@ It builds a host cdylib + per-arch staticlibs, generates the Swift bindings
 are baked in — the engine reads `ANTHROPIC_API_KEY` from the runtime
 environment, never from the framework.
 
+The same command also builds the device-only Linux runtime from the pinned
+OpenMinis source: iSH ARM64 static archives plus an Alpine aarch64 fakefs
+rootfs. Generated libraries, headers, and the rootfs archive remain untracked.
+Simulator slices do not link iSH and continue to expose an unavailable runtime.
+
+The iSH-linked iOS app is a GPLv3 combined distribution. Release builds must
+ship the corresponding source and notices documented in
+`docs/mobile-linux/LICENSES/NOTICE.md`; iSH's `LICENSE.IOS` contains the App
+Store distribution exception.
+
 ## Conversation source (mock vs. real engine)
 
 `Sources/Conversation/ConversationSource.swift` defines the seam `ChatView`

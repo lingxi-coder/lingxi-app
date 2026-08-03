@@ -45,6 +45,7 @@ uniffi = [
     "dep:uniffi",
     "dep:async-trait",
     "dep:client-protocol",
+    "dep:platform-ios-ish-runtime",
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
@@ -99,6 +100,7 @@ async-trait = { workspace = true, optional = true }
 # is serialized to bytes the native side persists. Optional + pulled under `uniffi`.
 serde_json = { workspace = true, optional = true }
 client-protocol = { path = "../../client-protocol", optional = true }
+platform-ios-ish-runtime = { path = "../../platforms/ios-ish-runtime", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
 orchestrator = { path = "../../orchestrator", optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }

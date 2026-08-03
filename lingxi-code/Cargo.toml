@@ -81,6 +81,7 @@ members = [
     "platforms/pty",
     "platforms/windows",
     "platforms/ios",
+    "platforms/ios-ish-runtime",
     "platforms/android",
     "platforms/android-libcap",
     "platforms/android-minijail",
@@ -171,6 +172,7 @@ default-members = [
     "platforms/pty",
     "platforms/windows",
     "platforms/ios",
+    "platforms/ios-ish-runtime",
     "platforms/android",
     "platforms/macos-computer-control",
 ]

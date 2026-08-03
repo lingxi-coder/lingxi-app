@@ -1,6 +1,6 @@
-# Android MobileLinux release contract
+# MobileLinux release contract
 
-LingXi's Android combined distribution is GPLv3 when it includes the
+LingXi's Android or iOS combined distribution is GPLv3 when it includes the
 OpenMinis-derived shell, PRoot, PTY bridge, or Alpine rootfs integration.
 Original MIT and Apache-2.0 components retain their notices.
 
@@ -19,6 +19,17 @@ Android keeps one distribution dimension:
 
 Both distributions can contain MobileLinux. A MobileLinux failure must be
 reported explicitly and must never silently switch to the Legacy runtime.
+
+## iOS (iSH ARM64)
+
+iOS device builds use the pinned OpenMinis iSH ARM64 source and Alpine aarch64
+fakefs rootfs. `clients/ios/scripts/build-linux-runtime.sh` reconstructs all
+native archives and the rootfs locally; simulator builds never link iSH.
+
+The runtime is in-process Linux userspace emulation, not a Linux kernel or a
+security boundary. Isolation remains the iOS app sandbox plus explicit fakefs
+bind mounts. Release artifacts must include iSH's GPLv3 text, `LICENSE.IOS`,
+the Alpine package notices/SBOM, and corresponding source for the exact pins.
 
 Build and verification entrypoints:
 

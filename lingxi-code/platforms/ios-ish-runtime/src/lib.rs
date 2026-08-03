@@ -1737,6 +1737,10 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, MobileLinuxError> {
 
 mod native {
     #[cfg(all(target_os = "ios", not(target_abi = "sim")))]
+    // The device bridge is the sole unsafe boundary in this crate: it validates
+    // Rust strings before crossing the C ABI and immediately copies/frees every
+    // owned string returned by the native iSH shim.
+    #[allow(unsafe_code)]
     mod device {
         use std::ffi::{CStr, CString};
         use std::os::raw::c_char;

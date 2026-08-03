@@ -346,8 +346,13 @@ for t in "${DEVICE_TARGET}" "${SIM_TARGETS[@]}"; do
       cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
         --target "${t}" --"${PROFILE}"
   else
-    cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
-      --target "${t}" --"${PROFILE}"
+    # The package also declares a cdylib for host-side UniFFI introspection.
+    # On device that incidental dylib sees the Objective-C iSH bridge only at
+    # the final Xcode app link, so permit those symbols to remain unresolved;
+    # the staticlib packaged below is unaffected and Xcode resolves them.
+    RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-undefined,dynamic_lookup" \
+      cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+        --target "${t}" --"${PROFILE}"
   fi
   arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"
   [[ -f "${arch_lib}" ]] || { echo "ERROR: staticlib not produced: ${arch_lib}" >&2; exit 1; }

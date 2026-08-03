@@ -53,8 +53,8 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
-        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/build/linux-runtime/openminis/include $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/iSH $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/NativeOffloads"
-        "OTHER_CFLAGS[sdk=iphoneos*]": "$(inherited) -DISH_INTERNAL=1"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/build/linux-runtime/openminis/include $(SRCROOT)/build/linux-runtime/openminis/include/ish $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/iSH $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/NativeOffloads"
+        "OTHER_CFLAGS[sdk=iphoneos*]": "$(inherited) -DISH_INTERNAL=1 -DGUEST_ARM64=1"
         "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": "$(inherited) $(SRCROOT)/build/linux-runtime/openminis/libs"
         "OTHER_LDFLAGS[sdk=iphoneos*]": "$(inherited) -lish_emu -lish -lfakefs -ObjC -all_load"
     preBuildScripts:

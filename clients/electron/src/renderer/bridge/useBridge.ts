@@ -10,6 +10,7 @@ import type {
 } from '@lingxi/bridge-client';
 
 import {
+  appendPendingUserPrompt,
   appendUserPrompt,
   emptyConversation,
   reduceEvent,
@@ -43,6 +44,7 @@ export interface UseBridge {
   readonly desktop: DesktopState;
   readonly usage: UsageSnapshot | null;
   readonly running: boolean;
+  readonly isCancelling: boolean;
   readonly pendingPermission: PermissionRequest | null;
   readonly pendingComputerAccess: ComputerAccessRequestDto | null;
   readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
@@ -115,6 +117,14 @@ export function resetBridgeRuntimeState(): {
   };
 }
 
+export function clearCancellationRuntime(
+  cancelling: { current: boolean },
+  task: { current: Promise<void> | null },
+): void {
+  cancelling.current = false;
+  task.current = null;
+}
+
 function pendingAskQueueFromBootstrap(snapshot: BootstrapState): AskUserQuestionRequestDto[] {
   return snapshot.pendingAskUserQuestions ? [...snapshot.pendingAskUserQuestions] : [];
 }
@@ -132,11 +142,20 @@ export function useBridge(): UseBridge {
   const [computerAccessQueue, setComputerAccessQueue] = useState<ComputerAccessRequestDto[]>([]);
   const [askUserQuestionQueue, setAskUserQuestionQueue] = useState<AskUserQuestionRequestDto[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const turnActiveRef = useRef(false);
+  const cancellingRef = useRef(false);
+  const cancellationTaskRef = useRef<Promise<void> | null>(null);
 
   const capture = useCallback((cause: unknown) => {
     const message = messageFrom(cause);
     setError(message);
     throw cause;
+  }, []);
+
+  const resetCancellation = useCallback(() => {
+    clearCancellationRuntime(cancellingRef, cancellationTaskRef);
+    setIsCancelling(false);
   }, []);
 
   const resetRuntime = useCallback(() => {
@@ -146,7 +165,9 @@ export function useBridge(): UseBridge {
     setPermissionQueue(next.permissionQueue);
     setComputerAccessQueue(next.computerAccessQueue);
     setAskUserQuestionQueue(next.askUserQuestionQueue);
-  }, []);
+    turnActiveRef.current = false;
+    resetCancellation();
+  }, [resetCancellation]);
 
   const requestTaskList = useCallback(async () => {
     if (!host) return;
@@ -175,6 +196,7 @@ export function useBridge(): UseBridge {
     }
 
     const offEvent = host.onEvent((event: ClientEvent) => {
+      if (event.type === 'turn_started') turnActiveRef.current = true;
       setConversation((previous) => reduceEvent(previous, event));
       setDesktop((previous) => reduceDesktopEvent(previous, event));
       if (event.type === 'ask_user_question') {
@@ -185,6 +207,13 @@ export function useBridge(): UseBridge {
       }
       if (event.type === 'ask_user_question_resolved') {
         dropPendingAskUserQuestion(event.request_id);
+      }
+      if (event.type === 'turn_ended' || event.type === 'session_ended') {
+        setPermissionQueue([]);
+        setComputerAccessQueue([]);
+        setAskUserQuestionQueue([]);
+        turnActiveRef.current = false;
+        resetCancellation();
       }
       if (event.type === 'error') setError(event.message);
     });
@@ -197,6 +226,8 @@ export function useBridge(): UseBridge {
         setPermissionQueue([]);
         setComputerAccessQueue([]);
         setAskUserQuestionQueue([]);
+        turnActiveRef.current = false;
+        resetCancellation();
       }
       if (state.status === 'error') setError(state.message);
       if (state.status === 'disconnected' && state.reason) setError(state.reason);
@@ -233,7 +264,7 @@ export function useBridge(): UseBridge {
       offPermission();
       offComputerAccess();
     };
-  }, [applyBootstrap, dropPendingAskUserQuestion, host]);
+  }, [applyBootstrap, dropPendingAskUserQuestion, host, resetCancellation, resetRuntime]);
 
   useEffect(() => {
     if (!host || connection.status !== 'connected' || !bootstrap?.workspace.trusted) return;
@@ -252,18 +283,27 @@ export function useBridge(): UseBridge {
   const sendPrompt = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || !host) return;
-    setConversation((previous) => appendUserPrompt(previous, trimmed));
+    turnActiveRef.current = true;
+    setConversation((previous) => appendPendingUserPrompt(previous, trimmed));
     try {
       await host.sendPrompt(trimmed);
     } catch (cause) {
-      setConversation((previous) => reduceEvent(previous, {
-        type: 'error',
-        kind: { type: 'transport' },
-        message: 'Failed to send the prompt to the engine.',
+      turnActiveRef.current = false;
+      // Stop may have raced this send before the bridge accepted the turn.
+      // With no owner left to emit turn_ended, release the reusable cancel
+      // task here so the next successful turn can be stopped normally.
+      resetCancellation();
+      setConversation((previous) => ({
+        ...reduceEvent(previous, {
+          type: 'error',
+          kind: { type: 'transport' },
+          message: 'Failed to send the prompt to the engine.',
+        }),
+        running: false,
       }));
       capture(cause);
     }
-  }, [capture, host]);
+  }, [capture, host, resetCancellation]);
 
   const runSlashCommand = useCallback(async (raw: string) => {
     const command = raw.trim();
@@ -285,10 +325,30 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host]);
 
-  const cancel = useCallback(async (turnId?: number) => {
-    if (!host) return;
-    try { await host.cancel(turnId); } catch (cause) { capture(cause); }
-  }, [capture, host]);
+  const cancel = useCallback((turnId?: number): Promise<void> => {
+    if (!host) return Promise.resolve();
+    if (!turnActiveRef.current) return Promise.resolve();
+    if (cancellingRef.current) return cancellationTaskRef.current ?? Promise.resolve();
+
+    cancellingRef.current = true;
+    setIsCancelling(true);
+    let task: Promise<void>;
+    task = host.cancel(turnId).then(() => {
+      // The server drains the same matched turn's brokers. Clear the local
+      // dialogs after the command crossed IPC successfully, while leaving the
+      // conversation running until the real turn_ended event arrives.
+      setPermissionQueue([]);
+      setComputerAccessQueue([]);
+      setAskUserQuestionQueue([]);
+    }).catch((cause: unknown) => {
+      if (cancellationTaskRef.current === task) {
+        resetCancellation();
+      }
+      capture(cause);
+    });
+    cancellationTaskRef.current = task;
+    return task;
+  }, [capture, host, resetCancellation]);
 
   const dropPending = useCallback((requestId: number) => {
     setPermissionQueue((previous) => previous.filter((entry) => entry.request_id !== requestId));
@@ -484,6 +544,7 @@ export function useBridge(): UseBridge {
     desktop,
     usage: conversation.usage,
     running: conversation.running,
+    isCancelling,
     pendingPermission: permissionQueue[0] ?? null,
     pendingComputerAccess: computerAccessQueue[0] ?? null,
     pendingAskUserQuestion: askUserQuestionQueue[0] ?? null,

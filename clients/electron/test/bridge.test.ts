@@ -130,6 +130,7 @@ test('computer access requests broadcast to renderers and are tracked as pending
   };
 
   (manager as any).wireClient(fakeClient, 0);
+  (manager as any).activeTurn = true;
   const request = {
     request_id: 5,
     reason: 'automate chat',
@@ -175,6 +176,7 @@ test('AskUserQuestion events are tracked and cleared across disconnect', async (
   };
 
   (manager as any).wireClient(fakeClient, 0);
+  (manager as any).activeTurn = true;
   handlers.get('event')!(event);
 
   assert.deepEqual(broadcasts, [{ channel: 'lingxi:event', payload: event }]);
@@ -198,6 +200,7 @@ test('AskUserQuestion resolved events clear replay state before a renderer reloa
   };
 
   (manager as any).wireClient(fakeClient, 0);
+  (manager as any).activeTurn = true;
   handlers.get('event')!({
     type: 'ask_user_question',
     request: {
@@ -231,6 +234,7 @@ test('AskUserQuestion broker resolution clears replay state without a renderer a
 
   (manager as any).broadcast = () => undefined;
   (manager as any).wireClient(fakeClient, 0);
+  (manager as any).activeTurn = true;
   handlers.get('event')!({
     type: 'ask_user_question',
     request: {
@@ -284,11 +288,139 @@ test('registerWindow replays pending AskUserQuestion requests to a reloaded rend
   };
 
   (manager as any).wireClient(fakeClient, 0);
+  (manager as any).activeTurn = true;
   handlers.get('event')!(event);
 
   manager.registerWindow(webContents as any, 'app://desktop/index.html');
 
   assert.deepEqual(sent, [{ channel: 'lingxi:event', payload: event }]);
+});
+
+test('old bridge generations cannot repopulate turn or permission state', () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const broadcasts: unknown[] = [];
+  (manager as any).broadcast = (_channel: string, payload: unknown) => broadcasts.push(payload);
+  (manager as any).generation = 2;
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const staleClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return staleClient; },
+  };
+
+  (manager as any).wireClient(staleClient, 1);
+  handlers.get('event')!({ type: 'turn_started', turn_id: 9 });
+  handlers.get('permission')!({ request_id: 9, kind: { type: 'exit_plan_mode' } });
+
+  assert.equal(manager.turnActive, false);
+  assert.equal((manager as any).pendingPermissionIds.size, 0);
+  assert.deepEqual(broadcasts, []);
+});
+
+test('turn terminal owns release and rejects late interactive or tool events', () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const broadcasts: Array<{ channel: string; payload: any }> = [];
+  (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!({ type: 'turn_started', turn_id: 7 });
+  handlers.get('permission')!({ request_id: 4, kind: { type: 'exit_plan_mode' } });
+  handlers.get('event')!({ type: 'error', kind: { type: 'internal' }, message: 'non-terminal command error' });
+  assert.equal(manager.turnActive, true, 'generic errors cannot release a running turn');
+  assert.ok((manager as any).pendingPermissionIds.has(4));
+
+  handlers.get('event')!({
+    type: 'turn_ended',
+    outcome: { type: 'cancelled' },
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '' },
+  });
+  assert.equal(manager.turnActive, false);
+  assert.equal((manager as any).pendingPermissionIds.size, 0);
+
+  handlers.get('permission')!({ request_id: 5, kind: { type: 'exit_plan_mode' } });
+  handlers.get('event')!({ type: 'tool_heartbeat', id: 'late', tool: 'WebSearch', elapsed_ms: 99_000 });
+  handlers.get('event')!({
+    type: 'ask_user_question',
+    request: { request_id: 6, questions: [] },
+  });
+
+  assert.equal((manager as any).pendingPermissionIds.size, 0);
+  assert.equal((manager as any).pendingAskUserQuestionIds.size, 0);
+  assert.equal(
+    broadcasts.some((entry) => entry.payload?.type === 'tool_heartbeat' && entry.payload?.id === 'late'),
+    false,
+  );
+});
+
+test('cancelling turn rejects late interactions but keeps turn events flowing', () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const broadcasts: Array<{ channel: string; payload: any }> = [];
+  (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!({ type: 'turn_started', turn_id: 8 });
+  (manager as any).cancellingTurn = true;
+  handlers.get('permission')!({ request_id: 8, kind: { type: 'exit_plan_mode' } });
+  handlers.get('computerAccess')!({ request_id: 9, reason: 'late', apps: [] });
+  handlers.get('event')!({
+    type: 'ask_user_question',
+    request: { request_id: 10, questions: [] },
+  });
+  handlers.get('event')!({ type: 'tool_heartbeat', id: 'owned', tool: 'Bash', elapsed_ms: 17_000 });
+
+  assert.equal(manager.turnActive, true, 'cancellation does not release the turn slot');
+  assert.equal((manager as any).pendingPermissionIds.size, 0);
+  assert.equal((manager as any).pendingComputerAccessIds.size, 0);
+  assert.equal((manager as any).pendingAskUserQuestionIds.size, 0);
+  assert.equal(
+    broadcasts.some((entry) => entry.payload?.type === 'tool_heartbeat' && entry.payload?.id === 'owned'),
+    true,
+    'Block-tool heartbeats remain visible while stopping',
+  );
+});
+
+test('prompt submission owns the pre-turn_started cancellation window', () => {
+  const calls: Array<{ type: string; value?: unknown }> = [];
+  const manager = new BridgeManager({
+    accessState: () => ({ workspace: '/workspace', trusted: true }),
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    sendPrompt: (text: string) => calls.push({ type: 'prompt', value: text }),
+    cancel: (turnId?: number) => calls.push({ type: 'cancel', value: turnId }),
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+  (manager as any).client = fakeClient;
+  (manager as any).activeWorkspace = '/workspace';
+  (manager as any).wireClient(fakeClient, 0);
+
+  (manager as any).sendPrompt('hello');
+  assert.equal(manager.turnActive, true);
+  (manager as any).cancelTurn(undefined);
+  assert.equal((manager as any).cancellingTurn, true);
+
+  handlers.get('event')!({ type: 'turn_started', turn_id: 91 });
+  handlers.get('permission')!({ request_id: 91, kind: { type: 'exit_plan_mode' } });
+
+  assert.equal((manager as any).cancellingTurn, true, 'turn_started must not undo an accepted cancel');
+  assert.equal((manager as any).pendingPermissionIds.size, 0);
+  assert.deepEqual(calls, [
+    { type: 'prompt', value: 'hello' },
+    { type: 'cancel', value: undefined },
+  ]);
 });
 
 test('provider credential status is sourced from the engine secure store', async () => {

@@ -1176,7 +1176,14 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
             <Icon name="waveform" size={21} color={flowMode ? '#fff' : t.windowBg} stroke={2.15} />
           </button>
           {bridge.running ? (
-            <button type="button" onClick={() => invoke(() => bridge.cancel())} aria-label="Stop current turn" title="Stop" style={{ ...composerSendStyle(t, true), background: t.danger }}><Icon name="stop" size={15} color="#fff" /></button>
+            <button
+              type="button"
+              disabled={bridge.isCancelling}
+              onClick={() => invoke(() => bridge.cancel())}
+              aria-label={bridge.isCancelling ? 'Stopping current turn' : 'Stop current turn'}
+              title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
+              style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
+            ><Icon name="stop" size={15} color="#fff" /></button>
           ) : (
             <button type="button" disabled={!ready || !hasPrompt} onClick={submit} aria-label="Send prompt" title="Send prompt" style={composerSendStyle(t, Boolean(ready && hasPrompt))}><Icon name="arrowU" size={19} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
           )}

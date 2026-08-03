@@ -893,7 +893,15 @@ async fn dispatch_control_request(
             //                      uuid, then `{"still_queued":[],
             //                      "cancelled":[uuids…]}`. Idempotent — a
             //                      repeat interrupt lists nothing twice.
-            let _ = cancel_tx.send(true);
+            // Cancel the token owned by the turn that is live NOW. Do not leave
+            // a sticky watch value behind when the CLI is between turns: that
+            // would cancel the next queued user message instead of the turn the
+            // host intended to interrupt.
+            if control_plane.cancel_active_turn().await {
+                let _ = cancel_tx.send(true);
+            } else {
+                let _ = cancel_tx.send(false);
+            }
             if field("cancel_queued").and_then(Value::as_bool) == Some(true) {
                 let cancelled = lifecycle.queued.cancel_all_queued();
                 for uuid in &cancelled {
@@ -2079,6 +2087,11 @@ pub async fn run_stream_json_input_loop(
                 external_message_id,
             )
             .await;
+        // The control plane's token is also its busy flag. Release it only
+        // after the orchestrator future has naturally completed so Block tools
+        // remain protected, but always release it before accepting between-turn
+        // control operations such as set_cwd.
+        control_plane.clear_active_turn().await;
         // The bridge outlives the turn otherwise (it parks on `changed()`),
         // and the next turn subscribes its own.
         cancel_bridge.abort();
@@ -4721,6 +4734,12 @@ mod tests {
         let plane = std::sync::Arc::new(crate::control_plane::StdioControlPlane::new(
             std::sync::Arc::new(tokio::sync::mpsc::unbounded_channel().0),
         ));
+        // `u1` represents a genuinely in-flight turn, so register the same
+        // owner token the production turn loop installs before dispatching an
+        // interrupt. An idle control plane deliberately does not emit a sticky
+        // watch cancellation, because that would poison the next queued turn.
+        let active_cancel = tokio_util::sync::CancellationToken::new();
+        plane.set_active_turn(active_cancel.clone()).await;
 
         // ① Plain interrupt: survivors listed, queue untouched.
         dispatch_control_request(
@@ -4745,6 +4764,10 @@ mod tests {
         )
         .await;
         assert!(*cancel_rx.borrow(), "interrupt must fire the cancel signal");
+        assert!(
+            active_cancel.is_cancelled(),
+            "interrupt cancels the active owner"
+        );
         let receipt: serde_json::Value =
             serde_json::from_str(&outbound_line(rx.recv().await.expect("receipt"))).unwrap();
         assert_eq!(receipt["response"]["subtype"], "success");

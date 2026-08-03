@@ -32,9 +32,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use client_adapter::ClientEventSink;
+use client_adapter::{lowering::lower_cost_snapshot, ClientEventSink};
 use client_protocol::commands::ImageRefDto;
-use client_protocol::events::{ClientEvent, ErrorKindDto};
+use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 // `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
 // `protocol` shape) so this library code can name it without taking a direct
 // `protocol` dependency.
@@ -415,12 +415,12 @@ impl OrchestratorTurnDriver {
     /// is wired. Shared by [`TurnDriver::run_turn`] (no images) and
     /// [`TurnDriver::run_turn_with_images`]; an empty `sources` vector is
     /// byte-identical to the pre-MULTIMODAL.1 text-only turn.
-    async fn drive_turn(&self, prompt: String, sources: Vec<ImageSource>) {
-        // Each turn gets its own cancel token. A `Now`-priority enqueue fires it
-        // (via the queue's registered active-turn token) to abort the in-flight
-        // turn so the urgent command runs next; a future per-turn cancel command
-        // can fire the same seam.
-        let cancel = CancellationToken::new();
+    async fn drive_turn(
+        &self,
+        prompt: String,
+        sources: Vec<ImageSource>,
+        cancel: CancellationToken,
+    ) {
         // NOW-ABORT wiring: register this turn's token with the queue so a `Now`
         // enqueue aborts it, and RESET the abort-reason flag to `UserInterrupt`
         // so a stale `QueueNowCommand` from the previous turn can't mislabel this
@@ -431,6 +431,7 @@ impl OrchestratorTurnDriver {
         if let Some(queue) = self.queue.as_ref() {
             queue.register_active_turn(cancel.clone()).await;
         }
+        let cancel_probe = cancel.clone();
         let result = self
             .orchestrator
             .run_turn_streaming_with_cancel_image_sources(&prompt, sources, cancel)
@@ -464,6 +465,21 @@ impl OrchestratorTurnDriver {
             Err(err) => {
                 if let Some(sink) = &self.error_sink {
                     sink.emit(Self::error_event(&err)).await;
+                    // `Error` is also used by non-turn commands, so clients
+                    // cannot safely treat every error as a turn terminal. Make
+                    // the hard-turn failure explicit with the same terminal
+                    // event shape normal orchestrator completion emits.
+                    let outcome = if cancel_probe.is_cancelled() {
+                        TurnOutcomeDto::Cancelled
+                    } else {
+                        TurnOutcomeDto::EndTurn
+                    };
+                    sink.emit(ClientEvent::TurnEnded {
+                        outcome,
+                        stop_reason: Some("error".to_string()),
+                        cost: lower_cost_snapshot(&self.orchestrator.snapshot_cost_real().await),
+                    })
+                    .await;
                 } else {
                     tracing::debug!(error = %err, "bridge-server: turn failed (no error sink)");
                 }
@@ -477,7 +493,8 @@ impl TurnDriver for OrchestratorTurnDriver {
     async fn run_turn(&self, prompt: String) {
         // No images: drive with an empty source set — identical to routing through
         // `run_turn_streaming_with_cancel` (which decodes `&[]` to an empty vec).
-        self.drive_turn(prompt, Vec::new()).await;
+        self.drive_turn(prompt, Vec::new(), CancellationToken::new())
+            .await;
     }
 
     /// MULTIMODAL.1: route pasted/attached images through to the model instead of
@@ -486,7 +503,22 @@ impl TurnDriver for OrchestratorTurnDriver {
     /// user message via `ConversationMessage::user_with_images`.
     async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
         let sources = Self::to_image_sources(images);
-        self.drive_turn(prompt, sources).await;
+        self.drive_turn(prompt, sources, CancellationToken::new())
+            .await;
+    }
+
+    async fn run_turn_with_cancel(&self, prompt: String, cancel: CancellationToken) {
+        self.drive_turn(prompt, Vec::new(), cancel).await;
+    }
+
+    async fn run_turn_with_images_and_cancel(
+        &self,
+        prompt: String,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+    ) {
+        self.drive_turn(prompt, Self::to_image_sources(images), cancel)
+            .await;
     }
 }
 

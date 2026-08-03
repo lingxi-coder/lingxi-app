@@ -1134,6 +1134,11 @@ impl BottomPane {
         &self.view_stack
     }
 
+    /// Dismiss permission/question/access prompts owned by the current turn.
+    pub fn dismiss_turn_prompts(&mut self) {
+        self.view_stack.dismiss_turn_prompts();
+    }
+
     /// Apply the `leftArrowOpensAgents` setting (ANDed with the agent-view
     /// enablement gate by the composition root — see the field doc).
     pub fn set_left_arrow_opens_agents(&mut self, enabled: bool) {
@@ -2093,6 +2098,18 @@ impl ViewStack {
     #[must_use]
     pub fn views(&self) -> &[Box<dyn BottomPaneView>] {
         &self.views
+    }
+
+    /// Drop every turn-owned interactive prompt while preserving unrelated
+    /// screens (help, settings, pickers). Dropping these views closes their
+    /// one-shot response senders, so a cancelled turn cannot be approved by a
+    /// stale dialog after its permission broker has already unwound.
+    pub fn dismiss_turn_prompts(&mut self) {
+        self.views.retain(|view| {
+            !view.as_any().is::<PermissionView>()
+                && !view.as_any().is::<AskUserQuestionView>()
+                && !view.as_any().is::<ComputerAccessView>()
+        });
     }
 
     /// Route a key to the active view. Returns `None` when no view is open

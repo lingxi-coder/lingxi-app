@@ -1079,19 +1079,28 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_cancels_turn_then_needs_two_presses_to_quit() {
+    fn ctrl_c_keeps_turn_owned_until_terminal_then_needs_two_presses_to_quit() {
         let mut app = test_app(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
         let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert!(!token.is_cancelled());
-        // Ctrl-C during a turn interrupts it (does NOT quit) and clears activity.
+        // Ctrl-C during a turn requests cancellation but does not release the
+        // slot until the orchestrator reaches its real terminal boundary.
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
             ChatOutcome::Continue
         ));
         assert!(token.is_cancelled());
+        assert!(app.chat_widget.turn_running());
+        // Repeated stop requests remain idempotent and cannot arm idle exit.
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            ChatOutcome::Continue
+        ));
+        assert!(!app.chat_widget.bottom_pane().ctrl_c_armed());
+        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
         assert!(!app.chat_widget.turn_running());
         // First idle Ctrl-C only arms the exit; it does not quit.
         assert!(matches!(
@@ -1338,8 +1347,13 @@ mod tests {
             ChatOutcome::Continue
         ));
         assert!(token.is_cancelled());
-        assert!(!app.chat_widget.turn_running());
-        // Idle now: the same key falls through to the quit policy.
+        assert!(app.chat_widget.turn_running());
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
+        // Idle only after the terminal event: Esc now reaches quit policy.
         assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
     }
 
@@ -1367,7 +1381,9 @@ mod tests {
             ChatOutcome::Continue
         ));
         assert!(token.is_cancelled());
-        // And once idle, Esc quits.
+        assert!(app.chat_widget.turn_running());
+        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
+        // And once the terminal boundary makes it idle, Esc quits.
         assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
     }
 
@@ -1397,33 +1413,24 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_routes_to_active_view_before_the_interrupt_policy() {
+    fn ctrl_c_cancels_turn_and_dismisses_active_view() {
         let mut app = test_app(Vec::new());
         typ(&mut app, "go");
         let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        let (exchange, _resp_rx) = tool_exchange();
+        let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
-        // Layer 1 — the active view swallows Ctrl-C (it owns the keyboard
-        // until resolved): no interrupt, no quit, prompt still open.
+        // Cancellation is global to the parent turn: a modal permission view
+        // cannot swallow Ctrl-C and survive as a stale approval surface.
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
             ChatOutcome::Continue
         ));
-        assert!(app.chat_widget.has_open_permission());
-        assert!(
-            !token.is_cancelled(),
-            "view-owned Ctrl-C must not interrupt"
-        );
-        // Resolve the prompt ('1' = allow once); layer 3 then interrupts.
-        app.on_key(press(KeyCode::Char('1')));
         assert!(!app.chat_widget.has_open_permission());
-        assert!(matches!(
-            app.on_key(ctrl(KeyCode::Char('c'))),
-            ChatOutcome::Continue
-        ));
         assert!(token.is_cancelled());
+        assert!(app.chat_widget.turn_running());
+        assert!(resp_rx.blocking_recv().is_err());
     }
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
@@ -1446,6 +1453,7 @@ mod tests {
     #[test]
     fn permission_prompt_owns_keyboard_and_enter_allows_once() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         assert!(app.chat_widget.has_open_permission());
@@ -1468,6 +1476,7 @@ mod tests {
     #[test]
     fn permission_prompt_esc_denies() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         let outcome = app.on_key(press(KeyCode::Esc));
@@ -1479,6 +1488,7 @@ mod tests {
     #[test]
     fn permission_prompt_number_three_denies() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         // '3' shortcut = third option = Deny.
@@ -1725,6 +1735,7 @@ mod tests {
             .bottom_pane()
             .view_stack()
             .contains::<ModelPickerView>());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         // A permission request arriving while the picker is open stacks on
         // top and owns the keyboard.
         let (exchange, resp_rx) = tool_exchange();
@@ -1854,6 +1865,7 @@ mod tests {
     #[test]
     fn permission_prompt_second_option_allows_always() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         app.on_key(press(KeyCode::Down)); // highlight "Yes, allow always"
@@ -1869,6 +1881,7 @@ mod tests {
     #[test]
     fn permission_resolution_is_single_shot_and_releases_keyboard() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         // '1' shortcut resolves with the first option (AllowOnce)…
@@ -2235,6 +2248,7 @@ mod tests {
     #[test]
     fn layout_permission_dialog_overlays_viewport() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, _resp_rx) = tool_exchange();
         app.open_permission(exchange);
         assert_eq!(app.viewport_height(80), 9, "permission viewport height");
@@ -2326,6 +2340,7 @@ mod tests {
         let backend = TestWriteBackend::new(80, 24);
         let raw = backend.raw_handle();
         let mut terminal = Terminal::with_options(backend).expect("terminal");
+        app.apply_turn_event(TurnEvent::TurnStarted);
         app.apply_turn_event(TurnEvent::TerminalSequence {
             seq: "\u{1b}]0;lingxi title\u{7}".to_string(),
         });
@@ -2482,6 +2497,7 @@ mod tests {
     #[test]
     fn layout_40x12_narrow_permission_modal_clips_gracefully() {
         let mut app = test_app(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
         let (exchange, _resp_rx) = tool_exchange();
         app.open_permission(exchange);
         assert_eq!(app.viewport_height(40), 9, "permission viewport height");

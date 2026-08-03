@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  clearCancellationRuntime,
   resetBridgeRuntimeState,
   shouldClearPendingPermissions,
   shouldResetBridgeRuntime,
@@ -28,4 +29,15 @@ test('pending permission ui is cleared across restart and disconnect states', ()
   assert.equal(shouldClearPendingPermissions({ status: 'error', message: 'boom' }), true);
   assert.equal(shouldClearPendingPermissions({ status: 'connecting' }), false);
   assert.equal(shouldClearPendingPermissions({ status: 'connected' }), false);
+});
+
+test('failed prompt submission releases a cancellation task for the next turn', () => {
+  const pending = Promise.resolve();
+  const cancelling = { current: true };
+  const task = { current: pending as Promise<void> | null };
+
+  clearCancellationRuntime(cancelling, task);
+
+  assert.equal(cancelling.current, false);
+  assert.equal(task.current, null);
 });

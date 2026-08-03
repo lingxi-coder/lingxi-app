@@ -241,6 +241,31 @@ struct PendingBackgrounding {
     requested_at: Instant,
 }
 
+fn is_live_turn_event(event: &TurnEvent) -> bool {
+    matches!(
+        event,
+        TurnEvent::TextDelta(_)
+            | TurnEvent::ThinkingDelta(_)
+            | TurnEvent::ToolUseStart { .. }
+            | TurnEvent::ToolHeartbeat { .. }
+            | TurnEvent::ToolHeartbeatBatch { .. }
+            | TurnEvent::ToolUseResult { .. }
+            | TurnEvent::PermissionRequest { .. }
+            | TurnEvent::TurnEnded(_)
+            | TurnEvent::CostUpdated(_)
+            | TurnEvent::ContextPressure { .. }
+            | TurnEvent::TerminalSequence { .. }
+            | TurnEvent::CompactionCompleted { .. }
+            | TurnEvent::CompactStarted
+            | TurnEvent::CompactEnded
+            | TurnEvent::RateLimit { .. }
+            | TurnEvent::RawUtilization { .. }
+            | TurnEvent::SubagentActivity { .. }
+            | TurnEvent::ApiRetry { .. }
+            | TurnEvent::Attachment { .. }
+    )
+}
+
 /// The chat surface: owns the conversation state and the interactive footer,
 /// leaving only loop plumbing (terminal, channels, callbacks) to the app.
 pub struct ChatWidget {
@@ -263,6 +288,14 @@ pub struct ChatWidget {
     theme_name: ThemeName,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
+    /// Whether turn-scoped bridge events still have a live owner. This remains
+    /// true while cancellation is waiting for Block tools, and flips only at
+    /// the terminal event so late tool events cannot resurrect idle UI state.
+    accepts_turn_events: bool,
+    /// Distinguishes the one resume-time session cost seed from a late
+    /// post-terminal cost callback. It becomes true at the first owned turn and
+    /// remains true for this widget/session lifetime.
+    has_seen_turn: bool,
     /// Cancellation token for an in-flight manual compaction pass.
     current_compaction: Option<CancellationToken>,
     /// A `/compact` submitted while a turn is running. It is replayed at the
@@ -496,6 +529,8 @@ impl ChatWidget {
             theme_setting: ThemeSetting::Named(ThemeName::Dark),
             theme_name: ThemeName::Dark,
             current_turn: None,
+            accepts_turn_events: false,
+            has_seen_turn: false,
             current_compaction: None,
             queued_compact: None,
             ready_compact: None,
@@ -753,6 +788,18 @@ impl ChatWidget {
         {
             return ChatOutcome::ForceRedraw;
         }
+        // A turn-owned modal must not swallow the cancellation chord.  The
+        // permission/question/access views intentionally own ordinary input,
+        // but Ctrl-C cancels their parent turn and drops the response sender.
+        // Route it before the view stack so no stale prompt can remain open
+        // while a Block tool is naturally finishing cancellation.
+        if key.kind == crossterm::event::KeyEventKind::Press
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C'))
+            && (self.current_turn.is_some() || self.current_compaction.is_some())
+        {
+            return self.on_pane_outcome(BottomPaneOutcome::Interrupt);
+        }
         // Ctrl+V / Alt+V: paste an IMAGE from the system clipboard (codex
         // `chatwidget/interaction.rs`). Bracketed paste only carries text —
         // a copied screenshot never arrives as `Event::Paste`, so it needs an
@@ -948,8 +995,26 @@ impl ChatWidget {
     /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
     /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
+        let belongs_to_manual_compaction = self.current_compaction.is_some()
+            && matches!(
+                &event,
+                TurnEvent::CompactionCompleted { .. }
+                    | TurnEvent::CompactStarted
+                    | TurnEvent::CompactEnded
+            );
+        let is_initial_session_cost =
+            !self.has_seen_turn && matches!(&event, TurnEvent::CostUpdated(_));
+        if !self.accepts_turn_events
+            && is_live_turn_event(&event)
+            && !belongs_to_manual_compaction
+            && !is_initial_session_cost
+        {
+            return;
+        }
         match event {
             TurnEvent::TurnStarted => {
+                self.accepts_turn_events = true;
+                self.has_seen_turn = true;
                 self.finalize_collapse_group();
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
@@ -1162,10 +1227,22 @@ impl ChatWidget {
                         file_path,
                     });
             }
-            TurnEvent::TurnEnded(_) => {
+            TurnEvent::TurnEnded(outcome) => {
+                let was_cancelled = matches!(outcome, traits::TurnOutcome::Cancelled)
+                    || self
+                        .current_turn
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled);
                 self.finalize_collapse_group();
                 self.flush_or_discard_active();
+                if was_cancelled {
+                    self.transcript.push_message(RenderedMessage::UserText {
+                        body: crate::history_cell::message::INTERRUPT_MESSAGE.to_string(),
+                        timestamp: 0,
+                    });
+                }
                 self.current_turn = None;
+                self.accepts_turn_events = false;
                 self.turn_started_at = None;
                 self.api_retry = None;
                 self.activity = None;
@@ -1759,6 +1836,14 @@ impl ChatWidget {
     /// prompts are serialized, and the queued one surfaces as soon as the open
     /// prompt resolves.
     pub fn open_permission(&mut self, exchange: PermissionExchange) {
+        if !self.accepts_turn_events
+            || self
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return;
+        }
         if self.has_open_interactive_prompt() {
             self.pending_prompts
                 .push_back(PendingPrompt::Permission(exchange));
@@ -1771,6 +1856,14 @@ impl ChatWidget {
     /// permission prompts, it serializes behind any currently open interactive
     /// prompt and surfaces once the keyboard is free.
     pub fn open_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
+        if !self.accepts_turn_events
+            || self
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return;
+        }
         if self.has_open_interactive_prompt() {
             self.pending_prompts
                 .push_back(PendingPrompt::AskUserQuestion(exchange));
@@ -1783,6 +1876,14 @@ impl ChatWidget {
     /// other interactive prompts, it serializes behind any currently open one
     /// and surfaces once the keyboard is free.
     pub fn open_computer_access(&mut self, exchange: ComputerAccessExchange) {
+        if !self.accepts_turn_events
+            || self
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return;
+        }
         if self.has_open_interactive_prompt() {
             self.pending_prompts
                 .push_back(PendingPrompt::ComputerAccess(exchange));
@@ -1862,6 +1963,7 @@ impl ChatWidget {
         // dispatched prompt turn (the caller passes it to `run_turn`).
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
+        self.accepts_turn_events = true;
         ChatOutcome::DispatchSlash(input.to_string(), token)
     }
 
@@ -3309,6 +3411,7 @@ impl ChatWidget {
         });
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
+        self.accepts_turn_events = true;
         ChatOutcome::Submit(content, self.take_pending_images(), token)
     }
 
@@ -4012,29 +4115,19 @@ impl ChatWidget {
                     self.compacting_started_at = None;
                     return ChatOutcome::Continue;
                 }
-                if let Some(token) = self.current_turn.take() {
+                if let Some(token) = self.current_turn.as_ref() {
+                    if token.is_cancelled() {
+                        return ChatOutcome::Continue;
+                    }
                     token.cancel();
                 }
-                self.turn_started_at = None;
-                self.activity = None;
-                self.active_tool_kinds.clear();
-                self.current_todo = None;
-                self.foreground_agents.clear();
-                self.sync_running_agents();
-                // (review) An interrupt IS a turn boundary — clear the tool
-                // correlation map here too (a cancelled turn future may be
-                // dropped before the bridge emits `TurnEnded`), matching the
-                // other boundaries the M1 fix targeted.
-                self.tool_inputs.clear();
-                // Commit any streamed partial reply, then push the interrupt
-                // row so scrollback shows `[Request interrupted by user]` (the
-                // dim `Interrupted · …` line) — claude-code parity; the old
-                // iocraft backend pushed the same UserText on its Cancel branch.
-                self.flush_or_discard_active();
-                self.transcript.push_message(RenderedMessage::UserText {
-                    body: crate::history_cell::message::INTERRUPT_MESSAGE.to_string(),
-                    timestamp: 0,
-                });
+                // Cancellation is not a terminal boundary. Keep the owner,
+                // active tool, elapsed heartbeat and correlation maps until the
+                // orchestrator emits TurnEnded; Block tools may still be safely
+                // finishing. Interactive requests are different: drop them now
+                // so a stale dialog cannot grant work after cancellation.
+                self.pending_prompts.clear();
+                self.bottom_pane.dismiss_turn_prompts();
                 ChatOutcome::Continue
             }
             BottomPaneOutcome::ToggleVerbose => {
@@ -4136,6 +4229,7 @@ impl ChatWidget {
         });
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
+        self.accepts_turn_events = true;
         ChatOutcome::Submit(text, self.take_pending_images(), token)
     }
 
@@ -5956,11 +6050,12 @@ mod tests {
     /// (so the progress bar renders). `CompactEnded` clears it back to idle.
     #[test]
     fn compact_started_shows_progress_then_ended_clears_it() {
-        let mut widget = widget();
+        let (mut widget, _mock) = widget_with_orchestrator();
         // Idle: no compaction, not running.
         let idle = widget.pane_status();
         assert!(!idle.running && idle.compact_percent.is_none());
 
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
         widget.apply_turn_event(TurnEvent::CompactStarted);
         let during = widget.pane_status();
         assert!(during.running, "compaction shows the running status row");
@@ -5990,6 +6085,7 @@ mod tests {
     fn auto_compaction_indicator_clears_on_completed_and_on_turn_end() {
         // Success path: CompactStarted → CompactionCompleted clears the bar.
         let mut w1 = widget();
+        w1.apply_turn_event(TurnEvent::TurnStarted);
         w1.apply_turn_event(TurnEvent::CompactStarted);
         assert!(w1.pane_status().compact_percent.is_some());
         w1.apply_turn_event(TurnEvent::CompactionCompleted {
@@ -6892,7 +6988,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_cancels_the_turn_and_clears_activity() {
+    fn ctrl_c_keeps_turn_owned_until_terminal_and_heartbeats_continue() {
         let mut widget = widget();
         typ(&mut widget, "x");
         let ChatOutcome::Submit(_, _, token) = widget.handle_key(press(KeyCode::Enter)) else {
@@ -6908,11 +7004,23 @@ mod tests {
         let outcome = widget.handle_key(ctrl(KeyCode::Char('c')));
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert!(token.is_cancelled());
+        assert!(widget.turn_running(), "Block tools retain the turn slot");
+        assert!(widget.activity.is_some());
+        assert!(widget.turn_started_at.is_some());
+
+        widget.apply_turn_event(TurnEvent::ToolHeartbeat {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Read".to_string(),
+            elapsed_ms: 17_000,
+        });
+        assert_eq!(widget.active_tool_elapsed_ms, Some(17_000));
+
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
         assert!(!widget.turn_running());
         assert!(widget.activity.is_none());
         assert!(widget.turn_started_at.is_none());
-        // Interrupt pushes a `[Request interrupted by user]` row rendering the
-        // dim `Interrupted · …` line into scrollback (claude-code parity).
+        // The interruption row is appended at the real terminal boundary, not
+        // when the token is merely fired.
         let all = cells(&widget);
         let last = all[all.len() - 1];
         let rendered: String = last
@@ -6928,6 +7036,77 @@ mod tests {
             rendered.contains("Interrupted"),
             "interrupt row: {rendered}"
         );
+    }
+
+    #[test]
+    fn cancellation_drops_open_queued_and_late_interactive_prompts() {
+        let mut widget = widget();
+        typ(&mut widget, "x");
+        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+
+        let (open, open_rx) = tool_exchange();
+        let (queued, queued_rx) = tool_exchange();
+        widget.open_permission(open);
+        widget.open_permission(queued);
+        assert!(widget.has_open_permission());
+        assert_eq!(widget.pending_prompts.len(), 1);
+
+        widget.handle_key(ctrl(KeyCode::Char('c')));
+        assert!(!widget.has_open_permission());
+        assert!(widget.pending_prompts.is_empty());
+        assert!(open_rx.blocking_recv().is_err());
+        assert!(queued_rx.blocking_recv().is_err());
+
+        let (late, late_rx) = tool_exchange();
+        widget.open_permission(late);
+        assert!(late_rx.blocking_recv().is_err());
+        assert!(!widget.has_open_permission());
+    }
+
+    #[test]
+    fn live_turn_events_are_ignored_without_an_owner_and_after_terminal() {
+        let mut widget = widget();
+
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("unowned"),
+            tool: "WebSearch".to_string(),
+            input: serde_json::json!({"query": "unowned"}),
+        });
+        let (unowned, unowned_rx) = tool_exchange();
+        widget.open_permission(unowned);
+        assert!(unowned_rx.blocking_recv().is_err());
+        assert!(cells(&widget).is_empty());
+
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        let before = cells(&widget).len();
+
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("late"),
+            tool: "WebSearch".to_string(),
+            input: serde_json::json!({"query": "late"}),
+        });
+        widget.apply_turn_event(TurnEvent::ToolHeartbeat {
+            id: protocol::ToolUseId::from("late"),
+            tool: "WebSearch".to_string(),
+            elapsed_ms: 99_000,
+        });
+        widget.apply_turn_event(TurnEvent::CompactionCompleted {
+            messages_before: 10,
+            messages_after: 2,
+            bytes_saved: 100,
+            summary: "late compaction".to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::CostUpdated("$9.9999".to_string()));
+        widget.apply_turn_event(rate_limit_rejected());
+
+        assert_eq!(cells(&widget).len(), before);
+        assert!(widget.cost.is_none());
+        assert!(widget.activity.is_none());
+        assert!(widget.active_tool_id.is_none());
     }
 
     #[test]
@@ -7018,6 +7197,7 @@ mod tests {
         let chord = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
         assert!(matches!(widget.handle_key(chord), ChatOutcome::PasteImage));
         let (exchange, _rx) = tool_exchange();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.open_permission(exchange);
         assert!(
             !matches!(widget.handle_key(chord), ChatOutcome::PasteImage),
@@ -7028,6 +7208,7 @@ mod tests {
     #[test]
     fn second_permission_request_queues_until_the_first_resolves() {
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let (first, first_rx) = tool_exchange();
         let (second, second_rx) = tool_exchange();
         widget.open_permission(first);
@@ -7062,6 +7243,7 @@ mod tests {
     #[test]
     fn queued_permissions_serialize_across_variants_and_drop_closes_channels() {
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let (first, first_rx) = tool_exchange();
         let (plan_tx, plan_rx) = oneshot::channel();
         let plan = PermissionExchange {
@@ -7090,6 +7272,7 @@ mod tests {
         // channels unsent (the gate maps a dropped resp_tx to a deny) instead
         // of leaking unanswerable prompts.
         let mut widget = ChatWidget::new(Vec::new(), SessionInfo::default());
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let (open, open_rx) = tool_exchange();
         let (queued, queued_rx) = tool_exchange();
         widget.open_permission(open);
@@ -7102,6 +7285,7 @@ mod tests {
     #[test]
     fn ask_user_question_queues_behind_permission_and_uses_dedicated_view() {
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let (permission, permission_rx) = tool_exchange();
         let (ask, ask_rx) = ask_exchange();
         widget.open_permission(permission);
@@ -7128,6 +7312,7 @@ mod tests {
     #[test]
     fn ask_user_question_timeout_is_driven_by_the_widget_tick() {
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let (mut ask, ask_rx) = ask_exchange();
         ask.timeout_secs = Some(0);
         widget.open_ask_user_question(ask);
@@ -8411,6 +8596,7 @@ mod tests {
     #[test]
     fn context_pressure_banner_renders_its_own_row_and_clears() {
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let width = 80;
         let idle_height = widget.desired_height(width);
         widget.apply_turn_event(TurnEvent::ContextPressure {
@@ -8458,6 +8644,7 @@ mod tests {
         // (75000/200000 → round(37.5) = 38), token totals, window size, and
         // the derived `exceeds_200k_tokens`.
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         let slot = crate::status_line::new_slot(
             tui_core::status_line_command::StatusLineConfig::from_settings_value(
                 &serde_json::json!({"type": "command", "command": "sl.sh"}),
@@ -8482,7 +8669,8 @@ mod tests {
     #[test]
     fn compaction_completed_folds_one_deduped_compact_boundary() {
         use crate::history_cell::system::CompactBoundaryCell;
-        let mut widget = widget();
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
         widget.apply_turn_event(TurnEvent::CompactionCompleted {
             messages_before: 40,
             messages_after: 8,
@@ -8561,14 +8749,20 @@ mod tests {
     fn rate_limit_composes_a_notice_and_dedupes_identical_text() {
         use crate::history_cell::system::RateLimitCell;
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let turn_cells = cells(&widget).len();
         widget.apply_turn_event(rate_limit_rejected());
-        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(cells(&widget).len(), turn_cells + 1);
         let notice = cell::<RateLimitCell>(&widget, 0);
         assert_eq!(notice.text(), "You've hit your session limit");
         assert_eq!(notice.upsell(), None, "unknown subscription → no upsell");
         // An identical snapshot composes the same text → suppressed.
         widget.apply_turn_event(rate_limit_rejected());
-        assert_eq!(cells(&widget).len(), 1, "identical notices never stack");
+        assert_eq!(
+            cells(&widget).len(),
+            turn_cells + 1,
+            "identical notices never stack"
+        );
         // `/clear` resets the dedupe slot with the scrollback: the SAME
         // notice can reappear in the now-empty transcript.
         submit_command(&mut widget, "/clear");
@@ -8597,10 +8791,12 @@ mod tests {
             credits_required: false,
         };
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let turn_cells = cells(&widget).len();
         // Entering overage: no composed notice (isUsingOverage + allowed →
         // null), but the ONE-SHOT transition notice fires.
         widget.apply_turn_event(overage());
-        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(cells(&widget).len(), turn_cells + 1);
         assert_eq!(
             cell::<RateLimitCell>(&widget, 0).text(),
             "You're now using usage credits"
@@ -8608,7 +8804,11 @@ mod tests {
         assert!(widget.has_shown_overage_notification);
         // Staying in overage: the flag suppresses a repeat.
         widget.apply_turn_event(overage());
-        assert_eq!(cells(&widget).len(), 1, "one-shot while in overage");
+        assert_eq!(
+            cells(&widget).len(),
+            turn_cells + 1,
+            "one-shot while in overage"
+        );
         // The flag SURVIVES /clear (TS component state) — no repeat after it.
         submit_command(&mut widget, "/clear");
         widget.apply_turn_event(overage());
@@ -8644,6 +8844,7 @@ mod tests {
     fn rate_limit_reads_the_wired_subscription_slot_at_compose_time() {
         use crate::history_cell::system::RateLimitCell;
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
         // A live composition-root slot, filled AFTER wiring (the background
         // fetch landing) — the composer reads it at compose time.
         let slot: traits::subscription::SharedSubscription =
@@ -8667,6 +8868,8 @@ mod tests {
     #[test]
     fn terminal_sequences_stage_in_order_and_drain_once() {
         let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let transcript_cells = cells(&widget).len();
         assert!(widget.take_terminal_sequences().is_empty());
         widget.apply_turn_event(TurnEvent::TerminalSequence {
             seq: "\u{1b}]0;title\u{7}".to_string(),
@@ -8686,8 +8889,8 @@ mod tests {
             widget.take_terminal_sequences().is_empty(),
             "drain consumes the stage"
         );
-        // Staging never touches the transcript.
-        assert!(widget.transcript().is_empty());
+        // Staging never touches the turn's transcript.
+        assert_eq!(cells(&widget).len(), transcript_cells);
     }
 
     #[test]

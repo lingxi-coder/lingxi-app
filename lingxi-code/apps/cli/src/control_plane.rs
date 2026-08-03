@@ -186,10 +186,16 @@ impl StdioControlPlane {
         *self.active_turn_cancel.lock().await = None;
     }
 
-    /// Cancel the active turn (the `deny+interrupt` path).
-    async fn cancel_active_turn(&self) {
-        if let Some(tok) = self.active_turn_cancel.lock().await.as_ref() {
-            tok.cancel();
+    /// Cancel the active turn (the `deny+interrupt` / control-channel path).
+    /// Returns whether a live owner existed. An interrupt received while idle
+    /// must not be remembered and applied to the next turn.
+    pub async fn cancel_active_turn(&self) -> bool {
+        let token = self.active_turn_cancel.lock().await.clone();
+        if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
         }
     }
 
@@ -1481,6 +1487,23 @@ mod tests {
             }
         );
         assert!(token.is_cancelled(), "deny+interrupt must cancel the turn");
+    }
+
+    #[tokio::test]
+    async fn idle_cancel_does_not_poison_the_next_turn() {
+        let (plane, _rx) = plane_with_channel();
+
+        assert!(!plane.cancel_active_turn().await);
+        assert!(!plane.is_busy().await);
+
+        let next = CancellationToken::new();
+        plane.set_active_turn(next.clone()).await;
+        assert!(plane.is_busy().await);
+        assert!(!next.is_cancelled());
+
+        plane.clear_active_turn().await;
+        assert!(!plane.is_busy().await);
+        assert!(!next.is_cancelled());
     }
 
     #[tokio::test]

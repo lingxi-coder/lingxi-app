@@ -102,6 +102,16 @@ export function appendUserPrompt(state: ConversationState, text: string): Conver
   return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
 }
 
+/**
+ * Echo a submitted user prompt and reserve the renderer's turn slot before the
+ * asynchronous `turn_started` event arrives. The real terminal event remains
+ * the only successful release path.
+ */
+export function appendPendingUserPrompt(state: ConversationState, text: string): ConversationState {
+  const next = appendUserPrompt(state, text);
+  return next === state ? state : { ...next, running: true };
+}
+
 /** Short, human label for a tool-use card (e.g. `Read`, `Bash`). */
 function toolLabel(tool: string): string {
   return tool && tool.length > 0 ? tool : 'tool';
@@ -243,7 +253,10 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       return pushNotice(state, event.message);
 
     case 'error':
-      return { ...pushError(state, event.message), running: false };
+      // Error is shared by turn failures and unrelated commands/listings. A
+      // hard turn failure is followed by an explicit turn_ended from the bridge
+      // server, so only that lifecycle event may release the composer.
+      return pushError(state, event.message);
 
     default:
       // Listings, sessions, cost_update, etc. — out of scope for the Stage.

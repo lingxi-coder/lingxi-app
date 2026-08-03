@@ -15,6 +15,7 @@ import {
   emptyConversation,
   reduceEvent,
   reduceEvents,
+  appendPendingUserPrompt,
   appendUserPrompt,
   type ConversationState,
 } from '../src/renderer/bridge/conversation';
@@ -106,15 +107,17 @@ test('a tool that interrupts streaming text reopens a fresh line afterwards', ()
   assert.equal(card.sub, 'ls');
 });
 
-test('error event records lastError, appends a strong line, and stops running', () => {
+test('error event records lastError but only turn_ended releases the running turn', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'turn_started' });
   s = reduceEvent(s, { type: 'error', kind: { type: 'server' }, message: 'boom' });
-  assert.equal(s.running, false);
+  assert.equal(s.running, true);
   assert.equal(s.lastError, 'boom');
   const last = s.items.at(-1) as Narration;
   assert.match(last.text, /boom/);
   assert.equal(last.strong, true);
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  assert.equal(s.running, false);
 });
 
 test('system_notice remains non-terminal while surfacing its severity', () => {
@@ -154,6 +157,15 @@ test('appendUserPrompt echoes a strong narration line and ignores blank input', 
   const line = s.items.at(-1) as Narration;
   assert.equal(line.text, 'fix the bug');
   assert.equal(line.strong, true);
+});
+
+test('submitted prompt reserves the turn slot before turn_started arrives', () => {
+  let s = appendPendingUserPrompt(emptyConversation(), 'fix the race');
+  assert.equal(s.running, true);
+  s = reduceEvent(s, { type: 'turn_started', turn_id: 44 });
+  assert.equal(s.running, true);
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'cancelled' }, cost: COST });
+  assert.equal(s.running, false);
 });
 
 test('reduceEvents folds a full turn end-to-end', () => {

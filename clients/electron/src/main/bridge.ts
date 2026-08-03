@@ -195,6 +195,22 @@ function ignorableLockfileError(input: unknown): boolean {
     || /bridge lockfile|JSON/.test(input.message);
 }
 
+export function isTurnOwnedEvent(event: ClientEvent): boolean {
+  return [
+    'ask_user_question',
+    'thinking_delta',
+    'tool_use_started',
+    'tool_heartbeat',
+    'tool_use_result',
+    'message_complete',
+    'cost_update',
+    'coordinator_status',
+    'coordinator_worker',
+    'usage_update',
+    'api_retry',
+  ].includes(event.type);
+}
+
 export class BridgeManager {
   private child: ChildProcess | null = null;
   private client: BridgeClient | null = null;
@@ -213,6 +229,8 @@ export class BridgeManager {
   private nextCredentialOperationId = 1;
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
   private activeTurn = false;
+  private activeTurnId: number | undefined;
+  private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   private readonly pendingPermissionIds = new Set<number>();
   private readonly pendingComputerAccessIds = new Set<number>();
@@ -268,6 +286,14 @@ export class BridgeManager {
   private clearPendingAskUserQuestion(requestId: number): void {
     this.pendingAskUserQuestionRequests.delete(requestId);
     this.pendingAskUserQuestionIds.delete(requestId);
+  }
+
+  private clearTurnInteractions(): void {
+    this.pendingPermissionIds.clear();
+    this.pendingComputerAccessIds.clear();
+    for (const requestId of [...this.pendingAskUserQuestionIds]) {
+      this.clearPendingAskUserQuestion(requestId);
+    }
   }
 
   async start(): Promise<void> {
@@ -549,18 +575,31 @@ export class BridgeManager {
 
   private wireClient(client: BridgeClient, generation: number): void {
     client.on('event', (event: ClientEvent) => {
+      if (generation !== this.generation) return;
+      if (isTurnOwnedEvent(event) && !this.activeTurn) {
+        this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
+        return;
+      }
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
-      if (event.type === 'turn_started') this.activeTurn = true;
-      if (event.type === 'turn_ended' || event.type === 'session_ended' || event.type === 'error') {
+      if (event.type === 'turn_started') {
+        if (!this.activeTurn) this.cancellingTurn = false;
+        this.activeTurn = true;
+        this.activeTurnId = event.turn_id;
+      }
+      if (event.type === 'turn_ended' || event.type === 'session_ended') {
         this.activeTurn = false;
+        this.activeTurnId = undefined;
+        this.cancellingTurn = false;
+        this.clearTurnInteractions();
       }
       if (event.type === 'model_changed') {
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
       }
       if (event.type === 'ask_user_question') {
+        if (this.cancellingTurn) return;
         const requestId = event.request.request_id;
         if (
           !this.pendingAskUserQuestionIds.has(requestId)
@@ -581,6 +620,7 @@ export class BridgeManager {
       this.broadcast(CH_EVENT, event);
     });
     client.on('permission', (request: PermissionRequest) => {
+      if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
       if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
         if (!this.pendingPermissionIds.has(request.request_id) && this.pendingPermissionIds.size >= MAX_PENDING_PERMISSIONS) {
           this.diagnostics.add('warn', 'bridge', 'permission request limit reached');
@@ -591,6 +631,7 @@ export class BridgeManager {
       }
     });
     client.on('computerAccess', (request: ComputerAccessRequestDto) => {
+      if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
       if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
         if (
           !this.pendingComputerAccessIds.has(request.request_id)
@@ -654,6 +695,29 @@ export class BridgeManager {
     if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
   }
 
+  private sendPrompt(text: unknown): void {
+    const prompt = validatePrompt(text);
+    this.requireClient().sendPrompt(prompt);
+    // Claim the local slot as soon as the command crossed the authenticated
+    // bridge boundary. `turn_started` may arrive on a later event-loop tick;
+    // without this pending owner an immediate Cancel (or permission request)
+    // can fall through the same gap fixed in the Rust connection.
+    if (!this.activeTurn) {
+      this.activeTurn = true;
+      this.activeTurnId = undefined;
+      this.cancellingTurn = false;
+    }
+  }
+
+  private cancelTurn(turnId: unknown): void {
+    const id = validateOptionalTurnId(turnId);
+    this.requireClient().cancel(id);
+    if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
+      this.cancellingTurn = true;
+      this.clearTurnInteractions();
+    }
+  }
+
   private registerIpc(): void {
     if (this.ipcRegistered) return;
     this.ipcRegistered = true;
@@ -662,7 +726,7 @@ export class BridgeManager {
       // The engine owns provider credential resolution. The Electron host must
       // not reject a prompt merely because no secret crossed its stdin boundary;
       // CLI/TUI may already have populated the shared secure store.
-      this.requireClient().sendPrompt(validatePrompt(text));
+      this.sendPrompt(text);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -711,7 +775,7 @@ export class BridgeManager {
     });
     ipcMain.handle(CH_CANCEL, (event: IpcMainInvokeEvent, turnId: unknown) => {
       this.assertSender(event);
-      this.requireClient().cancel(validateOptionalTurnId(turnId));
+      this.cancelTurn(turnId);
     });
     ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
@@ -801,11 +865,7 @@ export class BridgeManager {
 
   private async stopBridge(): Promise<void> {
     ++this.generation;
-    this.pendingPermissionIds.clear();
-    this.pendingComputerAccessIds.clear();
-    for (const requestId of [...this.pendingAskUserQuestionIds]) {
-      this.clearPendingAskUserQuestion(requestId);
-    }
+    this.clearTurnInteractions();
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));
@@ -818,6 +878,8 @@ export class BridgeManager {
     this.activeCredentialProviders.clear();
     this.credentialStorageEncrypted = false;
     this.activeTurn = false;
+    this.activeTurnId = undefined;
+    this.cancellingTurn = false;
     const client = this.client;
     this.client = null;
     if (client) {

@@ -41,7 +41,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
@@ -61,6 +61,7 @@ use msgqueue::{
     QueuedCommandContent, TelemetryQueueRecorder,
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 use tui_core::computer_access_bridge::ComputerAccessExchange;
 
@@ -103,6 +104,26 @@ pub trait TurnDriver: Send + Sync + 'static {
         let _ = images;
         self.run_turn(prompt).await;
     }
+
+    /// Cancel-aware text-only entry used by the connection-owned turn slot.
+    /// Legacy/test drivers keep their existing natural-completion behavior;
+    /// the production orchestrator driver overrides this and consumes the
+    /// token at its structured cancellation checkpoints.
+    async fn run_turn_with_cancel(&self, prompt: String, cancel: CancellationToken) {
+        let _ = cancel;
+        self.run_turn(prompt).await;
+    }
+
+    /// Cancel-aware multimodal sibling of [`Self::run_turn_with_images`].
+    async fn run_turn_with_images_and_cancel(
+        &self,
+        prompt: String,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+    ) {
+        let _ = cancel;
+        self.run_turn_with_images(prompt, images).await;
+    }
 }
 
 /// Connection-scoped outbound channel. Holds the per-connection [`FrameSink`]
@@ -111,19 +132,108 @@ pub trait TurnDriver: Send + Sync + 'static {
 /// connection closes the underlying mpsc is gone and `FrameSink::send` is a
 /// silent no-op.
 type SharedFrameSink = Arc<Mutex<Option<FrameSink>>>;
+type SharedPermissionGate = Arc<StdMutex<Option<Weak<AdapterPermissionGate>>>>;
+type SharedComputerAccessBroker = Arc<StdMutex<Option<Weak<BridgeComputerAccessBroker>>>>;
+type SharedAskUserQuestionBroker = Arc<StdMutex<Option<Weak<BridgeAskUserQuestionBroker>>>>;
 
 /// A [`ClientEventSink`] that forwards each lowered [`ClientEvent`] out as a
 /// [`Frame::Event`] on the connection's outbound channel.
 struct FrameEventSink {
     out: SharedFrameSink,
+    active_turn: ActiveTurnControl,
+    ask_user_question_broker: SharedAskUserQuestionBroker,
+}
+
+/// Event sink for connection-level command output (currently display-only slash
+/// commands). It deliberately bypasses turn ownership because no turn exists.
+struct UnscopedFrameEventSink {
+    out: SharedFrameSink,
+}
+
+async fn forward_event(out: &SharedFrameSink, event: ClientEvent) {
+    if let Some(sink) = out.lock().await.as_ref() {
+        let _ = sink.send(Frame::Event(event));
+    }
+}
+
+fn is_owned_turn_event(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::SystemNotice { .. }
+            | ClientEvent::TextDelta { .. }
+            | ClientEvent::AskUserQuestion { .. }
+            | ClientEvent::TurnStarted { .. }
+            | ClientEvent::TurnEnded { .. }
+            | ClientEvent::ToolUseStarted { .. }
+            | ClientEvent::ToolHeartbeat { .. }
+            | ClientEvent::ToolUseResult { .. }
+            | ClientEvent::MessageComplete { .. }
+            | ClientEvent::CostUpdate { .. }
+            | ClientEvent::CoordinatorStatus { .. }
+            | ClientEvent::CoordinatorWorker { .. }
+            | ClientEvent::ThinkingDelta { .. }
+            | ClientEvent::UsageUpdate { .. }
+            | ClientEvent::ApiRetry { .. }
+            | ClientEvent::CompactionCompleted { .. }
+            | ClientEvent::Attachment { .. }
+    )
 }
 
 #[async_trait]
 impl ClientEventSink for FrameEventSink {
-    async fn emit(&self, event: ClientEvent) {
-        if let Some(sink) = self.out.lock().await.as_ref() {
-            let _ = sink.send(Frame::Event(event));
+    async fn emit(&self, mut event: ClientEvent) {
+        // AskUserQuestion is parked in the broker before this event reaches
+        // the sink. Resolve it fail-closed before applying the generic event
+        // filter, otherwise an unowned/terminal request would be dropped while
+        // leaving its broker receiver parked until timeout.
+        if let ClientEvent::AskUserQuestion { request } = &event {
+            let out = self.out.lock().await;
+            let forwarded = self.active_turn.with_accepted_interaction(|| {
+                if let Some(sink) = out.as_ref() {
+                    let _ = sink.send(Frame::Event(event.clone()));
+                }
+            });
+            drop(out);
+            if !forwarded {
+                let broker = self
+                    .ask_user_question_broker
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .as_ref()
+                    .and_then(Weak::upgrade);
+                if let Some(broker) = broker {
+                    broker.cancel(request.request_id).await;
+                }
+            }
+            return;
         }
+        if matches!(event, ClientEvent::TurnEnded { .. }) {
+            let Some(cancelled) = self.active_turn.begin_terminal() else {
+                tracing::debug!("dropping duplicate or unowned turn terminal");
+                return;
+            };
+            if cancelled {
+                if let ClientEvent::TurnEnded { outcome, .. } = &mut event {
+                    *outcome = client_protocol::events::TurnOutcomeDto::Cancelled;
+                }
+            }
+        } else if is_owned_turn_event(&event) && !self.active_turn.accepts_turn_events() {
+            tracing::debug!(event = ?std::mem::discriminant(&event), "dropping terminal or unowned turn event");
+            return;
+        }
+        if let ClientEvent::TurnStarted { turn_id } = &mut event {
+            if turn_id.is_none() {
+                *turn_id = self.active_turn.turn_id();
+            }
+        }
+        forward_event(&self.out, event).await;
+    }
+}
+
+#[async_trait]
+impl ClientEventSink for UnscopedFrameEventSink {
+    async fn emit(&self, event: ClientEvent) {
+        forward_event(&self.out, event).await;
     }
 }
 
@@ -136,11 +246,18 @@ impl ClientEventSink for FrameEventSink {
 struct FramePermissionSink {
     out: SharedFrameSink,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
+    active_turn: ActiveTurnControl,
+    gate: SharedPermissionGate,
 }
 
 #[async_trait]
 impl PermissionRequestSink for FramePermissionSink {
     async fn emit_request(&self, request: PermissionRequest) {
+        let request_id = request.request_id;
+        if !self.active_turn.accepts_interactions() {
+            self.reject(request_id).await;
+            return;
+        }
         // Record the tool name for the eventual resolve.
         let tool_name = match &request.kind {
             PermissionKindDto::ToolUseConfirm { tool_name, .. } => Some(tool_name.clone()),
@@ -149,13 +266,36 @@ impl PermissionRequestSink for FramePermissionSink {
             _ => None,
         };
         if let Some(name) = tool_name {
-            self.tool_names
-                .lock()
-                .await
-                .insert(request.request_id, name);
+            self.tool_names.lock().await.insert(request_id, name);
         }
-        if let Some(sink) = self.out.lock().await.as_ref() {
-            let _ = sink.send(Frame::PermissionRequest(request));
+        // Cancellation can race the gate's `pending.insert` immediately before
+        // this sink is called. Linearize the final ownership check and the send
+        // under the turn-owner lock so a request never appears after cancel won.
+        let out = self.out.lock().await;
+        let forwarded = self.active_turn.with_accepted_interaction(|| {
+            if let Some(sink) = out.as_ref() {
+                let _ = sink.send(Frame::PermissionRequest(request));
+            }
+        });
+        drop(out);
+        if !forwarded {
+            self.tool_names.lock().await.remove(&request_id);
+            self.reject(request_id).await;
+        }
+    }
+}
+
+impl FramePermissionSink {
+    async fn reject(&self, request_id: u64) {
+        let gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(gate) = gate {
+            gate.resolve(request_id, PermissionResponseDto::Deny, "")
+                .await;
         }
     }
 }
@@ -166,13 +306,44 @@ impl PermissionRequestSink for FramePermissionSink {
 /// need, keyed by `request_id` on the [`BridgeComputerAccessBroker`] itself.
 struct FrameComputerAccessSink {
     out: SharedFrameSink,
+    active_turn: ActiveTurnControl,
+    broker: SharedComputerAccessBroker,
 }
 
 #[async_trait]
 impl ComputerAccessRequestSink for FrameComputerAccessSink {
     async fn emit_request(&self, request: ComputerAccessRequestDto) {
-        if let Some(sink) = self.out.lock().await.as_ref() {
-            let _ = sink.send(Frame::ComputerAccessRequest(request));
+        let request_id = request.request_id;
+        if !self.active_turn.accepts_interactions() {
+            self.reject(request_id).await;
+            return;
+        }
+        // The broker parks this request before invoking the sink. Linearize the
+        // final ownership check and send so cancellation either drains it or
+        // follows a request that was already exposed, never the reverse.
+        let out = self.out.lock().await;
+        let forwarded = self.active_turn.with_accepted_interaction(|| {
+            if let Some(sink) = out.as_ref() {
+                let _ = sink.send(Frame::ComputerAccessRequest(request));
+            }
+        });
+        drop(out);
+        if !forwarded {
+            self.reject(request_id).await;
+        }
+    }
+}
+
+impl FrameComputerAccessSink {
+    async fn reject(&self, request_id: u64) {
+        let broker = self
+            .broker
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(broker) = broker {
+            broker.deny(request_id).await;
         }
     }
 }
@@ -199,6 +370,9 @@ pub struct BridgeConnection {
     computer_access_broker: Option<Arc<BridgeComputerAccessBroker>>,
     /// Connection-scoped broker for `AskUserQuestion` UI exchanges.
     ask_user_question_broker: Option<Arc<BridgeAskUserQuestionBroker>>,
+    permission_gate_ref: SharedPermissionGate,
+    computer_access_broker_ref: SharedComputerAccessBroker,
+    ask_user_question_broker_ref: SharedAskUserQuestionBroker,
     driver: Option<Arc<dyn TurnDriver>>,
     /// The full command-routing seam (F2-08). When bound, every
     /// non-turn/non-permission [`ClientCommand`] (model, listings, slash, tasks,
@@ -228,10 +402,189 @@ pub struct BridgeConnection {
     /// this flag OWNS the drain loop; concurrent prompts enqueue and the owner
     /// drains them before clearing the flag.
     turn_running: Arc<AtomicBool>,
+    /// Connection-owned active turn identity and cancellation token. Keeping
+    /// this outside the spawned driver closes the race where Cancel arrives
+    /// after SendPrompt but before the driver registers with msgqueue.
+    active_turn: ActiveTurnControl,
     /// Abort handle for the currently-owned spawned turn-drain loop. On close we
     /// abort it so stale turn work cannot survive into the next reconnect and
     /// emit onto a newly-claimed outbound sink.
     active_turn_task: Arc<StdMutex<Option<tokio::task::AbortHandle>>>,
+}
+
+#[derive(Clone, Default)]
+struct ActiveTurnControl {
+    next_generation: Arc<AtomicU64>,
+    owner: Arc<StdMutex<Option<ActiveTurnOwner>>>,
+}
+
+struct ActiveTurnOwner {
+    generation: u64,
+    turn_id: Option<u64>,
+    cancel: CancellationToken,
+    terminal: bool,
+}
+
+#[derive(Clone)]
+struct TurnInteractions {
+    gate: Option<Arc<AdapterPermissionGate>>,
+    computer_access_broker: Option<Arc<BridgeComputerAccessBroker>>,
+    ask_user_question_broker: Option<Arc<BridgeAskUserQuestionBroker>>,
+    tool_names: Arc<Mutex<HashMap<u64, String>>>,
+}
+
+impl Default for TurnInteractions {
+    fn default() -> Self {
+        Self {
+            gate: None,
+            computer_access_broker: None,
+            ask_user_question_broker: None,
+            tool_names: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl TurnInteractions {
+    async fn drain(&self) {
+        if let Some(gate) = self.gate.as_ref() {
+            gate.drain().await;
+        }
+        if let Some(broker) = self.computer_access_broker.as_ref() {
+            broker.drain().await;
+        }
+        if let Some(broker) = self.ask_user_question_broker.as_ref() {
+            broker.drain().await;
+        }
+        self.tool_names.lock().await.clear();
+    }
+}
+
+impl ActiveTurnControl {
+    fn begin(&self, turn_id: Option<u64>) -> (u64, CancellationToken) {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let cancel = CancellationToken::new();
+        *self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(ActiveTurnOwner {
+            generation,
+            turn_id,
+            cancel: cancel.clone(),
+            terminal: false,
+        });
+        (generation, cancel)
+    }
+
+    fn finish(&self, generation: u64) {
+        let mut owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if owner
+            .as_ref()
+            .is_some_and(|active| active.generation == generation)
+        {
+            *owner = None;
+        }
+    }
+
+    fn cancel(&self, turn_id: Option<u64>) -> bool {
+        let token = {
+            let owner = self
+                .owner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            owner.as_ref().and_then(|active| {
+                (!active.terminal && (turn_id.is_none() || active.turn_id == turn_id))
+                    .then(|| active.cancel.clone())
+            })
+        };
+        if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    fn is_active(&self) -> bool {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_some()
+    }
+
+    fn accepts_turn_events(&self) -> bool {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|owner| !owner.terminal)
+    }
+
+    /// Atomically closes the event stream while retaining the active slot until
+    /// the driver future naturally returns. Returns whether cancellation had
+    /// already been requested so the terminal outcome can be normalized.
+    fn begin_terminal(&self) -> Option<bool> {
+        let mut owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let owner = owner.as_mut()?;
+        if owner.terminal {
+            return None;
+        }
+        owner.terminal = true;
+        Some(owner.cancel.is_cancelled())
+    }
+
+    fn accepts_interactions(&self) -> bool {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|owner| !owner.terminal && !owner.cancel.is_cancelled())
+    }
+
+    /// Run `action` while holding the turn-owner lock only when interactive
+    /// requests are still accepted. This is the linearization point shared by
+    /// prompt emission and cancellation: once `cancel` or `begin_terminal`
+    /// wins the lock, no later permission/question request can reach a client.
+    fn with_accepted_interaction(&self, action: impl FnOnce()) -> bool {
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if owner
+            .as_ref()
+            .is_some_and(|owner| !owner.terminal && !owner.cancel.is_cancelled())
+        {
+            action();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn turn_id(&self) -> Option<u64> {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(|owner| owner.turn_id)
+    }
+
+    fn clear(&self) {
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(owner) = owner {
+            owner.cancel.cancel();
+        }
+    }
 }
 
 impl Default for BridgeConnection {
@@ -267,6 +620,8 @@ async fn drain_main_thread(
     driver: &Arc<dyn TurnDriver>,
     queue: &Arc<MessageQueueManager>,
     loop_runtime: &Arc<tool_cron::LoopRuntime>,
+    active_turn: &ActiveTurnControl,
+    interactions: &TurnInteractions,
 ) {
     loop {
         // Snapshot the highest-priority main-thread, non-slash prompts so a run
@@ -294,7 +649,10 @@ async fn drain_main_thread(
                                 cmd.source == QueueSource::Cron,
                                 t,
                             );
-                            driver.run_turn(t.to_string()).await;
+                            let (generation, cancel) = active_turn.begin(None);
+                            driver.run_turn_with_cancel(t.to_string(), cancel).await;
+                            interactions.drain().await;
+                            active_turn.finish(generation);
                         }
                     }
                     continue;
@@ -316,7 +674,10 @@ async fn drain_main_thread(
             None => tag_loop_tick_in_flight(loop_runtime, false, &joined),
         }
         queue.remove(&consumed, "drained into follow-up turn").await;
-        driver.run_turn(joined).await;
+        let (generation, cancel) = active_turn.begin(None);
+        driver.run_turn_with_cancel(joined, cancel).await;
+        interactions.drain().await;
+        active_turn.finish(generation);
     }
 }
 
@@ -345,6 +706,9 @@ impl BridgeConnection {
             gate: None,
             computer_access_broker: None,
             ask_user_question_broker: None,
+            permission_gate_ref: Arc::new(StdMutex::new(None)),
+            computer_access_broker_ref: Arc::new(StdMutex::new(None)),
+            ask_user_question_broker_ref: Arc::new(StdMutex::new(None)),
             driver: None,
             router: None,
             handshaken: Arc::new(AtomicBool::new(false)),
@@ -360,6 +724,7 @@ impl BridgeConnection {
             ))),
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             turn_running: Arc::new(AtomicBool::new(false)),
+            active_turn: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
         }
     }
@@ -370,6 +735,16 @@ impl BridgeConnection {
     #[must_use]
     pub fn event_sink(&self) -> Arc<dyn ClientEventSink> {
         Arc::new(FrameEventSink {
+            out: self.out.clone(),
+            active_turn: self.active_turn.clone(),
+            ask_user_question_broker: self.ask_user_question_broker_ref.clone(),
+        })
+    }
+
+    /// Sink reserved for command output that is not part of a turn lifecycle.
+    /// Keeping it private prevents orchestrator events from bypassing ownership.
+    fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
+        Arc::new(UnscopedFrameEventSink {
             out: self.out.clone(),
         })
     }
@@ -382,6 +757,8 @@ impl BridgeConnection {
         Arc::new(FramePermissionSink {
             out: self.out.clone(),
             tool_names: self.tool_names.clone(),
+            active_turn: self.active_turn.clone(),
+            gate: self.permission_gate_ref.clone(),
         })
     }
 
@@ -392,6 +769,8 @@ impl BridgeConnection {
     pub fn computer_access_sink(&self) -> Arc<dyn ComputerAccessRequestSink> {
         Arc::new(FrameComputerAccessSink {
             out: self.out.clone(),
+            active_turn: self.active_turn.clone(),
+            broker: self.computer_access_broker_ref.clone(),
         })
     }
 
@@ -400,6 +779,10 @@ impl BridgeConnection {
     /// `SendPrompt`. Yields the fully-bound pump.
     #[must_use]
     pub fn bind(mut self, gate: Arc<AdapterPermissionGate>, driver: Arc<dyn TurnDriver>) -> Self {
+        *self
+            .permission_gate_ref
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&gate));
         self.gate = Some(gate);
         self.driver = Some(driver);
         self
@@ -418,6 +801,10 @@ impl BridgeConnection {
         broker: Arc<BridgeComputerAccessBroker>,
         rx: tokio::sync::mpsc::Receiver<ComputerAccessExchange>,
     ) -> Self {
+        *self
+            .computer_access_broker_ref
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&broker));
         let run_loop = broker.clone();
         tokio::spawn(async move { run_loop.run(rx).await });
         self.computer_access_broker = Some(broker);
@@ -432,6 +819,10 @@ impl BridgeConnection {
         broker: Arc<BridgeAskUserQuestionBroker>,
         rx: tokio::sync::mpsc::Receiver<AskUserQuestionExchange>,
     ) -> Self {
+        *self
+            .ask_user_question_broker_ref
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&broker));
         let run_loop = broker.clone();
         tokio::spawn(async move { run_loop.run(rx).await });
         self.ask_user_question_broker = Some(broker);
@@ -592,8 +983,16 @@ impl BridgeConnection {
     /// Route one decoded [`ClientCommand`].
     async fn dispatch(&self, command: ClientCommand) {
         match command {
-            ClientCommand::SendPrompt { text, images, .. } => {
-                self.handle_send_prompt(text, images).await;
+            ClientCommand::SendPrompt {
+                text,
+                images,
+                turn_id,
+                ..
+            } => {
+                self.handle_send_prompt(text, images, turn_id).await;
+            }
+            ClientCommand::Cancel { turn_id } => {
+                self.cancel_active_turn(turn_id).await;
             }
             ClientCommand::ApprovePermission {
                 request_id,
@@ -623,6 +1022,19 @@ impl BridgeConnection {
             ClientCommand::CancelAskUserQuestion { request_id } => {
                 self.cancel_ask_user_question(request_id).await;
             }
+            // Manual compaction is a connection-scoped command and is valid
+            // while no turn owns the event stream. Its completion must bypass
+            // the late-turn filter; automatic in-turn compaction continues to
+            // flow through `FrameEventSink` and remains owner-scoped.
+            command @ ClientCommand::ForceCompact => {
+                if let Some(router) = self.router.clone() {
+                    router.route(command, self.unscoped_event_sink()).await;
+                } else {
+                    tracing::debug!(
+                        "bridge-server: force compact not routed (no CommandRouter bound)"
+                    );
+                }
+            }
             // A slash command may be a `type: "prompt"` command (`/loop`,
             // Markdown/Plugin): claude-code injects its expanded prompt as the
             // user turn. Pre-dispatch via the router's dispatcher (which the
@@ -640,7 +1052,7 @@ impl BridgeConnection {
                     Some(traits::SlashDispatchResult::RunAsTurn { prompt }) => {
                         // Run the expanded prompt exactly like a direct user
                         // prompt (enqueue-or-spawn; no images).
-                        self.handle_send_prompt(prompt, Vec::new()).await;
+                        self.handle_send_prompt(prompt, Vec::new(), None).await;
                     }
                     // Display-only / unknown result: surface the SAME dispatch
                     // result's text directly. We must NOT re-`route()` here —
@@ -651,12 +1063,12 @@ impl BridgeConnection {
                     // the already-computed disposition instead.
                     Some(traits::SlashDispatchResult::Handled { display })
                     | Some(traits::SlashDispatchResult::Unknown { display, .. }) => {
-                        self.event_sink()
+                        self.unscoped_event_sink()
                             .emit(ClientEvent::TextDelta { text: display })
                             .await;
                     }
                     Some(traits::SlashDispatchResult::NotASlashCommand) => {
-                        self.event_sink()
+                        self.unscoped_event_sink()
                             .emit(ClientEvent::TextDelta {
                                 text: format!("not a slash command: {raw}"),
                             })
@@ -668,7 +1080,10 @@ impl BridgeConnection {
                     None => {
                         if let Some(router) = self.router.clone() {
                             router
-                                .route(ClientCommand::RunSlashCommand { raw }, self.event_sink())
+                                .route(
+                                    ClientCommand::RunSlashCommand { raw },
+                                    self.unscoped_event_sink(),
+                                )
                                 .await;
                         }
                     }
@@ -711,7 +1126,12 @@ impl BridgeConnection {
     /// directly-dispatched seed prompt) — matching claude-code, where a queued
     /// command's images are carried as `pastedContents`/`ContentBlockParam[]`
     /// but the bridge run loop here drives the text-only `run_turn` entry.
-    async fn handle_send_prompt(&self, text: String, images: Vec<ImageRefDto>) {
+    async fn handle_send_prompt(
+        &self,
+        text: String,
+        images: Vec<ImageRefDto>,
+        turn_id: Option<u64>,
+    ) {
         let Some(driver) = self.driver.clone() else {
             return;
         };
@@ -730,16 +1150,31 @@ impl BridgeConnection {
         let queue = self.queue.clone();
         let loop_runtime = self.loop_runtime.clone();
         let turn_running = self.turn_running.clone();
+        let active_turn = self.active_turn.clone();
+        let interactions = TurnInteractions {
+            gate: self.gate.clone(),
+            computer_access_broker: self.computer_access_broker.clone(),
+            ask_user_question_broker: self.ask_user_question_broker.clone(),
+            tool_names: self.tool_names.clone(),
+        };
+        // Claim the active owner before spawning. Cancel can now safely arrive
+        // immediately after SendPrompt without missing the driver's token.
+        let (seed_generation, seed_cancel) = active_turn.begin(turn_id);
         let task = tokio::spawn(async move {
             // Seed turn — the prompt that won the loop (carries its images).
-            driver.run_turn_with_images(text, images).await;
+            driver
+                .run_turn_with_images_and_cancel(text, images, seed_cancel)
+                .await;
+            interactions.drain().await;
+            active_turn.finish(seed_generation);
 
             // Between-turn drain: run queued main-thread prompts as follow-up
             // turns until the queue is empty. Re-check after clearing the flag to
             // close the race where a prompt enqueues between the empty-check and
             // the flag clear (twin of print.ts recheckCommandQueue).
             loop {
-                drain_main_thread(&driver, &queue, &loop_runtime).await;
+                drain_main_thread(&driver, &queue, &loop_runtime, &active_turn, &interactions)
+                    .await;
                 turn_running.store(false, Ordering::SeqCst);
                 // If a prompt slipped in after the last drain but before the
                 // store, re-claim the loop and drain again; otherwise we're done.
@@ -757,6 +1192,25 @@ impl BridgeConnection {
             .active_turn_task
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(task.abort_handle());
+    }
+
+    async fn cancel_active_turn(&self, turn_id: Option<u64>) {
+        if !self.active_turn.cancel(turn_id) {
+            tracing::debug!(?turn_id, "bridge-server: ignored stale or idle turn cancel");
+            return;
+        }
+
+        // Interaction state belongs to the matched turn. Drain it only after a
+        // successful identity match; a stale Cancel must have zero effect on a
+        // newer turn's prompts or durable permission decisions.
+        TurnInteractions {
+            gate: self.gate.clone(),
+            computer_access_broker: self.computer_access_broker.clone(),
+            ask_user_question_broker: self.ask_user_question_broker.clone(),
+            tool_names: self.tool_names.clone(),
+        }
+        .drain()
+        .await;
     }
 
     /// Resolve a parked permission request on the gate (the WS read task side of
@@ -928,6 +1382,7 @@ impl BridgeConnection {
         self.handshake_refused.store(false, Ordering::SeqCst);
         self.abort_active_turn_task();
         self.turn_running.store(false, Ordering::SeqCst);
+        self.active_turn.clear();
         self.queue.clear_active_turn().await;
         self.queue.clear().await;
         self.loop_runtime.take_in_flight_prompt();
@@ -977,10 +1432,56 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
     use client_protocol::commands::{ClientCommand, ImageRefDto};
+    use client_protocol::events::ClientEvent;
     use client_protocol::permission::PermissionRequest;
     use tokio::sync::{Mutex, Notify};
+    use tokio_util::sync::CancellationToken;
+    use traits::{PermissionDecision, PermissionGate};
 
-    use super::{BridgeConnection, TurnDriver};
+    use super::{is_owned_turn_event, ActiveTurnControl, BridgeConnection, TurnDriver};
+
+    #[test]
+    fn terminal_closes_all_turn_events_without_releasing_the_driver_slot() {
+        let active = ActiveTurnControl::default();
+        let (generation, _) = active.begin(Some(7));
+        assert!(active.accepts_turn_events());
+        assert_eq!(active.begin_terminal(), Some(false));
+        assert!(!active.accepts_turn_events());
+        assert!(!active.accepts_interactions());
+        assert!(
+            !active.cancel(Some(7)),
+            "a terminal turn is closed and cannot be cancelled again"
+        );
+        assert!(
+            active.is_active(),
+            "driver still owns the slot after terminal emission"
+        );
+        assert_eq!(
+            active.begin_terminal(),
+            None,
+            "a duplicate terminal is rejected"
+        );
+        active.finish(generation);
+        assert!(!active.is_active());
+
+        assert!(is_owned_turn_event(&ClientEvent::TextDelta {
+            text: "late".to_string(),
+        }));
+        assert!(is_owned_turn_event(&ClientEvent::CompactionCompleted {
+            messages_before: 2,
+            messages_after: 1,
+            bytes_saved: 10,
+        }));
+        assert!(is_owned_turn_event(&ClientEvent::SystemNotice {
+            message: "late notice".to_string(),
+            is_error: false,
+        }));
+        assert!(is_owned_turn_event(&ClientEvent::Attachment {
+            attachment: client_protocol::events::AttachmentDto::NestedMemory {
+                display_path: "late".to_string(),
+            },
+        }));
+    }
 
     /// Shared cell capturing the `(prompt, images)` a driver was driven with.
     type CapturedTurn = Arc<Mutex<Option<(String, Vec<ImageRefDto>)>>>;
@@ -1173,6 +1674,112 @@ mod tests {
         );
     }
 
+    struct CancelAwareBlockDriver {
+        started: Arc<Notify>,
+        cancel_observed: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl TurnDriver for CancelAwareBlockDriver {
+        async fn run_turn(&self, _prompt: String) {
+            panic!("connection must use the cancel-aware entry");
+        }
+
+        async fn run_turn_with_images_and_cancel(
+            &self,
+            _prompt: String,
+            _images: Vec<ImageRefDto>,
+            cancel: CancellationToken,
+        ) {
+            self.started.notify_one();
+            cancel.cancelled().await;
+            self.cancel_observed.notify_one();
+            // Models an InterruptBehavior::Block tool: cancellation has been
+            // observed, but the owner does not return until the safe boundary.
+            self.release.notified().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_matches_turn_id_and_keeps_slot_until_block_owner_finishes() {
+        let started = Arc::new(Notify::new());
+        let cancel_observed = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(CancelAwareBlockDriver {
+            started: started.clone(),
+            cancel_observed: cancel_observed.clone(),
+            release: release.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new().bind(gate, driver);
+
+        connection
+            .dispatch(ClientCommand::SendPrompt {
+                text: "block".to_string(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(41),
+            })
+            .await;
+        started.notified().await;
+
+        connection
+            .dispatch(ClientCommand::Cancel { turn_id: Some(99) })
+            .await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                cancel_observed.notified()
+            )
+            .await
+            .is_err(),
+            "stale turn id must not cancel the active owner"
+        );
+
+        connection
+            .dispatch(ClientCommand::Cancel { turn_id: Some(41) })
+            .await;
+        cancel_observed.notified().await;
+        assert!(connection.active_turn.is_active());
+        assert!(connection.turn_running.load(Ordering::SeqCst));
+
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while connection.active_turn.is_active()
+                || connection.turn_running.load(Ordering::SeqCst)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("turn slot released after Block owner completed");
+    }
+
+    #[tokio::test]
+    async fn permission_registered_after_cancel_is_denied_without_waiting_for_timeout() {
+        let connection = BridgeConnection::new();
+        let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: Arc::new(Mutex::new(None)),
+            notify: Arc::new(Notify::new()),
+        });
+        let connection = connection.bind(gate.clone(), driver);
+        let (generation, _) = connection.active_turn.begin(Some(73));
+        assert!(connection.active_turn.cancel(Some(73)));
+
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            gate.check("Bash", &serde_json::json!({ "command": "echo late" })),
+        )
+        .await
+        .expect("a post-cancel permission must not wait for the normal prompt timeout");
+
+        assert!(matches!(decision, PermissionDecision::Deny { .. }));
+        assert_eq!(gate.pending_count().await, 0);
+        connection.active_turn.finish(generation);
+    }
+
     /// A driver whose FIRST turn parks on a barrier until the test releases it,
     /// recording every prompt (in order) it is driven with. Lets a test prove a
     /// second `SendPrompt` arriving mid-turn does NOT spawn a concurrent turn but
@@ -1333,7 +1940,14 @@ mod tests {
             notify: Arc::new(Notify::new()),
         });
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        super::drain_main_thread(&driver, &queue, &loop_runtime).await;
+        super::drain_main_thread(
+            &driver,
+            &queue,
+            &loop_runtime,
+            &super::ActiveTurnControl::default(),
+            &super::TurnInteractions::default(),
+        )
+        .await;
         assert_eq!(
             loop_runtime.in_flight_prompt().as_deref(),
             Some("# Autonomous loop tick"),
@@ -1362,7 +1976,14 @@ mod tests {
             notify: Arc::new(Notify::new()),
         });
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        super::drain_main_thread(&driver, &queue, &loop_runtime).await;
+        super::drain_main_thread(
+            &driver,
+            &queue,
+            &loop_runtime,
+            &super::ActiveTurnControl::default(),
+            &super::TurnInteractions::default(),
+        )
+        .await;
         assert_eq!(
             loop_runtime.in_flight_prompt(),
             None,

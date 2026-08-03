@@ -1652,3 +1652,34 @@ async fn set_model_routes_over_ws() {
 
     endpoint.shutdown().await;
 }
+
+#[tokio::test]
+async fn force_compact_completion_routes_over_ws_without_an_active_turn() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let router = Arc::new(router_with(
+        handle,
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    )) as Arc<dyn CommandRouter>;
+
+    let connection = BridgeConnection::new();
+    let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+    let connection = connection
+        .bind(gate, Arc::new(NoopTurnDriver))
+        .bind_router(router);
+
+    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection))
+        .await
+        .expect("endpoint must start");
+    endpoint.set_auth_token(E2E_TOKEN.to_string());
+    let mut ws = connect(endpoint.port()).await;
+    send_hello(&mut ws).await;
+
+    send_command(&mut ws, &ClientCommand::ForceCompact).await;
+
+    match next_frame(&mut ws).await {
+        Frame::Event(ClientEvent::CompactionCompleted { .. }) => {}
+        other => panic!("expected idle CompactionCompleted over WS, got {other:?}"),
+    }
+
+    endpoint.shutdown().await;
+}

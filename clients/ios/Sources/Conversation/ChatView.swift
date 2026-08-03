@@ -46,6 +46,7 @@ struct ChatView: View {
 
     #if canImport(UIKit)
         @State private var keyboardObserverIsRegistered = false
+        @State private var keyboardObservers: [NSObjectProtocol] = []
     #endif
 
     // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
@@ -173,7 +174,12 @@ struct ChatView: View {
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
         }
-        .onDisappear(perform: cancelVoiceHold)
+        .onDisappear {
+            cancelVoiceHold()
+            #if canImport(UIKit)
+                unregisterKeyboardObservers()
+            #endif
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { cancelVoiceHold() }
         }
@@ -405,21 +411,32 @@ struct ChatView: View {
     #if canImport(UIKit)
     private func registerKeyboardObserversIfNeeded() {
         guard !keyboardObserverIsRegistered else { return }
+        unregisterKeyboardObservers()
         keyboardObserverIsRegistered = true
-        NotificationCenter.default.addObserver(
+        let willShow = NotificationCenter.default.addObserver(
             forName: UIResponder.keyboardWillShowNotification,
             object: nil,
             queue: .main
         ) { note in
             setKeyboardHeight(from: note)
         }
-        NotificationCenter.default.addObserver(
+        let willHide = NotificationCenter.default.addObserver(
             forName: UIResponder.keyboardWillHideNotification,
             object: nil,
             queue: .main
         ) { _ in
             keyboardHeight = 0
         }
+        keyboardObservers = [willShow, willHide]
+    }
+
+    private func unregisterKeyboardObservers() {
+        guard !keyboardObservers.isEmpty else { return }
+        for observer in keyboardObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        keyboardObservers.removeAll()
+        keyboardObserverIsRegistered = false
     }
 
     private func setKeyboardHeight(from notification: Notification) {

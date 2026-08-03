@@ -87,14 +87,10 @@ impl StrictPluginOnlyPolicy {
 
 fn all_components() -> HashSet<PluginComponent> {
     [
-        PluginComponent::Commands,
         PluginComponent::Agents,
         PluginComponent::Skills,
         PluginComponent::Hooks,
-        PluginComponent::OutputStyles,
         PluginComponent::McpServers,
-        PluginComponent::LspServers,
-        PluginComponent::Channels,
     ]
     .into_iter()
     .collect()
@@ -102,14 +98,10 @@ fn all_components() -> HashSet<PluginComponent> {
 
 fn component_from_slot(slot: &str) -> Option<PluginComponent> {
     Some(match slot {
-        "commands" => PluginComponent::Commands,
         "agents" => PluginComponent::Agents,
         "skills" => PluginComponent::Skills,
         "hooks" => PluginComponent::Hooks,
-        "outputStyles" => PluginComponent::OutputStyles,
         "mcp" | "mcpServers" => PluginComponent::McpServers,
-        "lsp" | "lspServers" => PluginComponent::LspServers,
-        "channels" => PluginComponent::Channels,
         _ => return None,
     })
 }
@@ -127,6 +119,32 @@ mod tests {
         assert!(policy.is_locked(PluginComponent::McpServers));
         assert!(policy.is_locked(PluginComponent::Hooks));
         assert!(!policy.is_locked(PluginComponent::Commands));
+    }
+
+    #[test]
+    fn boolean_true_locks_only_the_four_customization_surfaces() {
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":true}"#,
+        ]);
+
+        assert_eq!(policy.locked.len(), 4);
+        assert!(policy.is_locked(PluginComponent::Agents));
+        assert!(policy.is_locked(PluginComponent::Skills));
+        assert!(policy.is_locked(PluginComponent::Hooks));
+        assert!(policy.is_locked(PluginComponent::McpServers));
+        assert!(!policy.is_locked(PluginComponent::Commands));
+        assert!(!policy.is_locked(PluginComponent::OutputStyles));
+        assert!(!policy.is_locked(PluginComponent::LspServers));
+        assert!(!policy.is_locked(PluginComponent::Channels));
+    }
+
+    #[test]
+    fn unknown_and_non_customization_array_entries_are_ignored() {
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":["skills","commands","outputStyles","unknown"]}"#,
+        ]);
+
+        assert_eq!(policy.locked, HashSet::from([PluginComponent::Skills]));
     }
 
     #[test]

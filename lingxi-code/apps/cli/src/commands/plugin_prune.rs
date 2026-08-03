@@ -3,7 +3,7 @@
 //! plugin, 1:1 with claude-code 2.1.201 (probed against the real binary in an
 //! isolated `$CLAUDE_CONFIG_DIR`).
 //!
-//! A v2 `installed_plugins.json` record carries an `auto: true` marker
+//! A v2 `installed_plugins.json` record carries an `autoInstalled: true` marker
 //! ("True when pulled in as a dependency. Eligible for orphan sweep."). Prune
 //! computes, at the chosen scope, the set of `auto`-installed plugins that are
 //! NOT reachable — via the `manifest.dependencies` graph — from any
@@ -30,19 +30,13 @@
 //! An unknown `--scope` yields the install-family wording
 //! `Invalid scope: <s>. Must be one of: user, project, local.`
 //!
-//! Residual: this port's `plugin install` does not yet write the `auto: true`
-//! marker (dependency auto-install is not ported), so in the common case
-//! `autoCount == 0` and the empty-case line is what runs end-to-end. The full
-//! scan/removal path is implemented and unit-tested against synthetic v2 DBs;
-//! the "loaded plugins" set is sourced from each record's own `installPath`
-//! manifest (rather than the live `PluginManager` registry, which is not wired
-//! into the CLI seam), so a record with a missing/unreadable `installPath`
-//! manifest is treated as failed-to-load (matching the oracle's unloadable
-//! branch).
+//! Legacy `auto` and snake-case `auto_installed` markers remain readable.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
@@ -50,6 +44,7 @@ use serde_json::{Map, Value};
 use crate::commands::plugin_settings::Scope;
 
 /// `<plugins>/installed_plugins.json` path.
+#[cfg(test)]
 fn installed_path(plugins_dir: &Path) -> PathBuf {
     plugins_dir.join("installed_plugins.json")
 }
@@ -57,24 +52,12 @@ fn installed_path(plugins_dir: &Path) -> PathBuf {
 /// Load the v2 installed DB (`{version:2, plugins:{...}}`); missing/malformed ⇒
 /// a fresh empty v2 doc.
 fn load_installed(plugins_dir: &Path) -> Value {
-    std::fs::read_to_string(installed_path(plugins_dir))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .filter(|v| v.get("plugins").is_some())
-        .unwrap_or_else(|| serde_json::json!({"version": 2, "plugins": {}}))
+    super::plugin_install::load_installed(plugins_dir)
 }
 
 /// Write the installed DB (pretty, no trailing newline).
 fn write_installed(plugins_dir: &Path, doc: &Value) -> Result<(), String> {
-    let path = installed_path(plugins_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
+    super::plugin_install::write_installed(plugins_dir, doc)
 }
 
 /// Parse the prune `--scope` (default `user`); invalid-scope wording matches the
@@ -178,15 +161,14 @@ fn load_dependencies(install_path: &str) -> Option<Vec<String>> {
     let value: Value = serde_json::from_str(&raw).ok()?;
     // `dependencies` is optional; an absent key is an empty dependency list (a
     // loadable plugin), NOT a load failure.
-    let deps = value
-        .get("dependencies")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.as_str().map(String::from))
-                .collect()
+    let deps = plugin::parse_dependencies(value.get("dependencies"))
+        .ok()?
+        .into_iter()
+        .map(|dependency| match dependency.marketplace {
+            Some(marketplace) => format!("{}@{marketplace}", dependency.name),
+            None => dependency.name,
         })
-        .unwrap_or_default();
+        .collect();
     Some(deps)
 }
 
@@ -207,7 +189,10 @@ fn scan(db: &Value, scope: Scope, project_path: &Option<String>) -> Scan {
             Some(r) => r,
             None => continue,
         };
-        if rec.get("auto").and_then(Value::as_bool) == Some(true) {
+        let auto_installed = ["autoInstalled", "auto_installed", "auto"]
+            .iter()
+            .any(|key| rec.get(*key).and_then(Value::as_bool) == Some(true));
+        if auto_installed {
             auto.push(id.clone());
         } else {
             manual.push(id.clone());
@@ -326,11 +311,18 @@ fn remove_orphans(
         {
             if let Some(rec) = scoped_record(arr, scope, project_path) {
                 if let Some(path) = rec.get("installPath").and_then(Value::as_str) {
-                    let _ = std::fs::remove_dir_all(path);
+                    if let Some(path) = super::plugin_install::confined_cache_record_path(
+                        plugins_dir,
+                        Path::new(path),
+                    ) {
+                        let _ = std::fs::remove_dir_all(path);
+                    }
                 }
             }
         }
-        let _ = std::fs::remove_dir_all(plugins_dir.join("data").join(id));
+        if let Some(path) = super::plugin_install::confined_plugin_data_path(plugins_dir, id) {
+            let _ = std::fs::remove_dir_all(path);
+        }
 
         // Drop the scope+projectPath record; remove the key if none remain.
         if let Some(plugins) = db.get_mut("plugins").and_then(Value::as_object_mut) {
@@ -585,6 +577,54 @@ mod tests {
     }
 
     #[test]
+    fn prune_never_deletes_install_paths_outside_plugin_cache() {
+        let e = env();
+        let outside = e._tmp.path().join("must-survive");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), "keep").unwrap();
+        write_db(
+            &e,
+            &[("forged@mkt", "1.0.0", outside.to_str().unwrap(), true)],
+        );
+
+        run_prune_inner(
+            true, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
+
+        assert!(outside.join("sentinel").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_rejects_a_symlinked_plugin_cache_root() {
+        use std::os::unix::fs::symlink;
+
+        let e = env();
+        let outside = e._tmp.path().join("outside-cache");
+        let forged = outside.join("forged");
+        std::fs::create_dir_all(&forged).unwrap();
+        std::fs::write(forged.join("sentinel"), "keep").unwrap();
+        symlink(&outside, e.plugins.join("cache")).unwrap();
+        write_db(
+            &e,
+            &[(
+                "forged@mkt",
+                "1.0.0",
+                e.plugins.join("cache/forged").to_str().unwrap(),
+                true,
+            )],
+        );
+
+        run_prune_inner(
+            true, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
+
+        assert!(forged.join("sentinel").exists());
+    }
+
+    #[test]
     fn empty_case_dry_run_and_scope_wording() {
         let e = env();
         let msg = run_prune_inner(
@@ -631,6 +671,36 @@ mod tests {
             msg,
             "Nothing to prune (1 auto-installed plugin at user scope, all still needed)."
         );
+    }
+
+    #[test]
+    fn typed_dependency_and_auto_installed_marker_are_supported() {
+        let e = env();
+        let app_path = e.plugins.join("cache").join("app");
+        std::fs::create_dir_all(app_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            app_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"app","dependencies":[{"name":"dep","version":"^1"}]}"#,
+        )
+        .unwrap();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        std::fs::write(
+            installed_path(&e.plugins),
+            serde_json::to_vec(&serde_json::json!({"version":2,"plugins":{
+                "app@mkt":[{"scope":"user","installPath":app_path}],
+                "dep@mkt":[{"scope":"user","installPath":dep,"autoInstalled":true}]
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let msg = run_prune_inner(
+            false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
+        assert!(msg.contains("all still needed"), "{msg}");
     }
 
     #[test]

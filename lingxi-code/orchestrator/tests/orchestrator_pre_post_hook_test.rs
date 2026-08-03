@@ -217,6 +217,9 @@ fn make_builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinit
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     }
 }
 

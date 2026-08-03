@@ -36,7 +36,17 @@ use std::sync::Arc;
 /// Register the UI tools against `reg` (the full set, including the builtin
 /// `SendMessage`). This is the default-session path.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
-    register_with_options(reg, ctx, true, None);
+    register_with_options(reg, ctx, true, true, None);
+}
+
+/// Register UI tools for a host with no user-interaction transport.
+/// `AskUserQuestion` is omitted from the advertised schema rather than exposed
+/// with a resolver that could fabricate an answer.
+pub fn register_all_without_ask_user_question(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+) {
+    register_with_options(reg, ctx, true, false, None);
 }
 
 /// Register the UI tools EXCEPT the builtin `SendMessage`.
@@ -53,7 +63,15 @@ pub fn register_all_except_send_message(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
 ) {
-    register_with_options(reg, ctx, false, None);
+    register_with_options(reg, ctx, false, true, None);
+}
+
+/// Coordinator-mode registration for a host with no questionnaire transport.
+pub fn register_all_except_send_message_without_ask_user_question(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+) {
+    register_with_options(reg, ctx, false, false, None);
 }
 
 /// Register the full UI tool set but force `AskUserQuestion` to use the given
@@ -63,7 +81,7 @@ pub fn register_all_with_ask_resolver(
     ctx: tool_api::BuiltinToolContext,
     resolver: Arc<dyn ask_user_question::AskUserQuestionResolver>,
 ) {
-    register_with_options(reg, ctx, true, Some(resolver));
+    register_with_options(reg, ctx, true, true, Some(resolver));
 }
 
 /// Coordinator-mode variant of [`register_all_with_ask_resolver`]: skip the
@@ -74,13 +92,14 @@ pub fn register_all_except_send_message_with_ask_resolver(
     ctx: tool_api::BuiltinToolContext,
     resolver: Arc<dyn ask_user_question::AskUserQuestionResolver>,
 ) {
-    register_with_options(reg, ctx, false, Some(resolver));
+    register_with_options(reg, ctx, false, true, Some(resolver));
 }
 
 fn register_with_options(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
     include_send_message: bool,
+    include_ask_user_question: bool,
     ask_resolver: Option<Arc<dyn ask_user_question::AskUserQuestionResolver>>,
 ) {
     reg.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
@@ -89,10 +108,9 @@ fn register_with_options(
     }
     // AskUserQuestion must NOT auto-continue by default (oracle 2.1.201): the
     // production resolver honors `askUserQuestionTimeout` (default `never` ⇒
-    // block on the user), while a non-interactive (`--print`) session still
-    // auto-picks the first option so batch runs never hang. This replaces the
-    // old `FirstOptionResolver` default, which silently auto-selected option #1
-    // in every session. See `ask_user_question::DefaultTimeoutResolver`.
+    // block on the user). A non-interactive (`--print`) session does not expose
+    // this schema; a defensive call reports `InteractionRequired` and never
+    // manufactures a selection. See `ask_user_question::DefaultTimeoutResolver`.
     //
     // (M-15) The live `askUserQuestionTimeout` settings value rides on
     // `ctx.ask_user_question_timeout` (populated at the composition roots from
@@ -101,15 +119,18 @@ fn register_with_options(
     // falls back to `Never` (block). The non-interactive `--print` auto-first
     // behavior is unchanged: `DefaultTimeoutResolver::resolve` short-circuits to
     // first-option whenever `non_interactive` is set, regardless of the window.
-    let ask_timeout = ask_user_question::AskUserQuestionTimeout::parse_or_default(
-        ctx.ask_user_question_timeout.as_deref(),
-    );
-    let ask_resolver = ask_resolver
-        .unwrap_or_else(|| Arc::new(ask_user_question::DefaultTimeoutResolver::new(ask_timeout)));
-    reg.register_builtin(Arc::new(AskUserQuestionTool::with_resolver(
-        ctx.clone(),
-        ask_resolver,
-    )));
+    if include_ask_user_question {
+        let ask_timeout = ask_user_question::AskUserQuestionTimeout::parse_or_default(
+            ctx.ask_user_question_timeout.as_deref(),
+        );
+        let ask_resolver = ask_resolver.unwrap_or_else(|| {
+            Arc::new(ask_user_question::DefaultTimeoutResolver::new(ask_timeout))
+        });
+        reg.register_builtin(Arc::new(AskUserQuestionTool::with_resolver(
+            ctx.clone(),
+            ask_resolver,
+        )));
+    }
     reg.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
     // PARITY: the `PushNotification` tool (binary `Wzp`). Registered always; its
     // `is_enabled` (flag `tengu_kairos_push_notifications`, default off) gates
@@ -135,6 +156,7 @@ mod ask_timeout_wiring_tests {
     use serde_json::json;
     use std::sync::Arc;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::ToolError;
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -178,7 +200,7 @@ mod ask_timeout_wiring_tests {
             .call(one_question(), fresh_ctx(), fresh_tx())
             .await
             .expect_err("never must block an interactive call");
-        assert!(format!("{err}").contains("askUserQuestionTimeout=never"));
+        assert!(matches!(err, ToolError::InteractionRequired(_)));
     }
 
     #[tokio::test]
@@ -189,44 +211,28 @@ mod ask_timeout_wiring_tests {
             .call(one_question(), fresh_ctx(), fresh_tx())
             .await
             .expect_err("bogus must fall back to never and block");
-        assert!(format!("{err}").contains("askUserQuestionTimeout=never"));
+        assert!(matches!(err, ToolError::InteractionRequired(_)));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn duration_carrier_auto_advances_interactive() {
-        // A valid duration ⇒ the resolver waits the idle window then auto-continues
-        // with the first option, even in an interactive session. Paused time makes
-        // the `tokio::time::sleep(60s)` complete instantly.
+    async fn duration_carrier_without_ui_requires_interaction() {
         let tool = register_and_get_ask(Some("60s"));
-        let res = tool
+        let err = tool
             .call(one_question(), fresh_ctx(), fresh_tx())
             .await
-            .expect("a duration must auto-advance, not block");
-        // The auto-continued answer echoes the first option's label.
-        assert_eq!(
-            res.data["answers"]["Pick one?"].as_str(),
-            Some("Alpha"),
-            "auto-advance must select the first option: {:?}",
-            res.data
-        );
+            .expect_err("a resolver without a UI cannot invent answers");
+        assert!(matches!(err, tool_api::ToolError::InteractionRequired(_)));
     }
 
     #[tokio::test]
-    async fn duration_carrier_headless_auto_picks_first_option() {
-        // Non-interactive (`--print`) is unchanged: first-option regardless of the
-        // window (never blocks a batch run).
+    async fn duration_carrier_headless_requires_interaction() {
         let tool = register_and_get_ask(Some("5m"));
         let mut ctx = fresh_ctx();
         ctx.options.is_non_interactive_session = true;
-        let res = tool
+        let err = tool
             .call(one_question(), ctx, fresh_tx())
             .await
-            .expect("headless must not block");
-        assert_eq!(
-            res.data["answers"]["Pick one?"].as_str(),
-            Some("Alpha"),
-            "data: {:?}",
-            res.data
-        );
+            .expect_err("headless cannot answer on the user's behalf");
+        assert!(matches!(err, tool_api::ToolError::InteractionRequired(_)));
     }
 }

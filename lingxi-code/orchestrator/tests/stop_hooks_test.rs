@@ -151,6 +151,9 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     }
 }
 
@@ -506,6 +509,66 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
     assert!(
         seen[0].prompt.contains(r#""hook_event_name":"Stop""#),
         "goal Stop hook must evaluate the Stop payload"
+    );
+}
+
+#[tokio::test]
+async fn goal_status_transcript_records_set_progress_and_one_terminal_achievement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    ));
+    let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([
+            Ok(r#"{"ok": false, "reason": "not yet"}"#.to_string()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+        ])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner).await;
+    let orchestrator = Arc::new(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer),
+    );
+
+    orchestrator.set_active_goal("ship it").await;
+    orchestrator.run_turn("hi").await.expect("turn ok");
+
+    let statuses = std::fs::read_to_string(path)
+        .expect("goal transcript")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| {
+            if line["type"] != "attachment" || line["attachment"]["type"] != "goal_status" {
+                return None;
+            }
+            Some((
+                line["attachment"]["status"].as_str()?.to_string(),
+                line["attachment"]["iterations"].as_u64()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        [
+            ("set".to_string(), 0),
+            ("set".to_string(), 1),
+            ("achieved".to_string(), 2)
+        ],
+        "a successful evaluation must not emit a redundant terminal set record"
     );
 }
 

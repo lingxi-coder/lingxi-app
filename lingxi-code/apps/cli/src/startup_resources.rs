@@ -132,7 +132,10 @@ async fn bounded_get(
     Ok(out)
 }
 
-async fn download_plugin_urls(urls: &[String], root: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) async fn download_plugin_urls(
+    urls: &[String],
+    root: &Path,
+) -> Result<Vec<PathBuf>, String> {
     let client = download_client(true)?;
     let mut paths = Vec::with_capacity(urls.len());
     for (index, url) in urls.iter().enumerate() {

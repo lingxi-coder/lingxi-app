@@ -654,6 +654,17 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         &components.mcp_servers,
         &manifest_path,
     );
+    let dependencies = match crate::parse_dependencies(parsed.dependencies.as_ref()) {
+        Ok(dependencies) => dependencies,
+        Err(error) => {
+            tracing::warn!(
+                path = %manifest_path.display(),
+                %error,
+                "ignoring invalid plugin dependency declarations"
+            );
+            Vec::new()
+        }
+    };
 
     let manifest = PluginManifest {
         id,
@@ -668,6 +679,7 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         components,
         trust_level,
         depends_on: Vec::new(),
+        dependencies,
         user_config: parsed.user_config.map(|fields| UserConfigSchema { fields }),
         channels,
         settings,

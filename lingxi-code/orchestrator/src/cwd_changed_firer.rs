@@ -333,6 +333,9 @@ mod tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         });
 
         // Build a fresh executor over the populated registry. The Builtin arm

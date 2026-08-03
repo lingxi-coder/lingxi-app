@@ -23,12 +23,9 @@
 //! the composition-root loader reads back; uninstall clears that entry
 //! (`deletePluginOptions` settings half).
 //!
-//! Residuals (follow-ups): non-directory marketplace sources (git/github/url);
-//! `--config` SENSITIVE values → secure storage `pluginSecrets` (needs an async
-//! CredentialManager threaded into this sync CLI) + `number`/`boolean` type
-//! coercion; the matching `deletePluginOptions` keychain half; and `--prune`
-//! dependency GC (the orphan marker is written; the deferred sweep that deletes
-//! it is not ported).
+//! Sensitive `--config` values are handled by the async CLI wrapper and never
+//! written to settings. The synchronous core remains available for deterministic
+//! filesystem tests.
 
 use std::path::{Path, PathBuf};
 
@@ -44,31 +41,36 @@ fn iso_now() -> String {
 }
 
 /// `<plugins>/installed_plugins.json` path.
+#[cfg(test)]
 fn installed_path(plugins_dir: &Path) -> PathBuf {
     plugins_dir.join("installed_plugins.json")
 }
 
 /// Load the v2 installed DB (`{version:2, plugins:{...}}`); missing/malformed ⇒
 /// a fresh empty v2 doc.
-fn load_installed(plugins_dir: &Path) -> Value {
-    std::fs::read_to_string(installed_path(plugins_dir))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .filter(|v| v.get("plugins").is_some())
-        .unwrap_or_else(|| serde_json::json!({"version": 2, "plugins": {}}))
+pub(crate) fn load_installed(plugins_dir: &Path) -> Value {
+    traits::rooted_fs::read_to_string_limited(
+        plugins_dir,
+        Path::new("installed_plugins.json"),
+        16 * 1024 * 1024,
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .filter(|v| v.get("plugins").is_some())
+    .unwrap_or_else(|| serde_json::json!({"version": 2, "plugins": {}}))
 }
 
 /// Write the installed DB (pretty, no trailing newline).
-fn write_installed(plugins_dir: &Path, doc: &Value) -> Result<(), String> {
-    let path = installed_path(plugins_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?,
+pub(crate) fn write_installed(plugins_dir: &Path, doc: &Value) -> Result<(), String> {
+    std::fs::create_dir_all(plugins_dir).map_err(|error| error.to_string())?;
+    let serialized = serde_json::to_string_pretty(doc).map_err(|error| error.to_string())?;
+    traits::rooted_fs::atomic_write(
+        plugins_dir,
+        Path::new("installed_plugins.json"),
+        serialized.as_bytes(),
+        traits::AtomicWriteOptions::default(),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|error| error.to_string())
 }
 
 /// The resolved-marketplaces registry (`name → {source, installLocation, …}`).
@@ -107,24 +109,330 @@ fn marketplace_of(id: &str) -> Option<&str> {
     split_id(id).1
 }
 
-/// Read a marketplace's `plugins[]` entry for `name`, returning its `source`
-/// (the plugin's path within the marketplace repo, a relative string).
-fn marketplace_entry_source(market_root: &Path, name: &str) -> Option<String> {
+/// Resolve a catalog entry that is materialized inside its marketplace root.
+///
+/// The shared typed resolver rejects absolute paths and `..`; the canonical
+/// containment check additionally closes symlink escapes at the selected root.
+/// External Git/URL/npm sources are materialized separately before reaching
+/// this path.
+fn marketplace_entry_source_path(
+    market_root: &Path,
+    marketplace: &str,
+    name: &str,
+    plugins_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    use plugin::marketplace::{MarketplaceExternalSource, MarketplacePluginSource};
+
+    let Some(raw_entry) = marketplace_entry(market_root, name) else {
+        return Ok(None);
+    };
+    let entry = serde_json::from_value::<plugin::marketplace::MarketplacePluginEntry>(raw_entry)
+        .map_err(|error| format!("Invalid marketplace entry for \"{name}\": {error}"))?;
+    if let Some(MarketplacePluginSource::Structured(source)) = entry.source.as_ref() {
+        match source {
+            MarketplaceExternalSource::Github { .. }
+            | MarketplaceExternalSource::Git { .. }
+            | MarketplaceExternalSource::Url { .. }
+            | MarketplaceExternalSource::Npm { .. } => {
+                return materialize_external_plugin_source(plugins_dir, marketplace, name, source)
+                    .map(Some);
+            }
+            MarketplaceExternalSource::File { .. }
+            | MarketplaceExternalSource::Directory { .. } => {}
+        }
+    }
+    let candidate = match plugin::MarketplaceManager::plugin_dir_in_clone(market_root, &entry) {
+        Ok(candidate) => candidate,
+        Err(_) => return Ok(None),
+    };
+    let Ok(canonical_root) = std::fs::canonicalize(market_root) else {
+        return Ok(None);
+    };
+    match std::fs::canonicalize(&candidate) {
+        Ok(canonical_candidate) => Ok((canonical_candidate.starts_with(&canonical_root)
+            && canonical_candidate.is_dir())
+        .then_some(canonical_candidate)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Preserve update's distinction between "listed but not installed"
+            // and "not found" even when the listed source has not been checked
+            // out yet. `plugin_dir_in_clone` already rejected traversal.
+            let relative = candidate.strip_prefix(market_root).ok();
+            Ok(relative.map(|relative| canonical_root.join(relative)))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn external_source_cache_key(source: &plugin::marketplace::MarketplaceExternalSource) -> String {
+    let encoded = serde_json::to_vec(source).unwrap_or_default();
+    plugin::plugin_source_sha256(&encoded)[..20].to_string()
+}
+
+fn confined_source_subdir(root: &Path, relative: Option<&str>) -> Result<PathBuf, String> {
+    let relative = relative.filter(|path| !path.is_empty()).unwrap_or(".");
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "plugin source path escapes its repository: {relative}"
+        ));
+    }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("failed to resolve plugin source: {error}"))?;
+    let candidate = std::fs::canonicalize(root.join(relative_path))
+        .map_err(|error| format!("failed to resolve plugin source path {relative}: {error}"))?;
+    if !candidate.starts_with(&canonical_root) || !candidate.is_dir() {
+        return Err(format!(
+            "plugin source path escapes its repository: {relative}"
+        ));
+    }
+    Ok(candidate)
+}
+
+fn download_external_plugin_url(url: &str, root: &Path) -> Result<PathBuf, String> {
+    let url = url.to_string();
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to initialize plugin download: {error}"))?;
+        let mut roots = runtime.block_on(crate::startup_resources::download_plugin_urls(
+            std::slice::from_ref(&url),
+            &root,
+        ))?;
+        roots
+            .pop()
+            .ok_or_else(|| "plugin URL produced no materialized source".to_string())
+    })
+    .join()
+    .map_err(|_| "plugin download worker panicked".to_string())?
+}
+
+fn npm_package_path(package: &str) -> Result<PathBuf, String> {
+    let (package_name, version) = if let Some(scoped) = package.strip_prefix('@') {
+        let (scope, rest) = scoped
+            .split_once('/')
+            .ok_or_else(|| format!("invalid npm plugin source: {package}"))?;
+        let (name, version) = rest
+            .split_once('@')
+            .map_or((rest, None), |(name, version)| (name, Some(version)));
+        if scope.is_empty() || name.is_empty() {
+            return Err(format!("invalid npm plugin source: {package}"));
+        }
+        (format!("@{scope}/{name}"), version)
+    } else {
+        let (name, version) = package
+            .split_once('@')
+            .map_or((package, None), |(name, version)| (name, Some(version)));
+        (name.to_string(), version)
+    };
+    if package_name.starts_with('-')
+        || package_name
+            .trim_start_matches('@')
+            .split('/')
+            .any(|segment| {
+                segment.is_empty()
+                    || segment == "."
+                    || segment == ".."
+                    || !segment
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            })
+    {
+        return Err(format!("invalid npm plugin source: {package}"));
+    }
+    if version.is_some_and(|version| {
+        version.is_empty()
+            || !version.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(
+                        character,
+                        '.' | '-' | '_' | '+' | '*' | '^' | '~' | '<' | '>' | '=' | '|'
+                    )
+            })
+    }) {
+        return Err(format!("invalid npm plugin source: {package}"));
+    }
+    Ok(PathBuf::from(package_name))
+}
+
+fn materialize_npm_source(package: &str, root: &Path) -> Result<PathBuf, String> {
+    let package_path = npm_package_path(package)?;
+    let status = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
+        .arg("install")
+        .arg("--ignore-scripts")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--package-lock=false")
+        .arg("--prefix")
+        .arg(root)
+        .arg("--")
+        .arg(package)
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|error| format!("failed to start npm for plugin source: {error}"))?;
+    if !status.status.success() {
+        return Err(format!(
+            "failed to install npm plugin source: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+    confined_source_subdir(&root.join("node_modules"), package_path.to_str())
+}
+
+fn materialize_external_plugin_source(
+    plugins_dir: &Path,
+    marketplace: &str,
+    name: &str,
+    source: &plugin::marketplace::MarketplaceExternalSource,
+) -> Result<PathBuf, String> {
+    use plugin::marketplace::MarketplaceExternalSource;
+
+    let cache_key = external_source_cache_key(source);
+    let destination = plugins_dir
+        .join("source-cache")
+        .join(sanitize(marketplace, false))
+        .join(sanitize(name, false))
+        .join(cache_key);
+    if destination.is_dir() {
+        plugin::ensure_plugin_manifest(&destination)?;
+        return std::fs::canonicalize(&destination)
+            .map_err(|error| format!("failed to resolve cached plugin source: {error}"));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "invalid plugin source cache destination".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create plugin source cache: {error}"))?;
+    let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let staging = parent.join(format!(".source-{}-{nonce}", std::process::id()));
+    let payload = staging.join("payload");
+    let work = staging.join("work");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&work)
+        .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
+
+    let result = (|| -> Result<(), String> {
+        let resolved = match source {
+            MarketplaceExternalSource::Github {
+                repo,
+                git_ref,
+                path,
+            } => {
+                let checkout = work.join("checkout");
+                plugin::clone_plugin_git(
+                    &format!("https://github.com/{repo}.git"),
+                    git_ref.as_deref().unwrap_or_default(),
+                    &checkout,
+                )?;
+                confined_source_subdir(&checkout, path.as_deref())?
+            }
+            MarketplaceExternalSource::Git { url, git_ref, path } => {
+                let checkout = work.join("checkout");
+                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+                confined_source_subdir(&checkout, path.as_deref())?
+            }
+            MarketplaceExternalSource::Url { url } => download_external_plugin_url(url, &work)?,
+            MarketplaceExternalSource::Npm { package } => materialize_npm_source(package, &work)?,
+            MarketplaceExternalSource::File { .. }
+            | MarketplaceExternalSource::Directory { .. } => {
+                return Err("local marketplace source must stay inside its catalog root".to_string())
+            }
+        };
+        copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
+        plugin::ensure_plugin_manifest(&payload)?;
+        if let Err(error) = std::fs::rename(&payload, &destination) {
+            // Another installer may have won the deterministic cache race.
+            // Accept only a complete, validated winner.
+            if !destination.is_dir() || plugin::ensure_plugin_manifest(&destination).is_err() {
+                return Err(format!("failed to publish plugin source cache: {error}"));
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result?;
+    std::fs::canonicalize(&destination)
+        .map_err(|error| format!("failed to resolve materialized plugin source: {error}"))
+}
+
+fn marketplace_entry(market_root: &Path, name: &str) -> Option<Value> {
     let manifest = market_root
         .join(branding::PLUGIN_MANIFEST_DIR)
         .join("marketplace.json");
     let raw = std::fs::read_to_string(manifest).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     let plugins = value.get("plugins").and_then(Value::as_array)?;
-    let entry = plugins
+    plugins
         .iter()
-        .find(|p| p.get("name").and_then(Value::as_str) == Some(name))?;
-    // `source` may be a string (relative path) or an object (git/github — not
-    // yet supported here). Default to "." (repo root) when absent.
-    match entry.get("source") {
-        Some(Value::String(s)) => Some(s.clone()),
-        None => Some(".".to_string()),
-        Some(_) => None, // object source (external) — unsupported for now
+        .find(|p| p.get("name").and_then(Value::as_str) == Some(name))
+        .cloned()
+}
+
+fn resolve_plugin_source(
+    arg: &str,
+    plugins_dir: &Path,
+) -> Result<Option<(String, String, PathBuf)>, String> {
+    let (name, requested_marketplace) = split_id(arg);
+    let registry = load_registry(plugins_dir);
+    match requested_marketplace {
+        Some(marketplace) => {
+            let Some(entry) = registry.get(marketplace) else {
+                return Ok(None);
+            };
+            let identity = plugin_policy::MarketplaceSourceIdentity::from_value(entry);
+            plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), identity.as_ref())?;
+            let Some(root) = install_location(entry) else {
+                return Ok(None);
+            };
+            let Some(source) =
+                marketplace_entry_source_path(&root, marketplace, name, plugins_dir)?
+            else {
+                return Ok(None);
+            };
+            Ok(Some((
+                format!("{name}@{marketplace}"),
+                marketplace.to_string(),
+                source,
+            )))
+        }
+        None => {
+            for (marketplace, entry) in &registry {
+                let Some(root) = install_location(entry) else {
+                    continue;
+                };
+                if marketplace_entry(&root, name).is_none() {
+                    continue;
+                }
+                let identity = plugin_policy::MarketplaceSourceIdentity::from_value(entry);
+                plugin_policy::ensure_marketplace_source_allowed(
+                    Some(marketplace),
+                    identity.as_ref(),
+                )?;
+                if let Some(source) =
+                    marketplace_entry_source_path(&root, marketplace, name, plugins_dir)?
+                {
+                    return Ok(Some((
+                        format!("{name}@{marketplace}"),
+                        marketplace.clone(),
+                        source,
+                    )));
+                }
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -168,7 +476,14 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = std::fs::symlink_metadata(&from)?.file_type();
+        if kind.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("plugin source contains a symbolic link: {}", from.display()),
+            ));
+        }
+        if kind.is_dir() {
             copy_dir(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
@@ -275,10 +590,17 @@ fn field_is_sensitive(schema: &Map<String, Value>, key: &str) -> bool {
 /// Returns the accepted `(key, value)` pairs (both sensitive + non-sensitive; the
 /// caller routes them). Type coercion (`number`/`boolean`) is a follow-up — values
 /// are carried as strings, which the `${user_config.*}` substitution accepts.
+#[derive(Debug, Clone)]
+struct ConfigPair {
+    key: String,
+    value: Value,
+    raw_value: String,
+}
+
 fn parse_config_pairs(
     config: &[String],
     schema: &Map<String, Value>,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<ConfigPair>, String> {
     let mut out = Vec::with_capacity(config.len());
     for raw in config {
         // `indexOf("=")` with the `s <= 0` guard: no `=`, or `=` at index 0.
@@ -311,7 +633,42 @@ fn parse_config_pairs(
                 "--config {key}: value is empty. Omit the flag to leave \"{key}\" unset."
             ));
         }
-        out.push((key.to_string(), value));
+        let field_type = schema
+            .get(key)
+            .and_then(|field| field.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("string");
+        let typed = match field_type {
+            "string" | "directory" | "file" => Value::String(value.clone()),
+            "boolean" => match value.as_str() {
+                "true" => Value::Bool(true),
+                "false" => Value::Bool(false),
+                _ => {
+                    return Err(format!(
+                        "--config {key}: expected a boolean (true or false), got \"{value}\"."
+                    ));
+                }
+            },
+            "number" => {
+                let number = value
+                    .parse::<f64>()
+                    .map_err(|_| format!("--config {key}: expected a number, got \"{value}\"."))?;
+                let number = serde_json::Number::from_f64(number).ok_or_else(|| {
+                    format!("--config {key}: expected a finite number, got \"{value}\".")
+                })?;
+                Value::Number(number)
+            }
+            other => {
+                return Err(format!(
+                    "--config {key}: unsupported userConfig type \"{other}\"."
+                ));
+            }
+        };
+        out.push(ConfigPair {
+            key: key.to_string(),
+            value: typed,
+            raw_value: value,
+        });
     }
     Ok(out)
 }
@@ -332,7 +689,7 @@ fn persist_plugin_options(
     cwd: &Path,
     plugin_key: &str,
     schema: &Map<String, Value>,
-    pairs: &[(String, String)],
+    pairs: &[ConfigPair],
 ) -> Result<(), String> {
     let path = scope.path(home, cwd);
     let settings = read_settings_map(&path).unwrap_or_default();
@@ -351,12 +708,12 @@ fn persist_plugin_options(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    for (k, v) in pairs {
-        if field_is_sensitive(schema, k) {
+    for pair in pairs {
+        if field_is_sensitive(schema, &pair.key) {
             // Never write a secret to plaintext settings; drop any stale copy.
-            options.remove(k);
+            options.remove(&pair.key);
         } else {
-            options.insert(k.clone(), Value::String(v.clone()));
+            options.insert(pair.key.clone(), pair.value.clone());
         }
     }
     entry.insert("options".to_string(), Value::Object(options));
@@ -442,6 +799,185 @@ pub fn run_install(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    let parsed_scope = parse_scope(scope)?;
+    let settings_path = parsed_scope.path(home, cwd);
+    let previous_settings = std::fs::read(&settings_path).ok();
+    let previous_installed = traits::rooted_fs::read_to_string_limited(
+        plugins_dir,
+        Path::new("installed_plugins.json"),
+        16 * 1024 * 1024,
+    )
+    .ok()
+    .map(String::into_bytes);
+    let previous_db = load_installed(plugins_dir);
+    let mut created_paths = Vec::new();
+    let result = run_install_inner(
+        arg,
+        scope,
+        config,
+        plugins_dir,
+        home,
+        cwd,
+        false,
+        None,
+        &mut Vec::new(),
+        &mut created_paths,
+    );
+    if result.is_err() {
+        rollback_install_transaction(
+            plugins_dir,
+            &settings_path,
+            previous_settings.as_deref(),
+            previous_installed.as_deref(),
+            &previous_db,
+            &created_paths,
+        );
+    }
+    result
+}
+
+fn restore_file(path: &Path, previous: Option<&[u8]>) {
+    match previous {
+        Some(bytes) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(error) = std::fs::write(path, bytes) {
+                tracing::warn!(path = %path.display(), %error, "failed to roll back plugin transaction file");
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn install_paths(db: &Value) -> std::collections::HashSet<PathBuf> {
+    db.get("plugins")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|plugins| plugins.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|record| record.get("installPath").and_then(Value::as_str))
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn confined_existing_child(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    if std::fs::symlink_metadata(root)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    let relative = candidate.strip_prefix(root).ok()?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if std::fs::symlink_metadata(&current)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        {
+            return None;
+        }
+    }
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical_candidate = std::fs::canonicalize(candidate).ok()?;
+    (canonical_candidate != canonical_root
+        && canonical_candidate.starts_with(&canonical_root)
+        && canonical_candidate.is_dir())
+    .then_some(canonical_candidate)
+}
+
+/// Validate an `installPath` loaded from the mutable installed registry before
+/// any marker write or recursive deletion.
+pub(crate) fn confined_cache_record_path(plugins_dir: &Path, candidate: &Path) -> Option<PathBuf> {
+    confined_existing_child(&plugins_dir.join("cache"), candidate)
+}
+
+/// Resolve one plugin data directory without letting an installed-registry id
+/// become an absolute path or a multi-component traversal.
+pub(crate) fn confined_plugin_data_path(plugins_dir: &Path, id: &str) -> Option<PathBuf> {
+    let id_path = Path::new(id);
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains('/')
+        || id.contains('\\')
+        || id_path.is_absolute()
+        || id_path.components().count() != 1
+    {
+        return None;
+    }
+    confined_existing_child(
+        &plugins_dir.join("data"),
+        &plugins_dir.join("data").join(id),
+    )
+}
+
+fn rollback_install_transaction(
+    plugins_dir: &Path,
+    settings_path: &Path,
+    previous_settings: Option<&[u8]>,
+    previous_installed: Option<&[u8]>,
+    previous_db: &Value,
+    created_paths: &[PathBuf],
+) {
+    for path in created_paths.iter().rev() {
+        if let Some(path) = confined_cache_record_path(plugins_dir, path) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    let previous_paths = install_paths(previous_db);
+    for path in install_paths(&load_installed(plugins_dir)) {
+        if !previous_paths.contains(&path) {
+            if let Some(path) = confined_cache_record_path(plugins_dir, &path) {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+    restore_file(settings_path, previous_settings);
+    match previous_installed {
+        Some(bytes) => {
+            if let Err(error) = traits::rooted_fs::atomic_write(
+                plugins_dir,
+                Path::new("installed_plugins.json"),
+                bytes,
+                traits::AtomicWriteOptions::default(),
+            ) {
+                tracing::warn!(%error, "failed to restore installed plugin registry");
+            }
+        }
+        None => {
+            let _ =
+                traits::rooted_fs::remove_file(plugins_dir, Path::new("installed_plugins.json"));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_install_inner(
+    arg: &str,
+    scope: Option<&str>,
+    config: &[String],
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    auto_installed: bool,
+    required_by: Option<&str>,
+    dependency_stack: &mut Vec<String>,
+    created_paths: &mut Vec<PathBuf>,
+) -> Result<String, String> {
     // Scope is validated BEFORE the "Installing plugin …" progress prefix — the
     // binary emits the bare `Invalid scope: …` line with no prefix.
     let scope = parse_scope(scope)?;
@@ -457,60 +993,66 @@ pub fn run_install(
     let (name, market) = split_id(arg);
     let registry = load_registry(plugins_dir);
 
-    // Resolve the marketplace + the plugin's source dir within it.
-    let (market_name, plugin_src) = match market {
-        Some(market) => {
-            let root = registry.get(market).and_then(install_location);
-            let src = root
-                .as_deref()
-                .and_then(|r| marketplace_entry_source(r, name).map(|s| (r.to_path_buf(), s)));
-            match src {
-                Some((root, rel)) => (market.to_string(), root.join(rel)),
-                None => {
-                    return Err(fail(
-                        "install",
-                        arg,
-                        &format!(
-                            "Plugin \"{name}\" not found in marketplace \"{market}\". Your local copy may be out of date — try `lingxi-cli plugin marketplace update {market}`."
-                        ),
-                    ))
-                    .map_err(|e| format!("Installing plugin \"{arg}\"...{e}"));
-                }
-            }
-        }
-        None => {
-            // Bare name: first registry marketplace that lists it.
-            let found = registry.iter().find_map(|(mkt, entry)| {
-                let root = install_location(entry)?;
-                let rel = marketplace_entry_source(&root, name)?;
-                Some((mkt.clone(), root.join(rel)))
-            });
-            match found {
-                Some(v) => v,
-                None => {
-                    return Err(fail(
-                        "install",
-                        arg,
-                        &format!("Plugin \"{name}\" not found in any configured marketplace"),
-                    ))
-                    .map_err(|e| format!("Installing plugin \"{arg}\"...{e}"));
-                }
-            }
-        }
-    };
-
-    let full_id = format!("{name}@{market_name}");
-    let default_enabled = registry
-        .get(&market_name)
-        .and_then(install_location)
-        .and_then(|root| marketplace_entry_default_enabled(&root, name))
-        .unwrap_or_else(|| plugin_default_enabled(&plugin_src));
-    plugin_policy::ensure_marketplace_allowed(&market_name).map_err(|reason| {
+    // Resolve only after the marketplace policy gate. External typed sources
+    // are materialized into a confined source cache by the same resolver.
+    let resolved = resolve_plugin_source(arg, plugins_dir).map_err(|reason| {
         format!(
             "Installing plugin \"{arg}\"...{}",
             fail("install", arg, &reason)
         )
     })?;
+    let Some((_, market_name, plugin_src)) = resolved else {
+        let reason = match market {
+            Some(market) => format!(
+                "Plugin \"{name}\" not found in marketplace \"{market}\". Your local copy may be out of date — try `lingxi-cli plugin marketplace update {market}`."
+            ),
+            None => format!("Plugin \"{name}\" not found in any configured marketplace"),
+        };
+        return Err(format!(
+            "Installing plugin \"{arg}\"...{}",
+            fail("install", arg, &reason)
+        ));
+    };
+
+    let full_id = format!("{name}@{market_name}");
+    if dependency_stack.contains(&full_id) {
+        let mut cycle = dependency_stack.clone();
+        cycle.push(full_id.clone());
+        return Err(format!(
+            "Plugin dependency cycle detected: {}",
+            cycle.join(" -> ")
+        ));
+    }
+    let default_enabled = registry
+        .get(&market_name)
+        .and_then(install_location)
+        .and_then(|root| marketplace_entry_default_enabled(&root, name))
+        .unwrap_or_else(|| plugin_default_enabled(&plugin_src));
+    let policy_source = registry
+        .get(&market_name)
+        .and_then(plugin_policy::MarketplaceSourceIdentity::from_value);
+    plugin_policy::ensure_marketplace_source_allowed(Some(&market_name), policy_source.as_ref())
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
+
+    dependency_stack.push(full_id.clone());
+    let dependency_result = install_declared_dependencies(
+        &full_id,
+        &market_name,
+        &plugin_src,
+        Some(scope.label()),
+        plugins_dir,
+        home,
+        cwd,
+        dependency_stack,
+        created_paths,
+    );
+    dependency_stack.pop();
+    dependency_result?;
 
     // `--config key=value` userConfig persistence. Parse + validate against the
     // plugin's declared schema (byte-faithful errors, no "Installing…" prefix —
@@ -547,6 +1089,11 @@ pub fn run_install(
         .and_then(Value::as_array)
         .is_some_and(|a| a.iter().any(|r| record_matches(r, scope, &proj)))
     {
+        if auto_installed {
+            add_required_by_metadata(&mut installed, &full_id, scope, &proj, required_by);
+            write_installed(plugins_dir, &installed)?;
+            edit_enabled(scope, home, cwd, &full_id, Some(true))?;
+        }
         return Ok(format!(
             "Installing plugin \"{arg}\"...✔ Plugin \"{full_id}\" is already installed (scope: {})",
             scope.label()
@@ -559,13 +1106,46 @@ pub fn run_install(
         .join(sanitize(&market_name, false))
         .join(sanitize(name, false))
         .join(sanitize(&version, true));
-    let _ = std::fs::remove_dir_all(&dest);
-    copy_dir(&plugin_src, &dest).map_err(|e| {
-        format!(
-            "Installing plugin \"{arg}\"...{}",
-            fail("install", arg, &e.to_string())
-        )
-    })?;
+    if !dest.exists() {
+        let parent = dest.parent().ok_or_else(|| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, "invalid plugin cache destination")
+            )
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &error.to_string())
+            )
+        })?;
+        let staging = parent.join(format!(
+            ".{}.install-{}-{}",
+            sanitize(name, false),
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&staging);
+        if let Err(error) = copy_dir(&plugin_src, &staging) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &error.to_string())
+            ));
+        }
+        match std::fs::rename(&staging, &dest) {
+            Ok(()) => created_paths.push(dest.clone()),
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                if !dest.exists() {
+                    return Err(format!(
+                        "Installing plugin \"{arg}\"...{}",
+                        fail("install", arg, &error.to_string())
+                    ));
+                }
+            }
+        }
+    }
 
     // Record (v2) — `projectPath` is the LAST field, present only for
     // project/local scope (matching the binary's on-disk shape).
@@ -582,6 +1162,16 @@ pub fn run_install(
     record.insert("version".to_string(), Value::String(version.clone()));
     record.insert("installedAt".to_string(), Value::String(now.clone()));
     record.insert("lastUpdated".to_string(), Value::String(now));
+    if auto_installed {
+        record.insert("auto".to_string(), Value::Bool(true));
+        record.insert("autoInstalled".to_string(), Value::Bool(true));
+    }
+    if let Some(required_by) = required_by {
+        record.insert(
+            "requiredBy".to_string(),
+            Value::Array(vec![Value::String(required_by.to_string())]),
+        );
+    }
     if let Some(p) = &proj {
         record.insert("projectPath".to_string(), Value::String(p.clone()));
     }
@@ -596,8 +1186,18 @@ pub fn run_install(
     }
     write_installed(plugins_dir, &installed)
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
-    edit_enabled(scope, home, cwd, &full_id, Some(default_enabled))
-        .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
+    edit_enabled(
+        scope,
+        home,
+        cwd,
+        &full_id,
+        Some(if auto_installed {
+            true
+        } else {
+            default_enabled
+        }),
+    )
+    .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
 
     Ok(format!(
         "Installing plugin \"{arg}\"...✔ Successfully installed plugin: {full_id} (scope: {})",
@@ -605,11 +1205,214 @@ pub fn run_install(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn install_declared_dependencies(
+    owner_id: &str,
+    owner_marketplace: &str,
+    plugin_source: &Path,
+    scope: Option<&str>,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    dependency_stack: &mut Vec<String>,
+    created_paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let registry = load_registry(plugins_dir);
+    let market_root = registry
+        .get(owner_marketplace)
+        .and_then(install_location)
+        .ok_or_else(|| format!("Marketplace \"{owner_marketplace}\" is not available"))?;
+    let owner_name = name_of(owner_id);
+    let manifest = std::fs::read_to_string(
+        plugin_source
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let entry = marketplace_entry(&market_root, owner_name);
+    let manifest_dependencies = plugin::parse_dependencies(
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.get("dependencies")),
+    )?;
+    let marketplace_dependencies =
+        plugin::parse_dependencies(entry.as_ref().and_then(|entry| entry.get("dependencies")))?;
+    let dependencies = plugin::merge_dependency_requirements(
+        manifest_dependencies
+            .into_iter()
+            .chain(marketplace_dependencies),
+    );
+    if dependencies.is_empty() {
+        return Ok(());
+    }
+    let cross_market_allow = std::fs::read_to_string(
+        market_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|value| {
+        value
+            .get("allowCrossMarketplaceDependenciesOn")
+            .and_then(Value::as_array)
+            .cloned()
+    })
+    .unwrap_or_default();
+
+    for (dependency, requirements) in dependencies {
+        let dependency_id = dependency.resolved_id(owner_marketplace);
+        let dependency_marketplace = marketplace_of(&dependency_id).unwrap_or(owner_marketplace);
+        if dependency_marketplace != owner_marketplace
+            && !cross_market_allow
+                .iter()
+                .any(|allowed| allowed.as_str() == Some(dependency_marketplace))
+        {
+            return Err(format!(
+                "Plugin \"{owner_id}\" cannot install cross-marketplace dependency \"{dependency_id}\""
+            ));
+        }
+        let (_, _, dependency_source) = resolve_plugin_source(&dependency_id, plugins_dir)?
+            .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
+        let available = plugin_version(&dependency_source);
+        if !plugin::version_satisfies_all(&available, &requirements)? {
+            return Err(format!(
+                "Plugin dependency \"{dependency_id}\" version {available} does not satisfy {}",
+                requirements.join(", ")
+            ));
+        }
+        run_install_inner(
+            &dependency_id,
+            scope,
+            &[],
+            plugins_dir,
+            home,
+            cwd,
+            true,
+            Some(owner_id),
+            dependency_stack,
+            created_paths,
+        )?;
+    }
+    Ok(())
+}
+
+fn add_required_by_metadata(
+    installed: &mut Value,
+    plugin_id: &str,
+    scope: Scope,
+    project: &Option<String>,
+    required_by: Option<&str>,
+) {
+    let Some(required_by) = required_by else {
+        return;
+    };
+    let Some(records) = installed
+        .get_mut("plugins")
+        .and_then(Value::as_object_mut)
+        .and_then(|plugins| plugins.get_mut(plugin_id))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let Some(record) = records
+        .iter_mut()
+        .find(|record| record_matches(record, scope, project))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let required = record
+        .entry("requiredBy")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(required) = required.as_array_mut() else {
+        return;
+    };
+    if !required
+        .iter()
+        .any(|value| value.as_str() == Some(required_by))
+    {
+        required.push(Value::String(required_by.to_string()));
+    }
+}
+
+/// Async production wrapper that commits sensitive `--config` fields to the
+/// platform credential store and restores their previous values if the install
+/// transaction fails.
+pub async fn run_install_secure(
+    arg: &str,
+    scope: Option<&str>,
+    config: &[String],
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    let Some((plugin_key, _, plugin_source)) = resolve_plugin_source(arg, plugins_dir)? else {
+        return run_install(arg, scope, config, plugins_dir, home, cwd);
+    };
+    let schema = read_user_config_schema(&plugin_source);
+    let pairs = parse_config_pairs(config, &schema)?;
+    let sensitive: Vec<&ConfigPair> = pairs
+        .iter()
+        .filter(|pair| field_is_sensitive(&schema, &pair.key))
+        .collect();
+    if sensitive.is_empty() {
+        return run_install(arg, scope, config, plugins_dir, home, cwd);
+    }
+
+    let stack = engine_desktop::build_shared_credential_stack(home, false)
+        .await
+        .map_err(|error| format!("Failed to initialize plugin credential storage: {error}"))?;
+    let credentials = stack.credentials;
+    let mut previous = Vec::with_capacity(sensitive.len());
+    for pair in &sensitive {
+        let old = credentials
+            .get_plugin_secret(&plugin_key, &pair.key)
+            .await
+            .map_err(|error| format!("Failed to read plugin secret {}: {error}", pair.key))?
+            .map(|secret| secret.expose_secret().clone());
+        previous.push((pair.key.clone(), old));
+        if let Err(error) = credentials
+            .set_plugin_secret(&plugin_key, &pair.key, &pair.raw_value)
+            .await
+        {
+            rollback_plugin_secrets(&credentials, &plugin_key, &previous).await;
+            return Err(format!(
+                "Failed to store plugin secret {}: {error}",
+                pair.key
+            ));
+        }
+    }
+
+    let result = run_install(arg, scope, config, plugins_dir, home, cwd);
+    if result.is_err() {
+        rollback_plugin_secrets(&credentials, &plugin_key, &previous).await;
+    }
+    result
+}
+
+async fn rollback_plugin_secrets(
+    credentials: &secret::CredentialManager,
+    plugin: &str,
+    previous: &[(String, Option<String>)],
+) {
+    for (key, value) in previous.iter().rev() {
+        let result = match value {
+            Some(value) => credentials.set_plugin_secret(plugin, key, value).await,
+            None => credentials.delete_plugin_secret(plugin, key).await,
+        };
+        if let Err(error) = result {
+            tracing::warn!(plugin, key, %error, "failed to roll back plugin secret");
+        }
+    }
+}
+
 /// `plugin uninstall <plugin> [--keep-data] [--prune] [-y] [--scope]`.
 pub fn run_uninstall(
     arg: &str,
     scope: Option<&str>,
-    _keep_data: bool,
+    keep_data: bool,
     _prune: bool,
     _yes: bool,
     plugins_dir: &Path,
@@ -678,7 +1481,9 @@ pub fn run_uninstall(
     // Orphan only the matched records' cache dirs (marker; deferred sweep deletes).
     for rec in &matching {
         if let Some(path) = rec.get("installPath").and_then(Value::as_str) {
-            let _ = std::fs::write(Path::new(path).join(".orphaned_at"), iso_now());
+            if let Some(path) = confined_cache_record_path(plugins_dir, Path::new(path)) {
+                let _ = std::fs::write(path.join(".orphaned_at"), iso_now());
+            }
         }
     }
 
@@ -692,6 +1497,17 @@ pub fn run_uninstall(
         }
     }
     write_installed(plugins_dir, &installed).map_err(|e| fail("uninstall", arg, &e))?;
+
+    let has_remaining_records = installed
+        .get("plugins")
+        .and_then(|plugins| plugins.get(&full_id))
+        .and_then(Value::as_array)
+        .is_some_and(|records| !records.is_empty());
+    if !keep_data && !has_remaining_records {
+        if let Some(path) = confined_plugin_data_path(plugins_dir, &full_id) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 
     // DELETE the enabledPlugins key at THIS scope only (uninstall removes the
     // entry entirely, unlike `disable` which sets it to false).
@@ -707,6 +1523,114 @@ pub fn run_uninstall(
         name_of(&full_id),
         scope.label()
     ))
+}
+
+/// Async production uninstall wrapper. Credential cleanup is independent from
+/// `--keep-data`; that flag only preserves `${CLAUDE_PLUGIN_DATA}`.
+pub async fn run_uninstall_secure(
+    arg: &str,
+    scope: Option<&str>,
+    keep_data: bool,
+    prune: bool,
+    yes: bool,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    let scope_value = parse_scope(scope)?;
+    let project = project_path(scope_value, cwd);
+    let installed = load_installed(plugins_dir);
+    let (name, marketplace) = split_id(arg);
+    let plugin_key = marketplace.map_or_else(
+        || {
+            installed
+                .get("plugins")
+                .and_then(Value::as_object)
+                .and_then(|plugins| plugins.keys().find(|id| name_of(id) == name).cloned())
+                .unwrap_or_else(|| name.to_string())
+        },
+        |marketplace| format!("{name}@{marketplace}"),
+    );
+    let sensitive_keys: Vec<String> = installed
+        .get("plugins")
+        .and_then(|plugins| plugins.get(&plugin_key))
+        .and_then(Value::as_array)
+        .and_then(|records| {
+            records
+                .iter()
+                .find(|record| record_matches(record, scope_value, &project))
+        })
+        .and_then(|record| record.get("installPath"))
+        .and_then(Value::as_str)
+        .and_then(|path| confined_cache_record_path(plugins_dir, Path::new(path)))
+        .map(|path| read_user_config_schema(&path))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, field)| {
+            field
+                .get("sensitive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                .then_some(key)
+        })
+        .collect();
+
+    let credential_stack = if sensitive_keys.is_empty() {
+        None
+    } else {
+        Some(
+            engine_desktop::build_shared_credential_stack(home, false)
+                .await
+                .map_err(|error| {
+                    format!("Failed to initialize plugin credential storage: {error}")
+                })?,
+        )
+    };
+    let mut previous_secrets = Vec::with_capacity(sensitive_keys.len());
+    if let Some(stack) = &credential_stack {
+        for key in &sensitive_keys {
+            let previous = stack
+                .credentials
+                .get_plugin_secret(&plugin_key, key)
+                .await
+                .map_err(|error| format!("Failed to read plugin secret {key}: {error}"))?
+                .map(|secret| secret.expose_secret().clone());
+            previous_secrets.push((key.clone(), previous));
+        }
+        for key in &sensitive_keys {
+            if let Err(error) = stack
+                .credentials
+                .delete_plugin_secret(&plugin_key, key)
+                .await
+            {
+                rollback_plugin_secrets(&stack.credentials, &plugin_key, &previous_secrets).await;
+                return Err(format!("Failed to delete plugin secret {key}: {error}"));
+            }
+        }
+    }
+    let mut message = match run_uninstall(arg, scope, keep_data, prune, yes, plugins_dir, home, cwd)
+    {
+        Ok(message) => message,
+        Err(error) => {
+            if let Some(stack) = &credential_stack {
+                rollback_plugin_secrets(&stack.credentials, &plugin_key, &previous_secrets).await;
+            }
+            return Err(error);
+        }
+    };
+    if prune {
+        let prune_message = crate::commands::plugin_prune::run_prune(
+            false,
+            yes,
+            scope_value.label(),
+            plugins_dir,
+            home,
+            cwd,
+        )?;
+        message.push('\n');
+        message.push_str(&prune_message);
+    }
+    Ok(message)
 }
 
 /// Validate a `plugin update` `--scope`. Unlike the install family, update's
@@ -737,13 +1661,24 @@ fn scope_project_path(scope: &str, cwd: &Path) -> Option<PathBuf> {
 /// Resolve a full `name@market` id to its marketplace + on-disk plugin source
 /// dir (mirrors `iP`): a bare id (no `@`) or a market/plugin the registry can't
 /// resolve ⇒ `None` (⇒ the caller's `Plugin "<name>" not found`).
-fn resolve_source(plugins_dir: &Path, id: &str) -> Option<(String, PathBuf)> {
+fn resolve_source(plugins_dir: &Path, id: &str) -> Result<Option<(String, PathBuf)>, String> {
     let (name, market) = split_id(id);
-    let market = market?;
+    let Some(market) = market else {
+        return Ok(None);
+    };
     let registry = load_registry(plugins_dir);
-    let root = registry.get(market).and_then(install_location)?;
-    let rel = marketplace_entry_source(&root, name)?;
-    Some((market.to_string(), root.join(rel)))
+    let Some(entry) = registry.get(market) else {
+        return Ok(None);
+    };
+    let identity = plugin_policy::MarketplaceSourceIdentity::from_value(entry);
+    plugin_policy::ensure_marketplace_source_allowed(Some(market), identity.as_ref())?;
+    let Some(root) = install_location(entry) else {
+        return Ok(None);
+    };
+    Ok(
+        marketplace_entry_source_path(&root, market, name, plugins_dir)?
+            .map(|source| (market.to_string(), source)),
+    )
 }
 
 /// The version string from a plugin's own manifest (`unknown` when absent).
@@ -821,11 +1756,15 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
         .unwrap_or(base);
 
     if let Some(marketplace) = marketplace_of(&id) {
-        plugin_policy::ensure_marketplace_allowed(marketplace)?;
+        let registry = load_registry(plugins_dir);
+        let source = registry
+            .get(marketplace)
+            .and_then(plugin_policy::MarketplaceSourceIdentity::from_value);
+        plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())?;
     }
 
     // `iP`: the plugin must resolve to a marketplace source, else "not found".
-    let Some((market_name, plugin_src)) = resolve_source(plugins_dir, &id) else {
+    let Some((market_name, plugin_src)) = resolve_source(plugins_dir, &id)? else {
         return Err(format!("Plugin \"{name}\" not found"));
     };
 
@@ -943,7 +1882,9 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
                         .any(|r| r.get("installPath").and_then(Value::as_str) == Some(old))
                 });
             if !still_referenced {
-                let _ = std::fs::write(Path::new(old).join(".orphaned_at"), iso_now());
+                if let Some(path) = confined_cache_record_path(plugins_dir, Path::new(old)) {
+                    let _ = std::fs::write(path.join(".orphaned_at"), iso_now());
+                }
             }
         }
     }
@@ -1055,6 +1996,173 @@ mod tests {
     }
 
     #[test]
+    fn install_accepts_typed_directory_source_inside_catalog() {
+        let e = env();
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":{"source":"directory","path":"./plugins/hello"}}]}"#,
+        )
+        .unwrap();
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        assert!(e
+            .plugins
+            .join("cache/mymkt/hello/1.2.3/.lingxi-plugin/plugin.json")
+            .exists());
+    }
+
+    #[test]
+    fn npm_package_path_rejects_argument_and_path_injection() {
+        assert_eq!(
+            npm_package_path("@scope/plugin@1.2.3").unwrap(),
+            PathBuf::from("@scope/plugin")
+        );
+        for invalid in [
+            "--foreground-scripts",
+            "@scope/../escape",
+            "../escape",
+            "plugin@file:../../escape",
+            "plugin@https://example.com/archive.tgz",
+            "plugin@",
+        ] {
+            assert!(npm_package_path(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_git_source_materializes_a_confined_subdirectory() {
+        let e = env();
+        let repository = e._tmp.path().join("external-source");
+        let plugin_root = repository.join("nested/plugin");
+        std::fs::create_dir_all(plugin_root.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            plugin_root
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"external","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        for args in [
+            vec!["init", repository.to_str().unwrap()],
+            vec!["-C", repository.to_str().unwrap(), "add", "."],
+            vec![
+                "-C",
+                repository.to_str().unwrap(),
+                "-c",
+                "user.name=LingXi Test",
+                "-c",
+                "user.email=lingxi@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .expect("git is required by marketplace installation");
+            assert!(
+                output.status.success(),
+                "git fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let source = plugin::marketplace::MarketplaceExternalSource::Git {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            path: Some("nested/plugin".to_string()),
+        };
+
+        let materialized =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "external", &source).unwrap();
+
+        assert!(materialized
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .is_file());
+        assert!(materialized
+            .starts_with(std::fs::canonicalize(e.plugins.join("source-cache")).unwrap()));
+    }
+
+    #[test]
+    fn install_rejects_marketplace_source_outside_catalog_root() {
+        let e = env();
+        let outside = e._tmp.path().join("outside-plugin");
+        std::fs::create_dir_all(outside.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            outside
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"escaped","version":"9.9.9"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"escaped","source":"../outside-plugin"}]}"#,
+        )
+        .unwrap();
+
+        let error = run_install("escaped@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("catalog traversal must fail closed");
+
+        assert!(error.contains("not found in marketplace"), "{error}");
+        assert!(!e.plugins.join("cache/mymkt/escaped/9.9.9").exists());
+    }
+
+    #[test]
+    fn install_rollback_removes_cache_created_before_registry_write_failure() {
+        let e = env();
+        let registry_path = installed_path(&e.plugins);
+        std::fs::create_dir_all(&registry_path).unwrap();
+
+        let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("a directory at installed_plugins.json must make the write fail");
+
+        assert!(error.contains("Failed to install plugin"), "{error}");
+        assert!(!e.plugins.join("cache/mymkt/hello/1.2.3").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_never_writes_through_a_registry_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let e = env();
+        let outside = e._tmp.path().join("outside-registry.json");
+        std::fs::write(&outside, r#"{"sentinel":true}"#).unwrap();
+        symlink(&outside, installed_path(&e.plugins)).unwrap();
+
+        let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("root-confined registry write must reject symlinks");
+
+        assert!(error.contains("Failed to install plugin"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(outside).unwrap(),
+            r#"{"sentinel":true}"#
+        );
+        assert!(!e.plugins.join("cache/mymkt/hello/1.2.3").exists());
+    }
+
+    #[test]
+    fn plugin_data_paths_reject_forged_identifiers() {
+        let e = env();
+        for id in [
+            "../escape",
+            "/tmp/escape",
+            "nested/plugin",
+            "nested\\plugin",
+        ] {
+            assert!(confined_plugin_data_path(&e.plugins, id).is_none());
+        }
+    }
+
+    #[test]
     fn install_respects_manifest_default_disabled_state() {
         let e = env();
         let manifest = e
@@ -1113,6 +2221,53 @@ mod tests {
         .unwrap();
     }
 
+    fn add_market_plugin(e: &Env, name: &str, version: &str, dependencies: Value) {
+        let marketplace_path = e
+            .market
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        let mut marketplace: Value =
+            serde_json::from_str(&std::fs::read_to_string(&marketplace_path).unwrap()).unwrap();
+        marketplace["plugins"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": name,
+                "source": format!("./plugins/{name}")
+            }));
+        std::fs::write(
+            marketplace_path,
+            serde_json::to_string_pretty(&marketplace).unwrap(),
+        )
+        .unwrap();
+        let root = e.market.join("plugins").join(name);
+        std::fs::create_dir_all(root.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            serde_json::to_string(&serde_json::json!({
+                "name": name,
+                "version": version,
+                "dependencies": dependencies,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn set_dependencies(e: &Env, plugin: &str, version: &str, dependencies: Value) {
+        let root = e.market.join("plugins").join(plugin);
+        std::fs::write(
+            root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            serde_json::to_string(&serde_json::json!({
+                "name": plugin,
+                "version": version,
+                "dependencies": dependencies,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn install_config_persists_nonsensitive_options() {
         let e = env();
@@ -1137,6 +2292,100 @@ mod tests {
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn install_recursively_records_auto_dependency_and_reverse_owner() {
+        let e = env();
+        add_market_plugin(&e, "shared", "1.5.0", serde_json::json!([]));
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"^1.4"}]),
+        );
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        let installed = installed_db(&e);
+        let dependency = &installed["plugins"]["shared@mymkt"][0];
+        assert_eq!(dependency["auto"], Value::Bool(true));
+        assert_eq!(dependency["autoInstalled"], Value::Bool(true));
+        assert_eq!(dependency["requiredBy"], serde_json::json!(["hello@mymkt"]));
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"]["shared@mymkt"],
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn install_rejects_dependency_cycles_before_materializing_root() {
+        let e = env();
+        add_market_plugin(&e, "shared", "1.0.0", serde_json::json!(["hello"]));
+        set_dependencies(&e, "hello", "1.2.3", serde_json::json!(["shared"]));
+
+        let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert!(error.contains(
+            "Plugin dependency cycle detected: hello@mymkt -> shared@mymkt -> hello@mymkt"
+        ));
+        assert!(!installed_path(&e.plugins).exists());
+    }
+
+    #[test]
+    fn install_rejects_unsatisfied_dependency_range() {
+        let e = env();
+        add_market_plugin(&e, "shared", "2.0.0", serde_json::json!([]));
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"^1"}]),
+        );
+
+        let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert!(error.contains("shared@mymkt\" version 2.0.0 does not satisfy ^1"));
+        assert!(!installed_path(&e.plugins).exists());
+    }
+
+    #[test]
+    fn install_config_persists_declared_scalar_types() {
+        let e = env();
+        set_user_config(
+            &e,
+            r#"{"RETRIES":{"type":"number"},"ENABLED":{"type":"boolean"}}"#,
+        );
+        run_install(
+            "hello@mymkt",
+            None,
+            &["RETRIES=3.5".to_string(), "ENABLED=true".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let options = &user_settings(&e)["pluginConfigs"]["hello@mymkt"]["options"];
+        assert_eq!(options["RETRIES"], serde_json::json!(3.5));
+        assert_eq!(options["ENABLED"], Value::Bool(true));
+    }
+
+    #[test]
+    fn install_config_rejects_invalid_scalar_before_materialization() {
+        let e = env();
+        set_user_config(&e, r#"{"ENABLED":{"type":"boolean"}}"#);
+        let error = run_install(
+            "hello@mymkt",
+            None,
+            &["ENABLED=yes".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "--config ENABLED: expected a boolean (true or false), got \"yes\"."
+        );
+        assert!(!installed_path(&e.plugins).exists());
     }
 
     #[test]

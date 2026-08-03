@@ -36,6 +36,9 @@ fn hk(
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     }
 }
 
@@ -112,6 +115,9 @@ async fn list_hooks_maps_executor_type_content_and_source() {
         priority: 0,
         once: false,
         status_message: Some("Formatting…".into()),
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
     let reg = Arc::new(RwLock::new(reg));
 

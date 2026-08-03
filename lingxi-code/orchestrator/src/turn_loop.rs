@@ -359,7 +359,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
     // P0.1 (batched twin): arm the memory-selector prefetch CONCURRENTLY with
     // this turn (claude-code `wAo`). Fired here at turn start so the in-flight
-    // handle is ready when `relevant_memory_reminder_message` awaits it below,
+    // handle is ready when `relevant_memory_reminder_messages` consumes it below,
     // before the blocking-limit estimate. A strict no-op when no prefetch is
     // wired, keeping the locked turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::start_memory_prefetch`].
@@ -521,17 +521,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // P0.1 (batched twin): per-turn, transient `relevant_memories` SURFACING
-    // reminder — the memory-selector/prefetch result rendered as one
-    // `<system-reminder>` meta user message. Appended to THIS call's OUTGOING
+    // reminders — the memory-selector/prefetch result rendered as one meta user
+    // message per surfaced memory. Appended to THIS call's OUTGOING
     // snapshot only (never `session.history` / JSONL), after the async-hook
     // reminder and BEFORE the blocking-limit estimate inside
     // `call_api_with_ptl_recovery` so its tokens are counted in the prompt size.
-    // Awaits the prefetch armed by `start_memory_prefetch` at turn start. `None`
-    // when no prefetch is wired / empty result / everything already injected. See
-    // [`ConversationOrchestrator::relevant_memory_reminder_message`].
-    if let Some(reminder) = orch.relevant_memory_reminder_message().await {
-        turn_reminders.push(reminder);
-    }
+    // Awaits the prefetch armed by `start_memory_prefetch` at turn start. Empty
+    // when no prefetch is wired / the result is empty / everything was already
+    // injected. See [`ConversationOrchestrator::relevant_memory_reminder_messages`].
+    turn_reminders.extend(orch.relevant_memory_reminder_messages().await);
 
     // EXPERIMENTAL_SKILL_SEARCH (batched twin): per-turn, transient
     // `skill_discovery` SURFACING reminder — the discovery prefetch result
@@ -2940,9 +2938,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // matching claude-code `createBaseHookInput` (always sets
         // `transcript_path: getTranscriptPathForSession(...)`, utils/hooks.ts:322)
         // plus PreToolUse/PostToolUse's `permission_mode =
-        // appState.toolPermissionContext.mode` (toolHooks.ts:471). LingXi's session
-        // models `plan_mode: bool`, so plan-vs-default is the faithful approximation
-        // (the defer path below uses the same logic).
+        // appState.toolPermissionContext.mode` (toolHooks.ts:471). The hook reads
+        // the enforcing gate's live wire mode; session `plan_mode` remains the
+        // explicit override used while the plan workflow is active.
         //
         // FIX A: the transcript path is the live JSONL writer's path when one is
         // wired (preserves the writer-backed tests) ELSE the deterministically-
@@ -2958,7 +2956,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .as_ref()
             .map(|w| w.path().to_path_buf())
             .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
-        let permission_mode = Some(if plan_mode { "plan" } else { "default" }.to_string());
+        let permission_mode = Some(if plan_mode {
+            "plan".to_string()
+        } else {
+            orch.permission_mode()
+                .unwrap_or_else(|| "default".to_string())
+        });
         let hook_ctx = HookContext {
             session_id,
             cwd: orch.current_cwd(),
@@ -2995,11 +2998,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // (OSC 9 / 777 desktop notification, etc.). Run the allowlist validator
         // (`NEo`) over the folded sequence: on REJECT, warn (the observable half,
         // byte-faithful to claude-code's reject message). On ACCEPT the
-        // validated string would be written to the active terminal (`BEo`); the
-        // orchestrator has no TTY handle (the TUI owns the terminal in a separate
-        // process and the `OutputStream` has no raw-escape emit), so the
-        // terminal-WRITE is a documented residual — the parse / merge / allowlist
-        // validation all land here and are observable. No-op when no hook set it.
+        // validated string is emitted through the output bridge to the active
+        // TUI terminal (`BEo`). No-op when no hook set it.
         apply_terminal_sequence(orch, &name, pre_agg.terminal_sequence.as_deref()).await;
         // HOOK.1: a PreToolUse hook's `additionalContext` (NOT `systemMessage`)
         // becomes its OWN meta message, not folded into the tool_result — claude
@@ -3085,7 +3085,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 &reason,
             );
             Some((
-                ConversationMessage::user(
+                ConversationMessage::user_meta(
                     MessageId::new(),
                     format!(
                         "<system-reminder>\nPreToolUse:{name} hook stopped continuation: {reason}\n</system-reminder>"
@@ -3105,18 +3105,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `is_non_interactive_session = !interactive_permissions`; DORMANT on the
         // default REPL (interactive ignores defer).
         if matches!(pre_agg.decision, Some(HookDecision::Defer)) {
-            // DIVERGENCE (`hookName` on the deferred-tool record): the oracle
-            // sets `c = p.hookSource || `PreToolUse:${t.name}`` (BIN off
-            // 234731960), and `hookSource` IS populated on every yield (BIN off
-            // 237809684), so in practice its record carries the SOURCE LABEL
-            // (`"settings"`, `"plugin:{name}"`, `"skill:{name}"` — from `$Ws`)
-            // rather than the tool-qualified name. LingXi's `AggregateHookResult`
-            // does not carry the deferring hook's source, and the exact label
-            // strings cannot be inferred from `HookSource`'s variant NAMES
-            // without reading `$Ws` directly. Rather than guess a mapping, the
-            // port keeps the documented fallback the oracle itself uses when
-            // `hookSource` is absent. Recorded as a known gap.
-            let hook_name = format!("PreToolUse:{name}");
+            // The deferred attachment uses the source of the hook that owns the
+            // folded Defer decision. Fall back to the event-qualified name only
+            // for legacy/custom executors that omitted provenance.
+            let hook_name = pre_agg
+                .hook_source
+                .map(hooks::HookSource::deferred_label)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("PreToolUse:{name}"));
             let is_non_interactive = !orch.config.interactive_permissions;
             // batch size = the number of tool_use blocks this dispatch is
             // processing (claude-code counts `tool_use` blocks in the assistant
@@ -3142,20 +3138,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // untouched), push the `hook_deferred_tool` meta message, and
                 // terminate the turn (`tool_deferred` stop-reason — the tool is
                 // not executed).
-                // DIVERGENCE (`permissionMode`): the oracle writes
-                // `Tn(n).mode`, the live tool-permission mode, whose full
-                // domain is `default` / `plan` / `acceptEdits` /
-                // `bypassPermissions`. LingXi's session models only
-                // `plan_mode: bool` — there is no session-level
-                // `PermissionMode` to read — so plan-vs-default is the port's
-                // fidelity ceiling here. Deliberately NOT widened by guessing:
-                // it is the SAME approximation `hook_ctx.permission_mode` above
-                // already makes, so the two stay consistent.
-                let permission_mode = if orch.session.lock().await.plan_mode {
-                    "plan"
-                } else {
-                    "default"
-                };
+                // Persist the same live mode already supplied to the hook
+                // payload, including acceptEdits/bypassPermissions/dontAsk/auto.
+                let permission_mode = hook_ctx.permission_mode.as_deref().unwrap_or("default");
                 tracing::info!(
                     event = "tengu_pre_tool_hook_deferred",
                     tool_name = %name,
@@ -4175,16 +4160,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 duration_ms: Some(tool_duration_ms),
             }
         };
-        // O2: the identity the post-hook ATTACHMENT records carry. claude keys
+        // O2: the identity the post-hook attachment and model-facing records carry.
         // both off the event it actually fired, so the failure path renders as
         // `PostToolUseFailure:{tool}` (BIN off 234728254 / 234728470), not
         // `PostToolUse:{tool}`.
-        //
-        // RESIDUAL: the pre-existing model-facing `additionalContext` and
-        // `stopped continuation` prose a few blocks below still hardcode
-        // `PostToolUse:{tool}` on BOTH paths. That divergence predates this
-        // change and its bytes are asserted by the sibling test file, so it is
-        // left alone here and reported rather than silently rewritten.
         let post_hook_event = if is_error {
             "PostToolUseFailure"
         } else {
@@ -4216,10 +4195,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             post_additional_contexts.push(notice.text);
         }
 
-        // #40 terminalSequence apply for the PostToolUse aggregate (claude-code
+        // #40 terminalSequence apply for the post-dispatch aggregate (claude-code
         // `szn` runs per hook result, all event types). Same as the PreToolUse
-        // side: validate + warn-on-reject (observable); the terminal-WRITE is a
-        // documented residual.
+        // side: validate, warn on rejection, and write accepted bytes through
+        // the active terminal bridge.
         apply_terminal_sequence(orch, &name, post_agg.terminal_sequence.as_deref()).await;
 
         // FIX C (hook_stopped_continuation, PostToolUse twin): a PostToolUse
@@ -4289,7 +4268,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             let reason = post_agg
                 .reason
                 .clone()
-                .unwrap_or_else(|| "Execution stopped by PostToolUse hook".to_string());
+                .unwrap_or_else(|| format!("Execution stopped by {post_hook_event} hook"));
             // O2: the PERSISTED record. The model-facing prose below was
             // already byte-correct, but nothing reached the transcript —
             // the oracle yields a `hook_stopped_continuation` attachment
@@ -4307,10 +4286,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             )
             .await;
             injected_messages.push((
-                ConversationMessage::user(
+                ConversationMessage::user_meta(
                     MessageId::new(),
                     format!(
-                        "<system-reminder>\nPostToolUse:{name} hook stopped continuation: {reason}\n</system-reminder>"
+                        "<system-reminder>\n{post_hook_name} hook stopped continuation: {reason}\n</system-reminder>"
                     ),
                 ),
                 tool_use_id.clone(),
@@ -4321,7 +4300,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `additionalContext` is ALSO a separate `hook_additional_context`
         // attachment in claude-code (`toolHooks.ts:133-143`), injected AFTER the
         // tool_result — exactly what the injected-messages seam does. The
-        // hookName prefix is `PostToolUse:{tool}`. `systemMessage` stays folded
+        // hookName prefix follows the actual fired event. `systemMessage` stays folded
         // (handled by `final_content` below); only additionalContext splits out.
         // Strict no-op when no PostToolUse hook returned additionalContext.
         //
@@ -4335,9 +4314,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             orch.queue_hook_attachment(
                 tool_use_id,
                 hooks::additional_context_attachment(
-                    &format!("PostToolUse:{name}"),
+                    &post_hook_name,
                     tool_use_id.as_str(),
-                    "PostToolUse",
+                    post_hook_event,
                     &post_additional_contexts,
                 ),
             )
@@ -4345,7 +4324,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         }
         for ctx in &post_additional_contexts {
             let wrapped = format!(
-                "<system-reminder>\nPostToolUse:{name} hook additional context: {ctx}\n</system-reminder>"
+                "<system-reminder>\n{post_hook_name} hook additional context: {ctx}\n</system-reminder>"
             );
             // `user_meta`: the rendering is `zr({isMeta:true})` and is
             // ephemeral — the attachment line above is the on-disk record.
@@ -5936,6 +5915,9 @@ mod hook_context_attachment_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -5983,6 +5965,9 @@ mod hook_context_attachment_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -6491,6 +6476,9 @@ mod hook_context_attachment_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -6612,7 +6600,7 @@ mod hook_context_attachment_tests {
         assert_eq!(
             serde_json::to_string(&v["attachment"]).unwrap(),
             format!(
-                r#"{{"type":"hook_deferred_tool","toolUseID":"{id}","toolName":"Echo","toolInput":{{}},"hookName":"PreToolUse:Echo","hookEvent":"PreToolUse","permissionMode":"default"}}"#
+                r#"{{"type":"hook_deferred_tool","toolUseID":"{id}","toolName":"Echo","toolInput":{{}},"hookName":"session","hookEvent":"PreToolUse","permissionMode":"default"}}"#
             )
         );
     }
@@ -6634,6 +6622,9 @@ mod hook_context_attachment_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);

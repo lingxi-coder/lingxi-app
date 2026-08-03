@@ -185,6 +185,18 @@ pub struct HookResponse {
     /// follow-up — honoring it requires a skill/command registry reload path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reload_skills: Option<bool>,
+    /// Internal completion signal for `asyncRewake`. This never crosses the
+    /// hook JSON wire; the desktop completion drain consumes it only after the
+    /// result's model-facing context has been buffered.
+    #[serde(skip)]
+    pub async_rewake: bool,
+    /// Internal marker that the command hook successfully transferred its
+    /// remaining work to the runtime async registry after printing the
+    /// `{"async":true}` first line. Callers use this to keep live progress
+    /// open until the registry's completion callback fires. It is never part
+    /// of the hook JSON contract.
+    #[serde(skip)]
+    pub async_backgrounded: bool,
 }
 
 /// Structured elicitation answer a hook can return, mirroring claude-code's
@@ -279,6 +291,11 @@ pub enum HookOutcome {
 pub struct AggregateHookResult {
     /// Final aggregated decision (latest non-`None` wins until a `Block`).
     pub decision: Option<HookDecision>,
+    /// Source of the hook whose decision currently owns [`Self::decision`].
+    /// This follows the same sticky-first-block / otherwise-last-decision fold
+    /// as the decision itself, so downstream deferred-tool records can retain
+    /// provenance instead of guessing from the event name.
+    pub hook_source: Option<crate::definition::HookSource>,
     /// Reason associated with the final decision.
     pub reason: Option<String>,
     /// O2: the `command` half of the blocking hook's `blockingError` object,

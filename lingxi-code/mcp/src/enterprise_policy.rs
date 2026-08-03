@@ -104,7 +104,7 @@ use serde_json::Value;
 /// One allow/deny matcher entry (claude's `allowedMcpServers` /
 /// `deniedMcpServers` items). Any subset of the three keys may be present; the
 /// shape predicates `a3t`/`ZCn`/`ewn` test which is set.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerMatcher {
     /// `a3t`: match by server name.
@@ -127,6 +127,59 @@ pub struct McpPolicy {
     pub allowed: Option<Vec<McpServerMatcher>>,
 }
 
+impl McpPolicy {
+    /// Compose the effective policy from ordinary settings sources and managed
+    /// sources. Deny entries accumulate across every source and always win;
+    /// allow entries are accepted only from managed policy.
+    #[must_use]
+    pub fn from_effective_settings(ordinary: &[Value], managed: &[Value]) -> Self {
+        let mut denied = Vec::new();
+        let mut denied_present = false;
+        for source in ordinary.iter().chain(managed) {
+            let Some(raw) = source.get("deniedMcpServers") else {
+                continue;
+            };
+            denied_present = true;
+            let Some(entries) = raw.as_array() else {
+                continue;
+            };
+            for entry in entries {
+                if let Ok(matcher) = parse_matcher_entry(entry, MatcherListKind::Denied) {
+                    if !denied.contains(&matcher) {
+                        denied.push(matcher);
+                    }
+                }
+            }
+        }
+
+        // Managed tiers are ordered low → high. A later managed tier that
+        // supplies the field replaces the previous allowlist; an invalid value
+        // fails closed as an empty allowlist.
+        let mut allowed = None;
+        for source in managed {
+            let Some(raw) = source.get("allowedMcpServers") else {
+                continue;
+            };
+            allowed = Some(
+                raw.as_array()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| {
+                                parse_matcher_entry(entry, MatcherListKind::Allowed).ok()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        Self {
+            denied: denied_present.then_some(denied),
+            allowed,
+        }
+    }
+}
+
 /// claude's byte-exact `mcp add` rejection when a server is denied (`bPe`).
 #[must_use]
 pub fn denied_message(name: &str) -> String {
@@ -146,6 +199,37 @@ pub fn not_allowed_message(name: &str) -> String {
 #[must_use]
 pub fn read_managed_mcp_policy() -> McpPolicy {
     read_managed_mcp_policy_in(&managed_dir())
+}
+
+/// Compose MCP policy from the standard user/project/local settings paths, an
+/// optional `--settings` value, and the managed tiers. The returned policy is
+/// shared by CLI commands and engine boot.
+#[must_use]
+pub fn read_effective_mcp_policy(
+    lingxi_home: &Path,
+    cwd: &Path,
+    flag_settings: Option<&Value>,
+) -> McpPolicy {
+    let mut ordinary = Vec::new();
+    for path in [
+        lingxi_home.join("settings.json"),
+        cwd.join(branding::DOT_DIR).join("settings.json"),
+        cwd.join(branding::DOT_DIR).join("settings.local.json"),
+    ] {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Ok(value) = serde_json::from_str(&raw) {
+                ordinary.push(value);
+            }
+        }
+    }
+    if let Some(flag) = flag_settings {
+        ordinary.push(flag.clone());
+    }
+    let mut managed = Vec::new();
+    for_each_managed_settings_tier(&managed_dir(), &mut |source| {
+        managed.push(Value::Object(source.clone()));
+    });
+    McpPolicy::from_effective_settings(&ordinary, &managed)
 }
 
 /// Walk the managed settings tiers in ascending priority
@@ -412,6 +496,19 @@ use std::sync::OnceLock;
 /// MCP policy is evaluated; it is set-once because flag settings are immutable
 /// for the lifetime of one CLI process.
 static FLAG_SETTINGS_ENV: OnceLock<IndexMap<String, String>> = OnceLock::new();
+static FLAG_SETTINGS_POLICY: OnceLock<Value> = OnceLock::new();
+
+/// Freeze the parsed `--settings` policy layer for CLI subcommands that do not
+/// construct a desktop runtime.
+pub fn install_flag_settings_policy(settings: Value) -> bool {
+    FLAG_SETTINGS_POLICY.set(settings).is_ok()
+}
+
+/// Return the frozen `--settings` policy layer, when present.
+#[must_use]
+pub fn flag_settings_policy() -> Option<&'static Value> {
+    FLAG_SETTINGS_POLICY.get()
+}
 
 /// One settings source's `env` block → string (key, value) pairs — claude
 /// `ELt`: only string values participate and `NO_COLOR`/`FORCE_COLOR` are
@@ -1303,13 +1400,18 @@ pub fn load_enterprise_servers() -> Vec<McpServerConfig> {
 /// default deployment is byte-identical.
 pub fn apply_enterprise_mcp_policy(configs: &mut Vec<McpServerConfig>) {
     let policy = read_managed_mcp_policy();
+    apply_enterprise_mcp_policy_with(configs, &policy);
+}
+
+/// Apply enterprise exclusivity plus an already-composed effective policy.
+pub fn apply_enterprise_mcp_policy_with(configs: &mut Vec<McpServerConfig>, policy: &McpPolicy) {
     if enterprise_mcp_active() {
         *configs = load_enterprise_servers()
             .into_iter()
-            .filter(|c| is_server_allowed(c, &policy))
+            .filter(|c| is_server_allowed(c, policy))
             .collect();
     } else {
-        configs.retain(|c| is_server_allowed(c, &policy));
+        configs.retain(|c| is_server_allowed(c, policy));
     }
 }
 
@@ -2103,5 +2205,38 @@ mod tests {
             list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             ["keep"]
         );
+    }
+
+    #[test]
+    fn effective_policy_merges_all_denies_but_only_managed_allows() {
+        let ordinary = vec![serde_json::json!({
+            "deniedMcpServers": [{"serverName": "user-deny"}],
+            "allowedMcpServers": [{"serverName": "user-allow-must-be-ignored"}]
+        })];
+        let managed = vec![serde_json::json!({
+            "deniedMcpServers": [{"serverName": "managed-deny"}],
+            "allowedMcpServers": [{"serverName": "managed-allow"}]
+        })];
+        let policy = McpPolicy::from_effective_settings(&ordinary, &managed);
+        assert!(is_denied(
+            "user-deny",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+        assert!(is_denied(
+            "managed-deny",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+        assert!(is_allowed(
+            "managed-allow",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+        assert!(!is_allowed(
+            "user-allow-must-be-ignored",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
     }
 }

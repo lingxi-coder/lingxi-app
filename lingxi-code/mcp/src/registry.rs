@@ -196,6 +196,10 @@ pub struct McpRegistry {
     /// static headers; static-token servers are unaffected either way. Wired
     /// via [`Self::with_oauth`].
     oauth: Option<OAuthDeps>,
+    /// Session cwd used by dynamic MCP header helpers.
+    headers_helper_cwd: std::path::PathBuf,
+    /// Plugin roots keyed by scoped MCP server name.
+    headers_helper_plugin_roots: RwLock<HashMap<String, std::path::PathBuf>>,
     /// LIVE additional working directories (settings `additionalDirectories`
     /// union CLI `--add-dir`, plus any runtime `/add-dir`) advertised alongside
     /// cwd on each server's `roots/list`.
@@ -255,6 +259,9 @@ impl McpRegistry {
             raw_conn: None,
             hook_dispatcher: None,
             oauth: None,
+            headers_helper_cwd: std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            headers_helper_plugin_roots: RwLock::new(HashMap::new()),
             additional_roots: crate::new_shared_roots(Vec::new()),
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
@@ -468,6 +475,33 @@ impl McpRegistry {
         self
     }
 
+    /// Use the session cwd for every dynamic headers helper.
+    #[must_use]
+    pub fn with_headers_helper_cwd(mut self, cwd: std::path::PathBuf) -> Self {
+        self.headers_helper_cwd = cwd;
+        self
+    }
+
+    /// Associate a plugin MCP server with the plugin root used by its helper.
+    pub async fn set_headers_helper_plugin_root(
+        &self,
+        server: impl Into<String>,
+        root: std::path::PathBuf,
+    ) {
+        self.headers_helper_plugin_roots
+            .write()
+            .await
+            .insert(server.into(), root);
+    }
+
+    /// Remove a plugin helper context when its owning plugin unloads.
+    pub async fn remove_headers_helper_plugin_root(&self, server: &str) {
+        self.headers_helper_plugin_roots
+            .write()
+            .await
+            .remove(server);
+    }
+
     /// Inject the session's LIVE additional working directories (settings
     /// `additionalDirectories` union CLI `--add-dir`) advertised alongside cwd
     /// on each connected server's `roots/list`. Builder-style so it composes
@@ -631,6 +665,53 @@ impl McpRegistry {
         }
     }
 
+    /// Call one MCP tool and retry a single authentication failure after a
+    /// full reconnect. Reconnect re-runs `headersHelper` and OAuth resolution;
+    /// a second 401/403 is returned unchanged and never loops.
+    pub async fn call_tool_with_auth_retry(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: serde_json::Value,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+    ) -> Result<traits::McpToolResultDto, crate::client::McpClientError> {
+        let client = self.get_client(server).await.ok_or_else(|| {
+            crate::client::McpClientError::Rpc(format!(
+                "MCP server \"{server}\" has no live client"
+            ))
+        })?;
+        let first = client
+            .call_tool_with_progress(full_name, input.clone(), tool_use_id, on_progress.clone())
+            .await;
+        let Err(error) = first else {
+            return first;
+        };
+        if !error.is_auth_response() {
+            return Err(error);
+        }
+
+        let raw_name = {
+            let connections = self.connections.read().await;
+            connections
+                .keys()
+                .find(|name| normalize_name_for_mcp(name) == server)
+                .cloned()
+        }
+        .ok_or_else(|| crate::client::McpClientError::Rpc(error.to_string()))?;
+        self.reconnect(&raw_name)
+            .await
+            .map_err(|retry_error| crate::client::McpClientError::Rpc(retry_error.to_string()))?;
+        let refreshed = self.get_client(server).await.ok_or_else(|| {
+            crate::client::McpClientError::Rpc(format!(
+                "MCP server \"{server}\" did not publish a client after authentication refresh"
+            ))
+        })?;
+        refreshed
+            .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
+            .await
+    }
+
     /// Test-only helper that registers a config (`Disconnected` state) and
     /// caches a pre-built `Arc<McpClient>` for `name`. Used by M4-07 tools
     /// unit tests to exercise the dispatch paths without spinning up a
@@ -750,7 +831,21 @@ impl McpRegistry {
         // Returns `(augmented_spec, server_key)` so a 401 can drive a refresh +
         // retry. Static-token servers (and any server when `oauth` is unwired)
         // resolve to the spec unchanged with no server key.
-        let (connect_spec, oauth_key) = self.resolve_oauth_spec(&config).await?;
+        let helper_enabled = crate::headers_helper::has_headers_helper(&config.spec);
+        let mut resolved_config = config.clone();
+        let plugin_root = self
+            .headers_helper_plugin_roots
+            .read()
+            .await
+            .get(&config.name)
+            .cloned();
+        resolved_config.spec = crate::headers_helper::resolve_headers_helper_in(
+            &config,
+            &self.headers_helper_cwd,
+            plugin_root.as_deref(),
+        )
+        .await?;
+        let (connect_spec, oauth_key) = self.resolve_oauth_spec(&resolved_config).await?;
 
         let attempt =
             |spec: McpTransportSpec| self.connect_attempt(spec, connect_timeout, &config.name);
@@ -766,18 +861,29 @@ impl McpRegistry {
             // Checked BEFORE the 401 branch so a 403 never falls into refresh.
             Err(e) if oauth_key.is_some() => {
                 if let Some(scope) = error_is_403_insufficient_scope(&e) {
-                    let stepped = self.step_up_oauth_spec(&config, &scope).await?;
+                    let stepped = self.step_up_oauth_spec(&resolved_config, &scope).await?;
                     attempt(stepped).await?
                 } else if error_is_401(&e) {
                     // 401 → the access token is stale: force a refresh (or a
                     // fresh interactive flow), re-inject the Bearer, retry ONCE.
                     // Faithful-core 401 detection: the transport flattens errors
                     // to strings (structured status is a noted residual).
-                    let refreshed = self.reauth_oauth_spec(&config).await?;
+                    let refreshed = self.reauth_oauth_spec(&resolved_config).await?;
                     attempt(refreshed).await?
                 } else {
                     return Err(e);
                 }
+            }
+            Err(e) if helper_enabled && error_is_auth_response(&e) => {
+                // A helper may emit short-lived credentials. Re-run it for one
+                // auth failure and reconnect once; never loop indefinitely.
+                let refreshed = crate::headers_helper::resolve_headers_helper_in(
+                    &config,
+                    &self.headers_helper_cwd,
+                    plugin_root.as_deref(),
+                )
+                .await?;
+                attempt(refreshed).await?
             }
             Err(e) => return Err(e),
         };
@@ -1257,9 +1363,16 @@ impl McpRegistry {
         // from a previous 403 `insufficient_scope` (auth.ts:906-909
         // `cachedStepUpScope`). The stored blob is about to be overwritten by the
         // fresh grant, so we read it before driving the flow.
-        let cached_scope = match scope_override {
-            Some(s) => Some(s.to_string()),
-            None => oauth::load_tokens(&deps.storage, key)
+        let pinned_scope = oauth_cfg
+            .scopes
+            .as_deref()
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_string);
+        let cached_scope = match (pinned_scope, scope_override) {
+            (Some(scope), _) => Some(scope),
+            (None, Some(scope)) => Some(scope.to_string()),
+            (None, None) => oauth::load_tokens(&deps.storage, key)
                 .await
                 .ok()
                 .flatten()
@@ -2178,12 +2291,14 @@ fn inject_bearer(spec: &McpTransportSpec, access_token: &str) -> McpTransportSpe
         McpTransportSpec::Http {
             url,
             mut headers,
+            headers_helper,
             oauth,
         } => {
             headers.insert("Authorization".into(), bearer);
             McpTransportSpec::Http {
                 url,
                 headers,
+                headers_helper,
                 oauth,
             }
         }
@@ -2195,10 +2310,21 @@ fn inject_bearer(spec: &McpTransportSpec, access_token: &str) -> McpTransportSpe
 /// `Connection` / `Handshake` error string, so we substring-match `"401"`.
 /// Structured-status detection is a noted residual.
 fn error_is_401(e: &McpError) -> bool {
-    matches!(
-        e,
-        McpError::Connection(m) | McpError::Handshake(m) if m.contains("401")
-    )
+    matches!(e, McpError::HttpResponse { status: 401, .. })
+        || matches!(
+            e,
+            McpError::Connection(m) | McpError::Handshake(m) if m.contains("401")
+        )
+}
+
+fn error_is_auth_response(error: &McpError) -> bool {
+    error_is_401(error)
+        || matches!(error, McpError::HttpResponse { status: 403, .. })
+        || matches!(
+            error,
+            McpError::Connection(message) | McpError::Handshake(message)
+                if message.contains("403")
+        )
 }
 
 /// Faithful-core 403 `insufficient_scope` step-up detection (auth.ts
@@ -2213,6 +2339,16 @@ fn error_is_401(e: &McpError) -> bool {
 /// registry on a tool-call 403) is a noted residual, parallel to the 401 note —
 /// the live HTTP writer currently swallows non-2xx tool-call responses.
 fn error_is_403_insufficient_scope(e: &McpError) -> Option<String> {
+    if let McpError::HttpResponse {
+        status: 403,
+        www_authenticate: Some(value),
+    } = e
+    {
+        return value
+            .contains("insufficient_scope")
+            .then(|| extract_scope_from_www_auth(value))
+            .flatten();
+    }
     let (McpError::Connection(msg) | McpError::Handshake(msg)) = e else {
         return None;
     };
@@ -3519,6 +3655,7 @@ mod snapshot_tests {
         blank.spec = McpTransportSpec::Http {
             url: "   ".into(),
             headers: traits::McpHeaders::default(),
+            headers_helper: None,
             oauth: None,
         };
         assert!(
@@ -3534,6 +3671,7 @@ mod snapshot_tests {
         broken.spec = McpTransportSpec::Http {
             url: "${MISSING:-}".into(),
             headers: traits::McpHeaders::default(),
+            headers_helper: None,
             oauth: None,
         };
         broken.config_error =

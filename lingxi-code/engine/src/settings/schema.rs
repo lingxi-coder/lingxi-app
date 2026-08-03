@@ -180,6 +180,20 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_user_question_timeout: Option<String>,
 
+    /// Command prepended to CLI self-spawns. Only user, `--settings`, managed,
+    /// and the dedicated environment variables may contribute at the consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_wrapper: Option<String>,
+
+    /// Main interactive status-line command configuration. Kept as raw JSON so
+    /// forward-compatible Claude fields survive settings composition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_line: Option<Value>,
+
+    /// Per-task status-line command configuration for running subagents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_status_line: Option<Value>,
+
     /// Scalar field (later source wins). `viewMode`: the transcript view mode
     /// applied on startup. CC 2.1.207 settings zod (verbatim):
     /// `viewMode:E.enum(["default","verbose","focus"]).optional().catch(void 0)

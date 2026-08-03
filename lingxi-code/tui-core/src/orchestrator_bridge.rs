@@ -117,6 +117,9 @@ pub struct RunningAgentStatus {
     pub description: String,
     /// Lifecycle wire state. The input-adjacent surface keeps pending/running.
     pub status: String,
+    /// Custom `subagentStatusLine` content. `None` uses the built-in summary;
+    /// an empty string intentionally hides this task's row.
+    pub custom_content: Option<String>,
 }
 
 /// Events flowing from the orchestrator into the TUI render loop.
@@ -162,6 +165,19 @@ pub enum TurnEvent {
         /// Shared latest-value mailbox.
         heartbeats: Arc<CoalescedToolHeartbeats>,
     },
+    /// A blocking or asynchronous hook began running. This is transient UI
+    /// state and must never be appended to transcript history.
+    HookProgressStarted {
+        /// Unique identity for this hook run, not merely the hook definition.
+        id: String,
+        /// Configured status text, or a bounded generic fallback.
+        text: String,
+    },
+    /// The matching hook run reached a terminal outcome.
+    HookProgressFinished {
+        /// Run identity supplied by [`Self::HookProgressStarted`].
+        id: String,
+    },
     /// A tool result has returned.
     ToolUseResult {
         /// Correlator with the paired `ToolUseStart`.
@@ -190,6 +206,10 @@ pub enum TurnEvent {
     /// `apply_event` writes the value into `state.status.cost`, refreshing
     /// the status-line render.
     CostUpdated(String),
+    /// Full cumulative and most-recent request usage used by the custom status
+    /// line payload. Kept separate from the formatted footer string so legacy
+    /// consumers remain source-compatible.
+    CostSnapshotUpdated(CostSnapshot),
     /// The live context-pressure banner (or `None` to clear it). `apply_event`
     /// stores it on `state.context_pressure`; the prompt chrome renders it as a
     /// `<TokenWarning>`-equivalent line. Emitted by the orchestrator before
@@ -394,6 +414,10 @@ impl BridgeOutputStream {
 
 #[async_trait]
 impl OutputStream for BridgeOutputStream {
+    async fn emit_turn_started(&self) {
+        let _ = self.tx.send(TurnEvent::TurnStarted);
+    }
+
     async fn emit_text(&self, text: &str) {
         let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
     }
@@ -473,6 +497,30 @@ impl OutputStream for BridgeOutputStream {
         {
             self.heartbeats.reset_after_send_failure();
         }
+    }
+
+    async fn emit_hook_progress_started(
+        &self,
+        progress_id: &str,
+        hook_name: &str,
+        hook_event: &str,
+        status_message: Option<&str>,
+    ) {
+        let text = status_message
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Running {hook_event} hook {hook_name}\u{2026}"));
+        let _ = self.tx.send(TurnEvent::HookProgressStarted {
+            id: progress_id.to_string(),
+            text,
+        });
+    }
+
+    async fn emit_hook_progress_finished(&self, progress_id: &str) {
+        let _ = self.tx.send(TurnEvent::HookProgressFinished {
+            id: progress_id.to_string(),
+        });
     }
 
     async fn emit_tool_result(
@@ -559,6 +607,7 @@ impl OutputStream for BridgeOutputStream {
         // render pass. Format follows claude-code's `toFixed(4)` parity.
         let cost_str = format!("${:.4}", cost.total_usd);
         let _ = self.tx.send(TurnEvent::CostUpdated(cost_str));
+        let _ = self.tx.send(TurnEvent::CostSnapshotUpdated(cost.clone()));
 
         // Map stop_reason → TurnOutcome. Mirrors the M5-13 stdio REPL
         // mapping. Unknown/unrecognised reasons fall back to EndTurn.
@@ -706,6 +755,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_progress_is_transient_and_preserves_status_message() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge
+            .emit_hook_progress_started(
+                "hook-1:run-1",
+                "formatter",
+                "PostToolUse",
+                Some("Formatting\u{2026}"),
+            )
+            .await;
+        bridge.emit_hook_progress_finished("hook-1:run-1").await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::HookProgressStarted { id, text })
+                if id == "hook-1:run-1" && text == "Formatting\u{2026}"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::HookProgressFinished { id }) if id == "hook-1:run-1"
+        ));
+    }
+
+    #[tokio::test]
     async fn emit_tool_heartbeat_translates_without_transcript_payload() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
@@ -759,6 +833,10 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv().await.unwrap(),
+            TurnEvent::CostSnapshotUpdated(_)
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
             TurnEvent::TurnEnded(TurnOutcome::EndTurn)
         ));
     }
@@ -772,6 +850,10 @@ mod tests {
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::CostUpdated(_)
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::CostSnapshotUpdated(_)
         ));
         assert!(matches!(
             rx.recv().await.unwrap(),

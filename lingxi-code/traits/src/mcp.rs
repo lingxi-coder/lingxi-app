@@ -51,8 +51,10 @@ pub enum McpTransportSpec {
         /// byte-parity — see [`McpHeaders`]).
         headers: McpHeaders,
         /// Optional executable that produces auth headers on demand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         headers_helper: Option<String>,
         /// Optional OAuth 2.1 PKCE config.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         oauth: Option<McpOAuthConfigDto>,
     },
     /// JSON-over-HTTP endpoint.
@@ -62,7 +64,11 @@ pub enum McpTransportSpec {
         /// Static request headers (insertion order preserved for `getServerKey`
         /// byte-parity — see [`McpHeaders`]).
         headers: McpHeaders,
+        /// Optional executable that produces auth headers on demand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers_helper: Option<String>,
         /// Optional OAuth 2.1 PKCE config.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         oauth: Option<McpOAuthConfigDto>,
     },
     /// Bidirectional WebSocket connection.
@@ -70,7 +76,10 @@ pub enum McpTransportSpec {
         /// Endpoint URL (`ws://` or `wss://`).
         url: String,
         /// Static request headers used at handshake.
-        headers: std::collections::HashMap<String, String>,
+        headers: McpHeaders,
+        /// Optional executable that produces auth headers on demand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers_helper: Option<String>,
     },
     /// Same-process registered server (typically a Rust-native plugin).
     InProcess {
@@ -151,12 +160,24 @@ impl McpTransportSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpOAuthConfigDto {
     /// OAuth client identifier registered with the auth server.
+    #[serde(default, rename = "clientId", alias = "client_id")]
     pub client_id: Option<String>,
     /// Local port used for the loopback callback URL.
+    #[serde(default, rename = "callbackPort", alias = "callback_port")]
     pub callback_port: Option<u16>,
     /// Discovery document URL for the authorization server.
+    #[serde(
+        default,
+        rename = "authServerMetadataUrl",
+        alias = "auth_server_metadata_url"
+    )]
     pub auth_server_metadata_url: Option<String>,
+    /// Space-delimited scopes pinned by configuration. Pinned scopes take
+    /// precedence over discovery and are reused for a single auth retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
     /// Anthropic-account associate flag (spec §7.5).
+    #[serde(default)]
     pub xaa: Option<bool>,
 }
 
@@ -455,6 +476,20 @@ pub enum McpError {
     /// MCP `initialize` handshake failed or returned an invalid response.
     #[error("handshake failed: {0}")]
     Handshake(String),
+    /// Remote HTTP response metadata retained for authentication recovery.
+    #[error(
+        "HTTP {status}{detail}",
+        detail = www_authenticate
+            .as_ref()
+            .map(|value| format!(": {value}"))
+            .unwrap_or_default()
+    )]
+    HttpResponse {
+        /// HTTP response status.
+        status: u16,
+        /// `WWW-Authenticate` response header, when supplied by the server.
+        www_authenticate: Option<String>,
+    },
     /// OAuth handshake aborted or returned an error.
     #[error("oauth flow failed: {0}")]
     OAuth(String),

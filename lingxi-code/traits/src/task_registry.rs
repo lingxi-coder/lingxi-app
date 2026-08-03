@@ -73,6 +73,10 @@ pub struct TaskRecord {
     pub status: String,
     /// Human-readable description.
     pub description: String,
+    /// Wall-clock start as Unix epoch milliseconds, when known. This feeds
+    /// the `subagentStatusLine.tasks[].startTime` payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
     /// The shell command, for `local_bash` tasks only (claude-code
     /// `LocalShellTaskState.command`). `None` for every other task type. The
     /// `TaskStop` tool surfaces this in preference to `description` for

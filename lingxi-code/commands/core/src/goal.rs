@@ -165,12 +165,20 @@ impl GoalHandler {
             None => NO_GOAL_SET.to_string(),
             Some(g) => {
                 let elapsed = format_elapsed(goal_elapsed(&g));
-                let suffix = g
-                    .last_reason
-                    .as_ref()
-                    .map(|r| format!(" (last check: {r})"))
-                    .unwrap_or_default();
-                format!("Goal active: {} ({elapsed}){suffix}", g.condition)
+                let evaluations = match g.iterations {
+                    0 => "not yet evaluated".to_string(),
+                    1 => "1 turn".to_string(),
+                    count => format!("{count} turns"),
+                };
+                let mut output = format!(
+                    "Goal active: {} ({elapsed})\nEvaluations: {evaluations}",
+                    g.condition
+                );
+                if let Some(reason) = g.last_reason.as_deref() {
+                    output.push_str("\nLast check: ");
+                    output.push_str(reason);
+                }
+                output
             }
         }
     }
@@ -395,6 +403,7 @@ mod tests {
         match h.handle(&args("")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.starts_with("Goal active: finish the migration ("));
+                assert!(s.ends_with("\nEvaluations: not yet evaluated"));
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -415,6 +424,30 @@ mod tests {
             CommandResult::InjectMessage { content } => assert!(content.contains("\"status\"")),
             other => panic!("expected InjectMessage, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn status_pluralizes_turns_and_separates_last_check() {
+        let (handle, h) = mock_handler();
+        handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
+            condition: "ship".to_string(),
+            set_at: SystemTime::now(),
+            last_reason: Some("tests pending".to_string()),
+            iterations: 1,
+            tokens_at_start: 100,
+        }));
+        let one = h.status().await;
+        assert!(one.contains("\nEvaluations: 1 turn\nLast check: tests pending"));
+
+        handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
+            condition: "ship".to_string(),
+            set_at: SystemTime::now(),
+            last_reason: Some("review pending".to_string()),
+            iterations: 2,
+            tokens_at_start: 100,
+        }));
+        let many = h.status().await;
+        assert!(many.contains("\nEvaluations: 2 turns\nLast check: review pending"));
     }
 
     #[tokio::test]

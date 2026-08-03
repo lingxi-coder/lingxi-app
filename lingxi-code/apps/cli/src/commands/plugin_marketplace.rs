@@ -20,11 +20,8 @@
 //! `MarketplaceManager::resolve_index_via_git` into
 //! `<plugins>/marketplaces/<name>/`), or a hosted **url** `marketplace.json`.
 //!
-//! Residuals: the **url** source's HTTP `marketplace.json` download is not
-//! ported (the plugin crate has no HTTP-catalog fetch) — it classifies + shapes
-//! the `source` object but declines the fetch; a `ref` on a github/git source is
-//! recorded in the `source` object but not checked out (the shared clone helper
-//! fetches the default branch); and the network add path emits a single result
+//! A `ref` on a github/git source is checked out by the shared clone helper;
+//! the network add path emits a single result
 //! line rather than the binary's live per-step progress
 //! ("Refreshing marketplace cache…", "Cloning repository…", …).
 
@@ -34,6 +31,7 @@ use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
 
 use crate::commands::plugin_policy;
+use crate::commands::plugin_policy::MarketplaceSourceIdentity;
 use crate::commands::plugin_settings::{Scope, SCOPES};
 
 /// The resolved-marketplaces registry file under the plugins root.
@@ -162,15 +160,22 @@ fn iso_now() -> String {
 /// Write the registry map back (pretty, NO trailing newline — matching the
 /// binary's `known_marketplaces.json`).
 fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), String> {
-    let path = registry_path(plugins_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-    }
     let serialized = serde_json::to_string_pretty(&Value::Object(map.clone()))
         .map_err(|e| format!("Failed to serialize registry: {e}"))?;
-    std::fs::write(&path, serialized)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    std::fs::create_dir_all(plugins_dir)
+        .map_err(|e| format!("Failed to create {}: {e}", plugins_dir.display()))?;
+    traits::rooted_fs::atomic_write(
+        plugins_dir,
+        Path::new("known_marketplaces.json"),
+        serialized.as_bytes(),
+        traits::AtomicWriteOptions::default(),
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to write {}: {e}",
+            registry_path(plugins_dir).display()
+        )
+    })
 }
 
 /// The `extraKnownMarketplaces` declaration map from a scope's settings file.
@@ -240,6 +245,71 @@ enum Source {
     },
     /// A hosted `marketplace.json` fetched over HTTP(S) (no git clone).
     Url { url: String },
+}
+
+fn source_identity(source: &Source) -> MarketplaceSourceIdentity {
+    match source {
+        Source::Directory(path) => MarketplaceSourceIdentity::Directory {
+            path: path.display().to_string(),
+        },
+        Source::Github { repo, git_ref } => MarketplaceSourceIdentity::Github {
+            repo: repo.clone(),
+            git_ref: git_ref.clone(),
+            path: None,
+        },
+        Source::Git { url, git_ref } => MarketplaceSourceIdentity::Git {
+            url: url.clone(),
+            git_ref: git_ref.clone(),
+            path: None,
+        },
+        Source::Url { url } => MarketplaceSourceIdentity::Url { url: url.clone() },
+    }
+}
+
+fn lexical_absolute(path: &Path, cwd: &Path) -> PathBuf {
+    let expanded = path
+        .to_str()
+        .and_then(|raw| raw.strip_prefix("~/"))
+        .and_then(|rest| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest)))
+        .unwrap_or_else(|| path.to_path_buf());
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Resolve only lexical source identity. This deliberately performs no
+/// filesystem or network access so managed policy can reject before side
+/// effects.
+fn preflight_source_identity(
+    source: &str,
+    cwd: &Path,
+) -> Result<MarketplaceSourceIdentity, String> {
+    let trimmed = source.trim();
+    if trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('~')
+    {
+        return Ok(MarketplaceSourceIdentity::Directory {
+            path: lexical_absolute(Path::new(trimmed), cwd)
+                .display()
+                .to_string(),
+        });
+    }
+    classify_source(source).map(|source| source_identity(&source))
 }
 
 /// The unclassifiable-source error (binary: `cli_marketplace_add_invalid_source`).
@@ -461,9 +531,8 @@ fn source_object(src: &Source) -> Value {
 ///   `<plugins>/marketplaces/<name>/` via `MarketplaceManager::resolve_index_via_git`,
 ///   taking the marketplace `name` from the cloned catalog and setting
 ///   `installLocation` to the clone dir.
-/// - **url**: a hosted `marketplace.json` fetched over HTTP — classification +
-///   `source` object are shaped, but the download itself is a residual (the
-///   plugin crate has no HTTP-catalog fetch), so it declines cleanly.
+/// - **url**: a hosted `marketplace.json` fetched over HTTPS into an atomic
+///   local catalog directory.
 pub fn run_add(
     source: &str,
     scope: Option<&str>,
@@ -472,6 +541,9 @@ pub fn run_add(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    let policy_source = preflight_source_identity(source, cwd)?;
+    plugin_policy::ensure_marketplace_source_preflight(&policy_source)
+        .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
     // Classification (incl. local existence) is checked FIRST — before scope,
     // and before any "Adding marketplace…" progress line — matching the binary.
     let classified = classify_source(source)?;
@@ -529,7 +601,10 @@ fn add_directory(
             manifest_path.display()
         ));
     }
-    plugin_policy::ensure_marketplace_allowed(&name)
+    let identity = MarketplaceSourceIdentity::Directory {
+        path: abs.display().to_string(),
+    };
+    plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
         .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
 
     let source_value = source_object(&Source::Directory(abs.to_path_buf()));
@@ -544,7 +619,7 @@ fn add_directory(
     )
 }
 
-/// The network add path (github / git clone; url declines). Clones the catalog,
+/// The network add path (github / git clone / hosted URL). Stages the catalog,
 /// takes the marketplace `name` from it, and records `installLocation` = the
 /// clone dir.
 fn add_remote(
@@ -554,18 +629,37 @@ fn add_remote(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
-    // Determine the clone URL + a provisional clone-dir name hint (the final
-    // directory is renamed to the marketplace's own name after the catalog is
-    // parsed, matching the binary's temp-then-rename).
-    let (clone_url, hint) = match remote {
-        Source::Github { repo, .. } => (format!("https://github.com/{repo}.git"), repo.clone()),
-        Source::Git { url, .. } => (url.clone(), url_repo_hint(url)),
+    // Determine the clone URL + a provisional name used only for a unique
+    // staging path. Publication waits for the catalog's name-aware policy.
+    let (clone_url, hint, git_ref) = match remote {
+        Source::Github { repo, git_ref } => (
+            format!("https://github.com/{repo}.git"),
+            repo.clone(),
+            git_ref.as_deref(),
+        ),
+        Source::Git { url, git_ref } => (url.clone(), url_repo_hint(url), git_ref.as_deref()),
         Source::Url { url } => {
-            // A hosted marketplace.json is fetched over HTTP, not git-cloned; the
-            // plugin crate has no HTTP-catalog fetch yet (module residual).
-            return Err(format!(
-                "Adding marketplace…✘ Failed to add marketplace: Hosted marketplace.json URL sources are not yet supported: {url}"
-            ));
+            let (name, staged_catalog) = fetch_hosted_marketplace(plugins_dir, url)
+                .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+            let identity = source_identity(remote);
+            if let Err(reason) =
+                plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
+            {
+                let _ = std::fs::remove_dir_all(&staged_catalog);
+                return Err(format!(
+                    "Adding marketplace…✘ Failed to add marketplace: {reason}"
+                ));
+            }
+            let source_value = source_object(remote);
+            return publish_and_write_marketplace(
+                &name,
+                &source_value,
+                &staged_catalog,
+                target,
+                plugins_dir,
+                home,
+                cwd,
+            );
         }
         Source::Directory(_) => unreachable!("add_remote called with a directory source"),
     };
@@ -576,20 +670,23 @@ fn add_remote(
     }
 
     // From here the "Adding marketplace…" progress prefix is part of the line.
-    let (name, clone_dir) = clone_marketplace(plugins_dir, &clone_url, &hint)
+    let (name, staged_clone) = clone_marketplace(plugins_dir, &clone_url, &hint, git_ref)
         .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
-    if let Err(reason) = plugin_policy::ensure_marketplace_allowed(&name) {
-        let _ = std::fs::remove_dir_all(&clone_dir);
+    let identity = source_identity(remote);
+    if let Err(reason) =
+        plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
+    {
+        let _ = std::fs::remove_dir_all(&staged_clone);
         return Err(format!(
             "Adding marketplace…✘ Failed to add marketplace: {reason}"
         ));
     }
 
     let source_value = source_object(remote);
-    write_marketplace(
+    publish_and_write_marketplace(
         &name,
         &source_value,
-        &clone_dir.display().to_string(),
+        &staged_clone,
         target,
         plugins_dir,
         home,
@@ -597,9 +694,98 @@ fn add_remote(
     )
 }
 
+const MAX_HOSTED_MARKETPLACE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Fetch a hosted marketplace catalog without following redirects, validate
+/// its public shape, and leave it in a unique same-parent staging directory.
+/// The caller applies the name-aware policy before publishing that directory.
+fn fetch_hosted_marketplace(plugins_dir: &Path, url: &str) -> Result<(String, PathBuf), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid marketplace URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Hosted marketplace URLs must use HTTPS".to_string());
+    }
+    let plugins_dir = plugins_dir.to_path_buf();
+    let url = url.to_string();
+    std::thread::spawn(move || -> Result<(String, PathBuf), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to initialize marketplace download: {e}"))?;
+        runtime.block_on(async move {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("Failed to initialize marketplace download: {e}"))?;
+            let mut response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to download marketplace: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Failed to download marketplace: HTTP {}",
+                    response.status()
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_HOSTED_MARKETPLACE_BYTES as u64)
+            {
+                return Err("Hosted marketplace exceeds the 5 MiB limit".to_string());
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| format!("Failed to download marketplace: {e}"))?
+            {
+                if bytes.len().saturating_add(chunk.len()) > MAX_HOSTED_MARKETPLACE_BYTES {
+                    return Err("Hosted marketplace exceeds the 5 MiB limit".to_string());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("Invalid marketplace schema: {e}"))?;
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "Invalid marketplace schema: missing required field 'name'".to_string())?
+                .to_string();
+            if !value.get("owner").is_some_and(Value::is_object)
+                || !value.get("plugins").is_some_and(Value::is_array)
+            {
+                return Err(
+                    "Invalid marketplace schema: owner must be an object and plugins must be an array"
+                        .to_string(),
+                );
+            }
+
+            let parent = plugins_dir.join("marketplaces");
+            std::fs::create_dir_all(&parent)
+                .map_err(|e| format!("Failed to create marketplace cache: {e}"))?;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let temp = parent.join(format!(".hosted-{}-{nonce}", std::process::id()));
+            let manifest_dir = temp.join(branding::PLUGIN_MANIFEST_DIR);
+            std::fs::create_dir_all(&manifest_dir)
+                .map_err(|e| format!("Failed to create marketplace cache: {e}"))?;
+            if let Err(error) = std::fs::write(manifest_dir.join("marketplace.json"), &bytes) {
+                let _ = std::fs::remove_dir_all(&temp);
+                return Err(format!("Failed to cache marketplace: {error}"));
+            }
+            Ok((name, temp))
+        })
+    })
+    .join()
+    .map_err(|_| "Marketplace download worker panicked".to_string())?
+}
+
 /// A provisional clone-dir name derived from a git URL's last path segment
-/// (`.git` stripped). Only transient — the dir is renamed to the marketplace's
-/// declared name once the catalog is parsed.
+/// (`.git` stripped). It is used only to label the transient staging path.
 fn url_repo_hint(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     let last = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
@@ -632,45 +818,161 @@ fn sanitize_segment(s: &str) -> String {
 /// `MarketplaceManager::resolve_index_via_git` — run on a dedicated thread with
 /// its own current-thread runtime so it is safe to call from the async CLI
 /// dispatcher without nesting runtimes. Returns `(marketplace_name, clone_dir)`,
-/// where the clone dir is renamed to `marketplaces/<marketplace-name>/` so
-/// `installLocation` matches the binary.
+/// where the clone remains in a unique staging directory until the caller has
+/// applied the catalog's name-aware managed policy.
 fn clone_marketplace(
     plugins_dir: &Path,
     clone_url: &str,
     hint: &str,
+    git_ref: Option<&str>,
 ) -> Result<(String, PathBuf), String> {
     let plugins_dir = plugins_dir.to_path_buf();
     let url = clone_url.to_string();
     let hint = hint.to_string();
+    let git_ref = git_ref.map(ToOwned::to_owned);
     std::thread::spawn(move || -> Result<(String, PathBuf), String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let staging_hint = format!(
+            ".incoming-{}-{}-{nonce}",
+            sanitize_segment(&hint),
+            std::process::id()
+        );
         let mgr = plugin::MarketplaceManager::new(plugins_dir.clone());
-        let (index, clone_dir) = rt.block_on(mgr.resolve_index_via_git(&url, &hint))?;
-        let name = index.name;
-        // Rename the (hint-named) clone to the marketplace's own name so the
-        // recorded installLocation is `marketplaces/<marketplace-name>/`. The
-        // segment sanitizer mirrors the plugin crate's `sanitize_segment` (which
-        // is `pub(crate)`) so the target matches `resolve_index_via_git`'s own
-        // clone-dir layout.
-        let final_dir = plugins_dir
-            .join("marketplaces")
-            .join(sanitize_segment(&name));
-        let final_dir = if final_dir == clone_dir {
-            clone_dir
-        } else {
-            let _ = std::fs::remove_dir_all(&final_dir);
-            match std::fs::rename(&clone_dir, &final_dir) {
-                Ok(()) => final_dir,
-                Err(_) => clone_dir,
+        match rt.block_on(mgr.resolve_index_via_git_ref(&url, &staging_hint, git_ref.as_deref())) {
+            Ok((index, clone_dir)) => Ok((index.name, clone_dir)),
+            Err(error) => {
+                let staged = plugins_dir
+                    .join("marketplaces")
+                    .join(sanitize_segment(&staging_hint));
+                let _ = std::fs::remove_dir_all(staged);
+                Err(error)
             }
-        };
-        Ok((name, final_dir))
+        }
     })
     .join()
     .map_err(|_| "Failed to clone marketplace repository: worker thread panicked".to_string())?
+}
+
+struct PublishedMarketplace {
+    destination: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+impl PublishedMarketplace {
+    fn commit(self) {
+        if let Some(backup) = self.backup {
+            let _ = std::fs::remove_dir_all(backup);
+        }
+    }
+
+    fn rollback(self) {
+        let _ = std::fs::remove_dir_all(&self.destination);
+        if let Some(backup) = self.backup {
+            let _ = std::fs::rename(backup, self.destination);
+        }
+    }
+}
+
+/// Atomically replace one published marketplace cache after all policy gates.
+fn publish_marketplace_cache(
+    plugins_dir: &Path,
+    name: &str,
+    staged: &Path,
+) -> Result<PublishedMarketplace, String> {
+    let parent = plugins_dir.join("marketplaces");
+    let canonical_parent = std::fs::canonicalize(&parent)
+        .map_err(|error| format!("Failed to resolve marketplace cache: {error}"))?;
+    let canonical_staged = std::fs::canonicalize(staged)
+        .map_err(|error| format!("Failed to resolve staged marketplace: {error}"))?;
+    if canonical_staged.parent() != Some(canonical_parent.as_path()) {
+        return Err("Refusing to publish a marketplace outside its cache root".to_string());
+    }
+    let destination = parent.join(sanitize_segment(name));
+    if destination == canonical_staged {
+        return Err("Marketplace staging path collides with its destination".to_string());
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup = destination
+        .exists()
+        .then(|| parent.join(format!(".backup-{}-{nonce}", std::process::id())));
+    if let Some(backup) = &backup {
+        std::fs::rename(&destination, backup)
+            .map_err(|error| format!("Failed to stage existing marketplace cache: {error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&canonical_staged, &destination) {
+        if let Some(backup) = &backup {
+            let _ = std::fs::rename(backup, &destination);
+        }
+        return Err(format!("Failed to publish marketplace cache: {error}"));
+    }
+    Ok(PublishedMarketplace {
+        destination,
+        backup,
+    })
+}
+
+fn publish_and_write_marketplace(
+    name: &str,
+    source_value: &Value,
+    staged: &Path,
+    target: Scope,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    let _lock = lock_marketplace_state(plugins_dir)
+        .map_err(|error| format!("Adding marketplace…✘ Failed to add marketplace: {error}"))?;
+    if load_registry(plugins_dir).contains_key(name) {
+        let result = write_marketplace_unlocked(
+            name,
+            source_value,
+            &staged.display().to_string(),
+            target,
+            plugins_dir,
+            home,
+            cwd,
+        );
+        let _ = std::fs::remove_dir_all(staged);
+        return result;
+    }
+    let published = match publish_marketplace_cache(plugins_dir, name, staged) {
+        Ok(published) => published,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(staged);
+            return Err(format!(
+                "Adding marketplace…✘ Failed to add marketplace: {error}"
+            ));
+        }
+    };
+    let install_location = published.destination.display().to_string();
+    match write_marketplace_unlocked(
+        name,
+        source_value,
+        &install_location,
+        target,
+        plugins_dir,
+        home,
+        cwd,
+    ) {
+        Ok(message) => {
+            published.commit();
+            Ok(message)
+        }
+        Err(error) => {
+            published.rollback();
+            Err(error)
+        }
+    }
 }
 
 /// Shared writer for both add paths: write the per-scope declaration, then the
@@ -684,14 +986,49 @@ fn write_marketplace(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    let _lock = lock_marketplace_state(plugins_dir)
+        .map_err(|error| format!("Adding marketplace…✘ Failed to add marketplace: {error}"))?;
+    write_marketplace_unlocked(
+        name,
+        source_value,
+        install_location,
+        target,
+        plugins_dir,
+        home,
+        cwd,
+    )
+}
+
+fn write_marketplace_unlocked(
+    name: &str,
+    source_value: &Value,
+    install_location: &str,
+    target: Scope,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    let settings_path = target.path(home, cwd);
+    let previous_settings = std::fs::read(&settings_path).ok();
+    let previous_registry = traits::rooted_fs::read_to_string_limited(
+        plugins_dir,
+        Path::new("known_marketplaces.json"),
+        16 * 1024 * 1024,
+    )
+    .ok()
+    .map(String::into_bytes);
     // Per-scope declaration (settings.extraKnownMarketplaces[name] = {source}).
     let mut extra = read_extra(target, home, cwd);
     extra.insert(
         name.to_string(),
         serde_json::json!({ "source": source_value.clone() }),
     );
-    write_extra(target, home, cwd, extra)
-        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    if let Err(error) = write_extra(target, home, cwd, extra) {
+        restore_snapshot(&settings_path, previous_settings.as_deref());
+        return Err(format!(
+            "Adding marketplace…✘ Failed to add marketplace: {error}"
+        ));
+    }
 
     // Registry (resolved) — only written when the name is not already on disk.
     let mut registry = load_registry(plugins_dir);
@@ -709,12 +1046,58 @@ fn write_marketplace(
             "lastUpdated": iso_now(),
         }),
     );
-    write_registry(plugins_dir, &registry)
-        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    if let Err(error) = write_registry(plugins_dir, &registry) {
+        restore_snapshot(&settings_path, previous_settings.as_deref());
+        restore_registry_snapshot(plugins_dir, previous_registry.as_deref());
+        return Err(format!(
+            "Adding marketplace…✘ Failed to add marketplace: {error}"
+        ));
+    }
     Ok(format!(
         "Adding marketplace…✔ Successfully added marketplace: {name} (declared in {} settings)",
         target.label()
     ))
+}
+
+fn lock_marketplace_state(plugins_dir: &Path) -> Result<traits::RootedFileLock, String> {
+    std::fs::create_dir_all(plugins_dir)
+        .map_err(|error| format!("Failed to create plugin state root: {error}"))?;
+    traits::rooted_fs::lock_exclusive(
+        plugins_dir,
+        Path::new(".marketplace.lock"),
+        traits::rooted_fs::PRIVATE_DIR_MODE,
+        traits::rooted_fs::PRIVATE_FILE_MODE,
+    )
+    .map_err(|error| format!("Failed to lock marketplace state: {error}"))
+}
+
+fn restore_snapshot(path: &Path, snapshot: Option<&[u8]>) {
+    match snapshot {
+        Some(bytes) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, bytes);
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn restore_registry_snapshot(plugins_dir: &Path, snapshot: Option<&[u8]>) {
+    let result = match snapshot {
+        Some(bytes) => traits::rooted_fs::atomic_write(
+            plugins_dir,
+            Path::new("known_marketplaces.json"),
+            bytes,
+            traits::AtomicWriteOptions::default(),
+        ),
+        None => traits::rooted_fs::remove_file(plugins_dir, Path::new("known_marketplaces.json")),
+    };
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to restore marketplace registry");
+    }
 }
 
 /// `plugin marketplace remove <name> [--scope]`.
@@ -733,6 +1116,7 @@ pub fn run_remove(
         Some(s) => Some(Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?),
         None => None,
     };
+    let _lock = lock_marketplace_state(plugins_dir)?;
     let declaring = declaring_scopes(name, home, cwd);
     let targets: Vec<Scope> = match requested {
         Some(s) => {
@@ -791,12 +1175,20 @@ pub fn run_update(
     _home: &Path,
     _cwd: &Path,
 ) -> Result<String, String> {
+    let _lock = lock_marketplace_state(plugins_dir)?;
     let mut registry = load_registry(plugins_dir);
 
     if let Some(name) = name {
-        plugin_policy::ensure_marketplace_allowed(name).map_err(|reason| {
-            format!("Updating marketplace: {name}...✘ Failed to update marketplace(s): {reason}")
-        })?;
+        let source = registry
+            .get(name)
+            .and_then(MarketplaceSourceIdentity::from_value);
+        plugin_policy::ensure_marketplace_source_allowed(Some(name), source.as_ref()).map_err(
+            |reason| {
+                format!(
+                    "Updating marketplace: {name}...✘ Failed to update marketplace(s): {reason}"
+                )
+            },
+        )?;
         if !registry.contains_key(name) {
             let available: Vec<&str> = registry.keys().map(String::as_str).collect();
             return Err(format!(
@@ -824,10 +1216,14 @@ pub fn run_update(
     }
 
     let count = registry.len();
-    for marketplace in registry.keys() {
-        plugin_policy::ensure_marketplace_allowed(marketplace).map_err(|reason| {
-            format!("Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}")
-        })?;
+    for (marketplace, entry) in &registry {
+        let source = MarketplaceSourceIdentity::from_value(entry);
+        plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())
+            .map_err(|reason| {
+                format!(
+                    "Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}"
+                )
+            })?;
     }
     for entry in registry.values_mut() {
         if let Some(obj) = entry.as_object_mut() {
@@ -1011,6 +1407,78 @@ mod tests {
         assert_eq!(
             user["extraKnownMarketplaces"]["mymkt"],
             json!({"source": {"source": "directory", "path": abs}})
+        );
+    }
+
+    #[test]
+    fn add_rolls_back_scope_settings_when_registry_write_fails() {
+        let e = full_env();
+        let settings_path = e.home.join("settings.json");
+        std::fs::write(&settings_path, r#"{"existing":true}"#).unwrap();
+        let registry = e.plugins.join("known_marketplaces.json");
+        std::fs::create_dir_all(&registry).unwrap();
+
+        let error = run_add(
+            &e.market.to_string_lossy(),
+            None,
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .expect_err("registry directory must make the atomic write fail");
+
+        assert!(error.contains("Failed to write"), "{error}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&std::fs::read_to_string(settings_path).unwrap())
+                .unwrap(),
+            json!({"existing": true})
+        );
+    }
+
+    #[test]
+    fn published_marketplace_can_restore_the_previous_cache() {
+        let e = full_env();
+        let parent = e.plugins.join("marketplaces");
+        let destination = parent.join("mymkt");
+        let staged = parent.join(".incoming-test");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("old"), "old").unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("new"), "new").unwrap();
+
+        let published = publish_marketplace_cache(&e.plugins, "mymkt", &staged).unwrap();
+        assert!(destination.join("new").exists());
+        published.rollback();
+
+        assert!(destination.join("old").exists());
+        assert!(!destination.join("new").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marketplace_registry_write_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let e = full_env();
+        let outside = e._tmp.path().join("outside-marketplaces.json");
+        std::fs::write(&outside, r#"{"sentinel":true}"#).unwrap();
+        symlink(&outside, e.plugins.join("known_marketplaces.json")).unwrap();
+
+        let error = run_add(
+            &e.market.to_string_lossy(),
+            None,
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .expect_err("root-confined marketplace registry must reject symlinks");
+
+        assert!(error.contains("Failed to write"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(outside).unwrap(),
+            r#"{"sentinel":true}"#
         );
     }
 
@@ -1352,21 +1820,12 @@ mod tests {
     }
 
     #[test]
-    fn add_url_source_declines() {
+    fn hosted_marketplace_requires_https_before_network_io() {
         let e = full_env();
-        let err = run_add(
-            "https://example.com/marketplace.json",
-            None,
-            &[],
-            &e.plugins,
-            &e.home,
-            &e.cwd,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            "Adding marketplace…✘ Failed to add marketplace: Hosted marketplace.json URL sources are not yet supported: https://example.com/marketplace.json"
-        );
+        let err = fetch_hosted_marketplace(&e.plugins, "http://example.com/marketplace.json")
+            .unwrap_err();
+        assert_eq!(err, "Hosted marketplace URLs must use HTTPS");
+        assert!(!e.plugins.join("marketplaces").exists());
     }
 
     #[test]

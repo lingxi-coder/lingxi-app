@@ -10,6 +10,7 @@
 
 use crate::source::PluginSource;
 use crate::trust::PluginTrustLevel;
+use crate::PluginDependency;
 use hooks::HookDefinition;
 use mcp::McpServerConfig;
 use protocol::PluginId;
@@ -60,6 +61,9 @@ pub struct PluginManifest {
     pub trust_level: PluginTrustLevel,
     /// Plugin ids this plugin depends on.
     pub depends_on: Vec<PluginId>,
+    /// Versioned dependency declarations from `plugin.json`.
+    #[serde(default)]
+    pub dependencies: Vec<PluginDependency>,
     /// Optional user-config schema. Sensitive fields are resolved through
     /// the [`secret::CredentialManager`] at load time.
     pub user_config: Option<UserConfigSchema>,

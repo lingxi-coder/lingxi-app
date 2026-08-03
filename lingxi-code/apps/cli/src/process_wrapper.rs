@@ -1,27 +1,105 @@
 //! Shared process-wrapper support for CLI self-spawns.
 //!
-//! Claude Code honors `CLAUDE_CODE_PROCESS_WRAPPER` for child/self launches.
-//! LingXi also accepts the branded `LINGXI_CODE_PROCESS_WRAPPER`, with LingXi
-//! taking precedence. The wrapper is prepended to the command argv; callers then
-//! spawn `argv[0]` with the remaining args.
+//! Claude Code resolves `processWrapper` from env > managed > `--settings` >
+//! user settings. Project and local files are intentionally excluded. The
+//! resolved argv is frozen into an internal environment value before daemon,
+//! background-worker, and agent self-spawns so every descendant sees one
+//! immutable snapshot.
 
-/// Resolve the active process wrapper from the environment.
-///
-/// The value is intentionally split on shell whitespace. This keeps the helper
-/// dependency-free; wrapper paths containing spaces should be exposed through a
-/// small shim script.
-#[must_use]
-pub(crate) fn process_wrapper_tokens_from_env() -> Option<Vec<String>> {
-    let raw = std::env::var("LINGXI_CODE_PROCESS_WRAPPER")
+const RESOLVED_WRAPPER_ENV: &str = "LINGXI_RESOLVED_PROCESS_WRAPPER_JSON";
+
+fn process_wrapper_from_environment() -> Option<String> {
+    std::env::var("LINGXI_CODE_PROCESS_WRAPPER")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             std::env::var("CLAUDE_CODE_PROCESS_WRAPPER")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
-        })?;
-    let tokens: Vec<String> = raw.split_whitespace().map(ToString::to_string).collect();
-    (!tokens.is_empty()).then_some(tokens)
+        })
+}
+
+fn parse_wrapper(raw: &str) -> Result<Vec<String>, String> {
+    let tokens = shlex::split(raw)
+        .ok_or_else(|| "processWrapper contains invalid shell quoting".to_string())?;
+    if tokens.is_empty() {
+        return Err("processWrapper must not be empty".to_string());
+    }
+    Ok(tokens)
+}
+
+fn parse_flag_settings(raw: Option<&str>) -> Option<engine::settings::SettingsJson> {
+    let raw = raw?.trim();
+    let text = if raw.starts_with('{') {
+        raw.to_string()
+    } else {
+        std::fs::read_to_string(raw).ok()?
+    };
+    serde_json::from_str(&text).ok()
+}
+
+/// Resolve and freeze the process wrapper before any self-spawn.
+pub(crate) async fn configure(
+    flag_settings: Option<&str>,
+    project_dir: &std::path::Path,
+) -> Result<(), String> {
+    let raw = if let Some(raw) = process_wrapper_from_environment() {
+        Some(raw)
+    } else {
+        let managed_layers: Vec<engine::settings::SettingsJson> =
+            engine_desktop::settings_watch::managed_settings_raw_tiers()
+                .await
+                .into_iter()
+                .filter_map(|raw| serde_json::from_str(&raw).ok())
+                .collect();
+        let cli_layer = parse_flag_settings(flag_settings);
+        let empty_env = std::collections::BTreeMap::new();
+        engine::settings::Settings::load_with_layers_from_user_path(
+            engine::settings::LoadInputs {
+                env: &empty_env,
+                project_dir,
+                defaults: engine::settings::SettingsJson::default(),
+            },
+            engine::settings::FileLayerScope {
+                include_user: true,
+                include_project: false,
+                include_local: false,
+            },
+            engine::settings::SupplementalLayers {
+                cli_layer: cli_layer.as_ref(),
+                managed_layers: &managed_layers,
+            },
+            Some(&crate::run::lingxi_home_dir().join("settings.json")),
+        )
+        .ok()
+        .and_then(|effective| effective.settings.process_wrapper)
+        .filter(|raw| !raw.trim().is_empty())
+    };
+
+    match raw {
+        Some(raw) => {
+            let tokens = parse_wrapper(&raw)?;
+            let encoded = serde_json::to_string(&tokens)
+                .map_err(|error| format!("failed to freeze processWrapper: {error}"))?;
+            std::env::set_var(RESOLVED_WRAPPER_ENV, encoded);
+        }
+        None => std::env::remove_var(RESOLVED_WRAPPER_ENV),
+    }
+    Ok(())
+}
+
+/// Resolve the frozen wrapper, falling back to the public environment variables
+/// for embedding hosts that do not call [`configure`].
+#[must_use]
+pub(crate) fn process_wrapper_tokens_from_env() -> Option<Vec<String>> {
+    if let Ok(encoded) = std::env::var(RESOLVED_WRAPPER_ENV) {
+        if let Ok(tokens) = serde_json::from_str::<Vec<String>>(&encoded) {
+            if !tokens.is_empty() {
+                return Some(tokens);
+            }
+        }
+    }
+    process_wrapper_from_environment().and_then(|raw| parse_wrapper(&raw).ok())
 }
 
 /// Prepend the configured process wrapper, if any, to an argv vector.
@@ -40,8 +118,6 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 
-    // The process-wrapper env vars are process-global; serialize the tests that
-    // mutate them so they don't race.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard<'a> {
@@ -53,6 +129,7 @@ mod tests {
             let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             std::env::remove_var("LINGXI_CODE_PROCESS_WRAPPER");
             std::env::remove_var("CLAUDE_CODE_PROCESS_WRAPPER");
+            std::env::remove_var(RESOLVED_WRAPPER_ENV);
             Self { _lock: guard }
         }
     }
@@ -61,6 +138,7 @@ mod tests {
         fn drop(&mut self) {
             std::env::remove_var("LINGXI_CODE_PROCESS_WRAPPER");
             std::env::remove_var("CLAUDE_CODE_PROCESS_WRAPPER");
+            std::env::remove_var(RESOLVED_WRAPPER_ENV);
         }
     }
 
@@ -78,13 +156,7 @@ mod tests {
         let argv = vec!["lingxi-cli".to_string(), "--resume".to_string()];
         assert_eq!(
             wrap_argv(argv),
-            vec![
-                "sandbox".to_string(),
-                "--net".to_string(),
-                "none".to_string(),
-                "lingxi-cli".to_string(),
-                "--resume".to_string(),
-            ]
+            vec!["sandbox", "--net", "none", "lingxi-cli", "--resume"]
         );
     }
 
@@ -95,7 +167,7 @@ mod tests {
         std::env::set_var("CLAUDE_CODE_PROCESS_WRAPPER", "claude-wrap");
         assert_eq!(
             wrap_argv(vec!["exe".to_string()]),
-            vec!["lingxi-wrap".to_string(), "exe".to_string()]
+            vec!["lingxi-wrap", "exe"]
         );
     }
 
@@ -105,11 +177,7 @@ mod tests {
         std::env::set_var("CLAUDE_CODE_PROCESS_WRAPPER", "claude-wrap --flag");
         assert_eq!(
             wrap_argv(vec!["exe".to_string()]),
-            vec![
-                "claude-wrap".to_string(),
-                "--flag".to_string(),
-                "exe".to_string()
-            ]
+            vec!["claude-wrap", "--flag", "exe"]
         );
     }
 
@@ -118,7 +186,27 @@ mod tests {
         let _g = EnvGuard::new();
         std::env::set_var("LINGXI_CODE_PROCESS_WRAPPER", "   ");
         assert_eq!(process_wrapper_tokens_from_env(), None);
-        let argv = vec!["exe".to_string()];
-        assert_eq!(wrap_argv(argv.clone()), argv);
+    }
+
+    #[test]
+    fn quoted_wrapper_path_is_one_argv_token() {
+        let _g = EnvGuard::new();
+        std::env::set_var(
+            "LINGXI_CODE_PROCESS_WRAPPER",
+            "'/Applications/My Wrapper/bin/wrap' --mode safe",
+        );
+        assert_eq!(
+            process_wrapper_tokens_from_env(),
+            Some(vec![
+                "/Applications/My Wrapper/bin/wrap".to_string(),
+                "--mode".to_string(),
+                "safe".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn malformed_quoting_is_rejected() {
+        assert!(parse_wrapper("'unterminated").is_err());
     }
 }

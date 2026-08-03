@@ -66,6 +66,8 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // PreToolUse Block mock, not a SessionStart hook.
                 initial_user_message: None,
                 reload_skills: None,
+                async_rewake: false,
+                async_backgrounded: false,
             }),
         }
     }
@@ -91,6 +93,9 @@ async fn pretooluse_block_short_circuits() {
         priority: 100,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());

@@ -356,6 +356,7 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
             headers: traits::McpHeaders::new(),
+            headers_helper: None,
             oauth,
         },
         scope: ConfigScope::Project,
@@ -371,6 +372,7 @@ fn oauth_block(client_id: Option<&str>) -> McpOAuthConfigDto {
         client_id: client_id.map(str::to_string),
         callback_port: None,
         auth_server_metadata_url: None,
+        scopes: None,
         xaa: None,
     }
 }
@@ -531,6 +533,7 @@ async fn static_token_server_spec_is_unchanged() {
         spec: McpTransportSpec::Http {
             url: "https://static.example.com".into(),
             headers: headers.clone(),
+            headers_helper: None,
             oauth: None,
         },
         scope: ConfigScope::Project,
@@ -1055,6 +1058,7 @@ async fn xaa_flagged_server_without_enable_flag_hard_fails() {
         client_id: Some("as-client".into()),
         callback_port: None,
         auth_server_metadata_url: None,
+        scopes: None,
         xaa: Some(true),
     };
     let config = http_cfg("xaa-srv", Some(oauth));
@@ -1155,6 +1159,7 @@ async fn xaa_enabled_drives_exchange_and_attaches_bearer() {
         client_id: Some("as-client".into()),
         callback_port: None,
         auth_server_metadata_url: None,
+        scopes: None,
         xaa: Some(true),
     };
     let config = http_cfg("xaa-live", Some(oauth));

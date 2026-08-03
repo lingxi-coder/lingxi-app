@@ -48,6 +48,7 @@
 
 use command_api::markdown_loader::{
     build_markdown_command, build_skill_command, load_command_markdown_files,
+    load_managed_command_markdown_files, load_managed_skill_markdown_files,
     load_skill_markdown_files_with_roots,
 };
 use command_api::CommandRegistry;
@@ -112,6 +113,25 @@ pub async fn load_and_register_custom_commands(
     registered
 }
 
+/// Register only managed-policy commands. This path deliberately avoids
+/// reading user/project roots while the strict plugin-only skills slot is set.
+pub async fn load_and_register_managed_custom_commands(
+    reg: &mut CommandRegistry,
+    managed_dir: &Path,
+) -> usize {
+    let files = load_managed_command_markdown_files(managed_dir).await;
+    let mut seen = HashSet::new();
+    let mut registered = 0;
+    for file in &files {
+        let command = build_markdown_command(file, file.source);
+        if seen.insert(command.name.clone()) {
+            reg.register_command(command);
+            registered += 1;
+        }
+    }
+    registered
+}
+
 /// Discover every directory-format `.lingxi/skills/<name>/SKILL.md` command and
 /// register it into `reg`.
 pub async fn load_and_register_skill_commands(
@@ -144,6 +164,24 @@ pub async fn load_and_register_skill_commands_with_roots(
     .await;
     let mut seen: HashSet<String> = HashSet::new();
     let mut registered = 0usize;
+    for file in &files {
+        let command = build_skill_command(file, file.source);
+        if seen.insert(command.name.clone()) {
+            reg.register_command(command);
+            registered += 1;
+        }
+    }
+    registered
+}
+
+/// Register only managed-policy skills without probing ambient roots.
+pub async fn load_and_register_managed_skill_commands(
+    reg: &mut CommandRegistry,
+    managed_dir: &Path,
+) -> usize {
+    let files = load_managed_skill_markdown_files(managed_dir).await;
+    let mut seen = HashSet::new();
+    let mut registered = 0;
     for file in &files {
         let command = build_skill_command(file, file.source);
         if seen.insert(command.name.clone()) {

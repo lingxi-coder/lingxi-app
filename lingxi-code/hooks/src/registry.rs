@@ -852,6 +852,9 @@ mod all_hooks_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -1351,6 +1354,9 @@ mod match_event_matcher_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 
@@ -1385,6 +1391,9 @@ mod match_event_matcher_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 

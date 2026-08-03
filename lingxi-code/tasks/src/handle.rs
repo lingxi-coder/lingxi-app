@@ -80,6 +80,11 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
 
 fn state_to_record(s: &TaskState) -> TaskRecord {
     let b = s.base();
+    let started_at_ms = b
+        .start_time
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
     // Mirror claude-code `LocalShellTaskState.command`: `local_bash` and the
     // shell-event monitor (`monitor_ws`) both carry a shell command. `TaskStop`
     // prefers `command` over `description` for shell-backed tasks
@@ -127,6 +132,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         task_type: task_type_to_wire(b.task_type).to_string(),
         status: status_to_wire(b.status).to_string(),
         description: b.description.clone(),
+        started_at_ms,
         command,
         agent_type,
         server,

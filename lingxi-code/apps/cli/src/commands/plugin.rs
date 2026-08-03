@@ -374,24 +374,30 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::Disable(args) => run_disable(args),
 
         // Install/uninstall — marketplace-registry materialization + on-disk state.
-        Sub::Install(args) => market_result(crate::commands::plugin_install::run_install(
-            &args.plugin,
-            Some(&args.scope),
-            &args.config,
-            &plugins_dir(),
-            &crate::run::lingxi_home_dir(),
-            &scope_cwd(),
-        )),
-        Sub::Uninstall(args) => market_result(crate::commands::plugin_install::run_uninstall(
-            &args.plugin,
-            Some(&args.scope),
-            args.keep_data,
-            args.prune,
-            args.yes,
-            &plugins_dir(),
-            &crate::run::lingxi_home_dir(),
-            &scope_cwd(),
-        )),
+        Sub::Install(args) => market_result(
+            crate::commands::plugin_install::run_install_secure(
+                &args.plugin,
+                Some(&args.scope),
+                &args.config,
+                &plugins_dir(),
+                &crate::run::lingxi_home_dir(),
+                &scope_cwd(),
+            )
+            .await,
+        ),
+        Sub::Uninstall(args) => market_result(
+            crate::commands::plugin_install::run_uninstall_secure(
+                &args.plugin,
+                Some(&args.scope),
+                args.keep_data,
+                args.prune,
+                args.yes,
+                &plugins_dir(),
+                &crate::run::lingxi_home_dir(),
+                &scope_cwd(),
+            )
+            .await,
+        ),
 
         // `init` — scaffold a skill-plugin under ~/.lingxi/skills/ (the default
         // scaffold; `--with` component scaffolds are a tracked follow-up).

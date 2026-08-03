@@ -89,6 +89,28 @@ pub struct CostSnapshot {
     /// "(costs may be inaccurate due to usage of unknown models)" note (`Cqo`).
     #[serde(default)]
     pub unknown_models: bool,
+    /// Token usage returned by the most recent successful model request.
+    /// Unlike the cumulative counters above, this mirrors Claude Code's
+    /// `context_window.current_usage` payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_usage: Option<CurrentUsageSnapshot>,
+}
+
+/// Token classes from the most recent successful model response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentUsageSnapshot {
+    /// Uncached input tokens.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Output tokens.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Input tokens read from cache.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Input tokens written to cache.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 /// Live context-window usage paired with the cumulative billing snapshot.
@@ -262,6 +284,52 @@ pub struct ActiveGoalSnapshot {
     pub set_at: SystemTime,
     /// Most recent stop-time evaluation reason, when available.
     pub last_reason: Option<String>,
+    /// Number of Stop evaluations completed since the goal was set.
+    #[serde(default)]
+    pub iterations: u64,
+    /// Cumulative session tokens at activation time.
+    #[serde(default)]
+    pub tokens_at_start: u64,
+}
+
+/// Lifecycle carried by a `type:"goal_status"` transcript attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatusKind {
+    /// A goal was activated or replaced.
+    Set,
+    /// The user explicitly cleared the goal.
+    Cleared,
+    /// The Stop evaluator accepted the goal.
+    Achieved,
+}
+
+/// Typed, resumable `/goal` transcript attachment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalStatusAttachment {
+    /// Attachment discriminator.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Goal lifecycle transition.
+    pub status: GoalStatusKind,
+    /// User-supplied condition.
+    pub condition: String,
+    /// Number of Stop evaluations performed.
+    #[serde(default)]
+    pub iterations: u64,
+    /// Elapsed wall time since activation.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Tokens consumed since activation.
+    #[serde(default)]
+    pub tokens: u64,
+    /// Most recent evaluator reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
+    /// Full active state for lossless resume; absent on cleared/achieved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_state: Option<ActiveGoalSnapshot>,
 }
 
 /// Transcript-adjacent runtime state needed by an in-place session resume.
@@ -1638,6 +1706,12 @@ pub trait OrchestratorHandle: Send + Sync {
         self.run_turn_streaming_with_cancel(prompt, cancel).await
     }
 
+    /// Start a turn that contains only pending asynchronous-hook meta
+    /// responses. Implementations without an async-hook provider may no-op.
+    async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, HandleError> {
+        Ok(TurnOutcome::EndTurn)
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // engine-data-commands additions (`/export`, `/files`, `/context`,
     // `/resume`). Each carries a benign default so the production
@@ -2084,6 +2158,10 @@ pub struct ContextPressureBanner {
 /// for unit tests.
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Signal a model turn that did not originate from a direct UI submit,
+    /// such as an `asyncRewake` hook completion.
+    async fn emit_turn_started(&self) {}
+
     /// Emit a piece of plain assistant text. In M5-02 this is called once
     /// per `Text` content block per turn (whole-body). M5-04 will switch
     /// to per-SSE-delta emission without changing this signature.
@@ -2470,6 +2548,25 @@ pub trait OutputStream: Send + Sync {
     /// **Default no-op**: every pre-existing `OutputStream` impl keeps
     /// compiling unchanged. Only `StreamJsonStream` overrides this.
     async fn emit_hook_started(&self, _hook_id: &str, _hook_name: &str, _hook_event: &str) {}
+
+    /// Publish transient hook progress for interactive renderers.
+    ///
+    /// Unlike [`Self::emit_hook_started`], this callback is not part of the
+    /// stream-json protocol. It exists only for live surfaces such as the TUI,
+    /// so a hook's configured `statusMessage` can replace the generic spinner
+    /// text without adding a conversation or transcript record.
+    async fn emit_hook_progress_started(
+        &self,
+        _progress_id: &str,
+        _hook_name: &str,
+        _hook_event: &str,
+        _status_message: Option<&str>,
+    ) {
+    }
+
+    /// Clear one transient hook-progress row after its run reaches a terminal
+    /// outcome. The default remains a no-op for non-interactive output sinks.
+    async fn emit_hook_progress_finished(&self, _progress_id: &str) {}
 
     /// Emit a `system/hook_response` frame for `--include-hook-events`.
     ///

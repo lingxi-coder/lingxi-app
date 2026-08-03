@@ -235,6 +235,8 @@ pub struct BottomPane {
     bypass_available: bool,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
+    /// Whether a custom status line owns rendering the vim mode label.
+    hide_vim_mode_indicator: bool,
     /// Vim insert-mode two-key remaps, e.g. `{ "jj": "Escape" }`.
     vim_insert_mode_remaps: BTreeMap<String, String>,
     /// First char of a possible insert-mode remap sequence. The char is held
@@ -298,6 +300,9 @@ pub struct BottomPane {
     pending_input_preview: PendingInputPreview,
     /// Model-managed working plan rendered directly above the composer.
     planned_tasks: Vec<input_status::PlanTask>,
+    /// Hooks currently executing, keyed by a per-run identity. They render
+    /// above the composer and are never committed to transcript history.
+    running_hooks: BTreeMap<String, String>,
     /// Foreground + background agents currently running, rendered directly
     /// below the composer.
     running_agents: Vec<RunningAgentStatus>,
@@ -349,6 +354,7 @@ impl BottomPane {
             permission_mode: permission::PermissionMode::Default,
             bypass_available: false,
             vim: None,
+            hide_vim_mode_indicator: false,
             vim_insert_mode_remaps: BTreeMap::new(),
             vim_insert_remap_pending: None,
             ctrl_c_at: None,
@@ -370,6 +376,7 @@ impl BottomPane {
             verbose: false,
             pending_input_preview: PendingInputPreview::new(),
             planned_tasks: Vec::new(),
+            running_hooks: BTreeMap::new(),
             running_agents: Vec::new(),
             terminal_rows: None,
             context_pressure: None,
@@ -892,6 +899,27 @@ impl BottomPane {
         &self.planned_tasks
     }
 
+    /// Add or replace one transient hook status row.
+    pub fn set_running_hook(&mut self, id: String, status: String) {
+        self.running_hooks.insert(id, status);
+    }
+
+    /// Remove one completed hook status row.
+    pub fn clear_running_hook(&mut self, id: &str) {
+        self.running_hooks.remove(id);
+    }
+
+    /// Clear all hook progress at a turn boundary or controller reset.
+    pub fn clear_running_hooks(&mut self) {
+        self.running_hooks.clear();
+    }
+
+    /// Current live hook statuses, exposed for reducer tests.
+    #[must_use]
+    pub fn running_hooks(&self) -> &BTreeMap<String, String> {
+        &self.running_hooks
+    }
+
     /// Replace the live agent snapshot shown below the composer.
     pub fn set_running_agents(&mut self, agents: Vec<RunningAgentStatus>) {
         self.running_agents = agents;
@@ -1039,6 +1067,12 @@ impl BottomPane {
             crate::vim::VimMode::Insert => "INSERT",
             crate::vim::VimMode::Normal | crate::vim::VimMode::Visual => "NORMAL",
         })
+    }
+
+    /// Hide only the built-in vim indicator. Editing mode and the status-line
+    /// JSON `vim.mode` field remain active.
+    pub fn set_hide_vim_mode_indicator(&mut self, hide: bool) {
+        self.hide_vim_mode_indicator = hide;
     }
 
     /// Apply configured two-key insert-mode remaps before the generic Vim
@@ -1774,7 +1808,9 @@ impl BottomPane {
         };
         footer::FooterProps {
             mode,
-            vim_label: self.vim.as_ref().map(|v| v.label().to_string()),
+            vim_label: (!self.hide_vim_mode_indicator)
+                .then(|| self.vim.as_ref().map(|v| v.label().to_string()))
+                .flatten(),
             cost: self.status.cost.clone(),
             accessibility_announcement: self.accessibility_announcement.clone(),
         }
@@ -1797,15 +1833,15 @@ impl BottomPane {
     }
 
     fn planned_task_lines(&self) -> Vec<Line<'static>> {
-        if let Some(rows) = self.terminal_rows {
-            input_status::task_lines_with_limit(
-                &self.planned_tasks,
-                &self.theme,
-                input_status::max_visible_tasks(rows),
-            )
+        let mut lines = input_status::hook_lines(&self.running_hooks, &self.theme);
+        let tasks = if let Some(rows) = self.terminal_rows {
+            let limit = input_status::max_visible_tasks(rows).saturating_sub(lines.len());
+            input_status::task_lines_with_limit(&self.planned_tasks, &self.theme, limit)
         } else {
             input_status::task_lines(&self.planned_tasks, &self.theme)
-        }
+        };
+        lines.extend(tasks);
+        lines
     }
 
     /// The pane's vertical zones within `area`: running status, context banner,
@@ -2871,6 +2907,7 @@ mod tests {
             agent_type: "Explore".into(),
             description: "Mapping event flow".into(),
             status: "running".into(),
+            custom_content: None,
         }]);
         assert_eq!(pane.desired_height(80), base_height + 3);
 

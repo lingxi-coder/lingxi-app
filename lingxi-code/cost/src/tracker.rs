@@ -47,6 +47,15 @@ pub struct CostState {
     /// Cumulative lines removed across all edits this session (claude-code
     /// `Pt.totalLinesRemoved`).
     pub total_lines_removed: u64,
+    /// Most recent request usage for status-line `current_usage`.
+    #[serde(default)]
+    pub last_usage: Option<Usage>,
+    /// Cache-read tokens associated with [`Self::last_usage`].
+    #[serde(default)]
+    pub last_cache_read_input_tokens: u64,
+    /// Cache-creation tokens associated with [`Self::last_usage`].
+    #[serde(default)]
+    pub last_cache_creation_input_tokens: u64,
 }
 
 /// Per-model usage and cost slice of a [`CostState`].
@@ -223,6 +232,9 @@ impl CostTracker {
                     .total_web_search_requests
                     .saturating_add(s.web_search_requests);
             }
+            state.last_usage = Some(usage);
+            state.last_cache_read_input_tokens = cache_read_input_tokens;
+            state.last_cache_creation_input_tokens = cache_creation_input_tokens;
             (state.session_id, state.clone())
         };
         let _ = self.persist_tx.send(snap).await;

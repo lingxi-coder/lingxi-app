@@ -1100,6 +1100,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_budget(u64::MAX),
         );
         let tool = AgentTool::new(bctx);
+        assert!(
+            tool.input_schema()["properties"]
+                .get("run_in_background")
+                .is_none(),
+            "disabled background sessions must not advertise the field"
+        );
         let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
         let input = serde_json::json!({
             "description": "x",

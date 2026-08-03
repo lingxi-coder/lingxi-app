@@ -39,11 +39,28 @@ pub enum SseConnectError {
     /// Authorization header value was invalid (non-ASCII, control chars).
     #[error("invalid auth token: {0}")]
     InvalidAuth(String),
+    /// Remote response retained for authentication recovery.
+    #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
+    HttpResponse {
+        /// HTTP status code.
+        status: u16,
+        /// `WWW-Authenticate` response header.
+        www_authenticate: Option<String>,
+    },
 }
 
 impl From<SseConnectError> for McpError {
     fn from(value: SseConnectError) -> Self {
-        Self::Connection(value.to_string())
+        match value {
+            SseConnectError::HttpResponse {
+                status,
+                www_authenticate,
+            } => Self::HttpResponse {
+                status,
+                www_authenticate,
+            },
+            other => Self::Connection(other.to_string()),
+        }
     }
 }
 
@@ -117,10 +134,14 @@ where
         .map_err(|e| SseConnectError::Transport(e.to_string()))?;
 
     if !response.status().is_success() {
-        return Err(SseConnectError::Transport(format!(
-            "SSE GET returned {}",
-            response.status()
-        )));
+        return Err(SseConnectError::HttpResponse {
+            status: response.status().as_u16(),
+            www_authenticate: response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+        });
     }
 
     let byte_stream = response.bytes_stream();
@@ -133,6 +154,7 @@ where
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
 
     // SSE reader task: parse `data:` JSON frames and forward as Message.
+    let reader_inbound_tx = inbound_tx.clone();
     tokio::spawn(async move {
         while let Some(item) = event_stream.next().await {
             match item {
@@ -145,7 +167,7 @@ where
                     }
                     match serde_json::from_str::<JsonRpcMessage>(&event.data) {
                         Ok(msg) => {
-                            if inbound_tx.send(msg).is_err() {
+                            if reader_inbound_tx.send(msg).is_err() {
                                 // Connection dropped; stop reading.
                                 break;
                             }
@@ -190,17 +212,32 @@ where
                 };
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-            if let Err(e) = post_client
+            let response = post_client
                 .post(&post_url)
                 .headers(headers)
                 .json(&frame)
                 .send()
-                .await
-            {
-                tracing::warn!(error = %e, "mcp sse: POST failed");
-                // Drop the frame; the router will time out the request.
-                // Do not terminate the writer on a single failure — transient
-                // network blips should not tear down the whole session.
+                .await;
+            match response {
+                Err(error) => {
+                    tracing::warn!(%error, "mcp sse: POST failed");
+                }
+                Ok(response) if !response.status().is_success() => {
+                    let status = response.status().as_u16();
+                    let www_authenticate = response
+                        .headers()
+                        .get(reqwest::header::WWW_AUTHENTICATE)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    if let Some(error) =
+                        http_error_message(&frame, status, www_authenticate.as_deref())
+                    {
+                        if inbound_tx.send(error).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {}
             }
         }
     });
@@ -222,4 +259,29 @@ where
         Box::pin(inbound),
         Box::pin(outbound),
     ))
+}
+
+fn http_error_message(
+    request: &JsonRpcMessage,
+    status: u16,
+    www_authenticate: Option<&str>,
+) -> Option<JsonRpcMessage> {
+    let request = serde_json::to_value(request).ok()?;
+    let id = request.get("id")?.clone();
+    serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32001,
+            "message": format!(
+                "MCP_HTTP_STATUS={status};WWW_AUTHENTICATE={}",
+                www_authenticate.unwrap_or_default()
+            ),
+            "data": {
+                "httpStatus": status,
+                "wwwAuthenticate": www_authenticate
+            }
+        }
+    }))
+    .ok()
 }

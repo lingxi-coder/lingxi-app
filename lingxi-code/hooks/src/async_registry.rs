@@ -8,10 +8,10 @@
 //! engine proceeds immediately, and its eventual result folds back through a
 //! completion channel rather than gating the originating turn.
 //!
-//! The runtime first-line `{"async":true}` detection path (`hooks.ts:1117-1166`)
-//! is DEFERRED — it needs an incremental-stdout `ProcessRunner` capability that
-//! the buffered `ProcessRunner::run` does not provide. Only the config-`async`
-//! path ships here.
+//! Runtime first-line `{"async":true}` detection (`hooks.ts:1117-1166`) uses
+//! the process runner's streaming detection seam and registers the remaining
+//! output in this same registry, so configured and runtime-selected async hooks
+//! share timeout, completion, persistence, and re-wake behavior.
 
 use crate::response::{HookOutcome, HookResult};
 use protocol::HookId;
@@ -111,6 +111,22 @@ impl AsyncHookRegistry {
         work: HookWork,
         completion: Option<HookCompletion>,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
+        self.spawn_with_completion_and_rewake(hook_id, async_timeout, work, completion, None)
+            .await
+    }
+
+    /// Spawn a non-blocking hook and optionally mark its terminal result for a
+    /// model re-wake. Applying the re-wake metadata after the timeout race is
+    /// intentional: timeouts must wake the session too, with a bounded context
+    /// message, rather than publishing an empty completion.
+    pub async fn spawn_with_completion_and_rewake(
+        &self,
+        hook_id: HookId,
+        async_timeout: Option<Duration>,
+        work: HookWork,
+        completion: Option<HookCompletion>,
+        rewake_message: Option<String>,
+    ) -> Result<BackgroundTaskHandle, RuntimeError> {
         let timeout =
             async_timeout.unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS));
         // One clone races the timeout inside the task; a second drives the
@@ -122,11 +138,14 @@ impl AsyncHookRegistry {
         let task: Pin<Box<dyn Future<Output = ()> + Send + 'static>> = Box::pin(async move {
             // Race the hook against its timeout via the runtime's `sleep`.
             // `tokio::select!` polls both arms; whichever resolves first wins.
-            let result = tokio::select! {
+            let mut result = tokio::select! {
                 biased;
                 r = work => r,
                 () = timeout_runtime.sleep(timeout) => timeout_result(),
             };
+            if let Some(message) = rewake_message.as_deref() {
+                mark_async_rewake(&mut result, message);
+            }
             if let Some(completion) = completion {
                 completion(result.clone()).await;
             }
@@ -174,6 +193,23 @@ impl AsyncHookRegistry {
         }
         Ok(())
     }
+}
+
+const MAX_REWAKE_MESSAGE_CHARS: usize = 10_000;
+
+fn mark_async_rewake(result: &mut HookResult, configured: &str) {
+    let raw = if configured.trim().is_empty() {
+        "An asynchronous hook completed. Continue from its result."
+    } else {
+        configured.trim()
+    };
+    let message: String = raw.chars().take(MAX_REWAKE_MESSAGE_CHARS).collect();
+    let response = result.response.get_or_insert_with(Default::default);
+    response.additional_context = Some(match response.additional_context.take() {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n{message}"),
+        _ => message,
+    });
+    response.async_rewake = true;
 }
 
 /// The [`HookResult`] published when an async hook exceeds its timeout. Carries
@@ -360,5 +396,73 @@ mod tests {
         let (_id, got) = rx.recv().await.expect("result");
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(got.stdout, "fast");
+    }
+
+    #[tokio::test]
+    async fn rewake_marks_success_and_preserves_existing_context() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let reg = AsyncHookRegistry::new(runtime, tx);
+
+        let mut result = ok_result("done");
+        result.response = Some(crate::response::HookResponse {
+            additional_context: Some("hook output".into()),
+            ..Default::default()
+        });
+        let work: HookWork = Box::pin(async move { result });
+
+        reg.spawn_with_completion_and_rewake(
+            HookId::new(),
+            Some(Duration::from_secs(1)),
+            work,
+            None,
+            Some("continue now".into()),
+        )
+        .await
+        .expect("spawn");
+
+        let (_, got) = rx.recv().await.expect("completion");
+        let response = got.response.expect("rewake response");
+        assert!(response.async_rewake);
+        assert_eq!(
+            response.additional_context.as_deref(),
+            Some("hook output\ncontinue now")
+        );
+    }
+
+    #[tokio::test]
+    async fn rewake_timeout_still_publishes_bounded_context() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let reg = AsyncHookRegistry::new(runtime, tx);
+        let work: HookWork = Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            ok_result("never")
+        });
+        let oversized = "x".repeat(MAX_REWAKE_MESSAGE_CHARS + 25);
+
+        reg.spawn_with_completion_and_rewake(
+            HookId::new(),
+            Some(Duration::from_millis(10)),
+            work,
+            None,
+            Some(oversized),
+        )
+        .await
+        .expect("spawn");
+
+        let (_, got) = rx.recv().await.expect("timeout completion");
+        assert!(matches!(got.outcome, HookOutcome::Timeout));
+        let response = got.response.expect("timeout rewake response");
+        assert!(response.async_rewake);
+        assert_eq!(
+            response
+                .additional_context
+                .as_deref()
+                .expect("bounded message")
+                .chars()
+                .count(),
+            MAX_REWAKE_MESSAGE_CHARS
+        );
     }
 }

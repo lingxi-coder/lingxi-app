@@ -22,6 +22,49 @@ pub struct MarketplaceIndex {
     /// Installable plugins.
     #[serde(default)]
     pub plugins: Vec<MarketplacePluginEntry>,
+    /// Marketplaces that dependency declarations may explicitly cross into.
+    #[serde(rename = "allowCrossMarketplaceDependenciesOn", default)]
+    pub allow_cross_marketplace_dependencies_on: Vec<String>,
+}
+
+/// Typed source of one plugin catalog entry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MarketplacePluginSource {
+    /// A path relative to the marketplace root.
+    Relative(String),
+    /// A structured external or directory source.
+    Structured(MarketplaceExternalSource),
+}
+
+/// Structured source variants accepted by marketplace catalogs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "source", rename_all = "lowercase")]
+pub enum MarketplaceExternalSource {
+    /// GitHub repository source.
+    Github {
+        repo: String,
+        #[serde(rename = "ref", default)]
+        git_ref: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Arbitrary git repository source.
+    Git {
+        url: String,
+        #[serde(rename = "ref", default)]
+        git_ref: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// HTTPS archive source.
+    Url { url: String },
+    /// npm package source.
+    Npm { package: String },
+    /// File source.
+    File { path: String },
+    /// Directory source.
+    Directory { path: String },
 }
 
 /// One plugin entry in a marketplace catalog.
@@ -37,10 +80,16 @@ pub struct MarketplacePluginEntry {
     /// the plugin lives at the repo root.
     #[serde(default, alias = "pluginRoot")]
     pub path: Option<String>,
+    /// Canonical source; a relative string remains inside the marketplace.
+    #[serde(default)]
+    pub source: Option<MarketplacePluginSource>,
     /// A plugin hosted OUTSIDE the marketplace repo (git/url sub-source). Not
     /// yet materialized (follow-up); flagged so the arm can error clearly.
     #[serde(default)]
     pub external: bool,
+    /// Dependencies contributed by the marketplace entry.
+    #[serde(default)]
+    pub dependencies: Option<serde_json::Value>,
 }
 
 /// Errors resolving / materializing from a marketplace (the string is the
@@ -68,6 +117,16 @@ impl MarketplaceManager {
         url: &str,
         name: &str,
     ) -> Result<(MarketplaceIndex, PathBuf), MarketplaceError> {
+        self.resolve_index_via_git_ref(url, name, None).await
+    }
+
+    /// Clone a marketplace at an optional branch or tag.
+    pub async fn resolve_index_via_git_ref(
+        &self,
+        url: &str,
+        name: &str,
+        git_ref: Option<&str>,
+    ) -> Result<(MarketplaceIndex, PathBuf), MarketplaceError> {
         let clone_dir = self
             .install_dir
             .join("marketplaces")
@@ -80,8 +139,12 @@ impl MarketplaceManager {
                 .await
                 .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?;
         }
-        let (u, cd) = (url.to_string(), clone_dir.clone());
-        tokio::task::spawn_blocking(move || crate::git::clone_plugin_git(&u, "", &cd))
+        let (u, r, cd) = (
+            url.to_string(),
+            git_ref.unwrap_or_default().to_string(),
+            clone_dir.clone(),
+        );
+        tokio::task::spawn_blocking(move || crate::git::clone_plugin_git(&u, &r, &cd))
             .await
             .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?
             .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?;
@@ -110,9 +173,22 @@ impl MarketplaceManager {
                 entry.name
             ));
         }
-        let rel = entry
-            .path
-            .as_deref()
+        let source_path = match entry.source.as_ref() {
+            Some(MarketplacePluginSource::Relative(path)) => Some(path.as_str()),
+            Some(MarketplacePluginSource::Structured(
+                MarketplaceExternalSource::Directory { path }
+                | MarketplaceExternalSource::File { path },
+            )) => Some(path.as_str()),
+            Some(MarketplacePluginSource::Structured(_)) => {
+                return Err(format!(
+                    "Plugin '{}' is hosted outside the marketplace repo",
+                    entry.name
+                ));
+            }
+            None => None,
+        };
+        let rel = source_path
+            .or(entry.path.as_deref())
             .filter(|s| !s.is_empty())
             .unwrap_or(".");
         // A catalog must point only inside its own repo — reject traversal / root.

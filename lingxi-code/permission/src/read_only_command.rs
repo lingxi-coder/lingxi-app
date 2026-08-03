@@ -28,15 +28,10 @@
 //! grep / rg that the common case needs.
 //!
 //! The crucial property is the SAFE DIRECTION: this only ever returns `true`
-//! for a command whose base word is on the allowlist AND that carries NO shell
-//! metacharacter (any of the chars in [`READONLY_METACHARS`]) — exactly the
-//! complement of `makeRegexForSafeCommand`'s trailing character class. Anything
-//! with redirection / substitution / a non-allowlisted base word returns
-//! `false`, so the command falls through to the normal ask path. A read-only
-//! FALSE-negative is harmless (one extra prompt); there is no read-only
-//! FALSE-positive that would auto-allow a writing command, because the
-//! metacharacter guard rejects every redirection/substitution form and the base
-//! word must be an explicitly read-only tool.
+//! for a command whose base word is on the allowlist and that carries no active
+//! shell operator, redirection, or substitution. Quoted operators remain
+//! literal arguments; malformed quoting fails closed. Anything else returns
+//! `false` and falls through to the normal ask path.
 //!
 //! Per-subcommand splitting reuses [`crate::shell_command::split_command`] (the
 //! crate's `splitCommand_DEPRECATED` analogue), matching the TS
@@ -48,10 +43,8 @@
 /// these (a redirection, a pipe, a brace/paren group, a background, a list, or a
 /// newline) is NOT auto-allowed as read-only.
 ///
-/// These are QUOTE-NAIVE — TS rejects them regardless of quote context too (the
-/// `makeRegexForSafeCommand` trailing class excludes them outright). The two
-/// expansion metacharacters `$` and backtick are NOT in this set; they are
-/// QUOTE-AWARE (literal inside single quotes), handled by
+/// Quote state is handled by [`contains_active_metachar`]. The two
+/// expansion metacharacters `$` and backtick are handled separately by
 /// [`contains_unquoted_expansion`].
 const READONLY_METACHARS: &[char] = &['<', '>', '(', ')', '|', '{', '}', '&', ';', '\n', '\r'];
 
@@ -78,7 +71,7 @@ const READONLY_BASE_COMMANDS: &[&str] = &[
     "sleep", "which", "type", "expr", "seq", "tsort", "pr",
     // Hand-written read-only regex commands whose simple forms reduce to a
     // base-word + metachar-free-args shape (`ls`, `find`, `cd`).
-    // `pwd`/`whoami`/`alias`/`arch` are NOT base words — 2.1.211 keeps them in
+    // `pwd`/`whoami`/`alias`/`arch`/`date` are NOT base words — they stay in
     // the exact-match set `OPg` / the `arch` regex (bare / `-h` / `--help` only),
     // gated in `is_read_only_subcommand`. `echo`/`grep`/`rg`/`jq`/`uniq`/
     // `history` are handled with their TS-specific guards there too.
@@ -112,6 +105,37 @@ const DOCKER_REMOTE_CONTROL_FLAGS: &[&str] = &[
     "--context",
     "--host",
     "-H",
+];
+
+const GH_READ_ONLY_COMMANDS: &[(&str, &str)] = &[
+    ("pr", "view"),
+    ("pr", "list"),
+    ("pr", "diff"),
+    ("pr", "checks"),
+    ("pr", "status"),
+    ("issue", "view"),
+    ("issue", "list"),
+    ("issue", "status"),
+    ("repo", "view"),
+    ("run", "list"),
+    ("run", "view"),
+    ("auth", "status"),
+    ("release", "list"),
+    ("release", "view"),
+    ("workflow", "list"),
+    ("workflow", "view"),
+    ("label", "list"),
+];
+
+const READONLY_EXACT_COMMANDS: &[&str] = &[
+    "date",
+    "ip addr",
+    "claude -h",
+    "claude --help",
+    "node -v",
+    "node --version",
+    "python --version",
+    "python3 --version",
 ];
 
 /// Quote-aware scan for an ACTIVE `$` expansion or backtick command
@@ -211,6 +235,44 @@ fn contains_unquoted_expansion(command: &str) -> bool {
     false
 }
 
+/// Reject shell operators only when they are active in the shell grammar.
+/// Quoted separators are ordinary argument bytes, while an unmatched quote is
+/// never safe enough to auto-allow. Shell globs are deliberately allowed:
+/// expanding an argument list does not turn an allowlisted reader into a
+/// writer, and Claude's git/read-command fixtures include glob patterns.
+fn contains_active_metachar(command: &str) -> bool {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    for c in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' && !in_single_quote {
+            escaped = true;
+            continue;
+        }
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+        if in_single_quote || in_double_quote {
+            continue;
+        }
+        if READONLY_METACHARS.contains(&c) {
+            return true;
+        }
+    }
+
+    escaped || in_single_quote || in_double_quote
+}
+
 /// Is `command` read-only? — the public entry, mirroring TS
 /// `BashTool.isReadOnly` → `checkReadOnlyConstraints` →
 /// `splitCommand_DEPRECATED(command).every(isCommandReadOnly)`: the WHOLE
@@ -241,10 +303,9 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     if test.is_empty() {
         return false;
     }
-    // Any quote-naive shell metacharacter (redirection / pipe / group / list /
-    // newline) disqualifies — the `makeRegexForSafeCommand` trailing class. TS
-    // rejects these regardless of quote context.
-    if test.chars().any(|c| READONLY_METACHARS.contains(&c)) {
+    // Operators disqualify only when active. Quoted separators are literal
+    // argument bytes.
+    if contains_active_metachar(test) {
         return false;
     }
     // Quote-aware `$`/backtick guard: an ACTIVE expansion or command
@@ -255,6 +316,9 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     // runtime, so TS refuses it too.)
     if contains_unquoted_expansion(test) {
         return false;
+    }
+    if READONLY_EXACT_COMMANDS.contains(&test) {
+        return true;
     }
     let mut words = test.split_whitespace();
     let Some(base) = words.next() else {
@@ -276,6 +340,14 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     if base == "git" {
         let rest: Vec<&str> = words.collect();
         return git_subcommand_is_read_only(&rest);
+    }
+    if base == "gh" {
+        let rest: Vec<&str> = words.collect();
+        return gh_is_read_only(&rest);
+    }
+    if base == "jq" {
+        let rest: Vec<&str> = words.collect();
+        return jq_is_read_only(&rest);
     }
     // `echo` with metacharacter-free args is read-only (the TS echo regex; the
     // metachar guard above already rejected the dangerous `` ` ``/`$`/`<>` forms
@@ -318,6 +390,28 @@ fn is_read_only_subcommand(sub: &str) -> bool {
         };
     }
     READONLY_BASE_COMMANDS.contains(&base)
+}
+
+fn gh_is_read_only(args: &[&str]) -> bool {
+    args.len() >= 2
+        && GH_READ_ONLY_COMMANDS.contains(&(args[0], args[1]))
+        && !args[2..]
+            .iter()
+            .any(|arg| matches!(*arg, "--web" | "-w" | "--show-token"))
+}
+
+fn jq_is_read_only(args: &[&str]) -> bool {
+    !args.iter().any(|arg| {
+        matches!(
+            *arg,
+            "-f" | "--from-file" | "-L" | "--library-path" | "--argfile" | "--slurpfile"
+        ) || arg.starts_with("--from-file=")
+            || arg.starts_with("--library-path=")
+            || arg.starts_with("--argfile=")
+            || arg.starts_with("--slurpfile=")
+            || arg.contains("import ")
+            || arg.contains("include ")
+    })
 }
 
 fn docker_subcommand_is_read_only(rest: &[&str]) -> bool {
@@ -661,9 +755,14 @@ mod tests {
         assert!(command_is_read_only("whoami"));
         assert!(command_is_read_only("head -n 5 a.log"));
         assert!(command_is_read_only("wc -l src/main.rs"));
+        assert!(command_is_read_only("date"));
         assert!(command_is_read_only("rg needle"));
         assert!(command_is_read_only("echo hello world"));
+        assert!(command_is_read_only("echo 'a && b'"));
         assert!(command_is_read_only("find . -name '*.rs'"));
+        assert!(command_is_read_only("jq -r .name data.json"));
+        assert!(command_is_read_only("gh pr view 42 --json title"));
+        assert!(command_is_read_only("gh issue list"));
     }
 
     #[test]
@@ -715,6 +814,14 @@ mod tests {
         assert!(!command_is_read_only("mkdir foo"));
         // A read command compounded with a writer is NOT read-only overall.
         assert!(!command_is_read_only("cat a && rm b"));
+        assert!(!command_is_read_only("gh pr merge 42"));
+        assert!(!command_is_read_only("gh issue close 42"));
+        assert!(!command_is_read_only("gh pr view 42 --web"));
+        assert!(!command_is_read_only("gh auth status --show-token"));
+        assert!(!command_is_read_only("date --set 2030-01-01"));
+        assert!(!command_is_read_only("jq -f filter.jq data.json"));
+        assert!(command_is_read_only("cat *"));
+        assert!(command_is_read_only("cat file?.txt"));
     }
 
     #[test]

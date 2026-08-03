@@ -1,6 +1,6 @@
 //! P0.1 relevant-memory SURFACING channel — the transient render seam that
-//! turns the per-turn memory-selector/prefetch result into the body of a
-//! `<system-reminder>` meta user message appended to the OUTGOING snapshot.
+//! turns the per-turn memory-selector/prefetch result into independent meta
+//! user messages appended to the OUTGOING snapshot.
 //!
 //! 1:1 with claude-code v2.1.193+'s `relevant_memories` attachment renderer
 //! (`normalizeAttachmentForAPI` case `"relevant_memories"`, messages.ts):
@@ -38,19 +38,9 @@
 //! - `header` is `Memory: {path}:`, prefixed with `{staleness}\n\n` when the
 //!   memory is strictly older than one day (`age_days > 1`).
 //!
-//! ## Envelope ownership (LingXi divergence, documented)
-//!
-//! v2.1.181 emits each memory as its OWN `Ln({isMeta})` message with NO
-//! `<system-reminder>` wrapper. LingXi instead wraps the JOINED per-memory
-//! blocks in ONE `<system-reminder>` envelope here — mirroring how
-//! [`crate::lingxi_md`]'s sibling reminder renderers (skill_listing /
-//! conditional_rules `render_reminder`) each own their wrapper, so the
-//! orchestrator seam stays identical to every other per-turn reminder
-//! ([`relevant_memory_reminder_message`] returns ONE meta `ConversationMessage`).
-//! This is byte-equivalent for the model (the wrapper + joined bodies carry the
-//! same text the model would see across N separate meta messages).
-//!
-//! [`relevant_memory_reminder_message`]: (orchestrator) ConversationOrchestrator::relevant_memory_reminder_message
+//! Each surfaced memory is emitted as its own meta user message. Message
+//! boundaries are observable to provider token accounting and therefore must
+//! not be collapsed into a single reminder.
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
@@ -101,21 +91,24 @@ fn header_for(memory: &SurfacedMemory) -> String {
     }
 }
 
-/// Render the surfaced memories as the body of a single `<system-reminder>`
-/// meta user message, 1:1 with the v2.1.181 `relevant_memories` attachment (see
-/// the module docs). Returns the FULL wrapped string; the caller wraps it in a
-/// [`protocol::ConversationMessage`].
+/// Compatibility helper that joins independently rendered memory bodies.
 ///
 /// Each memory → `{idx0_preamble?}{header}\n\n{content}`; the blocks are joined
-/// by a blank line and wrapped once in `<system-reminder>\n…\n</system-reminder>`
-/// (envelope ownership — see module docs).
+/// by a blank line. Production callers use [`render_surfacing_messages`] so the
+/// provider observes the original per-memory message boundaries.
 ///
 /// An empty input renders an empty-bodied reminder; the orchestrator never
 /// calls this with an empty slice (it returns `None` first), so this is only a
 /// defensive shape.
 #[must_use]
 pub fn render_surfacing_block(memories: &[SurfacedMemory]) -> String {
-    let body = memories
+    render_surfacing_messages(memories).join("\n\n")
+}
+
+/// Render one provider-facing meta-message body per surfaced memory.
+#[must_use]
+pub fn render_surfacing_messages(memories: &[SurfacedMemory]) -> Vec<String> {
+    memories
         .iter()
         .enumerate()
         .map(|(idx, m)| {
@@ -126,9 +119,7 @@ pub fn render_surfacing_block(memories: &[SurfacedMemory]) -> String {
             let header = header_for(m);
             format!("{preamble}{header}\n\n{content}", content = m.content)
         })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!("<system-reminder>\n{body}\n</system-reminder>")
+        .collect()
 }
 
 #[cfg(test)]
@@ -150,11 +141,9 @@ mod tests {
         let out = render_surfacing_block(&[mem("/m/a.md", "USE FD NOT FIND", 0)]);
         assert_eq!(
             out,
-            "<system-reminder>\n\
-             Retrieved for possible relevance \u{2014} use only if it actually applies to what the user asked.\n\n\
+            "Retrieved for possible relevance \u{2014} use only if it actually applies to what the user asked.\n\n\
              Memory: /m/a.md:\n\n\
-             USE FD NOT FIND\n\
-             </system-reminder>"
+             USE FD NOT FIND"
         );
     }
 
@@ -182,7 +171,7 @@ mod tests {
             "got: {out}"
         );
         // idx-0 preamble still precedes the staleness sentence on the first memory.
-        assert!(out.starts_with("<system-reminder>\nRetrieved for possible relevance \u{2014}"));
+        assert!(out.starts_with("Retrieved for possible relevance \u{2014}"));
     }
 
     #[test]
@@ -213,12 +202,11 @@ mod tests {
     }
 
     #[test]
-    fn single_system_reminder_envelope_wraps_all_blocks() {
-        let out = render_surfacing_block(&[mem("/m/a.md", "A", 0), mem("/m/b.md", "B", 3)]);
-        // Exactly ONE envelope (not one-per-memory).
-        assert_eq!(out.matches("<system-reminder>").count(), 1);
-        assert_eq!(out.matches("</system-reminder>").count(), 1);
-        assert!(out.starts_with("<system-reminder>\n"));
-        assert!(out.ends_with("\n</system-reminder>"));
+    fn each_memory_has_an_independent_message_boundary() {
+        let out = render_surfacing_messages(&[mem("/m/a.md", "A", 0), mem("/m/b.md", "B", 3)]);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("Retrieved for possible relevance"));
+        assert!(!out[1].contains("Retrieved for possible relevance"));
+        assert!(out[1].contains("Memory: /m/b.md:\n\nB"));
     }
 }

@@ -1026,6 +1026,8 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             condition: condition.to_string(),
             set_at: std::time::SystemTime::now(),
             last_reason: None,
+            iterations: 0,
+            tokens_at_start: self.cost_tokens.load(Ordering::SeqCst),
         });
     }
 

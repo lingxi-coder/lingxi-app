@@ -222,6 +222,10 @@ pub struct TuiBuild {
     /// Merged `settings.emojiCompletionEnabled`; absent resolves to `true` at
     /// the composition root and is applied to the mounted composer.
     pub emoji_completion_enabled: bool,
+    /// Parsed `--settings` layer retained for TUI-owned command surfaces.
+    pub flag_settings: Option<engine::settings::SettingsJson>,
+    /// Exact user/project/local source gates for status-line provenance.
+    pub status_line_source_scope: (bool, bool, bool),
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -333,6 +337,22 @@ pub(crate) fn setting_source_flags(setting_sources: Option<&str>) -> (bool, bool
             (include_user, include_project)
         }
     }
+}
+
+fn status_line_source_flags(setting_sources: Option<&str>) -> (bool, bool, bool) {
+    let Some(setting_sources) = setting_sources else {
+        return (true, true, true);
+    };
+    let listed = setting_sources
+        .split(',')
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    (
+        listed.iter().any(|source| source == "user"),
+        listed.iter().any(|source| source == "project"),
+        listed.iter().any(|source| source == "local"),
+    )
 }
 
 /// Parse `--mcp-config <configs...>` entries into MCP server configs. Each
@@ -980,7 +1000,9 @@ fn flag_settings_env(settings: &str) -> std::collections::BTreeMap<String, Strin
 /// settings composition. Accepts the same inline-object-or-file shape as the
 /// existing flagSettings consumers. Invalid input remains absent here; the CLI
 /// validation/error surface continues to be owned by argument initialization.
-fn parse_flag_settings(settings: Option<&str>) -> Option<engine::settings::SettingsJson> {
+pub(crate) fn parse_flag_settings(
+    settings: Option<&str>,
+) -> Option<engine::settings::SettingsJson> {
     let raw = settings?.trim();
     let text = if raw.starts_with('{') {
         raw.to_string()
@@ -1159,6 +1181,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
     cfg.injected_permission_gate =
         Some(gate as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
+    let flag_settings = cfg.flag_settings.clone();
     let runtime = build_runtime_from_config(cfg, bridge).await?;
     crate::startup_trace::mark("tui_runtime_build_end");
     // (companyAnnouncements) Read the merged array honoring `--setting-sources`;
@@ -1181,6 +1204,8 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         permission_paths,
         company_announcements,
         emoji_completion_enabled,
+        flag_settings,
+        status_line_source_scope: status_line_source_flags(argv.setting_sources.as_deref()),
     })
 }
 

@@ -14,6 +14,7 @@
 
 pub mod agent_validation;
 pub mod blocklist;
+pub mod dependency;
 pub mod discovery;
 mod git;
 pub mod installed;
@@ -36,10 +37,14 @@ pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;
+pub use dependency::{
+    merge_dependency_requirements, parse_dependencies, version_satisfies_all, PluginDependency,
+};
 pub use discovery::{
     discover_cli_plugin_dirs, discover_effective_plugins, discover_enabled_plugins,
     discover_installed_plugins, discover_recorded_plugins,
 };
+pub use git::clone_plugin_git;
 pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};
 pub use manager::{PluginManager, PluginManagerError};
@@ -50,6 +55,8 @@ pub use manifest::{
 pub use marketplace::MarketplaceManager;
 /// Normalize an extracted MCP bundle into the shared plugin manifest layout.
 pub use mcpb::ensure_plugin_manifest;
+/// Stable content hash used for deterministic external-source cache keys.
+pub use mcpb::sha256_hex as plugin_source_sha256;
 /// Guarded zip extraction used by both installed MCP bundles and session-only
 /// `--plugin-url` archives.
 pub use mcpb::unpack_mcpb as unpack_plugin_archive;

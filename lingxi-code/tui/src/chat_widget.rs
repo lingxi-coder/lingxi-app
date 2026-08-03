@@ -1252,6 +1252,7 @@ impl ChatWidget {
                 self.partial_assistant_text.clear();
                 self.foreground_agents.clear();
                 self.sync_running_agents();
+                self.bottom_pane.clear_running_hooks();
                 // A FAILED auto/reactive compaction emits `CompactStarted` but
                 // neither `CompactionCompleted` nor `CompactEnded` — the turn
                 // boundary is the backstop that stops the `Compacting
@@ -1286,6 +1287,17 @@ impl ChatWidget {
                 // post-turn dollar amount (old backend: `state.status.cost`).
                 self.with_status_line(|s| s.data.cost = cost_str.clone());
                 self.cost = Some(cost_str);
+            }
+            TurnEvent::CostSnapshotUpdated(cost) => {
+                self.with_status_line(|s| {
+                    s.data.total_api_duration_ms =
+                        u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX);
+                    s.data.total_lines_added = cost.code_lines_added;
+                    s.data.total_lines_removed = cost.code_lines_removed;
+                    s.data.total_input_tokens = cost.input_tokens;
+                    s.data.total_output_tokens = cost.output_tokens;
+                    s.data.current_usage = cost.current_usage;
+                });
             }
             TurnEvent::Attachment { attachment } => {
                 // The oracle's `k$o` returns attachment RECORDS; the reminder
@@ -1334,6 +1346,14 @@ impl ChatWidget {
                     s.data.context_pct = used_fraction;
                     s.data.used_tokens = used_tokens;
                     s.data.context_window_tokens = context_window_tokens;
+                    // Before the first full cost snapshot, preserve the
+                    // long-standing status-line fallback where the live
+                    // context estimate is the available input-token total.
+                    // Once CostSnapshotUpdated supplies the cumulative API
+                    // count, context-pressure updates must not overwrite it.
+                    if s.data.total_input_tokens == 0 {
+                        s.data.total_input_tokens = used_tokens;
+                    }
                 });
             }
             TurnEvent::TerminalSequence { seq } => {
@@ -1454,6 +1474,12 @@ impl ChatWidget {
             TurnEvent::AgentStatusSnapshot { agents } => {
                 self.background_agents = agents;
                 self.sync_running_agents();
+            }
+            TurnEvent::HookProgressStarted { id, text } => {
+                self.bottom_pane.set_running_hook(id, text);
+            }
+            TurnEvent::HookProgressFinished { id } => {
+                self.bottom_pane.clear_running_hook(&id);
             }
             TurnEvent::BashOutput { stdout, stderr } => {
                 // `!`-command output: render inline as a bash-output cell
@@ -1687,6 +1713,18 @@ impl ChatWidget {
     /// pump reads this slot; `TurnEvent`s keep the live cost / rate-limit
     /// inputs fresh (see [`Self::apply_turn_event`]).
     pub fn set_status_line(&mut self, slot: crate::status_line::SharedStatusLine) {
+        let hide_vim_mode_indicator = slot
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .config
+                    .as_ref()
+                    .map(|config| config.hide_vim_mode_indicator)
+            })
+            .unwrap_or(false);
+        self.bottom_pane
+            .set_hide_vim_mode_indicator(hide_vim_mode_indicator);
         if let Ok(mut s) = slot.lock() {
             let (id, display) = self.current_model_id_display();
             s.data.model_id = id;
@@ -4493,6 +4531,7 @@ fn agent_status_from_tool_start(
             .unwrap_or("Running task")
             .to_string(),
         status: "running".to_string(),
+        custom_content: None,
     }
 }
 
@@ -8420,6 +8459,7 @@ mod tests {
                 agent_type: "Explore".into(),
                 description: "Map task flow".into(),
                 status: "running".into(),
+                custom_content: None,
             }],
         });
         assert_eq!(widget.bottom_pane().running_agents().len(), 2);
@@ -8432,6 +8472,7 @@ mod tests {
                     agent_type: "Explore".into(),
                     description: "Map task flow".into(),
                     status: "running".into(),
+                    custom_content: None,
                 },
                 RunningAgentStatus {
                     id: "a87654321".into(),
@@ -8439,6 +8480,7 @@ mod tests {
                     agent_type: "Explore".into(),
                     description: "Map task flow".into(),
                     status: "running".into(),
+                    custom_content: None,
                 },
             ],
         });
@@ -8891,6 +8933,30 @@ mod tests {
         );
         // Staging never touches the turn's transcript.
         assert_eq!(cells(&widget).len(), transcript_cells);
+    }
+
+    #[test]
+    fn hook_progress_updates_only_live_bottom_pane_state() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::HookProgressStarted {
+            id: "hook-1:run-1".into(),
+            text: "Formatting\u{2026}".into(),
+        });
+        assert_eq!(
+            widget
+                .bottom_pane()
+                .running_hooks()
+                .get("hook-1:run-1")
+                .map(String::as_str),
+            Some("Formatting\u{2026}")
+        );
+        assert!(widget.transcript().is_empty());
+
+        widget.apply_turn_event(TurnEvent::HookProgressFinished {
+            id: "hook-1:run-1".into(),
+        });
+        assert!(widget.bottom_pane().running_hooks().is_empty());
+        assert!(widget.transcript().is_empty());
     }
 
     #[test]

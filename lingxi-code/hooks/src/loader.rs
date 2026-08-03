@@ -23,7 +23,7 @@
 //! (`entrypoints/sdk/coreTypes.ts:25-53`); each maps to a
 //! [`HookEventType`] variant.
 //!
-//! ## Per-hook fields & deferrals
+//! ## Per-hook fields
 //!
 //! The `"command"`, `"http"`, `"agent"`, and `"prompt"` hook types are parsed
 //! (mapping onto [`HookExecutor::Command`] / [`HookExecutor::Http`] /
@@ -36,10 +36,9 @@
 //! wired). A `prompt` entry missing its `prompt` field is skipped.
 //!
 //! The additive `once` (`schemas/hooks.ts:51-54`) and `statusMessage`
-//! (`schemas/hooks.ts:47-50`) fields ARE parsed and carried onto
-//! [`HookDefinition`], but their behaviors — `once` self-removal-after-success
-//! and the `statusMessage` spinner display — are executor / TUI work and are
-//! NOT wired here.
+//! (`schemas/hooks.ts:47-50`) fields are parsed and carried onto
+//! [`HookDefinition`]. The executor applies once-after-success and emits live
+//! progress that the TUI renders without persisting it to the transcript.
 //!
 //! ### `http` / `agent` field-level mapping
 //!
@@ -262,21 +261,28 @@ struct HookEntry {
     #[serde(default)]
     timeout: Option<u64>,
     /// claude-code `once` (`schemas/hooks.ts:51-54`): run once then remove.
-    /// Parsed and carried onto [`HookDefinition::once`]; the self-removal
-    /// runtime behavior is executor work (deferred).
+    /// Parsed and carried onto [`HookDefinition::once`]; the executor performs
+    /// the self-removal after successful completion.
     #[serde(default)]
     once: Option<bool>,
     /// claude-code `async` (`schemas/hooks.ts`: `async:boolean().optional()
     /// .describe("If true, hook runs in background without blocking")`). Maps to
     /// [`HookDefinition::blocking`] = `!async` — `blocking == false` routes the
-    /// hook to the background async registry. The related `asyncRewake` /
-    /// `asyncTimeout` (15000) / `rewakeMessage` refinements need new
-    /// [`HookDefinition`] fields and are deferred (struct-field ripple).
+    /// hook to the background async registry.
     #[serde(default, rename = "async")]
     r#async: Option<bool>,
+    /// Reawaken the agent after an asynchronous completion.
+    #[serde(default, rename = "asyncRewake")]
+    async_rewake: Option<bool>,
+    /// Async timeout in milliseconds. Missing/zero resolves to 15 seconds.
+    #[serde(default, rename = "asyncTimeout")]
+    async_timeout: Option<u64>,
+    /// Optional meta-context used for an asynchronous rewake.
+    #[serde(default, rename = "rewakeMessage")]
+    rewake_message: Option<String>,
     /// claude-code `statusMessage` (`schemas/hooks.ts:47-50`): custom spinner
-    /// text. Parsed and carried onto [`HookDefinition::status_message`]; the
-    /// TUI spinner wiring is presentation work (deferred).
+    /// text. Parsed and carried onto [`HookDefinition::status_message`] for the
+    /// executor's live progress observer.
     #[serde(default, rename = "statusMessage")]
     status_message: Option<String>,
     /// claude-code per-hook `if` (`schemas/hooks.ts:35` `IfConditionSchema`):
@@ -374,6 +380,15 @@ fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serd
                     priority: 0,
                     once: entry.once.unwrap_or(false),
                     status_message: entry.status_message.clone(),
+                    async_rewake: entry.async_rewake.unwrap_or(false),
+                    async_timeout: entry
+                        .async_timeout
+                        .filter(|timeout| *timeout > 0)
+                        .map(Duration::from_millis),
+                    rewake_message: entry
+                        .rewake_message
+                        .clone()
+                        .filter(|message| !message.trim().is_empty()),
                 });
             }
         }
@@ -736,6 +751,28 @@ mod tests {
         assert_eq!(
             hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
             Some("Write|Edit"),
+        );
+    }
+
+    #[test]
+    fn async_runtime_options_parse_with_millisecond_timeout() {
+        let raw = r#"{
+          "hooks": {
+            "Stop": [{ "hooks": [
+              { "type": "command", "command": "notify.sh", "async": true,
+                "asyncRewake": true, "asyncTimeout": 2500,
+                "rewakeMessage": "Review the completed hook." }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert!(!hooks[0].blocking);
+        assert!(hooks[0].async_rewake);
+        assert_eq!(hooks[0].async_timeout, Some(Duration::from_millis(2500)));
+        assert_eq!(
+            hooks[0].rewake_message.as_deref(),
+            Some("Review the completed hook.")
         );
     }
 

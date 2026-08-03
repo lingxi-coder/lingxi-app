@@ -18,7 +18,7 @@ use crate::env_expansion::expand_env_vars_in_string;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use traits::{McpHeaders, McpTransportSpec};
+use traits::{McpHeaders, McpOAuthConfigDto, McpTransportSpec};
 
 /// Expand `${VAR}` / `${VAR:-default}` references in one string against the
 /// process environment, appending any missing-variable names to `missing`.
@@ -83,6 +83,10 @@ struct McpJsonEntry {
     transport_type: Option<String>,
     #[serde(default)]
     headers: McpHeaders,
+    #[serde(default, rename = "headersHelper", alias = "headers_helper")]
+    headers_helper: Option<String>,
+    #[serde(default)]
+    oauth: Option<McpOAuthConfigDto>,
     #[serde(default)]
     disabled: bool,
     /// Per-server `tools/call` timeout in ms. claude-code zod schema
@@ -310,12 +314,15 @@ pub fn build_server_from_json_entry(
                 url
             };
             let headers = expand_header_values(entry.headers, &mut missing);
+            let headers_helper = entry
+                .headers_helper
+                .map(|helper| expand_field(&helper, &mut missing));
             match entry.transport_type.as_deref() {
                 Some("sse") => McpTransportSpec::Sse {
                     url,
                     headers,
-                    headers_helper: None,
-                    oauth: None,
+                    headers_helper,
+                    oauth: entry.oauth,
                 },
                 // `claudeai-proxy`: binary-confirmed at offsets 74175408 and
                 // 81811504. Used for claude.ai hosted MCP servers; the proxy
@@ -326,7 +333,8 @@ pub fn build_server_from_json_entry(
                 Some("claudeai-proxy") => McpTransportSpec::Http {
                     url,
                     headers,
-                    oauth: None,
+                    headers_helper,
+                    oauth: entry.oauth,
                 },
                 // `sdk`: binary-confirmed at offsets 194710219 and 196781049.
                 // Used by Agent SDK embedded servers. When the type is "sdk"
@@ -338,10 +346,16 @@ pub fn build_server_from_json_entry(
                 Some("sdk") => McpTransportSpec::SdkControl {
                     control_channel_id: url,
                 },
+                Some("ws" | "websocket") => McpTransportSpec::WebSocket {
+                    url,
+                    headers,
+                    headers_helper,
+                },
                 _ => McpTransportSpec::Http {
                     url,
                     headers,
-                    oauth: None,
+                    headers_helper,
+                    oauth: entry.oauth,
                 },
             }
         } else {
@@ -372,11 +386,11 @@ pub fn build_server_from_json_entry(
         // schemas carry no `request_timeout_ms` field (zod strips it), so the
         // alias is honoured for remote HTTP-family transports only.
         let timeout_ms = match &spec {
-            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => {
-                entry.timeout.or_else(|| {
-                    as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))
-                })
-            }
+            McpTransportSpec::Sse { .. }
+            | McpTransportSpec::Http { .. }
+            | McpTransportSpec::WebSocket { .. } => entry.timeout.or_else(|| {
+                as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))
+            }),
             _ => entry.timeout,
         };
         let always_load = entry.always_load.unwrap_or(false);
@@ -615,6 +629,68 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_remote_headers_helper_and_pinned_oauth_scopes() {
+        let raw = r#"{
+          "mcpServers": {
+            "remote": {
+              "type": "http",
+              "url": "https://example.test/mcp",
+              "headers": {"Authorization": "static"},
+              "headersHelper": "printf '{}';",
+              "oauth": {
+                "clientId": "client-id",
+                "callbackPort": 8123,
+                "authServerMetadataUrl": "https://auth.example/.well-known/oauth-authorization-server",
+                "scopes": "read write",
+                "xaa": false
+              }
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        let McpTransportSpec::Http {
+            headers_helper,
+            oauth: Some(oauth),
+            ..
+        } = &cfgs[0].spec
+        else {
+            panic!("expected HTTP OAuth config")
+        };
+        assert_eq!(headers_helper.as_deref(), Some("printf '{}';"));
+        assert_eq!(oauth.client_id.as_deref(), Some("client-id"));
+        assert_eq!(oauth.callback_port, Some(8123));
+        assert_eq!(oauth.scopes.as_deref(), Some("read write"));
+    }
+
+    #[test]
+    fn websocket_accepts_ordered_headers_and_helper() {
+        let raw = r#"{
+          "mcpServers": {
+            "remote": {
+              "type": "websocket",
+              "url": "wss://example.test/mcp",
+              "headers": {"X-First": "1", "X-Second": "2"},
+              "headersHelper": "helper"
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        let McpTransportSpec::WebSocket {
+            headers,
+            headers_helper,
+            ..
+        } = &cfgs[0].spec
+        else {
+            panic!("expected WebSocket config")
+        };
+        assert_eq!(
+            headers.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["X-First", "X-Second"]
+        );
+        assert_eq!(headers_helper.as_deref(), Some("helper"));
     }
 
     #[test]

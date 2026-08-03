@@ -928,6 +928,8 @@ impl CommandRouter for EngineCommandRouter {
                                     condition: goal.condition,
                                     set_at: goal.set_at,
                                     last_reason: goal.last_reason,
+                                    iterations: goal.iterations,
+                                    tokens_at_start: goal.tokens_at_start,
                                 }
                             }),
                             runtime_snapshot,

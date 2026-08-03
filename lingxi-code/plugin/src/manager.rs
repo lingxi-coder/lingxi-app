@@ -17,7 +17,7 @@ use crate::lifecycle::PluginState;
 use crate::loader::resolve_user_config;
 use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
 use crate::source::PluginSource;
-use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
+use crate::strict_policy::StrictPluginOnlyPolicy;
 use crate::user_config;
 use serde_json::{Map, Value};
 
@@ -71,7 +71,7 @@ pub enum PluginManagerError {
 ///
 /// Holds a state map keyed by [`PluginId`], references to every engine
 /// registry the manager materialises into, the credential manager (for
-/// sensitive user-config values), the blocklist, and the strict policy.
+/// sensitive user-config values), and the blocklist.
 ///
 /// The `fs`, `http`, and `runtime` fields are reserved for Plan 16's
 /// install/fetch code; they are not used by the M1.21 stub.
@@ -87,7 +87,6 @@ pub struct PluginManager {
     runtime: Arc<dyn RuntimeSpawner>,
     credentials: Arc<CredentialManager>,
     blocklist: Arc<PluginBlocklist>,
-    strict: Arc<StrictPluginOnlyPolicy>,
     /// Persisted non-sensitive `userConfig` state, keyed by plugin identity
     /// (`name@marketplace` for cache-installed plugins, bare `name` for local
     /// ones). Read from the settings `pluginConfigs` scope at construction (via
@@ -129,7 +128,7 @@ impl PluginManager {
         runtime: Arc<dyn RuntimeSpawner>,
         credentials: Arc<CredentialManager>,
         blocklist: Arc<PluginBlocklist>,
-        strict: Arc<StrictPluginOnlyPolicy>,
+        _strict: Arc<StrictPluginOnlyPolicy>,
         command_registry: Arc<RwLock<CommandRegistry>>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         hook_registry: Arc<RwLock<HookRegistry>>,
@@ -146,7 +145,6 @@ impl PluginManager {
             runtime,
             credentials,
             blocklist,
-            strict,
             plugin_configs: RwLock::new(HashMap::new()),
             blocked_marketplaces: RwLock::new(HashSet::new()),
             command_registry,
@@ -673,7 +671,7 @@ impl PluginManager {
         //     the plugin id (so unload can target it). A file that cannot be
         //     read is skipped (TS returns null + filters).
         let mut cmds: Vec<command_api::SlashCommand> = Vec::new();
-        if !self.strict.is_locked(PluginComponent::Commands) {
+        {
             for cp in &manifest.components.commands {
                 let abs = if cp.path.is_absolute() {
                     cp.path.clone()
@@ -733,7 +731,7 @@ impl PluginManager {
         //     that cannot be read or parsed is skipped (TS filters nulls).
         let plugin_name = &manifest.name;
         let mut skills: Vec<skill_api::Skill> = Vec::new();
-        if !self.strict.is_locked(PluginComponent::Skills) {
+        {
             for sp in &manifest.components.skills {
                 let abs = if sp.path.is_absolute() {
                     sp.path.clone()
@@ -799,7 +797,7 @@ impl PluginManager {
         //     (`loadPluginOutputStyles.ts:55`). The body becomes
         //     `system_prompt_addendum` (TS `prompt: markdownContent.trim()`).
         let mut styles: Vec<OutputStyle> = Vec::new();
-        if !self.strict.is_locked(PluginComponent::OutputStyles) {
+        {
             for op in &manifest.components.output_styles {
                 let abs = if op.path.is_absolute() {
                     op.path.clone()
@@ -951,6 +949,11 @@ impl PluginManager {
         //    regardless of the state `connect_all` leaves them in.
         if !mcp_scoped.is_empty() {
             let names: Vec<String> = mcp_scoped.iter().map(|cfg| cfg.name.clone()).collect();
+            for name in &names {
+                self.mcp_registry
+                    .set_headers_helper_plugin_root(name.clone(), install_dir.to_path_buf())
+                    .await;
+            }
             self.plugin_mcp_names
                 .write()
                 .await
@@ -995,6 +998,11 @@ impl PluginManager {
         // MCP cleanup: remove exactly the scoped `plugin:{plugin}:*` entries
         // this plugin seeded into the registry's connection map.
         if let Some(names) = self.plugin_mcp_names.write().await.remove(id) {
+            for name in &names {
+                self.mcp_registry
+                    .remove_headers_helper_plugin_root(name)
+                    .await;
+            }
             let mut conns = self.mcp_registry.connections.write().await;
             for n in &names {
                 conns.remove(n);
@@ -1046,7 +1054,7 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
                 *v = user_config::substitute_string_field(v, ctx);
             }
         }
-        McpTransportSpec::WebSocket { url, headers } => {
+        McpTransportSpec::WebSocket { url, headers, .. } => {
             *url = user_config::substitute_string_field(url, ctx);
             for v in headers.values_mut() {
                 *v = user_config::substitute_string_field(v, ctx);
@@ -1272,6 +1280,9 @@ mod user_config_tests {
             priority: 0,
             once: false,
             status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
         }
     }
 

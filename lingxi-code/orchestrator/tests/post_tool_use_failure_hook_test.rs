@@ -17,7 +17,7 @@ use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSou
 use hooks::events::{HookEvent, HookEventType};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
-use hooks::response::{HookOutcome, HookResult};
+use hooks::response::{HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
@@ -27,7 +27,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
+use protocol::{ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -280,6 +280,32 @@ impl BuiltinHookHandler for FailingFailureHook {
     }
 }
 
+struct FailureContextHook;
+
+#[async_trait]
+impl BuiltinHookHandler for FailureContextHook {
+    fn id(&self) -> &str {
+        "failure-context-hook"
+    }
+
+    async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        let response =
+            matches!(event, HookEvent::PostToolUseFailure { .. }).then(|| HookResponse {
+                reason: Some("STOP-FAILURE".into()),
+                additional_context: Some("failure context".into()),
+                prevent_continuation: true,
+                ..HookResponse::default()
+            });
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response,
+        }
+    }
+}
+
 fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
     HookDefinition {
         id: HookId::new(),
@@ -295,6 +321,9 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         priority: 0,
         once: false,
         status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
     }
 }
 
@@ -470,4 +499,35 @@ async fn failing_post_tool_use_failure_hook_does_not_break_turn() {
         2,
         "the loop still reaches the terminating turn (2 API calls)"
     );
+}
+
+#[tokio::test]
+async fn failure_hook_feedback_uses_the_failure_event_name_everywhere() {
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id, "AlwaysFail");
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    registry.write().await.register(builtin_hook(
+        "failure-context-hook",
+        HookEventType::PostToolUseFailure,
+    ));
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(FailureContextHook));
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(AlwaysFailTool));
+    let orch = orch_with(api, Arc::new(exec), tools);
+
+    orch.run_turn("break it").await.expect("turn completes");
+    let history = orch.session().lock().await.history.clone();
+    let rendered = history
+        .iter()
+        .map(ConversationMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("PostToolUseFailure:AlwaysFail hook stopped continuation: STOP-FAILURE")
+    );
+    assert!(
+        rendered.contains("PostToolUseFailure:AlwaysFail hook additional context: failure context")
+    );
+    assert!(!rendered.contains("PostToolUse:AlwaysFail hook"));
 }

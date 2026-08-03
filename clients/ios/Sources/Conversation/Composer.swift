@@ -11,6 +11,7 @@ enum VoiceHoldGesturePolicy {
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
     @Environment(\.theme) private var t
+    @FocusState.Binding var inputFocused: Bool
     @Binding var model: ModelOption
     // The picker is driven exclusively by the engine's curated, provider-qualified
     // refs. Empty means the catalog is still loading; no mock rows are invented.
@@ -56,6 +57,46 @@ struct Composer: View {
     @State private var cancellingHold = false
     @State private var suppressMicTap = false
 
+    init(
+        model: Binding<ModelOption>,
+        availableModels: [String] = [],
+        activeModelId: String = "",
+        onSelectModel: @escaping (String) -> Void = { _ in },
+        draft: Binding<String>,
+        onSend: @escaping (String) -> Void,
+        streaming: Bool = false,
+        isCancelling: Bool = false,
+        sendEnabled: Bool = true,
+        onStop: @escaping () -> Void = {},
+        onCameraClick: @escaping () -> Void = {},
+        inputFocused: FocusState<Bool>.Binding,
+        attachment: ComposerAttachment? = nil,
+        onRemoveAttachment: @escaping () -> Void = {},
+        onMicHoldStart: @escaping () -> Void = {},
+        onMicHoldRelease: @escaping () -> Void = {},
+        onMicHoldCancel: @escaping () -> Void = {},
+        onMicTap: @escaping () -> Void = {}
+    ) {
+        self._model = model
+        self.availableModels = availableModels
+        self.activeModelId = activeModelId
+        self.onSelectModel = onSelectModel
+        self._draft = draft
+        self.onSend = onSend
+        self.streaming = streaming
+        self.isCancelling = isCancelling
+        self.sendEnabled = sendEnabled
+        self.onStop = onStop
+        self.onCameraClick = onCameraClick
+        self._inputFocused = inputFocused
+        self.attachment = attachment
+        self.onRemoveAttachment = onRemoveAttachment
+        self.onMicHoldStart = onMicHoldStart
+        self.onMicHoldRelease = onMicHoldRelease
+        self.onMicHoldCancel = onMicHoldCancel
+        self.onMicTap = onMicTap
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
@@ -70,6 +111,11 @@ struct Composer: View {
                     .font(.system(size: 15.5))
                     .foregroundColor(t.text)
                     .lineLimit(1...5)
+                    .focused($inputFocused)
+                    .submitLabel(.send)
+                    .onSubmit {
+                        send()
+                    }
                     .padding(.horizontal, 4).padding(.vertical, 2)
 
                 HStack(spacing: 2) {

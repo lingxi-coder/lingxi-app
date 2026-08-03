@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if canImport(UIKit)
+    import UIKit
+#endif
+
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
     @Environment(AppState.self) private var app
@@ -34,9 +38,15 @@ struct ChatView: View {
     // A transient affordance status line (permission denied / capture failed).
     @State private var captureStatus: String? = nil
     @State private var voiceHoldWillCancel = false
+    @State private var keyboardHeight: CGFloat = 0
 
     @State private var voiceCapture = VoiceCapture()
     private let cameraCapture = CameraCapture()
+    @FocusState private var composerFocused: Bool
+
+    #if canImport(UIKit)
+        @State private var keyboardObserverIsRegistered = false
+    #endif
 
     // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
     // chat view so the user is told up front when the network is unavailable —
@@ -96,6 +106,7 @@ struct ChatView: View {
                          sendEnabled: !convo.sessionTransitionPending,
                          onStop: stop,
                          onCameraClick: captureFromCamera,
+                         inputFocused: $composerFocused,
                          attachment: attachment,
                          onRemoveAttachment: { attachment = nil },
                          onMicHoldStart: startVoiceHold,
@@ -114,7 +125,7 @@ struct ChatView: View {
                     onApprove: { source.approvePermission($0, $1) },
                     onDeny: { source.denyPermission($0) }
                 )
-                .animation(.easeOut(duration: 0.2), value: convo.pendingPermissions.first)
+                    .animation(.easeOut(duration: 0.2), value: convo.pendingPermissions.first)
             #endif
         }
         .buttonStyle(.plain)
@@ -155,6 +166,9 @@ struct ChatView: View {
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .onAppear {
             withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true }
+            #if canImport(UIKit)
+                registerKeyboardObserversIfNeeded()
+            #endif
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
@@ -163,6 +177,9 @@ struct ChatView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { cancelVoiceHold() }
         }
+        #if canImport(UIKit)
+            .padding(.bottom, keyboardHeight)
+        #endif
     }
 
     // MARK: top bar
@@ -297,7 +314,10 @@ struct ChatView: View {
     // MARK: actions
     private func newChat() { source.startNewConversation() }
 
-    private func send(_ txt: String) { source.send(txt) }
+    private func send(_ txt: String) {
+        composerFocused = false
+        source.send(txt)
+    }
 
     // PR-4 item 2: interrupt the in-flight turn.
     private func stop() { source.cancel() }
@@ -380,6 +400,38 @@ struct ChatView: View {
     /// the banner on its own once the path is satisfied again; this gives the
     /// user an explicit nudge instead of waiting for the next send to fail.
     private func retryConnection() { source.warmUp() }
+
+    // MARK: keyboard
+    #if canImport(UIKit)
+    private func registerKeyboardObserversIfNeeded() {
+        guard !keyboardObserverIsRegistered else { return }
+        keyboardObserverIsRegistered = true
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardWillShowNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            setKeyboardHeight(from: note)
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardWillHideNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            keyboardHeight = 0
+        }
+    }
+
+    private func setKeyboardHeight(from notification: Notification) {
+        guard
+            let userInfo = notification.userInfo,
+            let keyboardFrame = (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect)
+        else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            keyboardHeight = max(0, keyboardFrame.height)
+        }
+    }
+    #endif
 }
 
 // MARK: - Error banner (PR-4 item 4)

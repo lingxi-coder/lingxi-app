@@ -40,17 +40,19 @@ struct Composer: View {
     var attachment: ComposerAttachment? = nil
     var onRemoveAttachment: () -> Void = {}
 
-    // Hold-to-talk on the mic affordance — mirrors Android `onMicHoldStart` /
-    // `onMicHoldRelease`. A press past the threshold enters the immersive voice
-    // flow; the finger lift drives the STT transcription that fills the draft.
+    // Hold-to-talk on the ordinary mic affordance — mirrors Android
+    // `onMicHoldStart` / `onMicHoldRelease`. The finger lift drives the STT
+    // transcription that fills the draft.
     var onMicHoldStart: () -> Void = {}
     var onMicHoldRelease: () -> Void = {}
     var onMicHoldCancel: () -> Void = {}
 
-    // A single TAP on the mic enters FlowMode (心流 voice orb) — mirrors the
-    // prototype's `mic → openOrb`. The press-and-hold STT path is kept: a quick
-    // tap fires this, a 0.6s hold fires the gesture instead.
+    // Android exposes ordinary recording and Flow Mode as separate actions. A
+    // single mic tap toggles recording; the neighboring waveform opens Flow.
     var onMicTap: () -> Void = {}
+    var onFlowModeTap: () -> Void = {}
+    var voiceCapturePhase: VoiceCapturePhase = .idle
+    var voiceInteractionMode: VoiceInteractionMode? = nil
 
     @State private var modelOpen = false
     @State private var holding = false
@@ -75,7 +77,10 @@ struct Composer: View {
         onMicHoldStart: @escaping () -> Void = {},
         onMicHoldRelease: @escaping () -> Void = {},
         onMicHoldCancel: @escaping () -> Void = {},
-        onMicTap: @escaping () -> Void = {}
+        onMicTap: @escaping () -> Void = {},
+        onFlowModeTap: @escaping () -> Void = {},
+        voiceCapturePhase: VoiceCapturePhase = .idle,
+        voiceInteractionMode: VoiceInteractionMode? = nil
     ) {
         self._model = model
         self.availableModels = availableModels
@@ -95,6 +100,9 @@ struct Composer: View {
         self.onMicHoldRelease = onMicHoldRelease
         self.onMicHoldCancel = onMicHoldCancel
         self.onMicTap = onMicTap
+        self.onFlowModeTap = onFlowModeTap
+        self.voiceCapturePhase = voiceCapturePhase
+        self.voiceInteractionMode = voiceInteractionMode
     }
 
     var body: some View {
@@ -116,6 +124,7 @@ struct Composer: View {
                     .onSubmit {
                         send()
                     }
+                    .accessibilityIdentifier("composer.input")
                     .padding(.horizontal, 4).padding(.vertical, 2)
 
                 HStack(spacing: 2) {
@@ -146,19 +155,48 @@ struct Composer: View {
                         }
                         .accessibilityLabel("停止")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // Mic: TAP enters the FlowMode orb; press-and-hold runs STT.
-                        Button(action: handleMicTap) {
-                            LXIcon(
-                                name: cancellingHold ? .x : .mic,
-                                size: 18,
-                                color: holding ? (cancellingHold ? t.danger : t.accent) : t.text2,
-                                stroke: 1.8
+                        // Match Android: ordinary recording and Flow Mode are
+                        // distinct controls instead of overloading one tap.
+                        HStack(spacing: 6) {
+                            Button(action: handleMicTap) {
+                                if voiceCapturePhase == .finishing {
+                                    ProgressView()
+                                        .tint(t.text2)
+                                        .frame(width: 34, height: 34)
+                                } else {
+                                    LXIcon(
+                                        name: cancellingHold || isDictationListening ? .stop : .mic,
+                                        size: 18,
+                                        color: cancellingHold ? t.danger
+                                            : (holding || isDictationListening ? t.accent : t.text2),
+                                        stroke: 1.8
+                                    )
+                                    .frame(width: 34, height: 34)
+                                }
+                            }
+                            .simultaneousGesture(micHoldGesture)
+                            .accessibilityLabel(
+                                isDictationListening ? "结束普通录音" : "普通录音"
                             )
-                                .frame(width: 34, height: 34)
+                            .accessibilityHint("轻点开始或结束；按住说话，上滑取消")
+                            .accessibilityIdentifier("composer.voice")
+                            .disabled(
+                                !sendEnabled
+                                    || voiceCapturePhase == .finishing
+                                    || voiceInteractionMode == .flow
+                            )
+
+                            Button(action: onFlowModeTap) {
+                                LXIcon(name: .audioWave, size: 18, color: .white, stroke: 1.8)
+                                    .frame(width: 40, height: 40)
+                                    .background(t.text)
+                                    .clipShape(Circle())
+                            }
+                            .accessibilityLabel("开启心流模式")
+                            .accessibilityIdentifier("composer.flow")
+                            .disabled(!sendEnabled || voiceInteractionMode != nil)
                         }
-                        .simultaneousGesture(micHoldGesture)
-                        .accessibilityLabel("语音心流")
-                        .accessibilityHint("轻点进入语音心流；按住转写为文本")
+                        .opacity(sendEnabled ? 1 : 0.45)
                     } else {
                         Button(action: send) {
                             LXIcon(name: .arrowUp, size: 16, color: .white)
@@ -183,10 +221,20 @@ struct Composer: View {
         .overlay(alignment: .bottomLeading) {
             if modelOpen { modelMenu.padding(.leading, 50).padding(.bottom, 50) }
         }
+        .onChange(of: inputFocused) { _, focused in
+            if focused { modelOpen = false }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { inputFocused = false }
+                    .accessibilityIdentifier("composer.keyboard.dismiss")
+            }
+        }
     }
 
-    // Press-and-hold → release, mirroring Android `voiceHold` (and the iOS
-    // hold-anywhere idiom): a 0.6s LongPress sequenced into a Drag so the same
+    // Press-and-hold → release, mirroring Android `voiceHold`: a 0.6s
+    // LongPress sequenced into a Drag so the same
     // touch that crosses the threshold (onMicHoldStart) is the one whose lift we
     // detect (onMicHoldRelease → STT).
     private var micHoldGesture: some Gesture {
@@ -238,6 +286,10 @@ struct Composer: View {
             return
         }
         onMicTap()
+    }
+
+    private var isDictationListening: Bool {
+        voiceInteractionMode == .dictation && voiceCapturePhase == .listening
     }
 
     /// One picker row derived from a real engine model reference.

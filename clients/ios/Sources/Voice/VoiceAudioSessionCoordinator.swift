@@ -3,10 +3,15 @@ import AVFoundation
 /// Serializes microphone, recognition and speech playback ownership so Flow
 /// Mode, hold-to-talk and engine tool callbacks cannot fight over AVAudioSession.
 actor VoiceAudioSessionCoordinator {
-    enum Purpose: Equatable {
+    enum Purpose: Equatable, Sendable {
         case recognition
         case recording
         case playback
+    }
+
+    struct Lease: Equatable, Sendable {
+        fileprivate let id: UUID
+        let purpose: Purpose
     }
 
     enum CoordinationError: LocalizedError {
@@ -23,9 +28,9 @@ actor VoiceAudioSessionCoordinator {
     static let shared = VoiceAudioSessionCoordinator()
     private enum State: Equatable {
         case idle
-        case active(Purpose)
-        case interrupted(Purpose)
-        case backgrounded(Purpose)
+        case active(Lease)
+        case interrupted(Lease)
+        case backgrounded(Lease)
     }
 
     private var state: State = .idle
@@ -53,12 +58,14 @@ actor VoiceAudioSessionCoordinator {
         observers.forEach(NotificationCenter.default.removeObserver)
     }
 
-    func activate(_ requested: Purpose) throws {
-        if let currentPurpose {
-            throw CoordinationError.busy(currentPurpose)
+    func acquire(_ requested: Purpose) throws -> Lease {
+        if let currentLease {
+            throw CoordinationError.busy(currentLease.purpose)
         }
         try configureAndActivate(requested)
-        state = .active(requested)
+        let lease = Lease(id: UUID(), purpose: requested)
+        state = .active(lease)
+        return lease
     }
 
     private func configureAndActivate(_ requested: Purpose) throws {
@@ -74,31 +81,31 @@ actor VoiceAudioSessionCoordinator {
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
-    func deactivate(_ owner: Purpose) {
-        guard currentPurpose == owner else { return }
+    func release(_ lease: Lease) {
+        guard currentLease == lease else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         state = .idle
     }
 
     func suspendForBackground() {
-        guard case .active(let owner) = state else { return }
+        guard case .active(let lease) = state else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        state = .backgrounded(owner)
+        state = .backgrounded(lease)
     }
 
     func resumeAfterForeground() {
-        guard case .backgrounded(let owner) = state else { return }
+        guard case .backgrounded(let lease) = state else { return }
         do {
-            try configureAndActivate(owner)
-            state = .active(owner)
+            try configureAndActivate(lease.purpose)
+            state = .active(lease)
         } catch {
             state = .idle
         }
     }
 
-    private var currentPurpose: Purpose? {
+    private var currentLease: Lease? {
         switch state {
-        case .active(let owner), .interrupted(let owner), .backgrounded(let owner): return owner
+        case .active(let lease), .interrupted(let lease), .backgrounded(let lease): return lease
         case .idle: return nil
         }
     }
@@ -110,14 +117,14 @@ actor VoiceAudioSessionCoordinator {
         else { return }
         switch type {
         case .began:
-            if case .active(let owner) = state { state = .interrupted(owner) }
+            if case .active(let lease) = state { state = .interrupted(lease) }
         case .ended:
-            guard case .interrupted(let owner) = state else { return }
+            guard case .interrupted(let lease) = state else { return }
             let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             if AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume) {
                 do {
-                    try configureAndActivate(owner)
-                    state = .active(owner)
+                    try configureAndActivate(lease.purpose)
+                    state = .active(lease)
                 } catch {
                     state = .idle
                 }
@@ -130,7 +137,7 @@ actor VoiceAudioSessionCoordinator {
     }
 
     private func handleRouteChange(_ notification: Notification) {
-        guard case .active(let owner) = state else { return }
+        guard case .active(let lease) = state else { return }
         guard
             let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
             let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
@@ -139,8 +146,8 @@ actor VoiceAudioSessionCoordinator {
         // Reapply the purpose-specific category so Bluetooth HFP and speaker
         // routes recover consistently after headsets connect or disconnect.
         do {
-            try configureAndActivate(owner)
-            state = .active(owner)
+            try configureAndActivate(lease.purpose)
+            state = .active(lease)
         } catch {
             state = .idle
         }

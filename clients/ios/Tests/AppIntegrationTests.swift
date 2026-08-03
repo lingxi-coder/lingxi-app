@@ -21,4 +21,33 @@ final class AppIntegrationTests: XCTestCase {
         XCTAssertEqual(restored, [.newConversation, .ask("检查项目")])
         XCTAssertTrue(drainedAgain.isEmpty, "an App Intent must be handled exactly once")
     }
+
+    func testTerminalDeepLinkMatchesAndroidRouteAndDecodesCommand() {
+        let url = URL(string: "lingxi://open_terminal?sessionId=shell-7&initCommand=git%20status")!
+
+        XCTAssertEqual(
+            LingxiDeepLink.action(from: url),
+            .openTerminal(sessionID: "shell-7", initialCommand: "git status")
+        )
+    }
+
+    func testTerminalDeepLinkDefaultsSessionAndRejectsUnknownRoutes() {
+        XCTAssertEqual(
+            LingxiDeepLink.action(from: URL(string: "lingxi://open_terminal")!),
+            .openTerminal(sessionID: "interactive", initialCommand: nil)
+        )
+        XCTAssertNil(LingxiDeepLink.action(from: URL(string: "https://open_terminal")!))
+        XCTAssertNil(LingxiDeepLink.action(from: URL(string: "lingxi://unknown")!))
+    }
+
+    func testMarkdownTerminalLinkKeepsAndroidCompatibleURL() {
+        let expected = URL(string: "lingxi://open_terminal?sessionId=shell-8&initCommand=pwd")!
+        let rendered = AIText.parseInline(
+            "在 [终端](\(expected.absoluteString)) 中继续",
+            size: 15.5
+        )
+
+        XCTAssertEqual(rendered.runs.compactMap(\.link), [expected])
+        XCTAssertEqual(String(rendered.characters), "在 终端 中继续")
+    }
 }

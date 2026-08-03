@@ -164,12 +164,41 @@ struct LanguagePage: View {
 // MARK: - Voice TTS
 struct VoicePage: View {
     @Environment(AppState.self) private var app
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
     @State private var capability = VoiceCapabilityModel()
+    @State private var saveMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
+            SettingsSection(
+                label: "配置状态",
+                footer: saveMessage ?? capability.configurationReadiness.message
+            ) {
+                SettingsRow(
+                    label: "语音识别",
+                    value: capability.speechConfigurationConfirmed ? "已保存" : "待保存",
+                    valueColor: capability.speechConfigurationConfirmed ? t.ok : t.text3,
+                    chevron: false
+                )
+                SettingsRow(
+                    label: "语音播报",
+                    value: capability.ttsConfigurationConfirmed ? "已保存" : "待保存",
+                    valueColor: capability.ttsConfigurationConfirmed ? t.ok : t.text3,
+                    chevron: false
+                )
+                SettingsRow(label: "保存语音配置", chevron: false, isLast: true) {
+                    Button("保存") {
+                        saveVoiceConfiguration()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(t.accent)
+                    .accessibilityIdentifier("settings.voice.save")
+                }
+            }
+
             SettingsSection(label: "语音识别", footer: capability.effectiveRecognitionLabel) {
                 SettingsRow(label: "识别语言", chevron: false) {
                     Picker("识别语言", selection: languageBinding) {
@@ -231,8 +260,8 @@ struct VoicePage: View {
                     chevron: false,
                     isLast: true
                 ) {
-                    Button("检查权限") {
-                        Task { await capability.requestPermissions() }
+                    Button(permissionActionLabel) {
+                        handlePermissionAction()
                     }
                 }
             }
@@ -271,13 +300,22 @@ struct VoicePage: View {
                 BlurbText(text: error)
             }
         }
-        .task { capability.refreshCapabilities() }
+        .task { capability.reloadFromDefaults() }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            saveMessage = nil
+            capability.reloadFromDefaults()
+        }
+        .onDisappear {
+            Task { await capability.stopPreview() }
+        }
     }
 
     private var languageBinding: Binding<String> {
         Binding(
             get: { capability.language },
             set: { value in
+                saveMessage = nil
                 capability.setLanguage(value)
                 app.voiceLanguage = value
             }
@@ -288,6 +326,7 @@ struct VoicePage: View {
         Binding(
             get: { capability.mode },
             set: { value in
+                saveMessage = nil
                 capability.setMode(value)
                 app.voiceRecognitionMode = value.rawValue
             }
@@ -297,7 +336,10 @@ struct VoicePage: View {
     private var voiceBinding: Binding<String> {
         Binding(
             get: { capability.selectedVoice?.id ?? "" },
-            set: capability.setVoice
+            set: { value in
+                saveMessage = nil
+                capability.setVoice(value)
+            }
         )
     }
 
@@ -307,6 +349,32 @@ struct VoicePage: View {
 
     private var autoPlayBinding: Binding<Bool> {
         Binding(get: { capability.autoPlay }, set: capability.setAutoPlay)
+    }
+
+    private var permissionActionLabel: String {
+        let speechDenied = capability.speechAuthorization == .denied
+            || capability.speechAuthorization == .restricted
+        let microphoneDenied = capability.microphonePermissionStatus == .denied
+        return speechDenied || microphoneDenied ? "系统设置" : "检查权限"
+    }
+
+    private func handlePermissionAction() {
+        let speechDenied = capability.speechAuthorization == .denied
+            || capability.speechAuthorization == .restricted
+        let microphoneDenied = capability.microphonePermissionStatus == .denied
+        if speechDenied || microphoneDenied {
+            guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+            openURL(settingsURL)
+        } else {
+            Task { await capability.requestPermissions() }
+        }
+    }
+
+    private func saveVoiceConfiguration() {
+        let readiness = capability.saveConfiguration()
+        app.voiceLanguage = capability.language
+        app.voiceRecognitionMode = capability.mode.rawValue
+        saveMessage = VoiceCapabilityModel.configurationSaveMessage(for: readiness)
     }
 
 }

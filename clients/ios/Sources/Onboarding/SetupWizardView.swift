@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - First-run setup wizard
 //
 // Port of the prototype's `SetupWizard` (lingxi-iphone.html). A 5-step first-run
-// flow over the sci-fi orb backdrop: welcome → name the assistant (wake word) →
+// flow over the sci-fi orb backdrop: welcome → name the assistant →
 // your name → choose native speech behavior → finish. Provider/model setup stays
 // in the real Provider settings flow, so onboarding never presents mock models.
 // On finish it writes the chosen values to `AppState` and marks `setupDone`, so
@@ -75,6 +75,13 @@ struct SetupWizardView: View {
             voiceLanguage = app.voiceLanguage
             voiceCapability.setMode(recognitionMode)
             voiceCapability.setLanguage(voiceLanguage)
+        }
+        .onChange(of: step) { oldStep, newStep in
+            guard oldStep == 3, newStep != 3 else { return }
+            Task { await voiceCapability.stopPreview() }
+        }
+        .onDisappear {
+            Task { await voiceCapability.stopPreview() }
         }
     }
 
@@ -156,13 +163,13 @@ struct SetupWizardView: View {
             VStack(spacing: 0) {
                 badge(.sparkle)
                 wizH("给你的灵犀起个名字")
-                wizSub("这会成为它的唤醒词。之后你可以说「嘿，\(assistantName.isEmpty ? "灵犀" : assistantName)」随时唤醒它。")
+                wizSub("这是助手在界面和对话中的称呼，之后可以随时在设置中修改。")
                 wizField(text: $assistantName, placeholder: "灵犀")
                 HStack {
                     HStack(spacing: 8) {
                         Circle().fill(Color(okl: 0.72, 0.18, 150)).frame(width: 7, height: 7)
                             .shadow(color: Color(okl: 0.72, 0.18, 150), radius: 4)
-                        Text("嘿，\(assistantName.isEmpty ? "灵犀" : assistantName)")
+                        Text(assistantName.isEmpty ? "灵犀" : assistantName)
                             .font(.system(size: 14, weight: .medium)).foregroundColor(Color(okl: 0.88, 0.04, 285))
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
@@ -191,6 +198,7 @@ struct SetupWizardView: View {
                     completionRow("称呼", userName)
                     completionRow("语音", recognitionMode.title)
                     completionRow("语言", VoiceCapabilityModel.displayName(for: voiceLanguage))
+                    completionRow("播报", voiceCapability.selectedVoice?.name ?? "稍后配置")
                 }
                 .padding(16)
                 .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
@@ -202,8 +210,8 @@ struct SetupWizardView: View {
     private var voiceCapabilityStep: some View {
         VStack(spacing: 0) {
             badge(.mic)
-            wizH("选择语音识别方式")
-            wizSub("优先使用 iOS 设备端识别；当前语言不支持时会明确回退到系统识别。")
+            wizH("配置语音能力")
+            wizSub("选择识别方式和系统播报声音；心流模式会自动听取并朗读回复。")
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("语言")
@@ -225,6 +233,35 @@ struct SetupWizardView: View {
                 ForEach(VoiceRecognitionMode.allCases) { mode in
                     voiceModeButton(mode)
                 }
+
+                Text("系统播报声音")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                    .padding(.top, 8)
+
+                HStack(spacing: 12) {
+                    Picker("系统播报声音", selection: onboardingVoiceBinding) {
+                        if voiceCapability.voices.isEmpty {
+                            Text("没有可用声音").tag("")
+                        } else {
+                            ForEach(voiceCapability.voices) { voice in
+                                Text("\(voice.name) · \(voice.language)").tag(voice.id)
+                            }
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button(voiceCapability.isPreviewing ? "播放中…" : "试听") {
+                        Task { await voiceCapability.preview() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(voiceCapability.isPreviewing || voiceCapability.selectedVoice == nil)
+                    .accessibilityIdentifier("onboarding.voice.preview")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
             }
 
             Text(voiceCapability.effectiveRecognitionLabel)
@@ -234,7 +271,22 @@ struct SetupWizardView: View {
                         ? Color.orange : Color(okl: 0.74, 0.10, 155)
                 )
                 .padding(.top, 18)
+
+            if let error = voiceCapability.errorMessage {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 10)
+            }
         }
+    }
+
+    private var onboardingVoiceBinding: Binding<String> {
+        Binding(
+            get: { voiceCapability.selectedVoice?.id ?? "" },
+            set: voiceCapability.setVoice
+        )
     }
 
     private func voiceLanguageButton(_ label: String, value: String) -> some View {
@@ -341,6 +393,9 @@ struct SetupWizardView: View {
         app.userName = userName.trimmingCharacters(in: .whitespaces)
         app.voiceRecognitionMode = recognitionMode.rawValue
         app.voiceLanguage = voiceLanguage
+        voiceCapability.setMode(recognitionMode)
+        voiceCapability.setLanguage(voiceLanguage)
+        voiceCapability.saveConfiguration()
         app.setupDone = true
         onDone()
     }

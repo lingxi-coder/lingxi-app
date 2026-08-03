@@ -23,7 +23,12 @@ struct AppIntegrationPage: View {
                 capabilityRow(
                     icon: .message,
                     title: "向灵犀提问",
-                    detail: "接收 Siri 或其他 App 传入的文本",
+                    detail: "接收 Siri 或其他 App 传入的文本"
+                )
+                capabilityRow(
+                    icon: .workflow,
+                    title: "打开终端",
+                    detail: "支持快捷指令与 lingxi://open_terminal 深链",
                     isLast: true
                 )
             }
@@ -37,7 +42,7 @@ struct AppIntegrationPage: View {
                     iconColor: t.accent,
                     label: "打开快捷指令",
                     sub: "查看灵犀提供的动作",
-                    value: "3 个动作",
+                    value: "4 个动作",
                     isLast: true,
                     onTap: openShortcuts
                 )

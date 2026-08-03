@@ -39,6 +39,7 @@ struct MainSettingsPage: View {
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
     let host: SettingsHost
+    @State private var voiceCapability = VoiceCapabilityModel()
 
     private let langMap = ["zh-CN": "简体中文", "zh-TW": "繁體中文", "en-US": "English", "ja-JP": "日本語"]
 
@@ -61,8 +62,12 @@ struct MainSettingsPage: View {
                             sub: df != nil ? "默认: \(df!.name)" : "未配置", value: "\(store.fetchProviders.filter{$0.enabled}.count) 个启用",
                             onTap: { host.push(.providerList(.init(.fetch))) })
                 SettingsRow(icon: .mic, iconColor: Color(srgb: 0.8018,0.4038,0.8909), label: "语音 TTS",
-                            sub: Presets.voice.first(where: { $0.id == store.voice.preset })?.name,
-                            value: store.voice.preset == "system" ? "免费" : "已配置", isLast: true,
+                            sub: voiceCapability.configuredVoice?.name ?? "iOS 系统语音",
+                            value: voiceCapability.configurationReadiness.isReadyForFlow
+                                ? "可用"
+                                : (voiceCapability.speechConfigurationConfirmed
+                                    && voiceCapability.ttsConfigurationConfirmed ? "需检查" : "未配置"),
+                            isLast: true,
                             onTap: { host.push(.voice) })
             }
 
@@ -130,6 +135,7 @@ struct MainSettingsPage: View {
                 .multilineTextAlignment(.center).lineSpacing(5)
                 .frame(maxWidth: .infinity).padding(.top, 8).padding(.bottom, 4)
         }
+        .task { voiceCapability.reloadFromDefaults() }
     }
 
     private var accountCard: some View {

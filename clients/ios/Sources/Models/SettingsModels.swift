@@ -72,13 +72,6 @@ struct MCPServer: Identifiable, Equatable {
     var auth: String? = nil
 }
 
-struct VoiceConfig: Equatable {
-    var preset: String = "system"
-    var voiceId: String = "zh-CN-XiaoxiaoNeural"
-    var speed: Double = 1.0
-    var autoPlay: Bool = false
-}
-
 struct DreamConfig: Equatable {
     var enabled: Bool = true
     var window: String = "night"          // night | always | custom
@@ -198,11 +191,6 @@ enum Presets {
         .init(id: "scrapingbee", name: "ScrapingBee", sub: "反爬代理",         color: Color(srgb: 0.8960, 0.6013, 0.0000), defaultUrl: "https://app.scrapingbee.com/api/v1", keyPrefix: "", models: []),
     ]
 
-    static let voice: [ProviderPreset] = [
-        .init(id: "elevenlabs", name: "ElevenLabs", sub: "高质量 · 多语种", color: Color(srgb: 0.8018, 0.4038, 0.8909), defaultUrl: "https://api.elevenlabs.io/v1", keyPrefix: "", models: []),
-        .init(id: "openai-tts", name: "OpenAI TTS", sub: "低延迟",          color: Color(srgb: 0.1326, 0.7261, 0.5350), defaultUrl: "https://api.openai.com/v1", keyPrefix: "", models: []),
-        .init(id: "system",     name: "系统语音",    sub: "设备本地 · 免费",  color: Color(srgb: 0.5728, 0.6177, 0.7466), defaultUrl: "", keyPrefix: "", models: []),
-    ]
 }
 
 // MARK: - Settings store (the prototype's useState block in SettingsSheet)
@@ -221,7 +209,6 @@ final class SettingsStore {
     var llmProviders: [GenericProvider] = []
     var searchProviders: [GenericProvider] = []
     var fetchProviders: [GenericProvider] = []
-    var voice = VoiceConfig()
     var linuxRuntime = LinuxRuntimeState()
     var skills: [Skill] = [
         .init(id: "sk1", name: "周报生成", author: "官方", desc: "聚合 Linear / GitHub / 日历自动出周报", triggers: ["每周五 17:00", "@周报"], enabled: true, builtin: true),

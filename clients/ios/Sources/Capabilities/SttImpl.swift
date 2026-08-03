@@ -57,8 +57,9 @@ import Foundation
                     throw SpeechFfiError.Unavailable
                 }
 
+                let audioLease: VoiceAudioSessionCoordinator.Lease
                 do {
-                    try await VoiceAudioSessionCoordinator.shared.activate(.recognition)
+                    audioLease = try await VoiceAudioSessionCoordinator.shared.acquire(.recognition)
                 } catch {
                     throw SpeechFfiError.Retriable(message: "audio session: \(error.localizedDescription)")
                 }
@@ -87,10 +88,10 @@ import Foundation
                     }
 
                     let transcript = try await operation.run(with: recognizer)
-                    await VoiceAudioSessionCoordinator.shared.deactivate(.recognition)
+                    await VoiceAudioSessionCoordinator.shared.release(audioLease)
                     return transcript
                 } catch {
-                    await VoiceAudioSessionCoordinator.shared.deactivate(.recognition)
+                    await VoiceAudioSessionCoordinator.shared.release(audioLease)
                     throw error
                 }
             } onCancel: {

@@ -22,8 +22,7 @@ struct RootView: View {
     @State private var confirmedSession: String
     @State private var pendingSessionRestoreID: String?
     @State private var draft: String
-    @State private var voiceActive = false
-    @State private var flowActive = false
+    @State private var voiceInteraction = VoiceInteractionController()
     @State private var projectSwitching = false
 
     private let appSandboxRoot: String
@@ -103,7 +102,10 @@ struct RootView: View {
         _activeSession = State(initialValue: storedSessionID)
         _confirmedSession = State(initialValue: storedSessionID)
         _pendingSessionRestoreID = State(initialValue: storedSessionID.isEmpty ? nil : storedSessionID)
-        _draft = State(initialValue: preferences.draft(projectID: projectID))
+        let initialDraft = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1"
+            ? ""
+            : preferences.draft(projectID: projectID)
+        _draft = State(initialValue: initialDraft)
         appSandboxRoot = root
         scopedPreferences = preferences
     }
@@ -140,6 +142,7 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .lingxiAppActionPending)) { _ in
             Task { await consumePendingAppActions() }
         }
+        .onOpenURL(perform: handleIncomingURL)
         .task(id: sourceGeneration) {
             let generation = sourceGeneration
             let current = source
@@ -172,7 +175,8 @@ struct RootView: View {
             isPresented: Binding(
                 get: { navigation.settingsOpen },
                 set: { if !$0 { navigation.closeSettings() } }
-            )
+            ),
+            onDismiss: handleSettingsDismissed
         ) {
             SettingsHost(
                 store: settingsStore,
@@ -204,10 +208,10 @@ struct RootView: View {
             ChatView(
                 session: session,
                 openDrawer: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { navigation.showDrawer() } },
-                voiceActive: $voiceActive,
-                onEnterFlow: { withAnimation(.easeOut(duration: 0.4)) { flowActive = true } },
                 draft: $draft,
+                voiceInteraction: voiceInteraction,
                 source: source,
+                onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenShellTask: { request in
                     navigation.openTerminal(
                         shellRequest: request,
@@ -258,23 +262,6 @@ struct RootView: View {
                 .zIndex(50)
             }
 
-            if voiceActive {
-                VoiceFlowView(onRelease: { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } })
-                    .zIndex(70)
-                    .allowsHitTesting(false)
-            }
-
-            if flowActive {
-                VoiceOrbView(
-                    convo: source.model,
-                    onSend: { source.send($0) },
-                    onCancel: { source.cancel() },
-                    onClose: { withAnimation(.easeOut(duration: 0.3)) { flowActive = false } }
-                )
-                .zIndex(72)
-                .transition(.opacity)
-            }
-
             if projectSwitching {
                 ProgressView("正在切换项目…")
                     .padding(18)
@@ -302,6 +289,17 @@ struct RootView: View {
             await Task.yield()
             guard !navigation.drawerOpen else { return }
             action()
+        }
+    }
+
+    private func handleSettingsDismissed() {
+        Task { @MainActor in
+            await VoicePreviewPlayback.shared.stop()
+            guard !navigation.settingsOpen,
+                  navigation.path.isEmpty,
+                  navigation.presentedRoute == nil
+            else { return }
+            voiceInteraction.reloadConfigurationAndResumeIfPossible()
         }
     }
 
@@ -430,6 +428,7 @@ struct RootView: View {
 
     private func switchProject(to projectID: String?, resumeSessionID: String? = nil, startNew: Bool = false) {
         guard !projectSwitching else { return }
+        voiceInteraction.handleContextChange()
         if projectID == projectStore.activeProjectId {
             navigation.closeDrawer()
             if let resumeSessionID {
@@ -585,10 +584,12 @@ struct RootView: View {
         switch phase {
         case .background:
             persistConversationScope()
-            voiceActive = false
-            flowActive = false
+            voiceInteraction.handleBackground()
             source.handleBackground()
-            Task { await VoiceAudioSessionCoordinator.shared.suspendForBackground() }
+            Task {
+                await VoicePreviewPlayback.shared.stop()
+                await VoiceAudioSessionCoordinator.shared.suspendForBackground()
+            }
         case .active:
             source.handleForeground()
             Task { await VoiceAudioSessionCoordinator.shared.resumeAfterForeground() }
@@ -620,10 +621,22 @@ struct RootView: View {
         case let .ask(question):
             let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
             beginAppIntegratedConversation(draftText: trimmed)
+        case let .openTerminal(sessionID, initialCommand):
+            navigation.openTerminal(
+                sessionID: sessionID,
+                initialCommand: initialCommand,
+                projectID: projectStore.activeProjectId
+            )
         }
     }
 
+    private func handleIncomingURL(_ url: URL) {
+        guard let action = LingxiDeepLink.action(from: url) else { return }
+        applyAppAction(action)
+    }
+
     private func beginAppIntegratedConversation(draftText: String) {
+        voiceInteraction.handleContextChange()
         pendingSessionRestoreID = nil
         activeSession = ""
         confirmedSession = ""

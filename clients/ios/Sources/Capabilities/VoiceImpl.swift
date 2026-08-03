@@ -18,12 +18,14 @@ import Foundation
         private let lock = NSLock()
         private var recorder: AVAudioRecorder?
         private var fileURL: URL?
+        private var audioLease: VoiceAudioSessionCoordinator.Lease?
 
         func startRecording(sampleRateHz: UInt32, format: String) async throws {
             try await requestMicAuthorization()
 
+            let lease: VoiceAudioSessionCoordinator.Lease
             do {
-                try await VoiceAudioSessionCoordinator.shared.activate(.recording)
+                lease = try await VoiceAudioSessionCoordinator.shared.acquire(.recording)
             } catch {
                 throw VoiceFfiError.Other(message: "audio session: \(error.localizedDescription)")
             }
@@ -41,24 +43,24 @@ import Foundation
                 guard rec.record() else {
                     throw VoiceFfiError.Other(message: "recorder failed to start")
                 }
-                store(recorder: rec, fileURL: url)
+                store(recorder: rec, fileURL: url, audioLease: lease)
             } catch let e as VoiceFfiError {
                 try? FileManager.default.removeItem(at: url)
-                await VoiceAudioSessionCoordinator.shared.deactivate(.recording)
+                await VoiceAudioSessionCoordinator.shared.release(lease)
                 throw e
             } catch {
                 try? FileManager.default.removeItem(at: url)
-                await VoiceAudioSessionCoordinator.shared.deactivate(.recording)
+                await VoiceAudioSessionCoordinator.shared.release(lease)
                 throw VoiceFfiError.Other(message: error.localizedDescription)
             }
         }
 
         func stopRecording() async throws -> VoiceRecordingFfi {
-            let (rec, url) = takeRecorder()
+            let (rec, url, lease) = takeRecorder()
 
-            guard let rec, let url else { throw VoiceFfiError.NotRecording }
+            guard let rec, let url, let lease else { throw VoiceFfiError.NotRecording }
             rec.stop()
-            await VoiceAudioSessionCoordinator.shared.deactivate(.recording)
+            await VoiceAudioSessionCoordinator.shared.release(lease)
 
             do {
                 let data = try Data(contentsOf: url)
@@ -78,19 +80,29 @@ import Foundation
             guard granted else { throw VoiceFfiError.PermissionDenied }
         }
 
-        private func store(recorder: AVAudioRecorder, fileURL: URL) {
+        private func store(
+            recorder: AVAudioRecorder,
+            fileURL: URL,
+            audioLease: VoiceAudioSessionCoordinator.Lease
+        ) {
             lock.lock()
             defer { lock.unlock() }
             self.recorder = recorder
             self.fileURL = fileURL
+            self.audioLease = audioLease
         }
 
-        private func takeRecorder() -> (AVAudioRecorder?, URL?) {
+        private func takeRecorder() -> (
+            AVAudioRecorder?,
+            URL?,
+            VoiceAudioSessionCoordinator.Lease?
+        ) {
             lock.lock()
             defer { lock.unlock() }
-            let current = (recorder, fileURL)
+            let current = (recorder, fileURL, audioLease)
             recorder = nil
             fileURL = nil
+            audioLease = nil
             return current
         }
 

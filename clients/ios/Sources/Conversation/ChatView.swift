@@ -1,22 +1,12 @@
 import SwiftUI
 
-#if canImport(UIKit)
-    import UIKit
-#endif
-
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
     @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
-    @Environment(\.scenePhase) private var scenePhase
 
     let session: SessionRef
     let openDrawer: () -> Void
-    /// Drives the voice "flow" overlay. ChatView owns the press lifecycle:
-    /// hold 0.6s to set true; release sets false.
-    @Binding var voiceActive: Bool
-    /// A TAP on the mic opens the FlowMode orb (心流) — RootView owns that overlay.
-    var onEnterFlow: () -> Void = {}
 
     /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
     /// published `model` and forwards user input to it — it no longer owns the
@@ -37,17 +27,12 @@ struct ChatView: View {
     @State private var attachment: ComposerAttachment? = nil
     // A transient affordance status line (permission denied / capture failed).
     @State private var captureStatus: String? = nil
-    @State private var voiceHoldWillCancel = false
-    @State private var keyboardHeight: CGFloat = 0
 
-    @State private var voiceCapture = VoiceCapture()
+    /// Root-owned state machine shared by ordinary dictation and Flow Mode.
+    let voiceInteraction: VoiceInteractionController
+    var onOpenVoiceSettings: () -> Void = {}
     private let cameraCapture = CameraCapture()
     @FocusState private var composerFocused: Bool
-
-    #if canImport(UIKit)
-        @State private var keyboardObserverIsRegistered = false
-        @State private var keyboardObservers: [NSObjectProtocol] = []
-    #endif
 
     // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
     // chat view so the user is told up front when the network is unavailable —
@@ -57,17 +42,17 @@ struct ChatView: View {
 
     init(session: SessionRef,
          openDrawer: @escaping () -> Void,
-         voiceActive: Binding<Bool>,
-         onEnterFlow: @escaping () -> Void = {},
          draft: Binding<String>,
+         voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
+         onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
         self.session = session
         self.openDrawer = openDrawer
-        self._voiceActive = voiceActive
-        self.onEnterFlow = onEnterFlow
         self._draft = draft
+        self.voiceInteraction = voiceInteraction
         self.source = source
+        self.onOpenVoiceSettings = onOpenVoiceSettings
         self.onOpenShellTask = onOpenShellTask
         self.convo = source.model
     }
@@ -93,6 +78,12 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
+                if voiceInteraction.isPresented {
+                    InlineVoicePanel(
+                        controller: voiceInteraction,
+                        onConfigure: onOpenVoiceSettings
+                    )
+                }
                 Composer(model: $convo.model,
                          // SHIP-BLOCKER #2: drive the picker off the engine's real
                          // model catalog + active id (out-of-band model state). On
@@ -104,7 +95,7 @@ struct ChatView: View {
                          onSend: send,
                          streaming: convo.streaming,
                          isCancelling: convo.isCancelling,
-                         sendEnabled: !convo.sessionTransitionPending,
+                         sendEnabled: !convo.sessionTransitionPending && voiceInteraction.mode != .flow,
                          onStop: stop,
                          onCameraClick: captureFromCamera,
                          inputFocused: $composerFocused,
@@ -113,7 +104,10 @@ struct ChatView: View {
                          onMicHoldStart: startVoiceHold,
                          onMicHoldRelease: endVoiceHold,
                          onMicHoldCancel: cancelVoiceHold,
-                         onMicTap: onEnterFlow)
+                         onMicTap: toggleVoiceCapture,
+                         onFlowModeTap: enterFlowMode,
+                         voiceCapturePhase: voiceInteraction.capturePhase,
+                         voiceInteractionMode: voiceInteraction.mode)
             }
 
             // SHIP-BLOCKER #3: the engine-parked permission prompt. Sits above the
@@ -130,62 +124,21 @@ struct ChatView: View {
             #endif
         }
         .buttonStyle(.plain)
-        // Voice flow: hold anywhere 0.6s to enter immersive recording; release sends.
-        // A LongPress sequenced into a Drag keeps the same touch, so the
-        // .updating/onEnded of the drag fire only after the 0.6s press succeeds
-        // and detect the eventual finger lift.
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.6)
-                .sequenced(before: DragGesture(minimumDistance: 0))
-                .onChanged { value in
-                    if case let .second(true, drag) = value {
-                        if !voiceActive { startVoiceHold() }
-                        if let drag {
-                            voiceHoldWillCancel = VoiceHoldGesturePolicy.shouldCancel(
-                                verticalTranslation: drag.translation.height
-                            )
-                        }
-                    }
-                }
-                .onEnded { value in
-                    let shouldCancel: Bool
-                    if case let .second(_, drag) = value, let drag {
-                        shouldCancel = VoiceHoldGesturePolicy.shouldCancel(
-                            verticalTranslation: drag.translation.height
-                        )
-                    } else {
-                        shouldCancel = voiceHoldWillCancel
-                    }
-                    voiceHoldWillCancel = false
-                    if shouldCancel {
-                        cancelVoiceHold()
-                    } else {
-                        endVoiceHold()
-                    }
-                }
-        )
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
+        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {
             withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true }
-            #if canImport(UIKit)
-                registerKeyboardObserversIfNeeded()
-            #endif
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
         }
         .onDisappear {
-            cancelVoiceHold()
-            #if canImport(UIKit)
-                unregisterKeyboardObservers()
-            #endif
+            voiceInteraction.handleContextChange()
         }
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { cancelVoiceHold() }
+        .onChange(of: convo.turnCompletion) { _, completion in
+            guard let completion else { return }
+            voiceInteraction.handleTurnCompletion(completion)
         }
-        #if canImport(UIKit)
-            .padding(.bottom, keyboardHeight)
-        #endif
     }
 
     // MARK: top bar
@@ -247,10 +200,18 @@ struct ChatView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
+            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("conversation.message-list")
             .onChange(of: convo.items.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.streaming) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.error) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.notice) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: composerFocused) { _, focused in
+                guard focused else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
         }
     }
 
@@ -265,7 +226,7 @@ struct ChatView: View {
                 .font(.scaledSystem(21, weight: .semibold, relativeTo: .title2))
                 .foregroundColor(t.text)
                 .padding(.bottom, 7)
-            Text("随便说点什么，或按住屏幕进入语音心流模式。")
+            Text("随便说点什么，或使用输入框旁的语音功能。")
                 .font(.scaledSystem(14, relativeTo: .subheadline)).foregroundColor(t.text4)
                 .multilineTextAlignment(.center).lineSpacing(14 * 0.5)
                 .frame(maxWidth: 260)
@@ -318,11 +279,14 @@ struct ChatView: View {
     }
 
     // MARK: actions
-    private func newChat() { source.startNewConversation() }
+    private func newChat() {
+        voiceInteraction.handleContextChange()
+        source.startNewConversation()
+    }
 
     private func send(_ txt: String) {
-        composerFocused = false
-        source.send(txt)
+        guard let token = source.send(txt) else { return }
+        voiceInteraction.registerAutomaticPlaybackCandidate(token)
     }
 
     // PR-4 item 2: interrupt the in-flight turn.
@@ -334,45 +298,46 @@ struct ChatView: View {
     // MARK: capability affordances (mirror Android RootScreen)
 
     /// Mic press past the 0.6s threshold opens the microphone immediately and
-    /// enters the immersive overlay. Duplicate gesture delivery is ignored.
+    /// presents the compact capture overlay. Duplicate delivery is ignored.
     private func startVoiceHold() {
-        guard voiceCapture.phase == .idle else { return }
         captureStatus = nil
-        voiceHoldWillCancel = false
-        withAnimation(.easeOut(duration: 0.25)) { voiceActive = true }
-        voiceCapture.start(completion: handleVoiceCaptureResult)
+        composerFocused = false
+        voiceInteraction.startDictation(onTranscript: appendVoiceTranscript)
     }
 
     /// Finger lift ends the request that has been recording since press-down;
     /// Speech then emits its final transcript through the shared state machine.
     private func endVoiceHold() {
-        withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
-        voiceCapture.finish()
+        voiceInteraction.finishListening()
+    }
+
+    /// Android exposes ordinary recording and Flow Mode as separate controls.
+    /// A tap on the microphone toggles the same capture used by press-and-hold.
+    private func toggleVoiceCapture() {
+        switch voiceInteraction.capturePhase {
+        case .idle:
+            startVoiceHold()
+        case .listening:
+            endVoiceHold()
+        case .finishing:
+            break
+        }
+    }
+
+    private func enterFlowMode() {
+        guard !convo.sessionTransitionPending else { return }
+        cancelVoiceHold()
+        composerFocused = false
+        voiceInteraction.startFlow(source: source)
     }
 
     private func cancelVoiceHold() {
-        voiceHoldWillCancel = false
-        voiceCapture.cancel()
-        if voiceActive {
-            withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
-        }
+        voiceInteraction.cancelDictation()
     }
 
-    private func handleVoiceCaptureResult(_ result: VoiceCaptureResult) {
-        if voiceActive {
-            withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
-        }
-        switch result {
-        case let .transcript(text):
-            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? text : "\(draft) \(text)"
-        case .permissionDenied:
-            captureStatus = "需要麦克风与语音识别权限"
-        case .empty:
-            break
-        case let .failed(message):
-            captureStatus = "语音识别失败：\(message)"
-        }
+    private func appendVoiceTranscript(_ text: String) {
+        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? text : "\(draft) \(text)"
     }
 
     /// Attach button: drive an on-device camera capture (falling back to the
@@ -407,48 +372,6 @@ struct ChatView: View {
     /// user an explicit nudge instead of waiting for the next send to fail.
     private func retryConnection() { source.warmUp() }
 
-    // MARK: keyboard
-    #if canImport(UIKit)
-    private func registerKeyboardObserversIfNeeded() {
-        guard !keyboardObserverIsRegistered else { return }
-        unregisterKeyboardObservers()
-        keyboardObserverIsRegistered = true
-        let willShow = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillShowNotification,
-            object: nil,
-            queue: .main
-        ) { note in
-            setKeyboardHeight(from: note)
-        }
-        let willHide = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillHideNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            keyboardHeight = 0
-        }
-        keyboardObservers = [willShow, willHide]
-    }
-
-    private func unregisterKeyboardObservers() {
-        guard !keyboardObservers.isEmpty else { return }
-        for observer in keyboardObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        keyboardObservers.removeAll()
-        keyboardObserverIsRegistered = false
-    }
-
-    private func setKeyboardHeight(from notification: Notification) {
-        guard
-            let userInfo = notification.userInfo,
-            let keyboardFrame = (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect)
-        else { return }
-        withAnimation(.easeOut(duration: 0.2)) {
-            keyboardHeight = max(0, keyboardFrame.height)
-        }
-    }
-    #endif
 }
 
 // MARK: - Error banner (PR-4 item 4)

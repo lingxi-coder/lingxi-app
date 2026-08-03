@@ -48,20 +48,62 @@ struct SystemVoiceOption: Identifiable, Equatable {
     let quality: AVSpeechSynthesisVoiceQuality
 }
 
+enum VoiceConfigurationIssueKind: Equatable {
+    case unconfigured
+    case permissionUndetermined
+    case permissionDenied
+    case restricted
+    case unavailable
+}
+
+enum VoiceConfigurationComponent: Equatable {
+    case speech
+    case microphone
+    case tts
+}
+
+struct VoiceConfigurationIssue: Equatable {
+    let component: VoiceConfigurationComponent
+    let kind: VoiceConfigurationIssueKind
+    let message: String
+}
+
+/// Separates explicit user configuration from permissions and transient system
+/// availability so callers can route users to the correct recovery action.
+struct VoiceConfigurationReadiness: Equatable {
+    let speechConfigured: Bool
+    let ttsConfigured: Bool
+    let speechReady: Bool
+    let ttsReady: Bool
+    let issues: [VoiceConfigurationIssue]
+
+    var isReadyForDictation: Bool { speechReady }
+    var isReadyForFlow: Bool { speechReady && ttsReady }
+    var message: String? { issues.first?.message }
+}
+
 /// One source of truth for the native speech capability surfaced by onboarding,
 /// settings, and Flow Mode. The engine callbacks read the same persisted keys.
 @Observable
 @MainActor
 final class VoiceCapabilityModel {
     nonisolated static let automaticLanguageIdentifier = "auto"
+    nonisolated static let currentSpeechConfigurationVersion = 1
+    nonisolated static let currentTTSConfigurationVersion = 1
+
+    private nonisolated static let speechConfigurationVersionKey = "voiceSpeechConfigurationVersion"
+    private nonisolated static let ttsConfigurationVersionKey = "voiceTTSConfigurationVersion"
 
     private let defaults: UserDefaults
+    private let previewPlayback: VoicePreviewPlayback
 
     var language: String
     var mode: VoiceRecognitionMode
     var voiceIdentifier: String
     var speed: Double
     var autoPlay: Bool
+    private(set) var speechConfigurationConfirmed: Bool
+    private(set) var ttsConfigurationConfirmed: Bool
     private(set) var speechAuthorization: SFSpeechRecognizerAuthorizationStatus
     private(set) var microphonePermissionStatus: MicrophonePermissionState
     private(set) var microphoneGranted = false
@@ -71,8 +113,12 @@ final class VoiceCapabilityModel {
     private(set) var isPreviewing = false
     private(set) var errorMessage: String?
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        previewPlayback: VoicePreviewPlayback? = nil
+    ) {
         self.defaults = defaults
+        self.previewPlayback = previewPlayback ?? .shared
         language = defaults.string(forKey: "voiceLanguage") ?? Self.automaticLanguageIdentifier
         mode = VoiceRecognitionMode(
             rawValue: defaults.string(forKey: "voiceRecognitionMode") ?? "on-device"
@@ -80,6 +126,10 @@ final class VoiceCapabilityModel {
         voiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier") ?? ""
         speed = defaults.object(forKey: "voiceSpeed") == nil ? 1 : defaults.double(forKey: "voiceSpeed")
         autoPlay = defaults.bool(forKey: "voiceAutoPlay")
+        speechConfigurationConfirmed = defaults.integer(forKey: Self.speechConfigurationVersionKey)
+            == Self.currentSpeechConfigurationVersion
+        ttsConfigurationConfirmed = defaults.integer(forKey: Self.ttsConfigurationVersionKey)
+            == Self.currentTTSConfigurationVersion
         speechAuthorization = SFSpeechRecognizer.authorizationStatus()
         microphonePermissionStatus = Self.resolveMicrophonePermissionStatus()
         microphoneGranted = microphonePermissionStatus == .granted
@@ -139,6 +189,27 @@ final class VoiceCapabilityModel {
             ?? voices.first
     }
 
+    var configuredVoice: SystemVoiceOption? {
+        guard !voiceIdentifier.isEmpty else { return nil }
+        return voices.first { $0.id == voiceIdentifier }
+    }
+
+    var configurationReadiness: VoiceConfigurationReadiness {
+        Self.buildConfigurationReadiness(
+            speechConfigured: speechConfigurationConfirmed,
+            ttsConfigured: ttsConfigurationConfirmed,
+            speechAuthorization: speechAuthorization,
+            microphonePermissionStatus: microphonePermissionStatus,
+            recognizerAvailable: recognizerAvailable,
+            hasConfiguredVoice: configuredVoice != nil,
+            systemVoicesAvailable: !voices.isEmpty
+        )
+    }
+
+    /// Compatibility shorthand for call sites that only need the current
+    /// aggregate state.
+    var readiness: VoiceConfigurationReadiness { configurationReadiness }
+
     var speechPermission: VoicePermissionDiagnostic {
         Self.speechPermissionDiagnostic(speechAuthorization)
     }
@@ -151,6 +222,8 @@ final class VoiceCapabilityModel {
         guard language != value else { return }
         language = value
         defaults.set(value, forKey: "voiceLanguage")
+        defaults.removeObject(forKey: Self.speechConfigurationVersionKey)
+        speechConfigurationConfirmed = false
         refreshCapabilities()
     }
 
@@ -158,12 +231,16 @@ final class VoiceCapabilityModel {
         guard mode != value else { return }
         mode = value
         defaults.set(value.rawValue, forKey: "voiceRecognitionMode")
+        defaults.removeObject(forKey: Self.speechConfigurationVersionKey)
+        speechConfigurationConfirmed = false
     }
 
     func setVoice(_ identifier: String) {
         guard voiceIdentifier != identifier else { return }
         voiceIdentifier = identifier
         defaults.set(identifier, forKey: "systemVoiceIdentifier")
+        defaults.removeObject(forKey: Self.ttsConfigurationVersionKey)
+        ttsConfigurationConfirmed = false
     }
 
     func setSpeed(_ value: Double) {
@@ -177,6 +254,45 @@ final class VoiceCapabilityModel {
         guard autoPlay != value else { return }
         autoPlay = value
         defaults.set(value, forKey: "voiceAutoPlay")
+    }
+
+    /// Re-reads user choices and confirmation markers after returning from a
+    /// settings surface, then refreshes permission and hardware availability.
+    func reloadFromDefaults() {
+        language = defaults.string(forKey: "voiceLanguage") ?? Self.automaticLanguageIdentifier
+        mode = VoiceRecognitionMode(
+            rawValue: defaults.string(forKey: "voiceRecognitionMode") ?? VoiceRecognitionMode.onDevice.rawValue
+        ) ?? .onDevice
+        voiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier") ?? ""
+        speed = defaults.object(forKey: "voiceSpeed") == nil ? 1 : defaults.double(forKey: "voiceSpeed")
+        autoPlay = defaults.bool(forKey: "voiceAutoPlay")
+        speechConfigurationConfirmed = defaults.integer(forKey: Self.speechConfigurationVersionKey)
+            == Self.currentSpeechConfigurationVersion
+        ttsConfigurationConfirmed = defaults.integer(forKey: Self.ttsConfigurationVersionKey)
+            == Self.currentTTSConfigurationVersion
+        refreshCapabilities()
+    }
+
+    /// Persists default-valued choices as explicit user decisions. TTS is only
+    /// confirmed when a concrete system voice can be persisted.
+    @discardableResult
+    func saveConfiguration() -> VoiceConfigurationReadiness {
+        defaults.set(language, forKey: "voiceLanguage")
+        defaults.set(mode.rawValue, forKey: "voiceRecognitionMode")
+        defaults.set(Self.currentSpeechConfigurationVersion, forKey: Self.speechConfigurationVersionKey)
+        speechConfigurationConfirmed = true
+
+        if let voice = configuredVoice ?? selectedVoice {
+            voiceIdentifier = voice.id
+            defaults.set(voice.id, forKey: "systemVoiceIdentifier")
+            defaults.set(Self.currentTTSConfigurationVersion, forKey: Self.ttsConfigurationVersionKey)
+            ttsConfigurationConfirmed = true
+        } else {
+            defaults.removeObject(forKey: Self.ttsConfigurationVersionKey)
+            ttsConfigurationConfirmed = false
+        }
+
+        return configurationReadiness
     }
 
     func refreshCapabilities() {
@@ -224,21 +340,45 @@ final class VoiceCapabilityModel {
         errorMessage = nil
         defer { isPreviewing = false }
         do {
-            try await VoiceAudioSessionCoordinator.shared.activate(.playback)
-            let utterance = AVSpeechUtterance(string: text)
-            utterance.voice = selectedVoice.flatMap { AVSpeechSynthesisVoice(identifier: $0.id) }
-                ?? AVSpeechSynthesisVoice(language: effectiveLanguageIdentifier)
-            utterance.rate = Self.utteranceRate(from: speed)
-            let synthesizer = AVSpeechSynthesizer()
-            synthesizer.speak(utterance)
-            while synthesizer.isSpeaking {
-                try await Task.sleep(for: .milliseconds(50))
+            guard let voice = selectedVoice else {
+                errorMessage = "系统当前没有可用的播报声音"
+                return
             }
-            await VoiceAudioSessionCoordinator.shared.deactivate(.playback)
+            let request = VoiceSpeechRequest(
+                text: text,
+                voiceIdentifier: voice.id,
+                languageIdentifier: effectiveLanguageIdentifier,
+                speed: speed
+            )
+            let outcome = try await previewPlayback.play(request)
+            if outcome == .interrupted {
+                errorMessage = "试听被系统音频中断，请重试"
+            }
+        } catch is CancellationError {
+            return
         } catch {
-            await VoiceAudioSessionCoordinator.shared.deactivate(.playback)
             errorMessage = error.localizedDescription
         }
+    }
+
+    func stopPreview() async {
+        await previewPlayback.stop()
+        isPreviewing = false
+    }
+
+    nonisolated static func configurationSaveMessage(
+        for readiness: VoiceConfigurationReadiness
+    ) -> String {
+        if readiness.isReadyForFlow {
+            return "语音识别和系统播报声音已保存并可用。"
+        }
+        if let issue = readiness.issues.first {
+            return "语音配置已保存；\(issue.message)"
+        }
+        if readiness.speechConfigured {
+            return "语音识别已保存，但当前没有可用的系统播报声音。"
+        }
+        return "语音配置尚未完成。"
     }
 
     private var permissionMessage: String? {
@@ -396,5 +536,119 @@ final class VoiceCapabilityModel {
     nonisolated static func utteranceRate(from multiplier: Double) -> Float {
         let normalized = min(2, max(0.5, multiplier))
         return AVSpeechUtteranceDefaultSpeechRate * Float(normalized)
+    }
+
+    nonisolated static func buildConfigurationReadiness(
+        speechConfigured: Bool,
+        ttsConfigured: Bool,
+        speechAuthorization: SFSpeechRecognizerAuthorizationStatus,
+        microphonePermissionStatus: MicrophonePermissionState,
+        recognizerAvailable: Bool,
+        hasConfiguredVoice: Bool,
+        systemVoicesAvailable: Bool
+    ) -> VoiceConfigurationReadiness {
+        var issues: [VoiceConfigurationIssue] = []
+
+        if !speechConfigured {
+            issues.append(.init(
+                component: .speech,
+                kind: .unconfigured,
+                message: "请先保存语音识别语言和识别方式"
+            ))
+        }
+
+        switch speechAuthorization {
+        case .authorized:
+            break
+        case .notDetermined:
+            issues.append(.init(
+                component: .speech,
+                kind: .permissionUndetermined,
+                message: "需要授予语音识别权限"
+            ))
+        case .denied:
+            issues.append(.init(
+                component: .speech,
+                kind: .permissionDenied,
+                message: "语音识别权限已关闭，请前往系统设置开启"
+            ))
+        case .restricted:
+            issues.append(.init(
+                component: .speech,
+                kind: .restricted,
+                message: "当前设备限制了语音识别"
+            ))
+        @unknown default:
+            issues.append(.init(
+                component: .speech,
+                kind: .unavailable,
+                message: "无法确认语音识别权限状态"
+            ))
+        }
+
+        switch microphonePermissionStatus {
+        case .granted:
+            break
+        case .undetermined:
+            issues.append(.init(
+                component: .microphone,
+                kind: .permissionUndetermined,
+                message: "需要授予麦克风权限"
+            ))
+        case .denied:
+            issues.append(.init(
+                component: .microphone,
+                kind: .permissionDenied,
+                message: "麦克风权限已关闭，请前往系统设置开启"
+            ))
+        case .unknown:
+            issues.append(.init(
+                component: .microphone,
+                kind: .unavailable,
+                message: "无法确认麦克风权限状态"
+            ))
+        }
+
+        if !recognizerAvailable {
+            issues.append(.init(
+                component: .speech,
+                kind: .unavailable,
+                message: "当前语言的系统识别器暂不可用"
+            ))
+        }
+
+        if !ttsConfigured {
+            issues.append(.init(
+                component: .tts,
+                kind: .unconfigured,
+                message: "请先选择并保存系统播报声音"
+            ))
+        } else if !systemVoicesAvailable {
+            issues.append(.init(
+                component: .tts,
+                kind: .unavailable,
+                message: "系统当前没有可用的播报声音"
+            ))
+        } else if !hasConfiguredVoice {
+            issues.append(.init(
+                component: .tts,
+                kind: .unavailable,
+                message: "已配置的系统声音不可用，请重新选择"
+            ))
+        }
+
+        let speechReady = speechConfigured
+            && speechAuthorization == .authorized
+            && microphonePermissionStatus == .granted
+            && recognizerAvailable
+        let ttsReady = ttsConfigured && systemVoicesAvailable && hasConfiguredVoice
+
+        return VoiceConfigurationReadiness(
+            speechConfigured: speechConfigured,
+            ttsConfigured: ttsConfigured,
+            speechReady: speechReady,
+            ttsReady: ttsReady,
+            issues: issues
+        )
     }
 }

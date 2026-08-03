@@ -344,9 +344,11 @@ struct AIText: View {
         return .paragraph(trimmed)
     }
 
-    // MARK: inline parsing (**bold** + `code`)
+    // MARK: inline parsing (**bold** + `code` + links)
 
-    /// Parse inline `**bold**` and `` `inline code` `` spans within one line.
+    /// Parse inline `**bold**`, `` `inline code` `` and `[label](url)` spans.
+    /// SwiftUI routes attributed links through the scene's `openURL` action, so
+    /// Android-compatible `lingxi://open_terminal` links reach RootView too.
     static func parseInline(_ s: String, size: CGFloat) -> AttributedString {
         var result = AttributedString()
         let chars = Array(s)
@@ -358,6 +360,23 @@ struct AIText: View {
         }
 
         while idx < chars.count {
+            // Link: [label](url). A malformed or non-URL target remains text.
+            if chars[idx] == "[",
+               let labelEnd = nextIndex(of: "]", in: chars, from: idx + 1),
+               labelEnd + 1 < chars.count,
+               chars[labelEnd + 1] == "(",
+               let targetEnd = nextIndex(of: ")", in: chars, from: labelEnd + 2) {
+                let label = String(chars[(idx + 1)..<labelEnd])
+                let target = String(chars[(labelEnd + 2)..<targetEnd])
+                if !label.isEmpty, let url = URL(string: target) {
+                    flushPlain()
+                    var link = parseInline(label, size: size)
+                    link.link = url
+                    result += link
+                    idx = targetEnd + 1
+                    continue
+                }
+            }
             // Inline code: `…` (single backtick, no nesting).
             if chars[idx] == "`" {
                 if let close = nextIndex(of: "`", in: chars, from: idx + 1) {

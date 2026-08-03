@@ -35,8 +35,8 @@ final class AppState {
 
     // MARK: First-run profile + onboarding (the prototype's `lx_settings` blob +
     // `lx_setup_done` flag). Persisted so the SetupWizard runs once and the
-    // VoiceOrb / drawer / settings can read the chosen names.
-    /// The assistant's wake-word name (prototype `assistantName`, default 灵犀).
+    // inline voice panel / drawer / settings can read the chosen names.
+    /// The assistant's display and conversation name (default 灵犀).
     var assistantName: String { didSet { defaults.set(assistantName, forKey: "assistantName") } }
     /// How the assistant addresses the user (prototype `userName`).
     var userName: String { didSet { defaults.set(userName, forKey: "userName") } }

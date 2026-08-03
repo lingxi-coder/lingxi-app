@@ -35,6 +35,64 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 5))
     }
 
+    func testComposerTracksKeyboardAndKeepsVoiceModesSeparate() {
+        let input = app.textFields["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["composer.voice"].exists)
+        XCTAssertTrue(app.buttons["composer.flow"].exists)
+
+        input.tap()
+        input.typeText("keyboard draft")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+
+        XCTAssertTrue(app.scrollViews["conversation.message-list"].exists)
+        let dismissKeyboard = app.buttons["composer.keyboard.dismiss"]
+        XCTAssertTrue(dismissKeyboard.waitForExistence(timeout: 2), app.debugDescription)
+        dismissKeyboard.tap()
+        XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+        XCTAssertEqual(input.value as? String, "keyboard draft")
+    }
+
+    func testVoiceModesShareInlinePanelAndConfigurationDeepLink() {
+        app.terminate()
+        app.launchArguments += [
+            "-voiceSpeechConfigurationVersion", "0",
+            "-voiceTTSConfigurationVersion", "0",
+        ]
+        app.launch()
+
+        let messageList = app.scrollViews["conversation.message-list"]
+        let composerInput = app.textFields["composer.input"]
+        let flowButton = app.buttons["composer.flow"]
+        XCTAssertTrue(flowButton.waitForExistence(timeout: 8), app.debugDescription)
+        flowButton.tap()
+
+        let panel = app.descendants(matching: .any)["conversation.voice-panel"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["心流模式"].exists)
+        XCTAssertTrue(app.staticTexts["需要配置语音能力"].exists)
+        XCTAssertTrue(messageList.exists)
+        XCTAssertTrue(composerInput.exists)
+        XCTAssertLessThanOrEqual(messageList.frame.maxY, panel.frame.minY + 1)
+        XCTAssertLessThanOrEqual(panel.frame.maxY, composerInput.frame.minY + 1)
+        let panelScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        panelScreenshot.name = "iOS-内联心流配置面板"
+        panelScreenshot.lifetime = .keepAlways
+        add(panelScreenshot)
+
+        app.buttons["voice.close"].tap()
+        XCTAssertTrue(waitUntilGone(panel, timeout: 5))
+        app.buttons["composer.voice"].tap()
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["语音输入"].exists)
+
+        let configure = app.buttons["voice.configure"]
+        XCTAssertTrue(configure.exists)
+        configure.tap()
+        XCTAssertTrue(app.navigationBars["语音 TTS"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["settings.voice.save"].exists)
+    }
+
     func testCancelledRunClosesEveryRunningRow() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_CANCELLED_RUN"] = "1"
@@ -159,6 +217,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["打开灵犀"].exists)
         XCTAssertTrue(app.staticTexts["新建对话"].exists)
         XCTAssertTrue(app.staticTexts["向灵犀提问"].exists)
+        XCTAssertTrue(app.staticTexts["打开终端"].exists)
         let topScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         topScreenshot.name = "应用接入-顶部"
         topScreenshot.lifetime = .keepAlways
@@ -205,7 +264,7 @@ final class LingxiCodeUITests: XCTestCase {
         nameField.typeText("测试用户")
         primaryAction.tap()
 
-        let voiceTitle = app.staticTexts["选择语音识别方式"]
+        let voiceTitle = app.staticTexts["配置语音能力"]
         XCTAssertTrue(voiceTitle.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(voiceTitle.isHittable)
         XCTAssertTrue(primaryAction.isHittable)
@@ -232,6 +291,11 @@ final class LingxiCodeUITests: XCTestCase {
     private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let ready = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: element)
         return XCTWaiter.wait(for: [ready], timeout: timeout) == .completed
+    }
+
+    private func waitUntilGone(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
+        return XCTWaiter.wait(for: [gone], timeout: timeout) == .completed
     }
 
 }

@@ -17,6 +17,7 @@
 // stay usable). NO secrets here.
 
 import Foundation
+import Observation
 import SwiftUI
 
 #if canImport(UIKit)
@@ -97,6 +98,7 @@ protocol VoiceTranscriptionSession: AnyObject {
 /// opening the tap. This helper owns the UI-facing press lifecycle and maps the
 /// generated `SpeechFfiError` onto a stable result.
 @MainActor
+@Observable
 final class VoiceCapture {
     typealias Completion = @MainActor (VoiceCaptureResult) -> Void
 

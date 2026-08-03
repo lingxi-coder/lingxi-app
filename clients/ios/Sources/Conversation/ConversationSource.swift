@@ -80,6 +80,32 @@ enum TurnNotice: Equatable {
     }
 }
 
+/// Identifies one client-owned turn independently of the engine session UUID.
+/// The monotonically increasing session epoch prevents a late completion from
+/// an abandoned session being mistaken for a turn in the newly-visible session.
+struct ConversationTurnToken: Equatable, Hashable, Sendable {
+    let clientTurnId: UInt64
+    let sessionEpoch: UInt64
+}
+
+/// A terminal result published for consumers that need to react to one exact
+/// turn (for example Flow voice playback). Only `.completed` is a successful
+/// assistant response; all other outcomes must be treated as non-speakable.
+struct ConversationTurnCompletion: Equatable, Sendable {
+    enum Outcome: Equatable, Sendable {
+        case completed
+        case maxTurns
+        case cancelled
+        case failed
+    }
+
+    let token: ConversationTurnToken
+    let outcome: Outcome
+    /// The final assistant text for this turn, trimmed of surrounding whitespace.
+    /// Empty when the turn produced no assistant message or did not complete.
+    let finalAssistantText: String
+}
+
 #if canImport(engine_mobileFFI)
 
     /// One engine-parked permission request the UI must answer (SHIP-BLOCKER #3).
@@ -146,6 +172,11 @@ final class ConversationModel: ObservableObject {
     /// matching turn released its owner slot. The composer remains editable but
     /// cannot submit another turn during this interval.
     @Published var isCancelling: Bool = false
+    /// The latest terminal turn result. Consumers must correlate its token with
+    /// the token returned by `ConversationSource.send`; observing the transcript's
+    /// last AI message is insufficient because session switches and late events
+    /// can otherwise replay stale content.
+    @Published var turnCompletion: ConversationTurnCompletion? = nil
     /// True when the session is brand-new and empty (drives the empty state).
     @Published var isNew: Bool = false
     /// The currently selected model chip.
@@ -240,7 +271,8 @@ protocol ConversationSource: AnyObject {
     /// produces the assistant reply (canned for the mock, streamed for the engine).
     /// MUST be a no-op while a turn is in flight (`model.streaming`) so rapid taps
     /// can't start an overlapping turn (PR-4 item 1).
-    func send(_ text: String)
+    @discardableResult
+    func send(_ text: String) -> ConversationTurnToken?
     /// Cancel the in-flight turn (PR-4 item 2): the engine submits `.cancel(...)`
     /// and keeps ownership until the engine confirms safe completion. A no-op
     /// when nothing is streaming.
@@ -450,6 +482,9 @@ final class MockConversationSource: ConversationSource {
     /// Bumped on cancel / new-chat so an in-flight canned reply timer no-ops when
     /// it fires (the mock's analog of the engine's cancel token).
     private var turnToken = 0
+    private var nextTurnId: UInt64 = 1
+    private var sessionEpoch: UInt64 = 1
+    private var activeTurnToken: ConversationTurnToken?
 
     #if DEBUG
         static func uiTestFixture(cancelledRun: Bool = false) -> MockConversationSource {
@@ -519,34 +554,55 @@ final class MockConversationSource: ConversationSource {
 
     func startNewConversation() {
         turnToken &+= 1
+        sessionEpoch &+= 1
+        activeTurnToken = nil
         model.messages = []
         model.items = []
         model.messageDetails = [:]
         model.streaming = false
+        model.turnCompletion = nil
         model.isNew = true
         model.statusLine = nil
         model.error = nil
         model.notice = nil
     }
 
-    func send(_ text: String) {
+    @discardableResult
+    func send(_ text: String) -> ConversationTurnToken? {
         // PR-4 item 1: gate overlapping turns on rapid taps.
-        guard !model.streaming else { return }
+        guard !model.streaming else { return nil }
         model.isNew = false
         model.notice = nil
+        model.turnCompletion = nil
         let message = Message(role: .user, text: text)
         model.messages.append(message)
         model.items.append(.message(message))
         model.streaming = true
         turnToken &+= 1
-        let token = turnToken
+        let generation = turnToken
+        let token = ConversationTurnToken(
+            clientTurnId: nextTurnId,
+            sessionEpoch: sessionEpoch
+        )
+        nextTurnId &+= 1
+        activeTurnToken = token
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
-            guard let self, self.turnToken == token else { return }
+            guard let self,
+                  self.turnToken == generation,
+                  self.activeTurnToken == token
+            else { return }
             let reply = Message(role: .ai, tag: "思考了 8 秒", text: "已记入。继续追问。")
             self.model.messages.append(reply)
             self.model.items.append(.message(reply))
             self.model.streaming = false
+            self.model.turnCompletion = ConversationTurnCompletion(
+                token: token,
+                outcome: .completed,
+                finalAssistantText: reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            self.activeTurnToken = nil
         }
+        return token
     }
 
     func cancel() {
@@ -555,6 +611,14 @@ final class MockConversationSource: ConversationSource {
         turnToken &+= 1
         model.streaming = false
         model.notice = .cancelled
+        if let activeTurnToken {
+            model.turnCompletion = ConversationTurnCompletion(
+                token: activeTurnToken,
+                outcome: .cancelled,
+                finalAssistantText: ""
+            )
+        }
+        activeTurnToken = nil
     }
 
     func dismissError() { model.error = nil }
@@ -574,10 +638,13 @@ final class MockConversationSource: ConversationSource {
     /// session would append into the NEW one (the wrong-session bug).
     func openSession(_ session: SessionRef) {
         turnToken &+= 1
+        sessionEpoch &+= 1
+        activeTurnToken = nil
         model.messages = MockData.messagesDefault
         model.items = MockData.messagesDefault.map(ConversationRenderItem.message)
         model.messageDetails = [:]
         model.streaming = false
+        model.turnCompletion = nil
         model.isNew = false
         model.statusLine = nil
         model.error = nil
@@ -590,6 +657,14 @@ final class MockConversationSource: ConversationSource {
         guard model.streaming else { return }
         turnToken &+= 1
         model.streaming = false
+        if let activeTurnToken {
+            model.turnCompletion = ConversationTurnCompletion(
+                token: activeTurnToken,
+                outcome: .cancelled,
+                finalAssistantText: ""
+            )
+        }
+        activeTurnToken = nil
     }
 }
 
@@ -975,6 +1050,7 @@ final class MockConversationSource: ConversationSource {
             model.messageDetails = [:]
             model.streaming = false
             model.isCancelling = false
+            model.turnCompletion = nil
             model.isNew = isNew
             model.statusLine = nil
             model.error = nil
@@ -999,6 +1075,48 @@ final class MockConversationSource: ConversationSource {
             currentTurnId = nil
             activeTurnEpoch = keepEpoch ? activeTurnEpoch : nil
             activeRunItemIndex = nil
+        }
+
+        private var activeConversationTurnToken: ConversationTurnToken? {
+            guard let currentTurnId,
+                  let activeTurnEpoch,
+                  activeTurnEpoch == sessionEpoch
+            else { return nil }
+            return ConversationTurnToken(
+                clientTurnId: currentTurnId,
+                sessionEpoch: activeTurnEpoch
+            )
+        }
+
+        private func finalAssistantTextForActiveTurn() -> String {
+            guard let streamingIndex,
+                  model.messages.indices.contains(streamingIndex)
+            else { return "" }
+            let message = model.messages[streamingIndex]
+            guard case .ai = message.role else { return "" }
+            if let detail = model.messageDetails[message.id] {
+                return detail.blocks.compactMap { block -> String? in
+                    guard case let .text(text) = block else { return nil }
+                    return text
+                }
+                .joined(separator: "\n\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return message.text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private func publishActiveTurnCompletion(
+            _ outcome: ConversationTurnCompletion.Outcome
+        ) {
+            guard let token = activeConversationTurnToken else { return }
+            model.turnCompletion = ConversationTurnCompletion(
+                token: token,
+                outcome: outcome,
+                finalAssistantText: outcome == .completed
+                    ? finalAssistantTextForActiveTurn()
+                    : ""
+            )
         }
 
         private func appendMessage(_ message: Message, detail: ConversationMessageDetail? = nil) {
@@ -1226,6 +1344,7 @@ final class MockConversationSource: ConversationSource {
                 model.statusLine = nil
                 model.notice = .cancelled
                 finishActiveRun(.cancelled)
+                publishActiveTurnCompletion(.cancelled)
                 clearTurnPointers(keepEpoch: false)
             } else if model.statusLine == "正在停止…" {
                 model.statusLine = nil
@@ -1247,15 +1366,20 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        private func startPrompt(_ prompt: TurnPrompt) {
+        private func startPrompt(_ prompt: TurnPrompt) -> ConversationTurnToken {
             model.notice = nil
             model.streaming = true
             model.isCancelling = false
+            model.turnCompletion = nil
             model.statusLine = nil
             streamingIndex = nil
             streamingItemIndex = nil
             currentTurnId = prompt.turnId
             activeTurnEpoch = sessionEpoch
+            let token = ConversationTurnToken(
+                clientTurnId: prompt.turnId,
+                sessionEpoch: sessionEpoch
+            )
             Self.turnLog.debug(
                 "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
             )
@@ -1269,9 +1393,11 @@ final class MockConversationSource: ConversationSource {
                         images: [],
                         turnId: prompt.turnId))
                 } catch {
+                    guard self.activeConversationTurnToken == token else { return }
                     self.fail(.host, "\(error)")
                 }
             }
+            return token
         }
 
         private func requestSessionCatalogRefreshAfterSettledTurn() {
@@ -1285,7 +1411,8 @@ final class MockConversationSource: ConversationSource {
             model.sessionRefreshRevision &+= 1
         }
 
-        func send(_ text: String) {
+        @discardableResult
+        func send(_ text: String) -> ConversationTurnToken? {
             // PR-4 item 1: a turn is already in flight — ignore the tap so we
             // never start an overlapping turn (which would corrupt appendDelta's
             // single `streamingIndex`). The Stop button is how you interrupt.
@@ -1293,7 +1420,7 @@ final class MockConversationSource: ConversationSource {
                 !model.streaming,
                 !model.isCancelling,
                 !model.sessionTransitionPending
-            else { return }
+            else { return nil }
 
             model.isNew = false
             model.notice = nil
@@ -1301,7 +1428,7 @@ final class MockConversationSource: ConversationSource {
 
             let turnId = nextTurnId
             nextTurnId &+= 1
-            startPrompt(TurnPrompt(text: text, turnId: turnId))
+            return startPrompt(TurnPrompt(text: text, turnId: turnId))
         }
 
         func cancelAndWait() async throws {
@@ -1740,24 +1867,27 @@ final class MockConversationSource: ConversationSource {
                 // `endTurn` just stops streaming; `maxTurns` / `cancelled` surface
                 // a distinct notice so the user knows the turn was interrupted.
                 model.streaming = false
-                streamingIndex = nil
-                streamingItemIndex = nil
                 if !model.isCancelling { model.statusLine = nil }
                 switch outcome {
                 case .endTurn:
                     model.notice = nil
                     finishActiveRun(.completed)
+                    publishActiveTurnCompletion(.completed)
                 case .maxTurns:
                     model.notice = .maxTurns
                     finishActiveRun(.maxTurns)
+                    publishActiveTurnCompletion(.maxTurns)
                 case .cancelled:
                     model.notice = .cancelled
                     finishActiveRun(.cancelled)
+                    publishActiveTurnCompletion(.cancelled)
                 @unknown default:
                     // `#[non_exhaustive]` — a future outcome falls back to a clean
-                    // end rather than crashing.
+                    // visual end rather than crashing, but remains non-speakable
+                    // until the client explicitly understands its semantics.
                     model.notice = nil
                     finishActiveRun(.completed)
+                    publishActiveTurnCompletion(.failed)
                 }
                 clearTurnPointers(keepEpoch: false)
                 requestSessionCatalogRefreshAfterSettledTurn()
@@ -1856,6 +1986,7 @@ final class MockConversationSource: ConversationSource {
                 )
                 model.isNew = messages.isEmpty
                 model.streaming = false
+                model.turnCompletion = nil
                 model.statusLine = nil
                 model.notice = nil
                 // A migration-safe empty resume may have just created its JSONL
@@ -1869,6 +2000,7 @@ final class MockConversationSource: ConversationSource {
                 model.activeSessionId = ""
                 setPendingSessionTransition(nil)
                 invalidateTurnContext()
+                model.turnCompletion = nil
 
             case let .mcpServers(servers):
                 // Out-of-band MCP listing → the UI `MCPServer` model. The DTO is
@@ -1906,6 +2038,7 @@ final class MockConversationSource: ConversationSource {
         func beginTurnForTesting(turnId: UInt64 = 1, sessionId: String = "test-session") {
             model.activeSessionId = sessionId
             model.streaming = true
+            model.turnCompletion = nil
             currentTurnId = turnId
             activeTurnEpoch = sessionEpoch
             nextTurnId = max(nextTurnId, turnId &+ 1)
@@ -2058,6 +2191,7 @@ final class MockConversationSource: ConversationSource {
             model.error = ConversationError(kind: kind, message: message)
             model.streaming = false
             model.statusLine = nil
+            publishActiveTurnCompletion(.failed)
             // A terminal error tears down the turn — its parked permission (if any)
             // can never be answered now, so drop the prompt rather than leave it
             // stranded.

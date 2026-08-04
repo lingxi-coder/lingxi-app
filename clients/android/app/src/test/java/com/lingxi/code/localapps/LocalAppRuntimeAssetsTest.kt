@@ -201,30 +201,14 @@ class LocalAppRuntimeAssetsTest {
      */
     @Test
     fun `the staged-late notice states a condition instead of diagnosing the failure`() {
-        val release = CountDownLatch(1)
-        assertNull(
-            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
-                assertTrue(release.await(10, TimeUnit.SECONDS))
-                STAGED_ROOT
-            },
-        )
-        release.countDown()
-
-        // The engine build after the timeout DOES get the root: this is the
-        // process where local-app generation works and the flag is still set.
-        assertEquals(
-            STAGED_ROOT,
-            LocalAppRuntimeAssets.prepareWithin(10_000) { error("must not re-stage") },
-        )
+        stageAfterANullHandout()
         assertEquals(
             LocalAppRuntimeStaging.StagedAfterNullHandout,
             LocalAppRuntimeAssets.stagingStatus(),
         )
 
-        // An unrelated failure — an LLM error, a validation failure — is what
-        // this notice gets appended to in that process.
-        val annotated = LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true)!!
-        assertTrue("the engine's own message must survive", annotated.startsWith(LLM_DETAIL))
+        val annotated = LocalAppRuntimeAssets.generationDetail(ENGINE_DETAIL, failed = true)!!
+        assertTrue("the engine's own message must survive", annotated.startsWith(ENGINE_DETAIL))
         assertFalse(
             "the notice must not assert that the live engine predates the runtime",
             annotated.contains("本次启动的引擎是在它就绪之前建立的"),
@@ -240,6 +224,97 @@ class LocalAppRuntimeAssetsTest {
         )
         assertFalse(
             LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Unavailable)!!.contains("如果"),
+        )
+    }
+
+    /**
+     * [LocalAppRuntimeStaging.StagedAfterNullHandout] latches for the whole
+     * process and cannot be cleared (see the test above), so keying the notice
+     * on the STATE alone pinned a restart instruction to every later failure in
+     * a process where the runtime is staged and apps generate normally — an LLM
+     * parse error, a validation failure, anything. Whether staging is implicated
+     * has to be read off THAT failure, and the only evidence available is the
+     * engine's own text.
+     */
+    @Test
+    fun `a staged-late process annotates only the failure that names the runtime`() {
+        stageAfterANullHandout()
+        assertEquals(
+            LocalAppRuntimeStaging.StagedAfterNullHandout,
+            LocalAppRuntimeAssets.stagingStatus(),
+        )
+
+        // Untouched — not merely un-annotated: no notice and no blank-line join.
+        assertEquals(LLM_DETAIL, LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true))
+        // A failure the engine did not describe is not evidence against the
+        // runtime either, and must not be blamed on it.
+        assertNull(LocalAppRuntimeAssets.generationDetail(null, failed = true))
+
+        // The failure this notice exists for still carries it.
+        val annotated = LocalAppRuntimeAssets.generationDetail(ENGINE_DETAIL, failed = true)!!
+        assertTrue("the engine's own message must survive", annotated.startsWith(ENGINE_DETAIL))
+        assertTrue(
+            "a runtime failure must still be explained",
+            annotated.contains(
+                LocalAppRuntimeAssets.noticeFor(
+                    LocalAppRuntimeStaging.StagedAfterNullHandout,
+                )!!,
+            ),
+        )
+    }
+
+    /**
+     * The gate above is scoped to the one uncertain state, and must not leak
+     * into the two certain ones. While [LocalAppRuntimeStaging.Staging] or
+     * [LocalAppRuntimeStaging.Unavailable] is readable, no root is staged — and
+     * a staged root only ever goes absent -> present — so it was absent when
+     * this process's engine was built too. Whatever the proximate cause of a
+     * given failure, the retry the user would otherwise reach for is guaranteed
+     * to die at Building, so both states keep annotating everything.
+     */
+    @Test
+    fun `a process with no staged root annotates a failure that never names the runtime`() {
+        assertNull(LocalAppRuntimeAssets.prepareWithin(10_000) { null })
+        assertEquals(LocalAppRuntimeStaging.Unavailable, LocalAppRuntimeAssets.stagingStatus())
+        assertTrue(
+            "an unavailable runtime must still explain an unrelated failure",
+            LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true)!!
+                .contains(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Unavailable)!!),
+        )
+
+        val release = CountDownLatch(1)
+        assertNull(
+            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
+                assertTrue(release.await(10, TimeUnit.SECONDS))
+                STAGED_ROOT
+            },
+        )
+        assertEquals(LocalAppRuntimeStaging.Staging, LocalAppRuntimeAssets.stagingStatus())
+        assertTrue(
+            "a still-staging runtime must still explain an unrelated failure",
+            LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true)!!
+                .contains(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Staging)!!),
+        )
+        release.countDown()
+    }
+
+    /**
+     * The process this file exists for: a caller times out and takes `null`, the
+     * run finishes anyway, and the NEXT engine build gets the root — so local
+     * apps may be perfectly healthy while the flag stays latched.
+     */
+    private fun stageAfterANullHandout() {
+        val release = CountDownLatch(1)
+        assertNull(
+            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
+                assertTrue(release.await(10, TimeUnit.SECONDS))
+                STAGED_ROOT
+            },
+        )
+        release.countDown()
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(10_000) { error("must not re-stage") },
         )
     }
 
@@ -260,8 +335,21 @@ class LocalAppRuntimeAssetsTest {
         const val BUDGET_MS = 150L
         const val STAGE_MS = 2_000L
         const val STAGED_ROOT = "/data/user/0/com.lingxi.code/files/local-app-runtime"
+        /**
+         * A real failed-job `detail`, not a paraphrase — the notice is now gated
+         * on this text, so a fixture that only resembles it would prove nothing.
+         *
+         * The clause is `LocalAppsHostBroker::fixed_runtime_mount`
+         * (engine-mobile/src/local_apps_host.rs:241); the prefix is
+         * `AppError::NotYetAvailable`'s `#[error("not yet available: {0}")]`
+         * (local-apps/src/error.rs:64), which is what the fixed Next build's
+         * `.map_err(AppError::NotYetAvailable)` produces and what `fail_job`
+         * writes into `last_error` verbatim. Preview start reaches the same
+         * clause under `io error: ` instead; both are covered by keying on the
+         * clause rather than on either prefix.
+         */
         const val ENGINE_DETAIL =
-            "not_yet_available: verified local-app Node runtime is unavailable; " +
+            "not yet available: verified local-app Node runtime is unavailable; " +
                 "stage local-app-runtime first"
         const val LLM_DETAIL = "生成失败：模型返回的方案无法解析，请重试。"
 

@@ -71,25 +71,50 @@ class LocalAppsViewModel(
      * slot ([draftEditInFlight]) and the post-conflict details refresh
      * ([draftConflictRefresh]). Far longer than a healthy round trip, so it
      * normally only fires on a failure the event stream could not attribute —
-     * but it is a heuristic, not a guarantee: a slow engine or a wall-clock step
-     * can trip it early. That is tolerable only because neither gate LOSES
-     * anything when it ages out: the in-flight edit is RE-SENT rather than
-     * dropped, and the refresh gate holds no edit at all. Settable so a test can
-     * reach the path without waiting out the production budget.
+     * but it is a heuristic, not a guarantee: a slow engine or a FORWARD
+     * wall-clock step can trip it early. (A backward step cannot: it re-stamps,
+     * which delays the deadline rather than pulling it in.) Tripping early is
+     * tolerable only because neither gate LOSES anything when it ages out: the
+     * in-flight edit is RE-SENT rather than dropped, and the refresh gate holds
+     * no edit at all.
+     * Settable so a test can reach the path without waiting out the production
+     * budget.
      */
     internal var inFlightEditBudgetMs: Long = 15_000
 
     /**
+     * The wall clock the two budget comparisons in [pumpDraftEditQueue] read,
+     * and the source of the re-stamp each one writes when it sees a negative
+     * elapsed. The two INITIAL `sentAtMs` stamps are taken by the data classes
+     * below, so replacing this seam moves "now" — and, through the re-stamp,
+     * only stamps this seam itself wrote.
+     *
+     * It exists because a BACKWARD step is the one direction a `now - sentAtMs
+     * >= budget` gate cannot survive on its own: the difference goes negative,
+     * satisfies no lower bound, and holds the gate until the clock catches up.
+     * Both gates are process-global, so that stalls every app, not just the one
+     * that owns the in-flight edit. iOS reads a monotonic clock and has no such
+     * failure mode; this reads [System.currentTimeMillis] because a JVM unit
+     * test cannot call `SystemClock`, so the sign is checked explicitly instead.
+     */
+    internal var currentTimeMs: () -> Long = System::currentTimeMillis
+
+    /**
      * The app whose authoritative snapshot a design conflict is waiting on, with
      * the wall clock at which it was asked for. Timestamped for the same reason
-     * [draftEditInFlight] is, and more urgently: [reduceDetails] is the only
-     * ANSWER that clears this, and it runs only for a *successful*
-     * `GetAppDetails` for that app. A refresh answered with `AppOperationFailed`
-     * (the app was deleted from another surface, the store is corrupt) or whose
-     * answer is dropped (an engine rebind or project switch cancels the event
-     * collector) would otherwise hold the gate for the life of the ViewModel —
-     * and this gate, unlike the in-flight slot, blocks the queue for EVERY app,
-     * not just this one.
+     * [draftEditInFlight] is, and more urgently: the only ANSWER that clears
+     * this is [reduceDetails], and it runs only for a *successful*
+     * `GetAppDetails` for that app.
+     *
+     * Four sites clear the field in all, and the other three exist precisely
+     * because no answer is coming: the `failedConflictRefresh` arm in [reduce]
+     * (a refresh answered with `AppOperationFailed` — the app was deleted from
+     * another surface, the store is corrupt), the budget in
+     * [pumpDraftEditQueue], and the deleted-app prune in [reduceApps]. Without
+     * them, a refresh whose answer is simply dropped (an engine rebind or
+     * project switch cancels the event collector, so no event arrives at all)
+     * would hold the gate for the life of the ViewModel — and this gate, unlike
+     * the in-flight slot, blocks the queue for EVERY app, not just this one.
      */
     private var draftConflictRefresh: PendingConflictRefresh? = null
     private var draftEditSequence = 0L
@@ -306,17 +331,28 @@ class LocalAppsViewModel(
         // queue free of a background coroutine whose delay a virtual test clock would
         // fast-forward.
         draftEditInFlight?.let { stale ->
-            if (System.currentTimeMillis() - stale.sentAtMs >= inFlightEditBudgetMs) {
+            val now = currentTimeMs()
+            val elapsed = now - stale.sentAtMs
+            if (elapsed < 0) {
+                // A backward wall-clock step, not a stall: `now` moved and the patch
+                // did not, so it is exactly as young as it was a moment ago. RE-STAMP
+                // and keep holding the slot. That restarts the budget from the
+                // stepped clock — a patch that really is stranded still ages out one
+                // budget from here, instead of waiting for the clock to climb back —
+                // while a healthy in-flight patch costs nothing. Releasing instead
+                // would resend on EVERY backward tick, including the sub-second NTP
+                // correction that is by far the common case (see [currentTimeMs]).
+                draftEditInFlight = stale.copy(sentAtMs = now)
+            } else if (elapsed >= inFlightEditBudgetMs) {
                 // Re-queue rather than discard, guarded like the conflict arm so a
                 // newer local value for the field wins. Discarding would lose the
                 // answer while `designer.values` kept the confirm gate satisfied, so a
                 // confirm could ship a spec the engine never received. Resending is
                 // safe and is what makes the wall clock acceptable here: a set-op is
                 // idempotent if the ack was merely lost, and a patch sent against a
-                // moved revision returns AppDesignConflict, which rebases. (iOS uses a
-                // monotonic clock; this uses the wall clock because a JVM unit test
-                // cannot call SystemClock. A clock step therefore only shifts WHEN the
-                // resend happens, never whether the edit survives.)
+                // moved revision returns AppDesignConflict, which rebases. A forward
+                // clock step therefore only shifts WHEN the resend happens, never
+                // whether the edit survives.
                 if (draftEditQueue.none { it.appId == stale.edit.appId && it.fieldId == stale.edit.fieldId }) {
                     draftEditQueue.add(0, stale.edit.copy(ready = true))
                 }
@@ -331,9 +367,17 @@ class LocalAppsViewModel(
         // worst case of resuming against the locally known revision is one more
         // AppDesignConflict, which re-queues and re-asks. That is the same state
         // we are in now, not a lost answer, which is why this may be dropped on
-        // a wall clock while the in-flight edit may only be re-sent.
+        // a wall clock while the in-flight edit may only be re-sent. A backward
+        // step (`elapsed < 0`) is handled the same way as at the gate above: the
+        // stamp is moved to the stepped clock so the budget runs again from now,
+        // which keeps a stepped clock from holding every app's queue until it
+        // catches up, without giving up a refresh that may still be answered.
         draftConflictRefresh?.let { pending ->
-            if (System.currentTimeMillis() - pending.sentAtMs >= inFlightEditBudgetMs) {
+            val now = currentTimeMs()
+            val elapsed = now - pending.sentAtMs
+            if (elapsed < 0) {
+                draftConflictRefresh = pending.copy(sentAtMs = now)
+            } else if (elapsed >= inFlightEditBudgetMs) {
                 releaseConflictRefreshUnanswered()
             }
         }
@@ -378,12 +422,19 @@ class LocalAppsViewModel(
      *
      * `designer.conflictRevision` is the sole input to
      * "设计已在其他位置更新到版本 N，已重新加载，请检查后继续。"
-     * (`LocalAppsScreen`), and 已重新加载 is a claim only [reduceDetails] can make
-     * true — it is the one place that replaces `values` with the engine's. Both
-     * callers below release the gate precisely because that snapshot is not
-     * coming, so leaving the field set would assert a reload that provably did
-     * not happen, over the pre-conflict local values, and invite the user to
-     * keep editing on top of them.
+     * (`LocalAppsScreen`), and 已重新加载 is a claim only an engine snapshot can
+     * make true. Exactly two reducers replace `values` with the engine's stored
+     * draft — [reduceDetails] (a successful `GetAppDetails`) and
+     * [reduceDraftChanged] (the full field map an `AppDesignDraftChanged`
+     * carries) — and both clear `conflictRevision` in the same `copy`, so the
+     * banner can never outlive a real reload. ([reduceDesignerRequested] builds
+     * a fresh designer from template defaults, whose `conflictRevision` starts
+     * null.) Both callers of this function — the budget in [pumpDraftEditQueue]
+     * and the `failedConflictRefresh` arm in [reduce] — release the gate
+     * precisely because neither of those snapshots is coming, so leaving the
+     * field set would assert a reload that provably did not happen, over the
+     * pre-conflict local values, and invite the user to keep editing on top of
+     * them.
      */
     private fun releaseConflictRefreshUnanswered() {
         val appId = draftConflictRefresh?.appId ?: return
@@ -691,7 +742,18 @@ class LocalAppsViewModel(
                 )
             }
             is ClientEvent.AppOperationFailed -> {
+                // `event.appId` is `Option<String>` on the wire and skipped when
+                // absent, so a failure addressing no app is a shape the protocol
+                // permits — and `null == null` would match a gate that is not
+                // even raised, silently swallowing that failure's banner. Guard
+                // the null explicitly, exactly as `failedConflictRefresh` below
+                // already does. No engine path emits `app_id: None` with this
+                // code today (the only two `None` handlers are `handle_list_apps`
+                // and `handle_create_app`, neither of which can produce
+                // `RevisionConflict`), so this is a guard, not a bug that was
+                // reaching users.
                 val recoveringConflict = event.code == AppErrorCodeDto.REVISION_CONFLICT &&
+                    event.appId != null &&
                     event.appId == draftConflictRefresh?.appId
                 // The details refresh a conflict is waiting on can fail outright —
                 // the app was deleted from another surface, or its store is
@@ -881,8 +943,10 @@ class LocalAppsViewModel(
                     // The gate this snapshot answers goes down unconditionally
                     // below, so the banner it raised must go down with it —
                     // `conflictRevision` is the sole input to
-                    // "…已重新加载，请检查后继续。" and only [reduceDetails] can make
-                    // 已重新加载 true. Without a template the `values` below cannot
+                    // "…已重新加载，请检查后继续。", and the only two reducers that can
+                    // make 已重新加载 true are this one and [reduceDraftChanged],
+                    // which clears the banner in the same `copy` that replaces
+                    // `values`. Without a template the `values` below cannot
                     // be replaced with the engine's, so leaving the banner up
                     // would assert a reload that provably did not happen, over
                     // the pre-conflict local values — exactly the state
@@ -958,9 +1022,12 @@ class LocalAppsViewModel(
         // the life of the ViewModel.
         //
         // `AppsChanged` is authoritative enough to prune on: the protocol defines
-        // it as the FULL record set (`ClientEvent::AppsChanged.apps`), and every
-        // emission goes through `AppService::announce_apps`, which snapshots
-        // every record under the emission-order lock. There is no partial
+        // it as the FULL record set (`ClientEvent::AppsChanged.apps`), and all
+        // three emitters build that set the same way — `AppService::announce_apps`
+        // (the `ListApps` reply and every post-mutation snapshot),
+        // `AppService::create_app`, and `AppService::delete_app`, each
+        // snapshotting every record under the emission-order lock it took before
+        // mutating. There is no partial
         // snapshot to mistake for a deletion — this reducer already replaces
         // `apps` wholesale and filters details/generation/previews on the same
         // set, so pruning here is no more trusting than what it already does.

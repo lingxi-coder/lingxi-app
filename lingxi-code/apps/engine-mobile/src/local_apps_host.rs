@@ -2259,7 +2259,9 @@ mod tests {
     use client_adapter::{ClientEventSink, MockSink};
     use futures_util::stream;
     use local_apps::test_support::FixedClock;
-    use local_apps::{AppTemplateKind, NoopAppEventObserver, NoopContinuationSink};
+    use local_apps::{
+        storage, AppState, AppTemplateKind, NoopAppEventObserver, NoopContinuationSink,
+    };
     use serde_json::json;
     use std::fs;
     use std::future::Future;
@@ -2587,7 +2589,17 @@ mod tests {
         full_runtime: bool,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     ) -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>) {
-        let root = TempDir::new().expect("tempdir");
+        create_broker_over(TempDir::new().expect("tempdir"), full_runtime, mobile_linux).await
+    }
+
+    /// [`create_broker`] over a root somebody else prepared — the seam
+    /// [`seed_app_fixture`] needs, because a seeded app has to be on disk
+    /// BEFORE the service loads it.
+    async fn create_broker_over(
+        root: TempDir,
+        full_runtime: bool,
+        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    ) -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>) {
         let service = test_service(&root).await;
         let runtime_root = full_runtime.then(|| create_runtime_root(&root));
         let broker = LocalAppsHostBroker::new(
@@ -2613,6 +2625,50 @@ mod tests {
         let full_build = root.path().join(layout.build_rel(true));
         fs::create_dir_all(&full_build).expect("create full build");
         record.id
+    }
+
+    /// `create_app_fixture` with a CHOSEN id, for the one test whose exercised
+    /// PORT is derived from the app id.
+    ///
+    /// `AppService::create_app` mints a random id by design and offers no way
+    /// to supply one, so an app created through it makes
+    /// `derived_window_slot` land somewhere different on every run: six
+    /// consecutive runs of the test below probed 26208, 20613, 26371, 24337,
+    /// 30061 and 27589.  Every one passed, which is the problem — the run that
+    /// eventually does not cannot be repeated.
+    ///
+    /// The app documents come from `save_app_files`, the same `storage` writer
+    /// `create_app` commits, and the service then LOADS them, so the RECORD
+    /// the start path below sees is the one a process restart would hand it.
+    /// That is the whole of the fidelity claim, and two things sit outside it.
+    ///
+    /// The index goes through `save_index`, which REPLACES `apps/index.json`
+    /// wholesale, not `create_app`'s locked, merging `save_index_preserving` —
+    /// hence two constraints: run this BEFORE the service loads the root, and
+    /// only once per root.
+    ///
+    /// And `create_app` also writes `manifest.json` and `permissions.json`
+    /// (`save_manifest` / `save_permissions`, neither of which lives in
+    /// `storage`) while this writes neither.  `load_permissions` returns the
+    /// deny-by-default state when its file is absent, but `load_manifest`
+    /// returns `NotFound`, so a seeded app cannot stand in for a created one on
+    /// a manifest-reading path — the bridge and capability handlers above.
+    fn seed_app_fixture(root: &TempDir, app_id: &str, name: &str) {
+        let app = AppState::create(
+            app_id.to_string(),
+            name.to_string(),
+            AppTemplateKind::Dashboard,
+            None,
+            1,
+        );
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
+        layout.initialize().expect("initialize the seeded layout");
+        storage::save_app_files(root.path(), &app).expect("persist the seeded app documents");
+        storage::save_index(root.path(), std::slice::from_ref(&app.record))
+            .expect("persist the seeded index");
+        let static_out = root.path().join(layout.build_rel(false)).join("out");
+        fs::create_dir_all(&static_out).expect("create static out");
+        fs::write(static_out.join("index.html"), "<html>ok</html>").expect("write index.html");
     }
 
     async fn wait_until<F, Fut>(label: &str, timeout_duration: Duration, mut condition: F)
@@ -2950,12 +3006,34 @@ mod tests {
     /// COLLECT the sibling pins, or the exclusion above is never reached by a
     /// real start.  The sibling is parked stopped, so its permanent port probes
     /// free at bind time.
+    ///
+    /// The starter is SEEDED with a fixed id rather than created with a minted
+    /// one: the contested port is derived from the id, so a minted id made this
+    /// test bind a different port on every run (see [`seed_app_fixture`]).  The
+    /// id is a well-formed minted-shape id whose slot no other test in this
+    /// file derives, so the two ports this test touches — 23356 and whatever
+    /// the skip lands on next — collide with nothing else in the binary.  The
+    /// sibling keeps its minted id: it never starts, and its pin is written
+    /// explicitly, so nothing about it is derived.
     #[tokio::test]
     async fn a_first_start_skips_a_port_a_stopped_sibling_app_already_owns() {
-        let (root, service, broker) = create_broker(false, None).await;
+        const STARTER_ID: &str = "43b026c4";
+        const STARTER_FIRST_PORT: u16 = 23_356;
+
+        let root = TempDir::new().expect("tempdir");
+        seed_app_fixture(&root, STARTER_ID, "Starter");
+        let (root, service, broker) = create_broker_over(root, false, None).await;
+        let starter = STARTER_ID.to_string();
         let sibling = create_app_fixture(&root, &service, "Sibling").await;
-        let starter = create_app_fixture(&root, &service, "Starter").await;
         let contested = APP_PORT_WINDOW_FIRST + derived_window_slot(&starter);
+        // Computed from the production derivation, then held against the
+        // documented value: if the derivation moves, this says so instead of
+        // quietly exercising some other port.
+        assert_eq!(
+            contested, STARTER_FIRST_PORT,
+            "app {starter} no longer derives the documented port; \
+             re-pick the fixture id and update the doc comment"
+        );
         // Nothing may HOLD the contested port, or the assertion below would
         // pass for the wrong reason.
         drop(

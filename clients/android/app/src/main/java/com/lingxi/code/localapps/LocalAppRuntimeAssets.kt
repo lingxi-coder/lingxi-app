@@ -18,13 +18,26 @@ import java.util.concurrent.TimeoutException
  * (local_apps_profile.rs:149-180 — `cell.get_or_try_init`, and the registry has
  * no removal path), and `LocalAppsHostBroker.runtime_root`
  * (local_apps_host.rs:159) has no setter, so `fixed_runtime_mount` (:235) keeps
- * answering from the first value forever. A `null` handed to the first engine
- * build therefore survives every reconnect and project switch, and only a
- * process restart clears it.
+ * answering from the first value forever.
  *
- * Nothing here changes that. It lets the local-apps surface TELL the user which
- * state they are in instead of leaving them with the engine's "stage
- * local-app-runtime first", which is not an instruction a user can follow.
+ * A reconnect does NOT clear it, and the reason is worth being exact about,
+ * because the obvious repair is on the wrong side. Android already rebuilds the
+ * engine — `RootScreen`'s `ensureSource(reconnectToken)` and
+ * `switchWorkspaceSource(createSource = …)` both run
+ * `EngineConversationSource.create` -> `buildVoiceEngine` -> [prepare], and by
+ * then [prepare] returns the staged root. That fresher root reaches
+ * `profile_apps` (host.rs:5452) and is DISCARDED, because `get_or_try_init`
+ * returns the already-initialised profile and drops its argument. Only a process
+ * restart clears it.
+ *
+ * Nothing here changes that, and nothing here should: the one place that could
+ * is `local_apps_profile.rs`'s `get_or_try_init`, and that cache is the
+ * single-owner guarantee for the profile's SQLite/Git/generation state
+ * (host.rs:5442-5444 says so outright). Lifting it is a product decision with a
+ * known workaround, not a bug fix. What this file does instead is let the
+ * local-apps surface TELL the user which state they are in, instead of leaving
+ * them with the engine's "stage local-app-runtime first", which is not an
+ * instruction a user can follow.
  */
 internal enum class LocalAppRuntimeStaging {
     /** Nothing has asked for the runtime yet in this process. */
@@ -60,11 +73,15 @@ object LocalAppRuntimeAssets {
     private const val ASSET_ROOT = "local-app-runtime"
 
     /**
-     * Every caller reaches this from `buildVoiceEngine`, whose sole production
-     * call site is the `viewModel { initializer { … } }` block that Compose
-     * runs synchronously on the MAIN thread. Extracting the ~200 MB runtime
-     * takes tens of seconds there, well past the 5 s input-dispatch ANR, so the
-     * work runs on a background thread and the caller waits only this long.
+     * Every caller reaches this from `buildVoiceEngine`, which has THREE
+     * production call sites — `conversation/ConversationSource.kt`,
+     * `settings/ProviderSettingsRepository.kt` and `cron/HeadlessEngineFactory.kt`
+     * — and the budget is sized for the worst of them: `ConversationSource`'s
+     * `create` is invoked from `RootScreen`'s `viewModel { initializer { … } }`
+     * block, which Compose runs synchronously on the MAIN thread. Extracting the
+     * ~200 MB runtime takes tens of seconds there, well past the 5 s
+     * input-dispatch ANR, so the work runs on a background thread and the caller
+     * waits only this long.
      * The budget covers the warm path (two manifest reads and a compare) many
      * times over; a cold first launch times out and gets `null`.
      *
@@ -84,9 +101,19 @@ object LocalAppRuntimeAssets {
     private var inFlight: FutureTask<String?>? = null
 
     /**
-     * Set once any caller has been handed `null`. On the production path that
-     * caller is `buildVoiceEngine`, so it means an engine may already have been
-     * built — and its profile memoised — without a runtime root.
+     * Set once [prepareWithin] has handed some caller `null`. That sentence is
+     * the whole of what this file observes, and the name says only that.
+     *
+     * What the flag is USED for rests on a premise from outside this file, and
+     * is recorded here as the inference it is: [prepare] has a single production
+     * caller, `buildVoiceEngine` (`voice/VoiceController.kt:186`), which passes
+     * the result straight to the engine as `localAppsRuntimeRoot`. Granted that,
+     * a set flag means an engine build MAY hold no runtime root — "may", not
+     * "does", for the reason spelled out on
+     * [LocalAppRuntimeStaging.StagedAfterNullHandout]. A second caller that only
+     * probed and discarded the result would leave this flag set and that
+     * inference false; there is no such caller today, and nothing here could
+     * notice one appearing.
      */
     @Volatile
     private var handedNullToCaller = false
@@ -128,21 +155,65 @@ object LocalAppRuntimeAssets {
     }
 
     /**
+     * The clause the engine emits when its broker holds no verified runtime
+     * root. `LocalAppsHostBroker::fixed_runtime_mount`
+     * (`engine-mobile/src/local_apps_host.rs:235-244`) is its only producer, and
+     * it reaches a failed job's `detail` verbatim under a variant prefix —
+     * `not yet available: ` when the fixed Next build asks for the mount,
+     * `io error: ` when preview start does — so a substring test is what
+     * survives both.
+     *
+     * OUT-OF-FILE PREMISE, stated as one: nothing here can compile against that
+     * Rust string. If it is reworded this gate stops matching and the
+     * [LocalAppRuntimeStaging.StagedAfterNullHandout] notice goes silent. That
+     * is the direction to fail in — silence, never a false claim — and it leaves
+     * the two states whose evidence IS local (Staging, Unavailable) untouched.
+     */
+    private const val ENGINE_RUNTIME_UNAVAILABLE = "verified local-app Node runtime is unavailable"
+
+    /**
      * The `detail` a generation job should carry. A job that FAILED while this
      * process has no usable runtime root gets the reason appended, because the
      * engine's own message ("stage local-app-runtime first") describes a build
      * step, not anything the user can do on the device.
      *
      * Appends rather than replaces: whatever the engine said stays first, since
-     * the runtime is not necessarily the only thing that went wrong. The notice
-     * is still true when it is not the proximate cause — with no root in the
-     * broker, every generation in this process fails at the Building stage.
+     * the runtime is not necessarily the only thing that went wrong.
+     *
+     * [LocalAppRuntimeStaging.Staging] and [LocalAppRuntimeStaging.Unavailable]
+     * annotate EVERY failure, and that is not over-reach: both are read with
+     * [stagedRoot] still null, and [stagedRoot] only ever goes null -> non-null,
+     * so it was null when this process's engine was built too. Whatever failed
+     * this time, the retry the user would otherwise reach for is guaranteed to
+     * die at Building.
+     *
+     * [LocalAppRuntimeStaging.StagedAfterNullHandout] is the one state where
+     * that argument does not hold — a root IS staged, the live engine may well
+     * be holding it, apps may be generating normally — and it latches for the
+     * life of the process, because [handedNullToCaller] cannot be cleared on any
+     * evidence this file can get. Annotating unconditionally therefore pinned a
+     * restart notice to every later LLM or validation failure. There, the notice
+     * is attached only to a failure that names the runtime.
      */
     internal fun generationDetail(detail: String?, failed: Boolean): String? {
         if (!failed) return detail
-        val notice = noticeFor(stagingStatus()) ?: return detail
+        val status = stagingStatus()
+        if (status == LocalAppRuntimeStaging.StagedAfterNullHandout && !namesTheRuntime(detail)) {
+            return detail
+        }
+        val notice = noticeFor(status) ?: return detail
         return listOfNotNull(detail?.takeIf(String::isNotBlank), notice).joinToString("\n\n")
     }
+
+    /**
+     * Whether the engine blamed the runtime for THIS failure. A failed job
+     * always carries the engine's own text (`lower_job` reads `last_error`,
+     * which `fail_job` always sets), so a missing or blank detail is not a
+     * runtime failure that lost its message — it is a job this file cannot
+     * speak for.
+     */
+    private fun namesTheRuntime(detail: String?): Boolean =
+        detail?.contains(ENGINE_RUNTIME_UNAVAILABLE) == true
 
     /**
      * Naming the restart is the whole point for [LocalAppRuntimeStaging.Staging]
@@ -163,6 +234,12 @@ object LocalAppRuntimeAssets {
      * to decide, rather than diagnosing a failure it cannot see. The
      * authoritative signal (does the memoised broker hold a root) lives in the
      * engine and is not reachable from here.
+     *
+     * [generationDetail] now only attaches this one when the engine's message
+     * does name the runtime, which makes the "如果 … 否则 …" branch redundant for
+     * every case that reaches a user. The wording is left as it is on purpose:
+     * tightening it back toward a direct claim is a copy decision, and this
+     * hedge is over-cautious rather than wrong.
      */
     internal fun noticeFor(status: LocalAppRuntimeStaging): String? = when (status) {
         LocalAppRuntimeStaging.Ready, LocalAppRuntimeStaging.Idle -> null

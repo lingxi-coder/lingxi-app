@@ -338,6 +338,227 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /**
+     * Both budget gates ask `now - sentAtMs >= budget`, and both stamps come from
+     * the wall clock. An NTP or user step BACKWARD makes that difference
+     * negative, and a negative elapsed satisfies no lower bound: with neither a
+     * sign check nor a re-stamp the gate is held until the clock catches up.
+     *
+     * The answer to a negative elapsed is to RE-STAMP, not to release: only `now`
+     * moved, so the patch is exactly as healthy as it was, and releasing it would
+     * buy an avoidable resend on every backward tick — including the sub-second
+     * NTP correction that is the common case. Both halves are asserted, because
+     * either alone is also satisfied by a weaker gate: the step itself must not
+     * resend (a release would), and one budget measured FROM THE RE-STAMP must
+     * still release (merely ignoring the sign would not, since the original stamp
+     * stays an hour in the future). Nothing here touches the budget — it stays at
+     * its production 15 s — so the only thing under test is the clock.
+     */
+    @Test
+    fun `a backward clock step re-stamps the in-flight draft slot instead of releasing it`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("first"), debounce = false),
+            )
+            runCurrent()
+            assertEquals(1, source.updateCommands().size)
+
+            // Unattributable, so no arm may release the slot — the watchdog is
+            // the only thing that can, exactly as in the test above.
+            source.emit(
+                ClientEvent.AppOperationFailed(APP_ID, AppErrorCodeDto.IO, "persist draft: disk full"),
+            )
+            runCurrent()
+            assertEquals("the failure itself must not release the slot", 1, source.updateCommands().size)
+
+            // The clock steps back an hour. `sentAtMs` was stamped moments ago and
+            // therefore at or BEFORE the real `now` this is derived from, so the
+            // elapsed the gate computes is at most a few milliseconds above
+            // -3_600_000 — negative unless this test itself runs for an hour.
+            val stepped = System.currentTimeMillis() - 3_600_000
+            viewModel.currentTimeMs = { stepped }
+            assertEquals(
+                "the budget must stay at its production value: only the clock moved",
+                15_000L,
+                viewModel.inFlightEditBudgetMs,
+            )
+
+            viewModel.onAction(LocalAppsAction.ConfirmDesign)
+            advanceUntilIdle()
+            assertEquals(
+                "a healthy patch must not be resent merely because the clock stepped back",
+                1,
+                source.updateCommands().size,
+            )
+
+            // One millisecond short of the budget, measured from the re-stamp the
+            // pump above wrote: still held, and now for the ordinary reason.
+            viewModel.currentTimeMs = { stepped + 14_999 }
+            viewModel.onAction(LocalAppsAction.ConfirmDesign)
+            advanceUntilIdle()
+            assertEquals(
+                "the budget restarted at the step; it has not run yet",
+                1,
+                source.updateCommands().size,
+            )
+
+            // At the budget it releases. Measured from the re-stamp: the original
+            // stamp is still an hour ahead of this clock, so a gate that only
+            // ignored the sign would hold here until the clock climbed back.
+            viewModel.currentTimeMs = { stepped + 15_000 }
+            viewModel.onAction(LocalAppsAction.ConfirmDesign)
+            advanceUntilIdle()
+
+            assertEquals(
+                "a stranded patch must still age out one budget after the step",
+                2,
+                source.updateCommands().size,
+            )
+            // Released, never dropped: the answer the user typed goes back out.
+            assertUpdate(source.updateCommands().last(), expectedRevision = 0u, value = "first")
+            assertTrue(
+                "the confirm must not go out while the resent patch is unacked",
+                source.commands.none { it is ClientCommand.ConfirmAppDesign },
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The same backward step against the second gate, which matters more: it is
+     * process-global rather than app-scoped, so wedging it stalls later edits for
+     * EVERY app. It re-stamps for the same reason the slot above does — the step
+     * says nothing about the refresh, which may still be answered — and one
+     * budget later it does release, because by then the answer really is overdue.
+     * Releasing loses nothing (`reduceDraftConflict` put the rejected patch back
+     * on the queue before raising the gate) but it must also take the "已重新加载"
+     * banner down, because it is released precisely when the authoritative
+     * snapshot is not known to be coming.
+     */
+    @Test
+    fun `a backward clock step re-stamps the conflict refresh gate instead of releasing it`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("first"), debounce = false),
+            )
+            runCurrent()
+            assertEquals(1, source.updateCommands().size)
+
+            source.emit(ClientEvent.AppDesignConflict(APP_ID, expectedRevision = 0u, actualRevision = 2u))
+            runCurrent()
+            assertTrue(source.commands.any { it == ClientCommand.GetAppDetails(APP_ID) })
+            assertEquals(2uL, viewModel.uiState.value.designer?.conflictRevision)
+
+            val stepped = System.currentTimeMillis() - 3_600_000
+            viewModel.currentTimeMs = { stepped }
+            assertEquals(
+                "the budget must stay at its production value: only the clock moved",
+                15_000L,
+                viewModel.inFlightEditBudgetMs,
+            )
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("second"), debounce = false),
+            )
+            runCurrent()
+
+            assertEquals(
+                "a backward step must not abandon a refresh that may still be answered",
+                1,
+                source.updateCommands().size,
+            )
+            assertEquals(
+                "the banner may only come down with the gate",
+                2uL,
+                viewModel.uiState.value.designer?.conflictRevision,
+            )
+
+            // One budget from the RE-STAMP, not from the original stamp, which is
+            // still an hour ahead of this clock: a gate that only ignored the sign
+            // would keep every app's queue closed here.
+            viewModel.currentTimeMs = { stepped + 15_000 }
+            viewModel.onAction(LocalAppsAction.ConfirmDesign)
+            advanceUntilIdle()
+
+            assertEquals(
+                "an overdue refresh must not wedge the process-global gate",
+                2,
+                source.updateCommands().size,
+            )
+            assertUpdate(source.updateCommands().last(), expectedRevision = 0u, value = "second")
+            assertNull(
+                "a gate released without its snapshot must not claim the designer reloaded",
+                viewModel.uiState.value.designer?.conflictRevision,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `AppOperationFailed.app_id` is `Option<String>` on the wire and skipped when
+     * absent, so a failure addressing no app is a shape the protocol permits. The
+     * suppression guard compared it to `draftConflictRefresh?.appId` with `==`,
+     * which is true when BOTH are null — no refresh pending and no app addressed
+     * — so such a failure's banner was swallowed entirely. The sibling guard one
+     * line below already spells `event.appId != null &&`.
+     *
+     * Reachability: no engine path emits this today. The only two handlers that
+     * pass `app_id: None` are `handle_list_apps` and `handle_create_app`, and
+     * neither can produce `RevisionConflict` — they yield the boot-time load
+     * error, a DTO raise failure, or a create/persist failure. This is a guard
+     * against a protocol-legal event, not a closed production bug.
+     */
+    @Test
+    fun `a failure addressing no app is not a conflict recovery and still raises its banner`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+            assertNull("no refresh is pending", viewModel.uiState.value.error)
+
+            source.emit(
+                ClientEvent.AppOperationFailed(null, AppErrorCodeDto.REVISION_CONFLICT, "创建应用失败"),
+            )
+            runCurrent()
+
+            assertEquals(
+                "null == null must not be read as a conflict this client is recovering from",
+                "创建应用失败",
+                viewModel.uiState.value.error,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun `confirm is refused when the draft edit never acks`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))

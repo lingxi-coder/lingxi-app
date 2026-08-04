@@ -103,9 +103,18 @@ struct LocalAppDesignerView: View {
     }
 
     private func prepare() async {
-        if store.designers[appID]?.interactionID == nil {
-            await store.openDesigner(appID: appID)
+        guard store.designers[appID]?.interactionID == nil else { return }
+        // `open_designer` is only legal from collecting_spec / generation_failed.
+        // Once the gate is armed the app sits in awaiting_spec_confirmation and
+        // the engine rejects it outright — which is what a relaunch used to
+        // produce, because the client had no interaction_id yet and asked for a
+        // gate that was already open. Refresh instead; the id arrives with the
+        // re-announced gate (AppService::resync_pending_gates).
+        if store.apps.first(where: { $0.id == appID })?.workflow == .awaitingSpecConfirmation {
+            await store.getDetails(appID: appID)
+            return
         }
+        await store.openDesigner(appID: appID)
     }
 
     private func selectStep(_ index: Int) {

@@ -5466,6 +5466,11 @@ pub fn build_mobile_engine_inner(
                 app_emissions.clone(),
             ));
             let domain_subscription = profile.domain_events.subscribe(observer.clone());
+            // Only now do the observers exist. AppService::load already
+            // announced pending gates, but into a fanout nobody had subscribed
+            // to yet, so those events were dropped — leaving a relaunched
+            // client with no `interaction_id` for an armed designer gate.
+            runtime.block_on(profile.service.resync_pending_gates());
             (
                 Ok(profile.service.clone()),
                 profile.host.clone(),

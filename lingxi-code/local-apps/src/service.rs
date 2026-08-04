@@ -366,6 +366,21 @@ impl AppService {
     /// Emitted unconditionally, not just for re-armed gates: clients treat
     /// gate announcements idempotently, so re-announcing an id they already
     /// know is a no-op.
+    /// Re-announce pending gates once observers are attached.
+    ///
+    /// [`Self::load`] announces too, but it runs BEFORE the host subscribes its
+    /// client and domain observers, so those events reach a fanout with no
+    /// subscribers and are dropped. After a relaunch with an armed designer
+    /// gate that left the client without the pending `interaction_id`, which
+    /// gates `confirm_design` — and the UI, seeing no id, would try
+    /// `open_designer`, which is illegal from `awaiting_spec_confirmation`.
+    /// The app was then unreachable from either side.
+    ///
+    /// Safe to call repeatedly: announcements are idempotent by design.
+    pub async fn resync_pending_gates(&self) {
+        self.announce_pending_gates().await;
+    }
+
     async fn announce_pending_gates(&self) {
         let order = self.acquire_emit_order().await;
         let events: Vec<AppEvent> = {
@@ -3634,6 +3649,42 @@ mod tests {
                 },
             ],
             "both pending gates are announced at load, in stored order"
+        );
+    }
+
+    /// The host subscribes its observers AFTER `load` returns, so the load-time
+    /// announcement lands in a fanout with no subscribers and is dropped. A
+    /// relaunched client is then left without the pending `interaction_id` that
+    /// gates `confirm_design`, and the UI — seeing no id — tries
+    /// `open_designer`, which is illegal from `awaiting_spec_confirmation`.
+    /// `resync_pending_gates` is what re-delivers it to a late subscriber.
+    #[tokio::test]
+    async fn resync_reannounces_pending_gates_to_a_late_subscriber() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let a = h
+            .service
+            .create_app("LateSub", AppTemplateKind::Dashboard, None)
+            .await
+            .unwrap();
+        let gate = h.service.open_designer(&a.id).await.unwrap();
+        drop(h);
+
+        let h2 = harness(dir.path()).await;
+        // Drain the load-time announcement: this stands in for the events the
+        // real host never sees, because it has not subscribed yet.
+        let _ = h2.take_events().await;
+
+        h2.service.resync_pending_gates().await;
+
+        assert_eq!(
+            h2.take_events().await,
+            vec![AppEvent::DesignerRequested {
+                app_id: a.id.clone(),
+                interaction_id: gate.interaction_id.clone(),
+                revision: 0,
+            }],
+            "resync must re-deliver the armed gate to an observer that attached after load"
         );
     }
 

@@ -149,6 +149,125 @@ impl Drop for RuntimeReservation {
     }
 }
 
+/// Loopback ports an in-flight start has CHOSEN but has not yet persisted as
+/// its app's pin, each paired with the app holding it.
+///
+/// `sibling_pinned_ports` reads the RECORDS, and a record only learns its port
+/// when `update_runtime_record` writes it — two persists and, on the full
+/// runtime, a deliberate ~11 ms after `bind_stable_loopback` picked it.  (That
+/// distance is what keeps the next binder out of the kernel's 1.2-2.8 ms
+/// refusal window after the probe listener closes; it must not be shortened.)
+/// For that whole stretch the port sits in NO snapshot a sibling can read: a
+/// concurrently-starting app derives or scans to the same port, binds it
+/// cleanly because the probe is already gone, and pins it too.  `set_runtime`
+/// then refuses to move either pin, so neither app can run while the other
+/// does — and on Android the two share one `http://127.0.0.1:<port>` origin's
+/// `localStorage` / `IndexedDB`.
+///
+/// A lease closes that stretch without closing the window: it is taken at the
+/// instant a candidate is chosen and released only once the pin is durable, so
+/// at any single INSTANT "persisted pins UNION live leases" names every port an
+/// in-flight start owns.
+///
+/// Reading that union is NOT one instant, and the difference is the whole of
+/// the subtlety here.  An allocator reads the pins first and takes its lease
+/// second, so a sibling can persist its pin and release its lease entirely
+/// between those two steps: the sibling's port is missing from the pin half
+/// (read too early) and missing from the lease half (sampled too late), even
+/// though neither half was ever wrong on its own.  A sample of a union is not
+/// a sample of an instant.
+///
+/// What makes the sample sound is the ORDER those halves are consulted in,
+/// plus a SECOND pin read taken after the lease (`bind_stable_loopback`).  A
+/// lease is released only once the pin it covers is durable, so once we hold
+/// the lease on a candidate, any sibling that could have chosen it either
+/// still holds its own lease — in which case our take already failed — or has
+/// already made its pin visible to that second read.  There is no third state,
+/// and no sibling can newly choose the port while we hold it.  It needs no new
+/// on-disk format — the records stay the registry, and this covers only the
+/// gap before a record has the answer.
+type PortLeases = Arc<std::sync::Mutex<HashMap<u16, String>>>;
+
+/// A panic while choosing a port must not brick every later start, so the
+/// poison is discarded rather than propagated: the map is a set of live
+/// reservations, and a half-written insert cannot corrupt it.
+fn lock_port_leases(leases: &PortLeases) -> std::sync::MutexGuard<'_, HashMap<u16, String>> {
+    leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Releases a leased port whose start never persisted it.
+///
+/// Same lifetime shape as [`RuntimeReservation`], for the same reason: the
+/// stretch it covers is crossed by `?` on two persist failures, by every
+/// `fail_reserved_runtime_start` bail-out, by a panic, and by the foreign
+/// caller cancelling `submit` outright.  A port leaked on any of those is a
+/// port no app in the profile can ever use again for the life of the process.
+///
+/// Unlike `RuntimeReservation` this holds a std mutex, so `drop` completes
+/// synchronously on whichever runtime the guard dies on — the guard is minted
+/// on the worker runtime and dropped on the ambient one.
+#[derive(Debug)]
+struct PortLease {
+    leases: PortLeases,
+    app_id: String,
+    port: u16,
+    released: bool,
+}
+
+impl PortLease {
+    /// Takes `port` for `app_id`, or `None` when another in-flight start
+    /// already holds it.  Test-and-insert under one lock: two allocators
+    /// racing on the same candidate cannot both come away with it.
+    fn take(leases: &PortLeases, app_id: &str, port: u16) -> Option<Self> {
+        {
+            let mut held = lock_port_leases(leases);
+            if held.contains_key(&port) {
+                return None;
+            }
+            held.insert(port, app_id.to_string());
+        }
+        Some(Self {
+            leases: Arc::clone(leases),
+            app_id: app_id.to_string(),
+            port,
+            released: false,
+        })
+    }
+
+    /// Hand-off point: the pin is now in the app's record, so
+    /// `sibling_pinned_ports` sees the port and the lease is redundant.
+    ///
+    /// Releasing is the same operation `drop` performs — what `commit` buys is
+    /// the ORDER.  It must be called after the persist and nowhere else: a
+    /// release taken before it re-opens exactly the stretch this type exists
+    /// to cover.
+    fn commit(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let mut held = lock_port_leases(&self.leases);
+        // Only while the entry is STILL ours, mirroring
+        // `RuntimeReservation::abandon`'s generation check: a late drop must
+        // never hand away a port some other start has since leased.
+        if held.get(&self.port).is_some_and(|owner| owner == &self.app_id) {
+            held.remove(&self.port);
+        }
+    }
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// Profile-scoped broker.  The service is attached after its durable load has
 /// completed, while command/capability resolution can be wired immediately.
 pub(crate) struct LocalAppsHostBroker {
@@ -163,6 +282,42 @@ pub(crate) struct LocalAppsHostBroker {
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
+    /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
+    /// collide with each other, and one broker is exactly one profile.
+    port_leases: PortLeases,
+    /// Serializes port ALLOCATION — the sibling-pin read plus the choice —
+    /// across this broker's starts.
+    ///
+    /// What it buys: the pin snapshot goes stale the instant another start
+    /// persists one, and a lease is only taken AFTER the snapshot is read.
+    /// Without this gate an allocator can read the pins, lose the scheduler for
+    /// the length of another app's entire lease, and then choose from a set
+    /// that never contained that app's port at all — so it wastes the whole
+    /// scan re-deriving candidates it has no reason to reject.
+    ///
+    /// It does NOT buy mutual exclusion on a candidate: two ungated allocators
+    /// sitting between the same pair of steps still cannot both come away with
+    /// one port, because `PortLease::take` is a test-and-insert under a single
+    /// mutex and the loser scans on.  Claiming otherwise here was the ninth
+    /// false comment this module has shipped; the guarantee lives in `take`.
+    ///
+    /// What it does NOT buy, because this was mis-stated here once already: it
+    /// does not make one start's snapshot fresh.  A sibling's persist and its
+    /// `PortLease::commit` both run AFTER that sibling has left this gate, so
+    /// they land freely inside the window a later start holds it — pins read at
+    /// the top of a gated allocation can be stale by the bottom of the very
+    /// same allocation.  The gate narrows the staleness to "no OTHER allocation
+    /// is in progress"; what closes it is the second pin read
+    /// `bind_stable_loopback` takes after leasing its candidate.
+    ///
+    /// Extending the gate over the persist instead would close the same hole
+    /// and is deliberately not done: `AppService::with_app` holds its state
+    /// lock across a blocking disk write, so that shape would hold this mutex
+    /// across another subsystem's lock — the ordering hazard, and the
+    /// held-across-blocking-work hazard, both at once.  Held across service
+    /// reads and the bind hop only — never across a call into client or
+    /// listener code, which is the rule `AppEmissionQueue` exists to keep.
+    port_allocation: Mutex<()>,
     next_request_id: AtomicU64,
 }
 
@@ -186,6 +341,8 @@ impl LocalAppsHostBroker {
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
+            port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            port_allocation: Mutex::new(()),
             next_request_id: AtomicU64::new(1),
         })
     }
@@ -873,16 +1030,30 @@ impl LocalAppsHostBroker {
         let bound = {
             let app_id = app_id.to_string();
             let assigned = current.port;
-            // Read on THIS runtime, before the hop: the derivation has to know
-            // which ports stopped siblings own permanently, which no bind probe
-            // on the worker runtime can discover.
+            let leases = Arc::clone(&self.port_leases);
+            let registry = Arc::clone(&service);
+            // Everything from the pin read to the choice is one step against
+            // this broker's other ALLOCATIONS — but only against those: a
+            // sibling that is already past its own allocation still persists
+            // its pin and releases its lease inside this window, which is why
+            // the choice is re-checked against a fresh read below rather than
+            // trusted because the gate is held.  See `port_allocation`.
+            let _allocation = self.port_allocation.lock().await;
+            // The FIRST read is taken on THIS runtime, before the hop: the
+            // derivation has to know which ports stopped siblings own
+            // permanently, which no bind probe on the worker runtime can
+            // discover.  The re-read after the lease runs on the worker
+            // runtime, where it is an ordinary `AppService` read — no runtime
+            // affinity, nothing blocking.
             let sibling_pins = sibling_pinned_ports(&service, &app_id).await;
             crate::local_apps_profile::worker_runtime()
-                .spawn(async move { bind_stable_loopback(&app_id, assigned, &sibling_pins).await })
+                .spawn(async move {
+                    bind_stable_loopback(&app_id, assigned, &sibling_pins, &leases, &registry).await
+                })
                 .await
                 .map_err(|error| format!("bind stable app port: {error}"))?
         };
-        let (listener, port) = match bound {
+        let (listener, port, port_lease) = match bound {
             Ok(bound) => bound,
             Err(error) => {
                 return self
@@ -939,6 +1110,21 @@ impl LocalAppsHostBroker {
                     format!("persist starting runtime state: {error}"),
                 )
                 .await;
+        }
+        // The pin is durable HERE and not one line earlier: `with_app` has
+        // already written the new record back under the state lock by the time
+        // it returns, so from this point `sibling_pinned_ports` reports the
+        // port for every later allocator and the lease has nothing left to
+        // cover.  Every path above this line drops the guard instead, which
+        // returns the port to the pool.
+        //
+        // That ORDER — persist, THEN release — is load-bearing beyond tidiness:
+        // it is the whole premise of `bind_stable_loopback`'s post-lease pin
+        // re-read.  A release moved above the persist would leave a port that
+        // is in neither the records nor the leases, which is exactly the hole
+        // both mechanisms exist to close.
+        if let Some(lease) = port_lease {
+            lease.commit();
         }
 
         let handle = if self.full_runtime {
@@ -1780,14 +1966,40 @@ fn normalize_mutations(input: &Value) -> Result<Vec<DataMutation>, String> {
 /// alongside the probe.  It PREVENTS new collisions only: a pair that already
 /// collided is permanent on both sides, so the `assigned` branch can do
 /// nothing but name the sibling instead of reporting a bare bind failure.
+///
+/// WHY a lease is taken as well.  A pin only reaches the records after the
+/// choice — see [`PortLeases`] — so `sibling_pins` cannot describe a sibling
+/// that is choosing right now.  Choice and reservation are therefore ONE step
+/// here: the lease is taken before the probe, which is what makes a candidate
+/// visible to every concurrent allocator from the instant it is picked.  The
+/// returned guard belongs to the CALLER, which must hold it until the port is
+/// persisted and then `commit` it.
+///
+/// WHY the pins are then read a SECOND time, from `service`, for the candidate
+/// the lease was just taken on.  `sibling_pins` is a SNAPSHOT the caller read
+/// before this call; a sibling can persist its pin and drop its lease in the
+/// interval between that read and the take, and a candidate caught mid-hand-off
+/// like that appears in neither half of "pins UNION leases" (see
+/// [`PortLeases`]).  Re-reading after the take is what removes the interval:
+/// `PortLease::commit` runs only after the persist, so once we hold the lease
+/// on a port, a sibling that could have owned it either still holds its own
+/// lease — and then our take returned `None` and we never got here — or has
+/// already made its pin readable.  A sibling cannot newly take the port either,
+/// because we hold it.  The re-read costs one `AppService` state lock per
+/// candidate actually leased, which is one per start in the ordinary case.
+///
+/// The `assigned` branch takes no lease and needs no re-read: an assigned port
+/// is by definition already persisted, so every sibling's pin snapshot has it.
 async fn bind_stable_loopback(
     app_id: &str,
     assigned: Option<u16>,
     sibling_pins: &[(String, u16)],
-) -> Result<(TcpListener, u16), String> {
+    leases: &PortLeases,
+    service: &AppService,
+) -> Result<(TcpListener, u16, Option<PortLease>), String> {
     if let Some(port) = assigned {
         return match TcpListener::bind(("127.0.0.1", port)).await {
-            Ok(listener) => Ok((listener, port)),
+            Ok(listener) => Ok((listener, port, None)),
             Err(error) => Err(
                 match sibling_pins.iter().find(|(_, pinned)| *pinned == port) {
                     Some((sibling, _)) => format!(
@@ -1808,9 +2020,33 @@ async fn bind_stable_loopback(
         if sibling_pins.iter().any(|(_, pinned)| *pinned == port) {
             continue;
         }
-        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
-            return Ok((listener, port));
+        // Taken BEFORE the probe, so a sibling that reaches this candidate
+        // finds it occupied even though nothing is persisted and — on the full
+        // runtime, once the probe below is released — nothing is bound either.
+        // The lock is dropped by `take` itself and never spans the await.
+        let Some(lease) = PortLease::take(leases, app_id, port) else {
+            continue;
+        };
+        // Now that the candidate cannot move again, ask the records once more.
+        // `sibling_pins` was read before this call and a sibling's pin may have
+        // landed since; because a lease outlives its own persist, holding this
+        // one makes the answer stable rather than merely fresher.  Order is the
+        // point — a re-read BEFORE the take would reproduce the same interval
+        // it is here to remove.
+        if sibling_pinned_ports(service, app_id)
+            .await
+            .iter()
+            .any(|(_, pinned)| *pinned == port)
+        {
+            drop(lease);
+            continue;
         }
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+            return Ok((listener, port, Some(lease)));
+        }
+        // Refused by the kernel: hand the candidate straight back rather than
+        // holding it for the rest of this scan.
+        drop(lease);
     }
     Err("no stable loopback port is available for the app".into())
 }
@@ -1830,9 +2066,15 @@ fn derived_window_slot(app_id: &str) -> u16 {
 /// Ports every OTHER app in this profile has already pinned, each paired with
 /// its owner.
 ///
-/// Read once per start rather than kept as a registry: the records ARE the
+/// Read on demand rather than kept as a registry: the records ARE the
 /// registry, and a cached copy would be one more thing to invalidate on
 /// create/delete.  One in-memory lock per app in the profile.
+///
+/// Twice per start in the ordinary case, not once — the snapshot the caller
+/// reads before `bind_stable_loopback` cannot be trusted to still be true when
+/// a candidate is leased, so the leased candidate is re-checked against a fresh
+/// read.  Every result is a snapshot; only one taken while the port in question
+/// is leased says anything durable about it.
 async fn sibling_pinned_ports(service: &AppService, app_id: &str) -> Vec<(String, u16)> {
     let mut pinned = Vec::new();
     for record in service.records().await {
@@ -2671,6 +2913,32 @@ mod tests {
         fs::write(static_out.join("index.html"), "<html>ok</html>").expect("write index.html");
     }
 
+    /// A registry of its own for a probe that drives `bind_stable_loopback`
+    /// directly.  Production hands it the BROKER's — see
+    /// `a_first_start_skips_a_port_a_concurrent_start_has_leased`, which is
+    /// what holds that wiring in place.
+    fn test_leases() -> PortLeases {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// An `AppService` holding no apps, for the probes that drive
+    /// `bind_stable_loopback` directly and hand it their sibling pins by hand.
+    ///
+    /// The allocator re-reads the pins from this service after leasing a
+    /// candidate, so an EMPTY one is what keeps those probes saying what their
+    /// names say: the re-read contributes no exclusion, leaving the passed
+    /// snapshot as the only one in play.  A probe that wants the re-read itself
+    /// seeds a real pin instead — see
+    /// `a_pin_that_lands_after_the_snapshot_is_caught_before_the_choice_sticks`.
+    ///
+    /// The returned `TempDir` has to outlive the service; binding it to `_`
+    /// drops it immediately and pulls the app root out from under the load.
+    async fn empty_registry() -> (TempDir, Arc<AppService>) {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        (root, service)
+    }
+
     async fn wait_until<F, Fut>(label: &str, timeout_duration: Duration, mut condition: F)
     where
         F: FnMut() -> Fut,
@@ -2864,6 +3132,7 @@ mod tests {
     /// churning ephemeral ports alongside the suite; 0 in 60 with this one.
     #[tokio::test]
     async fn derived_app_ports_stay_below_every_shipped_platform_ephemeral_floor() {
+        let (_registry_root, registry) = empty_registry().await;
         // Real minted ids (eight lowercase hex, `ids::generate_app_id`).  Eight
         // of these ten drew a port at or above the Android floor from the old
         // 30000..50000 window.
@@ -2871,9 +3140,10 @@ mod tests {
             "0f3a91cc", "a71b04de", "5c92f8b1", "deadbeef", "00000000", "ffffffff", "9a1c7e40",
             "3b6d20af", "7e0091cd", "c4f5a3b2",
         ] {
-            let (listener, port) = bind_stable_loopback(app_id, None, &[])
-                .await
-                .expect("derive a port");
+            let (listener, port, _lease) =
+                bind_stable_loopback(app_id, None, &[], &test_leases(), &registry)
+                    .await
+                    .expect("derive a port");
             assert!(
                 port < LOWEST_SHIPPED_EPHEMERAL_FLOOR,
                 "app {app_id} was pinned to {port}, which the kernel can hand out ephemerally"
@@ -2945,17 +3215,28 @@ mod tests {
             "the fixture pair no longer collides, so this probe would pass vacuously"
         );
 
-        let (listener, first_port) = bind_stable_loopback(first_id, None, &[])
-            .await
-            .expect("the first app derives a port");
-        // The first app is stopped: nothing holds the port, only the pin
-        // survives — precisely the state a bind probe cannot distinguish.
-        drop(listener);
-
-        let (second_listener, second_port) =
-            bind_stable_loopback(second_id, None, &[(first_id.to_string(), first_port)])
+        let (_registry_root, registry) = empty_registry().await;
+        let leases = test_leases();
+        let (listener, first_port, first_lease) =
+            bind_stable_loopback(first_id, None, &[], &leases, &registry)
                 .await
-                .expect("the second app derives a port");
+                .expect("the first app derives a port");
+        // The first app is stopped: nothing holds the port, only the pin
+        // survives — precisely the state a bind probe cannot distinguish.  The
+        // LEASE goes too, and the shared registry is deliberate: only the pin
+        // may be why the second app moves off the slot.
+        drop(listener);
+        drop(first_lease);
+
+        let (second_listener, second_port, _second_lease) = bind_stable_loopback(
+            second_id,
+            None,
+            &[(first_id.to_string(), first_port)],
+            &leases,
+            &registry,
+        )
+        .await
+        .expect("the second app derives a port");
         assert_ne!(
             second_port, first_port,
             "app {second_id} was pinned to {second_port}, which app {first_id} owns forever"
@@ -2976,9 +3257,16 @@ mod tests {
         let holder = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let port = holder.local_addr().expect("local addr").port();
 
-        let named = bind_stable_loopback("starter", Some(port), &[("sibling-app".into(), port)])
-            .await
-            .expect_err("a held pinned port fails the start");
+        let (_registry_root, registry) = empty_registry().await;
+        let named = bind_stable_loopback(
+            "starter",
+            Some(port),
+            &[("sibling-app".into(), port)],
+            &test_leases(),
+            &registry,
+        )
+        .await
+        .expect_err("a held pinned port fails the start");
         assert!(
             named.contains(&format!("stable app port {port} is unavailable")),
             "{named}"
@@ -2990,6 +3278,8 @@ mod tests {
             "starter",
             Some(port),
             &[("other-app".into(), port.wrapping_add(1))],
+            &test_leases(),
+            &registry,
         )
         .await
         .expect_err("a squatted pinned port still fails");
@@ -3072,6 +3362,376 @@ mod tests {
             (APP_PORT_WINDOW_FIRST..APP_PORT_WINDOW_FIRST + APP_PORT_WINDOW_LEN).contains(&pinned),
             "app {starter} port {pinned} is outside the derived window"
         );
+    }
+
+    /// The stretch a pin snapshot cannot describe.  A chosen port only reaches
+    /// the records ~11 ms later (see [`PortLeases`]), and on the full runtime
+    /// the probe listener is released BEFORE then on purpose — so for that
+    /// stretch the port is in no snapshot, is held by nothing, and binds
+    /// cleanly for the next app that scans to it.  Both apps then own it
+    /// forever and neither can run while the other does.
+    ///
+    /// Driven through the reservation API instead of by racing two real
+    /// starts: a race reproduces the collision only sometimes, so it would pass
+    /// for the wrong reason on most runs and rot without anyone noticing.  The
+    /// port here is leased and deliberately NOT bound — precisely the state the
+    /// production window leaves it in — so an allocator that does not consult
+    /// the leases takes it on every run, not on a lucky one.
+    #[tokio::test]
+    async fn an_unpersisted_lease_moves_the_next_allocation_off_that_port() {
+        const APP_ID: &str = "1a2b3c4d";
+        const FIRST_CHOICE: u16 = 29_728;
+        let first_choice = APP_PORT_WINDOW_FIRST + derived_window_slot(APP_ID);
+        // Computed from the production derivation, then held against the
+        // documented value, so a moved derivation says so instead of quietly
+        // exercising some other port.
+        assert_eq!(
+            first_choice, FIRST_CHOICE,
+            "app {APP_ID} no longer derives the documented port; \
+             re-pick the fixture id and update the doc comment"
+        );
+        let (_registry_root, registry) = empty_registry().await;
+        let leases = test_leases();
+
+        // A sibling start that has CHOSEN this port and not yet persisted it.
+        let concurrent = PortLease::take(&leases, "sibling-app", first_choice)
+            .expect("the port is unleased before the sibling takes it");
+
+        let (listener, port, lease) = bind_stable_loopback(APP_ID, None, &[], &leases, &registry)
+            .await
+            .expect("the app still gets a port");
+        assert_ne!(
+            port, first_choice,
+            "app {APP_ID} was pinned to {first_choice}, which a sibling had already chosen"
+        );
+        assert!(
+            (APP_PORT_WINDOW_FIRST..APP_PORT_WINDOW_FIRST + APP_PORT_WINDOW_LEN).contains(&port),
+            "app {APP_ID} port {port} is outside the derived window"
+        );
+        // Choice and reservation are ONE step: the port it did take is already
+        // spoken for, before any record has heard of it.
+        assert!(
+            PortLease::take(&leases, "third-app", port).is_none(),
+            "port {port} was chosen but left free for a concurrent allocator"
+        );
+
+        // Dropped without a commit — every bail-out between the choice and the
+        // persist ends here — so the port returns to the pool instead of being
+        // lost for the life of the process.
+        drop(listener);
+        drop(lease);
+        let reclaimed = PortLease::take(&leases, "third-app", port)
+            .expect("a lease dropped without a commit releases its port");
+        drop(reclaimed);
+        // Committing releases it too; what `commit` buys is the order, not a
+        // different effect.  The pin has taken over by then.
+        PortLease::take(&leases, "fourth-app", port)
+            .expect("free again")
+            .commit();
+        let after_commit = PortLease::take(&leases, "fifth-app", port);
+        assert!(
+            after_commit.is_some(),
+            "port {port} stayed leased after its start committed"
+        );
+        drop(after_commit);
+
+        // With the sibling gone the derivation is deterministic again: an app
+        // that moved port on restart would orphan its own WebView storage.
+        drop(concurrent);
+        let (again, port_again, _lease) =
+            bind_stable_loopback(APP_ID, None, &[], &leases, &registry)
+                .await
+                .expect("the app derives its port");
+        assert_eq!(
+            port_again, first_choice,
+            "the first choice must stay deterministic while the slot is free"
+        );
+        drop(again);
+    }
+
+    /// The hand-off a lease and a gate BOTH miss, and the re-read that catches
+    /// it.
+    ///
+    /// An allocator samples "persisted pins UNION live leases" in two steps:
+    /// the pins first (in the caller, before `bind_stable_loopback`), the lease
+    /// second.  A sibling that persists its pin and then commits its lease in
+    /// between lands in neither half — the pin read was too early, the lease
+    /// sample too late — and the allocation gate does not help, because the
+    /// sibling's persist and commit both run after it has left that gate.  Both
+    /// apps then pin the same port and neither can run while the other does.
+    ///
+    /// SEEDED, not raced, and the seed is exactly the post-hand-off state: the
+    /// sibling's pin is in the records (persisted) and NOT in the leases
+    /// (committed), while the snapshot handed to the allocator is the one that
+    /// was read before either happened — an empty slice.  Every ordering
+    /// question is therefore already settled when the call starts, so the
+    /// allocator either consults the records again after leasing its candidate
+    /// or takes the sibling's port on every single run.
+    ///
+    /// The control arm is the other half of the point.  Nothing binds the
+    /// contested port here — the sibling is merely pinned — so an allocator
+    /// that moved off it because some unrelated process happened to hold it
+    /// would look identical to one that read the records.  Proving the port is
+    /// free on THIS machine first is what tells those two apart; if it is not
+    /// free the control fails loudly instead of handing the real assertion a
+    /// free pass.
+    #[tokio::test]
+    async fn a_pin_that_lands_after_the_snapshot_is_caught_before_the_choice_sticks() {
+        const APP_ID: &str = "8c6d31fa";
+        const FIRST_CHOICE: u16 = 27_262;
+        let first_choice = APP_PORT_WINDOW_FIRST + derived_window_slot(APP_ID);
+        let next_choice =
+            APP_PORT_WINDOW_FIRST + (derived_window_slot(APP_ID) + 1) % APP_PORT_WINDOW_LEN;
+        assert_eq!(
+            first_choice, FIRST_CHOICE,
+            "app {APP_ID} no longer derives the documented port; \
+             re-pick the fixture id and update the doc comment"
+        );
+
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sibling = create_app_fixture(&root, &service, "Hand-off").await;
+        let leases = test_leases();
+
+        // CONTROL: with the records still empty of pins, the derivation lands
+        // on the contested port and the port is genuinely available here.  A
+        // failure at this line means the fixture port is occupied by something
+        // outside this test, and the assertion below would have passed without
+        // proving anything.
+        let (control, control_port, control_lease) =
+            bind_stable_loopback(APP_ID, None, &[], &leases, &service)
+                .await
+                .expect("the app derives its port with nothing pinned");
+        assert_eq!(
+            control_port, first_choice,
+            "port {first_choice} is not free on this machine (or the derivation moved), \
+             so the contested arm below cannot distinguish the re-read from a busy port"
+        );
+        drop(control);
+        drop(control_lease);
+
+        // The hand-off, in the order production performs it: the pin becomes
+        // durable FIRST, and only then is the lease released.  From here the
+        // port is in the records and in no lease.
+        let sibling_lease = PortLease::take(&leases, &sibling, first_choice)
+            .expect("the sibling leases the port it is about to persist");
+        service
+            .update_runtime_record(
+                &sibling,
+                AppRuntimeState::Starting,
+                Some(first_choice),
+                None,
+                None,
+            )
+            .await
+            .expect("the sibling persists its pin");
+        sibling_lease.commit();
+        assert!(
+            lock_port_leases(&leases).is_empty(),
+            "the seed must leave the port in the records ONLY; a lease still held \
+             would let the take alone move the allocation off it"
+        );
+
+        // The snapshot is the one the caller read BEFORE that hand-off, so the
+        // pre-check cannot exclude the port and the lease is taken on it.  Only
+        // a read of the records after that take can reject it.
+        let (listener, port, lease) = bind_stable_loopback(APP_ID, None, &[], &leases, &service)
+            .await
+            .expect("the app still gets a port");
+        assert_ne!(
+            port, first_choice,
+            "app {APP_ID} was pinned to {first_choice}, which app {sibling} persisted \
+             after the snapshot was read; both apps now own it forever"
+        );
+        assert_eq!(
+            port, next_choice,
+            "the scan skipped more than the contested candidate, so something other \
+             than the sibling's pin moved it"
+        );
+        // The rejected candidate went back to the pool: a lease dropped only on
+        // the success path would strand every port the re-read rejects.
+        assert!(
+            lock_port_leases(&leases).get(&first_choice).is_none(),
+            "port {first_choice} stayed leased after the re-read rejected it"
+        );
+        drop(listener);
+        drop(lease);
+    }
+
+    /// The production half of the same defect: `start_reserved_runtime` has to
+    /// hand the BROKER's registry to the allocator, or the exclusion above is
+    /// never reached by a real start.  Deterministic — the sibling's lease is
+    /// planted before the start rather than raced against it.
+    ///
+    /// Seeded with a fixed id for the reason [`seed_app_fixture`] documents:
+    /// the contested port is derived from the id, so a minted one would probe
+    /// a different port on every run.  This id's slot is derived by no other
+    /// test in the binary.
+    ///
+    /// The control arm exists because the contested port here is held by
+    /// NOTHING — the sibling has only leased it — so a start that moved off it
+    /// because an unrelated process on this machine happened to be sitting on
+    /// that port produces exactly the same green as a start that consulted the
+    /// broker's leases.  Deriving the port through the production allocator
+    /// first, against a registry with no lease planted, is what separates them:
+    /// if the port is not free the control fails and says so, instead of the
+    /// real assertion passing for the environment's reason.
+    #[tokio::test]
+    async fn a_first_start_skips_a_port_a_concurrent_start_has_leased() {
+        const STARTER_ID: &str = "b17cc0de";
+        const STARTER_FIRST_PORT: u16 = 26_141;
+
+        let root = TempDir::new().expect("tempdir");
+        seed_app_fixture(&root, STARTER_ID, "Leased");
+        let (_root, service, broker) = create_broker_over(root, false, None).await;
+        let contested = APP_PORT_WINDOW_FIRST + derived_window_slot(STARTER_ID);
+        let next_slot =
+            APP_PORT_WINDOW_FIRST + (derived_window_slot(STARTER_ID) + 1) % APP_PORT_WINDOW_LEN;
+        assert_eq!(
+            contested, STARTER_FIRST_PORT,
+            "app {STARTER_ID} no longer derives the documented port; \
+             re-pick the fixture id and update the doc comment"
+        );
+
+        // CONTROL, before anything is planted: the production allocator lands
+        // on the contested port, so it is free on this machine and the skip
+        // below can only be the lease's doing.  Its own lease registry, so
+        // nothing survives into the start; the listener is released for the
+        // same reason.  Releasing it leaves the kernel's brief rebind refusal
+        // on that port, which is harmless here — the start rejects the
+        // candidate at `PortLease::take`, before any probe touches it.
+        let (control, control_port, control_lease) =
+            bind_stable_loopback(STARTER_ID, None, &[], &test_leases(), &service)
+                .await
+                .expect("the starter derives its port with nothing leased");
+        assert_eq!(
+            control_port, contested,
+            "port {contested} is not free on this machine (or the derivation moved), \
+             so the assertion below cannot distinguish the lease from a busy port"
+        );
+        drop(control);
+        drop(control_lease);
+
+        // Nothing binds it and no record mentions it — the only thing that can
+        // move the start off this port is the lease.
+        let concurrent = PortLease::take(&broker.port_leases, "sibling-app", contested)
+            .expect("the port is unleased before the sibling takes it");
+
+        broker
+            .manage_runtime_value(json!({"app_id": STARTER_ID, "action": "start"}))
+            .await
+            .expect("the start succeeds on a port no concurrent start holds");
+
+        let pinned = service
+            .runtime_record(STARTER_ID)
+            .await
+            .expect("runtime record")
+            .port
+            .expect("the start pinned a port");
+        assert_ne!(
+            pinned, contested,
+            "app {STARTER_ID} was pinned to {contested}, which a concurrent start had chosen"
+        );
+        assert_eq!(
+            pinned, next_slot,
+            "the start skipped more than the leased candidate, so something other \
+             than the broker's leases moved it"
+        );
+        drop(concurrent);
+        // The start committed its own lease once the pin was durable: a port
+        // still held after that is one the profile never gets back.
+        assert!(
+            lock_port_leases(&broker.port_leases).is_empty(),
+            "a finished start left a port leased"
+        );
+    }
+
+    /// One hole a lease alone cannot cover: the pin snapshot is read BEFORE a
+    /// lease is taken, so without a gate two allocators can sit between those
+    /// same two steps at once, read the same pins, and choose the same port.
+    ///
+    /// WHAT THIS PINS.  With the gate held, a start reaches neither the choice
+    /// nor the pin it implies: no lease appears in the broker's registry and no
+    /// port reaches the record.  That rules out a gate taken after the LEASE or
+    /// after the PERSIST, which the older "the start has not finished"
+    /// assertion alone could not, since any gate anywhere on the start path
+    /// satisfies it.
+    ///
+    /// It does NOT rule out a gate taken after the SNAPSHOT: move the lock to
+    /// just past `sibling_pinned_ports` and all three assertions still pass,
+    /// because the start blocks before leasing either way.  That lower edge is
+    /// as unobservable from outside as the upper edge below, and for the same
+    /// reason.  Saying it was pinned was the tenth false comment here.
+    ///
+    /// WHAT IT CANNOT PIN — the gate's UPPER edge, that it is RELEASED before
+    /// `update_runtime_record`.  That release is invisible from outside: the
+    /// only external handle on it is acquiring the mutex, and the instant to
+    /// try is between a start's choice and its persist, which is exactly the
+    /// interval no observer can name without the start path telling it.  Take
+    /// the gate too early and the start is still blocked on it; too late and it
+    /// is already released either way.  Pinning it needs the start path
+    /// instrumented — a barrier the test releases after the choice — and that
+    /// is production machinery existing only for a test, so it is not here.
+    /// The upper edge is held by `port_allocation`'s doc comment and by review,
+    /// not by this test, and nothing below should be read as covering it.
+    ///
+    /// The control start is what keeps the gated assertion honest: it measures
+    /// what an UNGATED start costs on this machine and sizes the wait from
+    /// that, so "not finished yet" cannot quietly degrade into "not finished
+    /// yet because everything here is slow".
+    #[tokio::test]
+    async fn port_allocation_is_serialized_across_one_brokers_starts() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let control_id = create_app_fixture(&root, &service, "Ungated").await;
+        let app_id = create_app_fixture(&root, &service, "Gated").await;
+
+        let control_began = tokio::time::Instant::now();
+        broker
+            .manage_runtime_value(json!({"app_id": control_id, "action": "start"}))
+            .await
+            .expect("an ungated start succeeds");
+        let ungated = control_began.elapsed();
+
+        let gate = broker.port_allocation.lock().await;
+        let start = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = app_id.clone();
+            async move {
+                broker
+                    .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
+                    .await
+            }
+        });
+        // Twenty times what a start just cost here, floored at the historical
+        // 300 ms and capped so a pathological control cannot hang the suite.
+        let budget = (ungated * 20).clamp(Duration::from_millis(300), Duration::from_secs(5));
+        sleep(budget).await;
+        assert!(
+            !start.is_finished(),
+            "a start finished within {budget:?} while the allocation gate was held \
+             (an ungated start took {ungated:?} here), so it never took the gate"
+        );
+        assert!(
+            lock_port_leases(&broker.port_leases).is_empty(),
+            "a start leased a port while the allocation gate was held, so the gate \
+             is taken after the choice"
+        );
+        assert_eq!(
+            service
+                .runtime_record(&app_id)
+                .await
+                .expect("runtime record")
+                .port,
+            None,
+            "a start pinned a port while the allocation gate was held"
+        );
+
+        drop(gate);
+        timeout(Duration::from_secs(10), start)
+            .await
+            .expect("the start is released by the gate")
+            .expect("join the start")
+            .expect("the start succeeds once the gate is free");
     }
 
     /// The invariant `bind_stable_loopback`'s "no fallback" reasoning rests on,

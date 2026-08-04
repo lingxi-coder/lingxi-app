@@ -2,19 +2,22 @@
 //! refuse commands whose intent is networking up-front with a pointer to the
 //! structured Git tool rather than executing to a confusing seccomp EPERM.
 //!
-//! REACHABILITY — read before extending this module. `network_intent` has
-//! exactly ONE production caller, `crate::MobileShellTool::call`, and it sits
-//! behind `if !mobile_linux_guest`. `mobile_linux_guest` is true whenever the
-//! shell carrier is `ShellCarrier::mobile_linux_guest`, which sets
-//! `force_platform_sandbox: true`. So this detector runs ONLY on the legacy
-//! Android shell — and `apk`, `npm`, `npx` and `pip` do not exist there. Every
-//! rule in this file for those four commands is currently unreachable in
-//! production.
+//! REACHABILITY — read before extending this module. There are exactly TWO
+//! production callers, and which shell you are on decides which one runs:
 //!
-//! An earlier version of this comment claimed guest shells "reuse the same
-//! detector for capability reporting and permission-gate prompting". No call
-//! site backs that: there is no network permission gate wired to this module.
-//! Adding one is outstanding work, not a described behaviour.
+//!  - `ShellMobileTool::call`, behind `if !mobile_linux_guest` — the legacy
+//!    Android shell, where a detected command is REFUSED before it runs.
+//!  - `ShellMobileTool::check_permissions`, behind `if guest_shell` — the
+//!    iSH/Alpine guest, where it returns `PermissionResult::Ask` so the host
+//!    prompts for once/session/always. The guest is not refused, because it is
+//!    the only shell that has `apk`, `npm`, `npx` and `pip` at all.
+//!
+//! `mobile_linux_guest` / `guest_shell` are the same predicate:
+//! `ShellCarrier::mobile_linux_guest` sets `force_platform_sandbox: true`.
+//!
+//! This matters because for a while only the first caller existed, so every
+//! rule here for apk/npm/npx/pip was unreachable on the one shell that has
+//! them. Adding a rule is not the same as it running — check both call sites.
 //!
 //! The tokenizer is best-effort (no real shell parse): commands that hide
 //! networking via `$(echo cur)l`, `eval`, or similar tricks won't be flagged.
@@ -554,3 +557,4 @@ mod tests {
         let _ = network_intent("$(");
     }
 }
+

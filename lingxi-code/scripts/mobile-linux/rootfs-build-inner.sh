@@ -37,14 +37,13 @@ REPO="${OUT}/repo"
 # Builder-side tools only; none of this reaches the rootfs being assembled.
 # python3 is needed for the closure manifest and is not in the base image.
 #
-# Cached under the mounted output directory rather than fetched fresh each run:
-# gcc and musl-dev are ~100MB, and re-downloading them dominated every rebuild.
+# Cached under the mounted output directory rather than fetched fresh each run.
 # Keyed by arch: an .apk filename carries no architecture, so `gcc-15.2.0-r5.apk`
 # is the same name for aarch64 and x86_64. One shared cache directory would let
 # an x86_64 build pick up the aarch64 build's package.
 BUILDER_CACHE="/out/.builder-cache/${ARCH}"
 mkdir -p "${BUILDER_CACHE}"
-apk add --cache-dir "${BUILDER_CACHE}" curl gcc musl-dev python3 >/dev/null 2>&1
+apk add --cache-dir "${BUILDER_CACHE}" curl python3 >/dev/null 2>&1
 
 rm -rf "${OUT}" "${TARGET}"
 mkdir -p "${OUT}" "${TARGET}" "${REPO}/${ARCH}"
@@ -114,13 +113,6 @@ if grep -qi '^ERROR' "${OUT}/install.log"; then
   grep -i '^ERROR' "${OUT}/install.log" | head -20 >&2
   exit 1
 fi
-
-echo "[rootfs:${ARCH}] building zero_free.so"
-# OpenMinis injects LD_PRELOAD=/lib/zero_free.so into every `node` exec but never
-# ships the library, so musl's loader refuses to start Node. Build the library
-# the injection already expects instead of patching the vendored snapshot.
-gcc -shared -fPIC -O2 -Wall -Wextra -o "${TARGET}/lib/zero_free.so" /src/zero_free.c
-chmod 0755 "${TARGET}/lib/zero_free.so"
 
 echo "[rootfs:${ARCH}] configuring guest shell"
 # The vendored OpenMinis rootfs script appends an unconditional `cd ~` to

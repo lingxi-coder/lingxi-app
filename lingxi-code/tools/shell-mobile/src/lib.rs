@@ -25,7 +25,7 @@ pub mod net_intent;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use permission::result::PermissionMetadata;
+use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -158,12 +158,49 @@ impl Tool for ShellMobileTool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        // Recon finding: the desktop `BashTool::check_permissions` is itself a
-        // stub (`tools/shell/src/bash.rs` "allow-all-gate (M4-02 default)").
-        // Real allow/ask gating lives in the engine's `AdapterPermissionGate`
-        // (already wired on mobile via `PermissionRequestSink` -> Kotlin UI),
-        // NOT in tool-level rule code — so this mirrors the desktop stub.
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        // The guest shell (iSH/Alpine) really can reach the network: it ships
+        // apk, npm, npx, pip, git and curl, and nothing below it enforces
+        // deny-net. `call` deliberately does not refuse network intent there —
+        // refusing outright would make the toolchain useless — so the gate has
+        // to be the decision point instead. Returning Ask here is what makes an
+        // agent-initiated network command require approval, and the host's
+        // prompt handling supplies the once/session/always semantics.
+        //
+        // On the legacy deny-net shell this is unnecessary: `call` already
+        // refuses network intent up-front, before anything runs.
+        let guest_shell = self
+            .ctx
+            .mobile_shell()
+            .is_some_and(|shell| shell.force_platform_sandbox);
+        if guest_shell {
+            if let Some(command) = input.get("command").and_then(Value::as_str) {
+                if let Some(advice) = net_intent::network_intent(command) {
+                    return PermissionResult::Ask {
+                        reason: PermissionDecisionReason::Other {
+                            reason: "guest shell command shows network intent".into(),
+                        },
+                        prompt: PermissionPrompt {
+                            title: "Allow network access?".into(),
+                            message: advice,
+                            options: vec![
+                                "Allow once".into(),
+                                "Allow for this session".into(),
+                                "Always allow".into(),
+                                "Deny".into(),
+                            ],
+                        },
+                        pending_classifier_check: None,
+                        metadata: PermissionMetadata::default(),
+                    };
+                }
+            }
+        }
+
+        // Otherwise: the desktop `BashTool::check_permissions` is itself a stub
+        // (`tools/shell/src/bash.rs` "allow-all-gate (M4-02 default)"), with real
+        // allow/ask gating in the engine's `AdapterPermissionGate` (wired on
+        // mobile via `PermissionRequestSink` -> client UI). Mirror that.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "mobile-shell deny-net (engine AdapterPermissionGate handles allow/ask)"
@@ -631,6 +668,43 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(res.data["stdout"], "ok\n");
+    }
+
+    #[tokio::test]
+    async fn guest_shell_network_intent_asks_before_running() {
+        // The guest can actually reach the network and `call` deliberately does
+        // not refuse there, so the permission gate is the only control point.
+        // Before this was wired, check_permissions returned a blanket Allow and
+        // an agent-initiated `apk add` ran with no approval at all.
+        let (ctx, _, _) = mobile_linux_ctx(ok_output("ok\n"));
+        let tool = ShellMobileTool::new(ctx);
+        for command in ["apk add git", "npm i left-pad", "git clone https://example.com/r.git"] {
+            let decision = tool
+                .check_permissions(&json!({ "command": command }), &fresh_ctx())
+                .await;
+            let PermissionResult::Ask { prompt, .. } = decision else {
+                panic!("{command:?} must require approval on the guest shell");
+            };
+            // once / session / always are what plan item 12 asks for.
+            assert!(prompt.options.len() >= 3, "{command:?} -> {:?}", prompt.options);
+        }
+    }
+
+    #[tokio::test]
+    async fn guest_shell_local_command_is_not_gated() {
+        // Over-asking is its own failure: a gate that prompts for `ls` trains
+        // the user to approve everything.
+        let (ctx, _, _) = mobile_linux_ctx(ok_output("ok\n"));
+        let tool = ShellMobileTool::new(ctx);
+        for command in ["ls -la", "npm run build", "git status"] {
+            let decision = tool
+                .check_permissions(&json!({ "command": command }), &fresh_ctx())
+                .await;
+            assert!(
+                matches!(decision, PermissionResult::Allow { .. }),
+                "{command:?} must not prompt"
+            );
+        }
     }
 
     #[tokio::test]

@@ -5,8 +5,7 @@
 #
 # This is the step the vendored OpenMinis `prepare_alpine_rootfs.sh` never had:
 # it resolves the recursive APK closure, installs it OFFLINE into a digest-
-# verified minirootfs, and builds the zero_free.so that OpenMinis' Node exec
-# path already preloads. The output tarball is what should be handed to
+# verified minirootfs. The output tarball is what should be handed to
 # `fakefsify`, in place of the bare minirootfs.
 #
 # Usage:
@@ -22,13 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 PINS="${REPO_ROOT}/docs/mobile-linux/local-app-runtime-pins.json"
 INNER="${SCRIPT_DIR}/rootfs-build-inner.sh"
-NATIVE_DIR="${SCRIPT_DIR}/native"
 
 # Digest-pinned so a moving `alpine:3.24` tag cannot change the builder itself.
 # These are per-architecture manifest digests, not the index digest: passing a
 # single arch's digest with --platform for the other arch does NOT cross-build,
 # it silently hands back the pinned image and warns, so the "x86_64" build would
-# run an arm64 builder and produce an arm64 zero_free.so inside an x86_64 rootfs.
+# run an arm64 builder while claiming to have produced an x86_64 rootfs.
 BUILDER_IMAGE_AARCH64="docker.io/library/alpine:3.24@sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18"
 BUILDER_IMAGE_X86_64="docker.io/library/alpine:3.24@sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f"
 
@@ -94,7 +92,6 @@ mkdir -p "${OUTPUT}"
   -e LINGXI_ROOTFS_SHA256="${ROOTFS_SHA}" \
   -e LINGXI_PACKAGES="${PACKAGES}" \
   -v "${INNER}:/inner.sh:ro" \
-  -v "${NATIVE_DIR}:/src:ro" \
   -v "${OUTPUT}:/out" \
   "${BUILDER_IMAGE}" \
   sh -c 'test "$(uname -m)" = "'"${ARCH}"'" || {

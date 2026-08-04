@@ -139,11 +139,31 @@ def validate_binary_symlink(
     """
     if not any(rel.startswith(prefix) for prefix in BINARY_SYMLINK_SCRUTINY_PREFIXES):
         return
-    destination = root / resolved
-    if not destination.exists():
+
+    # Resolve the LINK, not its lexically-normalised target. The two agree only
+    # when every component of the target is a real directory; once the target
+    # traverses a symlink followed by `..` they diverge, and attesting to the
+    # lexical result vouches for a different file than the one the guest execs.
+    real = pathlib.Path(os.path.realpath(root / rel.lstrip("/")))
+    root_real = pathlib.Path(os.path.realpath(root))
+    try:
+        guest_rel = "/" + real.relative_to(root_real).as_posix()
+    except ValueError:
+        fail(f"symlink in a binary directory escapes the rootfs: {rel} -> {target}")
+    if not real.exists():
         fail(f"symlink in a binary directory is dangling: {rel} -> {target}")
-    if destination.is_dir():
+    if real.is_dir():
         fail(f"symlink in a binary directory must resolve to a file: {rel} -> {target}")
+    # The blanket ban this replaced made it impossible for anything on PATH to
+    # live in a guest-writable directory. Keep that property: an executable the
+    # guest can rewrite is not covered by the immutable-file inventory, so a
+    # /usr/bin entry resolving into one is uninventoried by construction.
+    for writable in WRITABLE_ROOTS:
+        if guest_rel == writable or guest_rel.startswith(f"{writable}/"):
+            fail(
+                f"symlink in a binary directory resolves into a writable root: "
+                f"{rel} -> {guest_rel}"
+            )
 
 
 def normalize_hardlink_target(member_name: str, linkname: str) -> pathlib.PurePosixPath:

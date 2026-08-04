@@ -154,6 +154,32 @@ fi
 rm -f "${fixture_root}/usr/bin/lx-dir"
 rm -rf "${fixture_root}/usr/lib/node_modules"
 
+# The blanket ban that used to cover binary directories made it impossible for
+# anything on PATH to resolve into a guest-writable directory, or to reach a
+# different file than its lexical target names. Both properties must survive the
+# relaxation, so assert them directly.
+mkdir -p "${fixture_root}/tmp"
+: > "${fixture_root}/tmp/payload"
+ln -sf ../../tmp/payload "${fixture_root}/usr/bin/lx-writable"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject a /usr/bin symlink resolving into a writable root" >&2
+  exit 1
+fi
+rm -f "${fixture_root}/usr/bin/lx-writable"
+
+# Chained: the lexical normalisation of the target and the kernel's resolution
+# disagree, so validating the lexical string would vouch for the wrong file.
+mkdir -p "${fixture_root}/opt/a/b" "${fixture_root}/opt/a/tmp"
+ln -sfn .. "${fixture_root}/opt/a/b/up"
+: > "${fixture_root}/opt/a/tmp/payload"
+ln -sf ../../opt/a/b/up/../../tmp/payload "${fixture_root}/usr/bin/lx-chain"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject a chained symlink whose realpath differs from its lexical target" >&2
+  exit 1
+fi
+rm -f "${fixture_root}/usr/bin/lx-chain" "${fixture_root}/tmp/payload"
+rm -rf "${fixture_root}/opt"
+
 manifest_path="${tmp_root}/rootfs-manifest.json"
 lock_path="${tmp_root}/rootfs-build.lock.json"
 spdx_path="${tmp_root}/rootfs.spdx.json"
@@ -196,6 +222,50 @@ fi
 tar_archive="${tmp_root}/rootfs.tar"
 python3 "${tool}" build-archive --root "${fixture_root}" --output "${tar_archive}" --source-date-epoch "${SOURCE_DATE_EPOCH}"
 python3 "${tool}" verify-archive --archive "${tar_archive}"
+
+# The archive validator has its own symlink policy, separate from the tree
+# validator's. Cover both directions here: a resolvable relative symlink in a
+# binary directory must survive the round trip, and a dangling one must be
+# rejected at archive level even though the tree check never sees it.
+ln -sf busybox "${fixture_root}/bin/archive-ok.symlink-test"
+python3 "${tool}" build-archive --root "${fixture_root}" --output "${tmp_root}/sym-ok.tar" --source-date-epoch "${SOURCE_DATE_EPOCH}"
+python3 "${tool}" verify-archive --archive "${tmp_root}/sym-ok.tar" >/dev/null || {
+  echo "verify-archive must accept a resolvable relative symlink in /bin" >&2
+  exit 1
+}
+rm -f "${fixture_root}/bin/archive-ok.symlink-test"
+
+# Built by hand: build-archive validates the tree first, so a dangling link can
+# never reach the archive through it -- yet a hand-rolled or third-party archive
+# can carry one, which is exactly what verify-archive exists to catch.
+python3 - "${tmp_root}/sym-dangling.tar" <<'MAKE_DANGLING'
+import io
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "w", format=tarfile.PAX_FORMAT) as tar:
+    def reg(name, data=b"x", mode=0o755):
+        info = tarfile.TarInfo(name)
+        info.size = len(data); info.mode = mode
+        info.uid = info.gid = 0; info.uname = info.gname = "root"; info.mtime = 0
+        tar.addfile(info, io.BytesIO(data))
+
+    def sym(name, target):
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.SYMTYPE; info.linkname = target; info.mode = 0o777
+        info.uid = info.gid = 0; info.uname = info.gname = "root"; info.mtime = 0
+        tar.addfile(info)
+
+    reg("bin/busybox")
+    sym("bin/sh", "busybox")
+    reg("sbin/apk")
+    reg("etc/apk/repositories", b"repo\n", 0o644)
+    sym("usr/bin/lx-dangling", "definitely-not-here")
+MAKE_DANGLING
+if python3 "${tool}" verify-archive --archive "${tmp_root}/sym-dangling.tar" >/dev/null 2>&1; then
+  echo "expected verify-archive to reject a dangling symlink in /usr/bin" >&2
+  exit 1
+fi
 
 python3 - <<'PY' "${tmp_root}/bad-archive.tar"
 import io

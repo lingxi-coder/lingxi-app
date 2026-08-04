@@ -106,7 +106,7 @@ LOCAL_APP_TARBALL=""
 # after a local-app build shipped an app whose rootfs had no toolchain at all,
 # with nothing in the log to say so.
 STAGED_MANIFEST="${STAGE_ROOT}/manifest.json"
-if [[ "${LOCAL_APP_RUNTIME}" != "1" && -f "${STAGED_MANIFEST}" ]]; then
+if [[ "${LOCAL_APP_RUNTIME}" != "1" && "${CLEAN}" != "1" && -f "${STAGED_MANIFEST}" ]]; then
   if grep -q '"local_app_runtime": true' "${STAGED_MANIFEST}" 2>/dev/null; then
     echo "error: a local-app runtime is already staged at ${STAGE_ROOT}." >&2
     echo "       Re-run with --local-app-runtime, or pass --clean to replace it" >&2
@@ -130,14 +130,19 @@ if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
     echo "local-app rootfs build produced no tarball: ${LOCAL_APP_TARBALL}" >&2
     exit 1
   }
-  # `--apk-dir` stays supported for verifying a closure produced elsewhere;
-  # otherwise the one just built is used.
-  [[ -n "${APK_DIR}" ]] || APK_DIR="${LOCAL_APP_ROOTFS_DIR}/apk-closure"
-  # Deliberately NOT --release: that gate demands every supported ABI be
-  # release-ready, and iOS ships arm64 only. The arm64 closure is already
-  # verified artifact-by-artifact against the pins by the builder above.
-  # `package-rootfs-release.sh` remains the step that requires --release.
-  bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh"
+  if [[ -n "${APK_DIR}" ]]; then
+    # An explicit --apk-dir is a request for the full release check against that
+    # closure, so run it. It will refuse while any supported ABI is short of
+    # release-ready -- which is the point of asking.
+    bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh" --release --apk-dir "${APK_DIR}"
+  else
+    # Deliberately NOT --release by default: that gate demands every supported
+    # ABI be release-ready, and iOS ships arm64 only. The arm64 closure was
+    # already verified artifact-by-artifact against the pins by the builder
+    # above. `package-rootfs-release.sh` remains the step that requires
+    # --release for an actual release.
+    bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh"
+  fi
 else
   bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh"
 fi

@@ -220,6 +220,28 @@ struct LXISHGuestEnvironment {
 }
 
 struct LXISHRuntimeMountPlanner {
+    /// Where an absolute guest path lands inside the fakefs data tree, or nil if
+    /// it is not an in-tree absolute path. Traversal components are rejected
+    /// rather than normalised: the cost of being wrong here is creating a
+    /// directory outside the rootfs on the host.
+    static func guestMountPointURL(for guestPath: String, under dataRoot: URL) -> URL? {
+        guard guestPath.hasPrefix("/") else { return nil }
+        let components = guestPath.split(separator: "/").map(String.init)
+        guard !components.isEmpty,
+              !components.contains(".."),
+              !components.contains(".")
+        else {
+            return nil
+        }
+        let candidate = components.reduce(dataRoot) {
+            $0.appendingPathComponent($1, isDirectory: true)
+        }
+        guard candidate.standardizedFileURL.path.hasPrefix(dataRoot.path + "/") else {
+            return nil
+        }
+        return candidate
+    }
+
     static func effectiveMounts(
         requestedMounts: [LXISHMountSpec],
         config: LXISHNativeConfig
@@ -827,7 +849,7 @@ private final class LXISHNativeCoordinator {
         execute(config: config) { runtime in
             runtime.mounts = mounts
             try self.rootfsManager.cacheMounts(mounts, for: config)
-            try self.ensureHostMountsExist(mounts)
+            try self.ensureMountEndpointsExist(mounts, config: config)
             if LXISHKernelRuntimeBridge.isDeviceBridgeAvailable() {
                 try runtime.kernel.configureMounts(mounts.map(self.dictionary(from:)))
             }
@@ -1210,19 +1232,41 @@ private final class LXISHNativeCoordinator {
             requestedMounts: runtime.mounts,
             config: runtime.config
         )
-        try ensureHostMountsExist(mounts)
+        try ensureMountEndpointsExist(mounts, config: runtime.config)
         guard !mounts.isEmpty else { return }
         try runtime.kernel.configureMounts(mounts.map(dictionary(from:)))
     }
 
-    private func ensureHostMountsExist(_ mounts: [LXISHMountSpec]) throws {
+    /// A bind mount needs BOTH ends to exist: the host directory being shared,
+    /// and the guest directory it attaches to inside the fakefs.
+    ///
+    /// Only the host side was being created. `ensureGuestDirectories` builds a
+    /// fixed list baked into the rootfs image and never sees request-supplied
+    /// guest paths, so every `/var/lingxi/local-app-build/<app-id>/<channel>`
+    /// mount had no mount point to attach to.
+    private func ensureMountEndpointsExist(
+        _ mounts: [LXISHMountSpec],
+        config: LXISHNativeConfig
+    ) throws {
+        let dataRoot = config.rootfsDataURL.standardizedFileURL
         for mount in mounts {
             try FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: mount.hostPath, isDirectory: true),
                 withIntermediateDirectories: true
             )
+            guard let guestDirectory = LXISHRuntimeMountPlanner.guestMountPointURL(
+                for: mount.guestPath,
+                under: dataRoot
+            ) else {
+                continue
+            }
+            try FileManager.default.createDirectory(
+                at: guestDirectory,
+                withIntermediateDirectories: true
+            )
         }
     }
+
 
     private func timeoutSeconds(from request: LXISHRunRequest) -> Double {
         guard let timeoutMs = request.timeoutMs else { return 0 }

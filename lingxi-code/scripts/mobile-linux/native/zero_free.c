@@ -7,9 +7,15 @@
  *     deps/ish/xX_main_Xx.h:244         (unconditional append)
  *     src/ios/iSH/ISHKernel.m:791       (unconditional append)
  *     src/ios/iSH/ISHShellExecutor.m:408 (unconditional append)
- * The upstream snapshot never ships the library, so musl's loader aborts and
- * Node cannot start at all. Building the object the injection already names
- * fixes that without patching the vendored snapshot.
+ * The upstream snapshot never ships the library.
+ *
+ * CORRECTION: an earlier version of this file claimed musl's loader aborts on a
+ * missing LD_PRELOAD object and that Node therefore could not start at all.
+ * That is false, and it was asserted rather than measured. Verified on Alpine
+ * 3.24.1 / musl 1.2.6 / Node v24.18.1 aarch64: with /lib/zero_free.so deleted
+ * and LD_PRELOAD still pointing at it, `node --version` runs normally — musl
+ * silently ignores a preload object it cannot open. Shipping this library is
+ * therefore NOT required for Node to start.
  *
  * WHY THIS IS INTENTIONALLY EMPTY
  * ------------------------------
@@ -40,11 +46,15 @@
  * cannot even observe from a native aarch64 rootfs, since the Zone-allocator
  * corruption it targets is a property of iSH's *emulator*.
  *
- * This object therefore satisfies the loader and interposes nothing, which is
- * strictly better than the status quo of a missing file. If on-device testing
- * under iSH shows V8 instability that zeroing would address, the fix belongs in
- * a real allocator implementation or in the injection sites themselves -- not
- * in a partial interposer that reliably segfaults before Node prints a line.
+ * What remains, then, is a placeholder that interposes nothing. It exists so
+ * the injected path resolves to a real, inspectable object rather than silently
+ * to nothing, and so that IF on-device testing under iSH shows V8 instability
+ * that zeroing would address, there is an obvious place to put the fix. It is
+ * not load-bearing today: deleting it changes no observed behaviour.
+ *
+ * If the on-device run shows Node is stable without zeroing, the honest move is
+ * to delete this file and stop building it, not to keep a stub whose original
+ * justification did not hold.
  */
 
 /*

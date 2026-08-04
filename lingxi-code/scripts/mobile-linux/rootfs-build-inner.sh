@@ -86,7 +86,7 @@ for attempt in 1 2 3; do
     break
   fi
   echo "[rootfs:${ARCH}] fetch attempt ${attempt} failed; retrying" >&2
-  grep -i error "${OUT}/fetch.log" >&2 | head -5 || true
+  grep -i error "${OUT}/fetch.log" | head -5 >&2 || true
   sleep 5
 done
 if [ "${FETCH_OK}" != "1" ]; then
@@ -108,10 +108,10 @@ echo "[rootfs:${ARCH}] installing closure offline (--no-network)"
 apk --root "${TARGET}" --arch "${ARCH}" add \
     --no-network --allow-untrusted --repository "${REPO}" $PKGS \
     > "${OUT}/install.log" 2>&1 || {
-  echo "[rootfs:${ARCH}] offline install failed" >&2; grep -i error "${OUT}/install.log" >&2 | head -20; exit 1; }
+  echo "[rootfs:${ARCH}] offline install failed" >&2; grep -i error "${OUT}/install.log" | head -20 >&2; exit 1; }
 if grep -qi '^ERROR' "${OUT}/install.log"; then
   echo "[rootfs:${ARCH}] offline install reported errors" >&2
-  grep -i '^ERROR' "${OUT}/install.log" >&2 | head -20
+  grep -i '^ERROR' "${OUT}/install.log" | head -20 >&2
   exit 1
 fi
 

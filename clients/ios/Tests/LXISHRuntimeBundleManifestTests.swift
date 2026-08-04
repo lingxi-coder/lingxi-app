@@ -341,6 +341,40 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         let sha256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         return (archiveURL, sha256)
     }
+
+    // MARK: - Guest mount points
+
+    func testGuestMountPointMapsAbsolutePathsIntoTheFakefsDataTree() throws {
+        let dataRoot = URL(fileURLWithPath: "/managed/alpine-rootfs/data", isDirectory: true)
+
+        // A bind mount needs a directory on BOTH sides. Only the host side was
+        // created, so every local-app build mount attached to nothing.
+        let build = LXISHRuntimeMountPlanner.guestMountPointURL(
+            for: "/var/lingxi/local-app-build/abcd1234/store",
+            under: dataRoot
+        )
+        XCTAssertEqual(
+            build?.standardizedFileURL.path,
+            "/managed/alpine-rootfs/data/var/lingxi/local-app-build/abcd1234/store"
+        )
+
+        XCTAssertEqual(
+            LXISHRuntimeMountPlanner.guestMountPointURL(for: "/root", under: dataRoot)?
+                .standardizedFileURL.path,
+            "/managed/alpine-rootfs/data/root"
+        )
+    }
+
+    func testGuestMountPointRefusesPathsThatWouldEscapeTheDataTree() throws {
+        let dataRoot = URL(fileURLWithPath: "/managed/alpine-rootfs/data", isDirectory: true)
+        // Creating these would mkdir outside the rootfs on the HOST, so they are
+        // refused rather than normalised.
+        for guestPath in ["../escape", "/var/../../escape", "/a/./b", "relative/path", "/", ""] {
+            XCTAssertNil(
+                LXISHRuntimeMountPlanner.guestMountPointURL(for: guestPath, under: dataRoot),
+                "guest path \(guestPath) must not map to a directory"
+            )
+        }
 }
 
 private enum TestZipArchive {
@@ -423,6 +457,7 @@ private enum CRC32 {
         }
         return crc ^ 0xffff_ffff
     }
+    }
 }
 
 private extension Data {
@@ -435,4 +470,5 @@ private extension Data {
         var value = value.littleEndian
         append(Data(bytes: &value, count: MemoryLayout<UInt32>.size))
     }
+
 }

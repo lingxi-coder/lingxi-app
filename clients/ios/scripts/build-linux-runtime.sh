@@ -39,6 +39,8 @@ STAGE_XCODE="${STAGE_ROOT}/xcode"
 BUILD_TYPE="release"
 ALPINE_VERSION="3.21"
 CLEAN=0
+LOCAL_APP_RUNTIME=0
+APK_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -49,6 +51,8 @@ Options:
   --debug                 Use OpenMinis debug iSH build artifacts
   --release               Use OpenMinis release iSH build artifacts (default)
   --alpine-version <ver>  Pass a version to prepare_alpine_rootfs.sh (default: 3.21)
+  --local-app-runtime     Require the exact Node/Git local-app rootfs contract
+  --apk-dir <dir>         Hashed recursive APK closure for --local-app-runtime
   -h, --help              Show this help
 EOF
 }
@@ -71,6 +75,14 @@ while [[ $# -gt 0 ]]; do
       ALPINE_VERSION="${2:?missing value for --alpine-version}"
       shift 2
       ;;
+    --local-app-runtime)
+      LOCAL_APP_RUNTIME=1
+      shift
+      ;;
+    --apk-dir)
+      APK_DIR="${2:?missing value for --apk-dir}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -82,6 +94,18 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
+  [[ -d "${APK_DIR}" ]] || {
+    echo "--local-app-runtime requires --apk-dir <recursive-apk-closure>" >&2
+    exit 1
+  }
+  bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh" \
+    --release \
+    --apk-dir "${APK_DIR}"
+else
+  bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh"
+fi
 
 for required in "$BUILD_ISH" "$PREPARE_ROOTFS"; do
   [[ -x "$required" || -f "$required" ]] || {
@@ -101,6 +125,12 @@ bash "${BUILD_ISH}" "${BUILD_TYPE}"
 
 echo "[build-linux-runtime] Preparing pinned Alpine rootfs (${ALPINE_VERSION})"
 bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
+
+if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
+  echo "[build-linux-runtime] Verifying exact local-app runtime packages"
+  python3 "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/rootfs_tool.py" verify-tree \
+    --root "${DEPS_DIR}/resources/alpine-rootfs/data"
+fi
 
 echo "[build-linux-runtime] Staging headers, static libs, and resources"
 rsync -a --delete "${DEPS_DIR}/include/" "${STAGE_INCLUDE}/"

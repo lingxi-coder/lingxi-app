@@ -146,7 +146,9 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             appSandboxRoot: appSandboxRoot,
             projectCwd: scope.projectCwd,
             providerConfig: provider,
-            mobileLinux: runtime.map(makeIosMobileLinuxConfig)
+            mobileLinux: runtime.map(makeIosMobileLinuxConfig),
+            localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
+            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot
         )
         let handle = try buildIosEngineWithConfig(
             config: config,

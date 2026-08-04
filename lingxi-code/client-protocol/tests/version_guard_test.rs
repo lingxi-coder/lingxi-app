@@ -305,6 +305,9 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::AppsChanged", "apps_changed");
     put("ClientEvent::AppsChanged.apps", "Vec<AppRecordDto>");
 
+    put("ClientEvent::AppEvent", "app_event");
+    put("ClientEvent::AppEvent.event", "AppEventDto");
+
     put(
         "ClientEvent::AppDesignerRequested",
         "app_designer_requested",
@@ -370,6 +373,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::AppRuntimeChanged", "app_runtime_changed");
     put("ClientEvent::AppRuntimeChanged.app_id", "String");
     put("ClientEvent::AppRuntimeChanged.state", "AppRuntimeStateDto");
+    put(
+        "ClientEvent::AppRuntimeChanged.details",
+        "Option<AppRuntimeDetailsDto>",
+    );
     put(
         "ClientEvent::AppRuntimeChanged.last_error",
         "Option<String>",
@@ -561,6 +568,11 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::ListApps", "list_apps");
 
+    put("ClientCommand::ListAppTemplates", "list_app_templates");
+
+    put("ClientCommand::GetAppDetails", "get_app_details");
+    put("ClientCommand::GetAppDetails.app_id", "String");
+
     put("ClientCommand::CreateApp", "create_app");
     put("ClientCommand::CreateApp.name", "String");
     put("ClientCommand::CreateApp.template", "AppTemplateKindDto");
@@ -598,6 +610,30 @@ fn current_contract_index() -> ContractIndex {
         "u64",
     );
 
+    put(
+        "ClientCommand::RequestAppDesignSuggestion",
+        "request_app_design_suggestion",
+    );
+    put("ClientCommand::RequestAppDesignSuggestion.app_id", "String");
+    put(
+        "ClientCommand::RequestAppDesignSuggestion.expected_revision",
+        "u64",
+    );
+    put(
+        "ClientCommand::RequestAppDesignSuggestion.prompt",
+        "Option<String>",
+    );
+
+    put(
+        "ClientCommand::DismissAppDesignSuggestion",
+        "dismiss_app_design_suggestion",
+    );
+    put("ClientCommand::DismissAppDesignSuggestion.app_id", "String");
+    put(
+        "ClientCommand::DismissAppDesignSuggestion.suggestion_id",
+        "String",
+    );
+
     put("ClientCommand::ConfirmAppDesign", "confirm_app_design");
     put("ClientCommand::ConfirmAppDesign.app_id", "String");
     put("ClientCommand::ConfirmAppDesign.revision", "u64");
@@ -623,6 +659,52 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::RequestAppRevision", "request_app_revision");
     put("ClientCommand::RequestAppRevision.app_id", "String");
     put("ClientCommand::RequestAppRevision.prompt", "String");
+
+    put("ClientCommand::RetryAppGeneration", "retry_app_generation");
+    put("ClientCommand::RetryAppGeneration.app_id", "String");
+
+    put(
+        "ClientCommand::ExecuteAppBridgeRequest",
+        "execute_app_bridge_request",
+    );
+    put(
+        "ClientCommand::ExecuteAppBridgeRequest.request",
+        "AppBridgeRequestDto",
+    );
+
+    put(
+        "ClientCommand::ResolveAppUiRequest",
+        "resolve_app_ui_request",
+    );
+    put("ClientCommand::ResolveAppUiRequest.request_id", "String");
+    put(
+        "ClientCommand::ResolveAppUiRequest.decision",
+        "AppAuthorizationDecisionDto",
+    );
+    put(
+        "ClientCommand::ResolveAppUiRequest.result_json",
+        "Option<String>",
+    );
+    put("ClientCommand::ResolveAppUiRequest.error", "Option<String>");
+
+    put(
+        "ClientCommand::ResolveAppCapabilityRequest",
+        "resolve_app_capability_request",
+    );
+    put(
+        "ClientCommand::ResolveAppCapabilityRequest.request_id",
+        "String",
+    );
+    put(
+        "ClientCommand::ResolveAppCapabilityRequest.decision",
+        "AppAuthorizationDecisionDto",
+    );
+
+    put(
+        "ClientCommand::ResetAppPermissions",
+        "reset_app_permissions",
+    );
+    put("ClientCommand::ResetAppPermissions.app_id", "String");
 
     put("ClientCommand::ListAppCheckpoints", "list_app_checkpoints");
     put("ClientCommand::ListAppCheckpoints.app_id", "String");
@@ -920,6 +1002,62 @@ fn current_contract_index() -> ContractIndex {
     put("DensityLevelDto::Compact", "compact");
     put("DensityLevelDto::Comfortable", "comfortable");
 
+    put("AppDataFieldTypeDto::Text", "text");
+    put("AppDataFieldTypeDto::LongText", "long_text");
+    put("AppDataFieldTypeDto::Integer", "integer");
+    put("AppDataFieldTypeDto::Decimal", "decimal");
+    put("AppDataFieldTypeDto::Boolean", "boolean");
+    put("AppDataFieldTypeDto::DateTime", "date_time");
+    put("AppDataFieldTypeDto::Enum", "enum");
+    put("AppDataFieldTypeDto::ImageRef", "image_ref");
+
+    put("AppDataFieldDto.id", "String");
+    put("AppDataFieldDto.label", "String");
+    put("AppDataFieldDto.field_type", "AppDataFieldTypeDto");
+    put("AppDataFieldDto.required", "bool");
+    put("AppDataFieldDto.options", "Vec<String>");
+
+    put("AppDataCollectionDto.id", "String");
+    put("AppDataCollectionDto.label", "String");
+    put("AppDataCollectionDto.fields", "Vec<AppDataFieldDto>");
+    put("AppDataCollectionDto.enabled_by_default", "bool");
+
+    put("AppDesignFieldTypeDto::ShortText", "short_text");
+    put("AppDesignFieldTypeDto::LongText", "long_text");
+    put("AppDesignFieldTypeDto::SingleChoice", "single_choice");
+    put("AppDesignFieldTypeDto::MultipleChoice", "multiple_choice");
+    put("AppDesignFieldTypeDto::Boolean", "boolean");
+    put("AppDesignFieldTypeDto::Color", "color");
+    put("AppDesignFieldTypeDto::Density", "density");
+    put("AppDesignFieldTypeDto::ScreenList", "screen_list");
+    put("AppDesignFieldTypeDto::FeatureList", "feature_list");
+    put("AppDesignFieldTypeDto::DataFieldList", "data_field_list");
+    put("AppDesignFieldTypeDto::DomainList", "domain_list");
+
+    put("AppDesignFieldOptionDto.value", "String");
+    put("AppDesignFieldOptionDto.label", "String");
+
+    put("AppDesignFieldDto.id", "String");
+    put("AppDesignFieldDto.label", "String");
+    put("AppDesignFieldDto.description", "Option<String>");
+    put("AppDesignFieldDto.field_type", "AppDesignFieldTypeDto");
+    put("AppDesignFieldDto.required", "bool");
+    put("AppDesignFieldDto.default_value", "Option<DesignValueDto>");
+    put("AppDesignFieldDto.options", "Vec<AppDesignFieldOptionDto>");
+
+    put("AppDesignStepDto.id", "String");
+    put("AppDesignStepDto.order", "u32");
+    put("AppDesignStepDto.title", "String");
+    put("AppDesignStepDto.description", "Option<String>");
+    put("AppDesignStepDto.fields", "Vec<AppDesignFieldDto>");
+
+    put("AppTemplateDto.kind", "AppTemplateKindDto");
+    put("AppTemplateDto.version", "u32");
+    put("AppTemplateDto.name", "String");
+    put("AppTemplateDto.description", "String");
+    put("AppTemplateDto.steps", "Vec<AppDesignStepDto>");
+    put("AppTemplateDto.collections", "Vec<AppDataCollectionDto>");
+
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
     put("AppRecordDto.template", "AppTemplateKindDto");
@@ -947,6 +1085,13 @@ fn current_contract_index() -> ContractIndex {
     put("DesignValueDto::ScreenList.value", "Vec<String>");
     put("DesignValueDto::FeatureList", "feature_list");
     put("DesignValueDto::FeatureList.value", "Vec<String>");
+    put("DesignValueDto::DataFieldList", "data_field_list");
+    put(
+        "DesignValueDto::DataFieldList.value",
+        "Vec<AppDataFieldDto>",
+    );
+    put("DesignValueDto::DomainList", "domain_list");
+    put("DesignValueDto::DomainList.value", "Vec<String>");
 
     put("AppDesignPatchOpDto::Set", "set");
     put("AppDesignPatchOpDto::Set.field_id", "String");
@@ -961,6 +1106,189 @@ fn current_contract_index() -> ContractIndex {
     put("AppCheckpointDto.label", "String");
     put("AppCheckpointDto.kind", "AppCheckpointKindDto");
     put("AppCheckpointDto.created_at_ms", "u64");
+
+    put("AppRuntimeModeDto::StaticExport", "static_export");
+    put("AppRuntimeModeDto::NextProduction", "next_production");
+
+    put(
+        "AppRuntimeSuspensionReasonDto::Backgrounded",
+        "backgrounded",
+    );
+    put(
+        "AppRuntimeSuspensionReasonDto::MemoryWarning",
+        "memory_warning",
+    );
+    put(
+        "AppRuntimeSuspensionReasonDto::RuntimeQuota",
+        "runtime_quota",
+    );
+    put(
+        "AppRuntimeSuspensionReasonDto::ProcessExited",
+        "process_exited",
+    );
+
+    put("AppRuntimeRecoveryStateDto::NotNeeded", "not_needed");
+    put("AppRuntimeRecoveryStateDto::Pending", "pending");
+    put("AppRuntimeRecoveryStateDto::Recovering", "recovering");
+    put("AppRuntimeRecoveryStateDto::Recovered", "recovered");
+    put("AppRuntimeRecoveryStateDto::Failed", "failed");
+
+    put("AppGenerationJobStateDto::Queued", "queued");
+    put("AppGenerationJobStateDto::Scaffolding", "scaffolding");
+    put("AppGenerationJobStateDto::Generating", "generating");
+    put("AppGenerationJobStateDto::Validating", "validating");
+    put("AppGenerationJobStateDto::Building", "building");
+    put(
+        "AppGenerationJobStateDto::StartingPreview",
+        "starting_preview",
+    );
+    put(
+        "AppGenerationJobStateDto::AwaitingApproval",
+        "awaiting_approval",
+    );
+    put("AppGenerationJobStateDto::Succeeded", "succeeded");
+    put("AppGenerationJobStateDto::Failed", "failed");
+    put("AppGenerationJobStateDto::Cancelled", "cancelled");
+
+    put("AppGenerationJobDto.id", "String");
+    put("AppGenerationJobDto.app_id", "String");
+    put("AppGenerationJobDto.revision", "u64");
+    put("AppGenerationJobDto.continuation_seq", "u64");
+    put("AppGenerationJobDto.state", "AppGenerationJobStateDto");
+    put("AppGenerationJobDto.percent", "Option<u8>");
+    put("AppGenerationJobDto.detail", "Option<String>");
+    put("AppGenerationJobDto.log_rel", "Option<String>");
+    put("AppGenerationJobDto.updated_at_ms", "u64");
+
+    put("AppManifestDto.schema_version", "u32");
+    put("AppManifestDto.app_id", "String");
+    put("AppManifestDto.name", "String");
+    put("AppManifestDto.template", "AppTemplateKindDto");
+    put("AppManifestDto.design_revision", "u64");
+    put("AppManifestDto.collections", "Vec<AppDataCollectionDto>");
+    put("AppManifestDto.allowed_domains", "Vec<String>");
+
+    put("AppRuntimeDetailsDto.state", "AppRuntimeStateDto");
+    put("AppRuntimeDetailsDto.mode", "Option<AppRuntimeModeDto>");
+    put("AppRuntimeDetailsDto.loopback_url", "Option<String>");
+    put(
+        "AppRuntimeDetailsDto.suspension_reason",
+        "Option<AppRuntimeSuspensionReasonDto>",
+    );
+    put(
+        "AppRuntimeDetailsDto.recovery_state",
+        "Option<AppRuntimeRecoveryStateDto>",
+    );
+    put("AppRuntimeDetailsDto.last_error", "Option<String>");
+
+    put("AppDesignFieldValueDto.field_id", "String");
+    put("AppDesignFieldValueDto.value", "DesignValueDto");
+
+    put("AppDetailsDto.app", "AppRecordDto");
+    put("AppDetailsDto.design_revision", "u64");
+    put("AppDetailsDto.design_fields", "Vec<AppDesignFieldValueDto>");
+    put("AppDetailsDto.manifest", "Option<AppManifestDto>");
+    put("AppDetailsDto.runtime", "AppRuntimeDetailsDto");
+    put(
+        "AppDetailsDto.generation_job",
+        "Option<AppGenerationJobDto>",
+    );
+    put("AppDetailsDto.checkpoints", "Vec<AppCheckpointDto>");
+
+    put("AppBridgeOperationDto::QueryData", "query_data");
+    put("AppBridgeOperationDto::MutateData", "mutate_data");
+    put("AppBridgeOperationDto::NetworkRequest", "network_request");
+    put("AppBridgeOperationDto::RuntimeStatus", "runtime_status");
+
+    put("AppBridgeRequestDto.request_id", "String");
+    put("AppBridgeRequestDto.app_id", "String");
+    put("AppBridgeRequestDto.operation", "AppBridgeOperationDto");
+    put("AppBridgeRequestDto.payload_json", "Option<String>");
+
+    put("AppBridgeResponseDto.request_id", "String");
+    put("AppBridgeResponseDto.app_id", "String");
+    put("AppBridgeResponseDto.ok", "bool");
+    put("AppBridgeResponseDto.result_json", "Option<String>");
+    put("AppBridgeResponseDto.error", "Option<String>");
+
+    put("AppUiActionKindDto::Inspect", "inspect");
+    put("AppUiActionKindDto::Click", "click");
+    put("AppUiActionKindDto::Fill", "fill");
+    put("AppUiActionKindDto::Select", "select");
+    put("AppUiActionKindDto::Toggle", "toggle");
+    put("AppUiActionKindDto::Scroll", "scroll");
+    put("AppUiActionKindDto::Navigate", "navigate");
+    put("AppUiActionKindDto::Back", "back");
+    put("AppUiActionKindDto::Reload", "reload");
+
+    put("AppUiTargetDto.element_id", "Option<String>");
+    put("AppUiTargetDto.role", "Option<String>");
+    put("AppUiTargetDto.name", "Option<String>");
+
+    put("AppUiRequestDto.request_id", "String");
+    put("AppUiRequestDto.app_id", "String");
+    put("AppUiRequestDto.action", "AppUiActionKindDto");
+    put("AppUiRequestDto.target", "Option<AppUiTargetDto>");
+    put("AppUiRequestDto.value", "Option<String>");
+
+    put("AppCapabilityKindDto::DataMutation", "data_mutation");
+    put("AppCapabilityKindDto::UiControl", "ui_control");
+    put("AppCapabilityKindDto::NetworkDomain", "network_domain");
+    put(
+        "AppCapabilityKindDto::RestoreCheckpoint",
+        "restore_checkpoint",
+    );
+
+    put("AppCapabilityRequestDto.request_id", "String");
+    put("AppCapabilityRequestDto.app_id", "String");
+    put("AppCapabilityRequestDto.capability", "AppCapabilityKindDto");
+    put("AppCapabilityRequestDto.domain", "Option<String>");
+    put("AppCapabilityRequestDto.reason", "String");
+
+    put("AppAuthorizationDecisionDto::Deny", "deny");
+    put("AppAuthorizationDecisionDto::AllowOnce", "allow_once");
+    put("AppAuthorizationDecisionDto::AllowSession", "allow_session");
+    put("AppAuthorizationDecisionDto::AllowAlways", "allow_always");
+
+    put("AppEventDto::AppTemplatesChanged", "app_templates_changed");
+    put(
+        "AppEventDto::AppTemplatesChanged.templates",
+        "Vec<AppTemplateDto>",
+    );
+    put("AppEventDto::AppDetailsChanged", "app_details_changed");
+    put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
+    put(
+        "AppEventDto::AppGenerationJobChanged",
+        "app_generation_job_changed",
+    );
+    put(
+        "AppEventDto::AppGenerationJobChanged.job",
+        "AppGenerationJobDto",
+    );
+    put("AppEventDto::AppBridgeResponse", "app_bridge_response");
+    put(
+        "AppEventDto::AppBridgeResponse.response",
+        "AppBridgeResponseDto",
+    );
+    put("AppEventDto::AppUiRequest", "app_ui_request");
+    put("AppEventDto::AppUiRequest.request", "AppUiRequestDto");
+    put(
+        "AppEventDto::AppCapabilityRequested",
+        "app_capability_requested",
+    );
+    put(
+        "AppEventDto::AppCapabilityRequested.request",
+        "AppCapabilityRequestDto",
+    );
+    put(
+        "AppEventDto::AppCheckpointsChanged",
+        "app_checkpoints_changed",
+    );
+    put("AppEventDto::AppCheckpointsChanged.app_id", "String");
+    put(
+        "AppEventDto::AppCheckpointsChanged.checkpoints",
+        "Vec<AppCheckpointDto>",
+    );
 
     ix
 }
@@ -1181,8 +1509,15 @@ fn contract_index_covers_every_dto() {
         TaskStatusDto,
     };
     use client_protocol::local_apps::{
-        AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
-        AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto,
+        AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
+        AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
+        AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
+        AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
+        AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
+        AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
+        AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+        AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
+        AppTemplateDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
         AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -1408,6 +1743,170 @@ fn contract_index_covers_every_dto() {
         },
         ClientCommand::ListApps,
     );
+
+    // The local-app surface added after the initial freeze. Every field is
+    // named explicitly (no `..Default::default()`, no positional construction)
+    // so a RENAMED or REMOVED field breaks THIS compile — which is the whole
+    // point of the anchor, and is what `_apps` above already did for the
+    // original twelve DTOs.
+    let _app_data_field = AppDataFieldDto {
+        id: String::new(),
+        label: String::new(),
+        field_type: AppDataFieldTypeDto::Text,
+        required: false,
+        options: Vec::new(),
+    };
+    let _app_data_collection = AppDataCollectionDto {
+        id: String::new(),
+        label: String::new(),
+        fields: Vec::new(),
+        enabled_by_default: false,
+    };
+    let _app_design_field_option = AppDesignFieldOptionDto {
+        value: String::new(),
+        label: String::new(),
+    };
+    let _app_design_field = AppDesignFieldDto {
+        id: String::new(),
+        label: String::new(),
+        description: None,
+        field_type: AppDesignFieldTypeDto::ShortText,
+        required: false,
+        default_value: None,
+        options: Vec::new(),
+    };
+    let _app_design_step = AppDesignStepDto {
+        id: String::new(),
+        order: 0,
+        title: String::new(),
+        description: None,
+        fields: Vec::new(),
+    };
+    let _app_template = AppTemplateDto {
+        kind: AppTemplateKindDto::CrudTracker,
+        version: 0,
+        name: String::new(),
+        description: String::new(),
+        steps: Vec::new(),
+        collections: Vec::new(),
+    };
+    let app_generation_job = AppGenerationJobDto {
+        id: String::new(),
+        app_id: String::new(),
+        revision: 0,
+        continuation_seq: 0,
+        state: AppGenerationJobStateDto::Queued,
+        percent: None,
+        detail: None,
+        log_rel: None,
+        updated_at_ms: 0,
+    };
+    let _app_manifest = AppManifestDto {
+        schema_version: 0,
+        app_id: String::new(),
+        name: String::new(),
+        template: AppTemplateKindDto::ContentShowcase,
+        design_revision: 0,
+        collections: Vec::new(),
+        allowed_domains: Vec::new(),
+    };
+    let _app_runtime_details = AppRuntimeDetailsDto {
+        state: AppRuntimeStateDto::Stopped,
+        mode: Some(AppRuntimeModeDto::StaticExport),
+        loopback_url: None,
+        suspension_reason: Some(AppRuntimeSuspensionReasonDto::Backgrounded),
+        recovery_state: Some(AppRuntimeRecoveryStateDto::NotNeeded),
+        last_error: None,
+    };
+    let _app_design_field_value = AppDesignFieldValueDto {
+        field_id: String::new(),
+        value: DesignValueDto::Boolean { value: false },
+    };
+    let app_details = AppDetailsDto {
+        app: AppRecordDto {
+            id: String::new(),
+            name: String::new(),
+            template: AppTemplateKindDto::FormUtility,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            workflow_state: AppWorkflowStateDto::CollectingSpec,
+            conversation_id: None,
+            workspace_rel: String::new(),
+        },
+        design_revision: 0,
+        design_fields: Vec::new(),
+        manifest: None,
+        runtime: AppRuntimeDetailsDto {
+            state: AppRuntimeStateDto::Stopped,
+            mode: None,
+            loopback_url: None,
+            suspension_reason: None,
+            recovery_state: None,
+            last_error: None,
+        },
+        generation_job: None,
+        checkpoints: Vec::new(),
+    };
+    let _app_bridge_request = AppBridgeRequestDto {
+        request_id: String::new(),
+        app_id: String::new(),
+        operation: AppBridgeOperationDto::QueryData,
+        payload_json: None,
+    };
+    let app_bridge_response = AppBridgeResponseDto {
+        request_id: String::new(),
+        app_id: String::new(),
+        ok: false,
+        result_json: None,
+        error: None,
+    };
+    let _app_ui_target = AppUiTargetDto {
+        element_id: None,
+        role: None,
+        name: None,
+    };
+    let app_ui_request = AppUiRequestDto {
+        request_id: String::new(),
+        app_id: String::new(),
+        action: AppUiActionKindDto::Inspect,
+        target: None,
+        value: None,
+    };
+    let app_capability_request = AppCapabilityRequestDto {
+        request_id: String::new(),
+        app_id: String::new(),
+        capability: AppCapabilityKindDto::DataMutation,
+        domain: None,
+        reason: String::new(),
+    };
+    let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
+    // One value per `AppEventDto` variant: the envelope is a single
+    // `ClientEvent::AppEvent`, so nothing else forces these seven tags to exist.
+    let _app_events: Vec<AppEventDto> = vec![
+        AppEventDto::AppTemplatesChanged {
+            templates: Vec::new(),
+        },
+        AppEventDto::AppDetailsChanged {
+            details: app_details,
+        },
+        AppEventDto::AppGenerationJobChanged {
+            job: app_generation_job,
+        },
+        AppEventDto::AppBridgeResponse {
+            response: app_bridge_response,
+        },
+        AppEventDto::AppUiRequest {
+            request: app_ui_request,
+        },
+        AppEventDto::AppCapabilityRequested {
+            request: app_capability_request,
+        },
+        AppEventDto::AppCheckpointsChanged {
+            app_id: String::new(),
+            checkpoints: Vec::new(),
+        },
+    ];
+
 
     // Sanity: the index is non-empty and contains a known anchor key.
     let ix = current_contract_index();

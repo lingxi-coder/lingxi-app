@@ -29,10 +29,17 @@
     },
     {
       "name": "git",
-      "version": "REPLACE_WITH_REAL_VERSION",
+      "version": "2.47.3-r0",
       "license": "REPLACE_WITH_REAL_LICENSE",
       "architecture": "arm64",
       "origin": "git"
+    },
+    {
+      "name": "nodejs",
+      "version": "22.23.0-r0",
+      "license": "MIT",
+      "architecture": "arm64",
+      "origin": "nodejs"
     },
     {
       "name": "openssh-client",
@@ -73,6 +80,11 @@
       "kind": "elf"
     },
     {
+      "path": "/usr/bin/node",
+      "sha256": "abababababababababababababababababababababababababababababababab",
+      "kind": "elf"
+    },
+    {
       "path": "/usr/bin/ssh",
       "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "kind": "elf"
@@ -104,6 +116,12 @@
     {
       "path": "/usr/bin/git",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "kind": "regular-file",
+      "size_bytes": 1
+    },
+    {
+      "path": "/usr/bin/node",
+      "sha256": "abababababababababababababababababababababababababababababababab",
       "kind": "regular-file",
       "size_bytes": 1
     },

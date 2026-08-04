@@ -21,8 +21,8 @@ use crate::listings::{
     MemoryEntryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
-    AppCheckpointDto, AppDesignPatchDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto,
-    AppWorkflowStateDto, DesignValueDto,
+    AppCheckpointDto, AppDesignPatchDto, AppErrorCodeDto, AppEventDto, AppRecordDto,
+    AppRuntimeDetailsDto, AppRuntimeStateDto, AppWorkflowStateDto, DesignValueDto,
 };
 use crate::message::MessageDto;
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,8 @@ use std::collections::HashMap;
 /// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
 /// but still have no live engine source in the foundation (decisions §0.7 /
 /// §0.9) and round-trip only.
+// Boxing the app payload would change the generated Swift/Kotlin protocol API.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -380,6 +382,12 @@ pub enum ClientEvent {
         apps: Vec<AppRecordDto>,
     },
 
+    /// Extensible local-app event envelope.
+    AppEvent {
+        /// Strongly typed local-app payload.
+        event: AppEventDto,
+    },
+
     /// The design-spec gate opened; `interaction_id` reaches the client ONLY
     /// here, gating `ConfirmAppDesign` to the UI flow.
     AppDesignerRequested {
@@ -455,6 +463,9 @@ pub enum ClientEvent {
         app_id: String,
         /// The new runtime state.
         state: AppRuntimeStateDto,
+        /// Extended runtime mode, URL, suspension and recovery state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<AppRuntimeDetailsDto>,
         /// Last runtime failure, if any. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_error: Option<String>,

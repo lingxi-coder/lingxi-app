@@ -247,8 +247,13 @@ function validateDesignValue(v: unknown): void {
     case 'multiple_choice':
     case 'screen_list':
     case 'feature_list':
+    case 'domain_list':
       assert.ok(Array.isArray(o['value']));
       for (const item of o['value'] as unknown[]) assert.ok(isString(item));
+      break;
+    case 'data_field_list':
+      assert.ok(Array.isArray(o['value']));
+      for (const item of o['value'] as unknown[]) validateAppDataField(item);
       break;
     case 'boolean':
       assert.ok(isBool(o['value']));
@@ -281,6 +286,200 @@ function validateDesignPatch(v: unknown): void {
   if ('note' in o) assert.ok(isString(o['note']));
 }
 
+function validateAppDataField(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['id']) && isString(o['label']) && isBool(o['required']));
+  assert.ok(
+    [
+      'text',
+      'long_text',
+      'integer',
+      'decimal',
+      'boolean',
+      'date_time',
+      'enum',
+      'image_ref',
+    ].includes(o['field_type'] as string),
+  );
+  assert.ok(Array.isArray(o['options']));
+  for (const opt of o['options'] as unknown[]) assert.ok(isString(opt));
+}
+
+function validateAppDataCollection(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['id']) && isString(o['label']) && isBool(o['enabled_by_default']));
+  assert.ok(Array.isArray(o['fields']));
+  for (const f of o['fields'] as unknown[]) validateAppDataField(f);
+}
+
+function validateAppDesignField(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['id']) && isString(o['label']) && isBool(o['required']));
+  assert.ok(
+    [
+      'short_text',
+      'long_text',
+      'single_choice',
+      'multiple_choice',
+      'boolean',
+      'color',
+      'density',
+      'screen_list',
+      'feature_list',
+      'data_field_list',
+      'domain_list',
+    ].includes(o['field_type'] as string),
+  );
+  if ('description' in o) assert.ok(isString(o['description']));
+  if ('default_value' in o) validateDesignValue(o['default_value']);
+  assert.ok(Array.isArray(o['options']));
+  for (const opt of o['options'] as unknown[]) {
+    const p = rec(opt);
+    assert.ok(isString(p['value']) && isString(p['label']));
+  }
+}
+
+function validateAppTemplate(v: unknown): void {
+  const o = rec(v);
+  validateAppTemplateKind(o['kind']);
+  assert.ok(isNumber(o['version']) && isString(o['name']) && isString(o['description']));
+  assert.ok(Array.isArray(o['steps']));
+  for (const step of o['steps'] as unknown[]) {
+    const s = rec(step);
+    assert.ok(isString(s['id']) && isNumber(s['order']) && isString(s['title']));
+    if ('description' in s) assert.ok(isString(s['description']));
+    assert.ok(Array.isArray(s['fields']));
+    for (const f of s['fields'] as unknown[]) validateAppDesignField(f);
+  }
+  assert.ok(Array.isArray(o['collections']));
+  for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
+}
+
+function validateAppRuntimeDetails(v: unknown): void {
+  const o = rec(v);
+  validateAppRuntimeState(o['state']);
+  if ('mode' in o) {
+    assert.ok(['static_export', 'next_production'].includes(o['mode'] as string));
+  }
+  if ('loopback_url' in o) assert.ok(isString(o['loopback_url']));
+  if ('suspension_reason' in o) {
+    assert.ok(
+      ['backgrounded', 'memory_warning', 'runtime_quota', 'process_exited'].includes(
+        o['suspension_reason'] as string,
+      ),
+    );
+  }
+  if ('recovery_state' in o) {
+    assert.ok(
+      ['not_needed', 'pending', 'recovering', 'recovered', 'failed'].includes(
+        o['recovery_state'] as string,
+      ),
+    );
+  }
+  if ('last_error' in o) assert.ok(isString(o['last_error']));
+}
+
+function validateAppGenerationJob(v: unknown): void {
+  const o = rec(v);
+  assert.ok(
+    isString(o['id']) &&
+      isString(o['app_id']) &&
+      isNumber(o['revision']) &&
+      isNumber(o['continuation_seq']) &&
+      isNumber(o['updated_at_ms']),
+  );
+  assert.ok(
+    [
+      'queued',
+      'scaffolding',
+      'generating',
+      'validating',
+      'building',
+      'starting_preview',
+      'awaiting_approval',
+      'succeeded',
+      'failed',
+      'cancelled',
+    ].includes(o['state'] as string),
+  );
+  if ('percent' in o) assert.ok(isNumber(o['percent']));
+  if ('detail' in o) assert.ok(isString(o['detail']));
+  if ('log_rel' in o) assert.ok(isString(o['log_rel']));
+}
+
+function validateAppManifest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(
+    isNumber(o['schema_version']) &&
+      isString(o['app_id']) &&
+      isString(o['name']) &&
+      isNumber(o['design_revision']),
+  );
+  validateAppTemplateKind(o['template']);
+  assert.ok(Array.isArray(o['collections']));
+  for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
+  assert.ok(Array.isArray(o['allowed_domains']));
+  for (const d of o['allowed_domains'] as unknown[]) assert.ok(isString(d));
+}
+
+function validateAppBridgeRequest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['request_id']) && isString(o['app_id']));
+  assert.ok(
+    ['query_data', 'mutate_data', 'network_request', 'runtime_status'].includes(
+      o['operation'] as string,
+    ),
+  );
+  if ('payload_json' in o) assert.ok(isString(o['payload_json']));
+}
+
+function validateAppBridgeResponse(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['request_id']) && isString(o['app_id']) && isBool(o['ok']));
+  if ('result_json' in o) assert.ok(isString(o['result_json']));
+  if ('error' in o) assert.ok(isString(o['error']));
+}
+
+function validateAppUiRequest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['request_id']) && isString(o['app_id']));
+  assert.ok(
+    [
+      'inspect',
+      'click',
+      'fill',
+      'select',
+      'toggle',
+      'scroll',
+      'navigate',
+      'back',
+      'reload',
+    ].includes(o['action'] as string),
+  );
+  if ('target' in o) {
+    const target = rec(o['target']);
+    for (const key of ['element_id', 'role', 'name']) {
+      if (key in target) assert.ok(isString(target[key]));
+    }
+  }
+  if ('value' in o) assert.ok(isString(o['value']));
+}
+
+function validateAppCapabilityRequest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['request_id']) && isString(o['app_id']) && isString(o['reason']));
+  assert.ok(
+    ['data_mutation', 'ui_control', 'network_domain', 'restore_checkpoint'].includes(
+      o['capability'] as string,
+    ),
+  );
+  if ('domain' in o) assert.ok(isString(o['domain']));
+}
+
+function validateAppAuthorizationDecision(v: unknown): void {
+  assert.ok(['deny', 'allow_once', 'allow_session', 'allow_always'].includes(v as string));
+}
+
 function validateAppRecord(v: unknown): void {
   const o = rec(v);
   assert.ok(
@@ -299,6 +498,86 @@ function validateAppCheckpoint(v: unknown): void {
   const o = rec(v);
   assert.ok(isString(o['id']) && isString(o['label']) && isNumber(o['created_at_ms']));
   validateAppCheckpointKind(o['kind']);
+}
+
+function validateAppDetails(v: unknown): void {
+  const o = rec(v);
+  validateAppRecord(o['app']);
+  assert.ok(isNumber(o['design_revision']));
+  assert.ok(Array.isArray(o['design_fields']));
+  for (const pair of o['design_fields'] as unknown[]) {
+    const p = rec(pair);
+    assert.ok(isString(p['field_id']));
+    validateDesignValue(p['value']);
+  }
+  if ('manifest' in o) validateAppManifest(o['manifest']);
+  validateAppRuntimeDetails(o['runtime']);
+  if ('generation_job' in o) validateAppGenerationJob(o['generation_job']);
+  assert.ok(Array.isArray(o['checkpoints']));
+  for (const c of o['checkpoints'] as unknown[]) validateAppCheckpoint(c);
+}
+
+function validateAppEvent(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'app_templates_changed':
+      assert.ok(Array.isArray(o['templates']));
+      for (const tpl of o['templates'] as unknown[]) validateAppTemplate(tpl);
+      break;
+    case 'app_details_changed':
+      validateAppDetails(o['details']);
+      break;
+    case 'app_generation_job_changed':
+      validateAppGenerationJob(o['job']);
+      break;
+    case 'app_bridge_response':
+      validateAppBridgeResponse(o['response']);
+      break;
+    case 'app_ui_request':
+      validateAppUiRequest(o['request']);
+      break;
+    case 'app_capability_requested':
+      validateAppCapabilityRequest(o['request']);
+      break;
+    case 'app_checkpoints_changed':
+      assert.ok(isString(o['app_id']) && Array.isArray(o['checkpoints']));
+      for (const c of o['checkpoints'] as unknown[]) validateAppCheckpoint(c);
+      break;
+    default:
+      assert.fail(`unknown AppEventDto type: ${String(o['type'])}`);
+  }
+}
+
+function validateAskUserQuestionRequest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isNumber(o['request_id']));
+  if ('timeout_secs' in o) assert.ok(isNumber(o['timeout_secs']));
+  assert.ok(Array.isArray(o['questions']));
+  for (const q of o['questions'] as unknown[]) {
+    const question = rec(q);
+    assert.ok(
+      isString(question['question']) &&
+        isString(question['header']) &&
+        isBool(question['multi_select']),
+    );
+    assert.ok(Array.isArray(question['options']));
+    for (const opt of question['options'] as unknown[]) {
+      const option = rec(opt);
+      assert.ok(isString(option['label']) && isString(option['description']));
+      if ('preview' in option) assert.ok(isString(option['preview']));
+    }
+  }
+}
+
+function validateAttachment(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'nested_memory':
+      assert.ok(isString(o['display_path']));
+      break;
+    default:
+      assert.fail(`unknown AttachmentDto type: ${String(o['type'])}`);
+  }
 }
 
 // ── ClientCommand ─────────────────────────────────────────────────────────────
@@ -341,6 +620,18 @@ function validateCommand(name: string, v: unknown): void {
       }
       break;
     case 'deny_computer_access':
+      assert.ok(isNumber(o['request_id']));
+      break;
+    case 'answer_ask_user_question':
+      assert.ok(isNumber(o['request_id']));
+      {
+        const answers = rec(o['answers']);
+        for (const [question, answer] of Object.entries(answers)) {
+          assert.ok(isString(question) && isString(answer));
+        }
+      }
+      break;
+    case 'cancel_ask_user_question':
       assert.ok(isNumber(o['request_id']));
       break;
     case 'set_permission_mode':
@@ -399,6 +690,7 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isString(o['task_id']));
       break;
     case 'list_apps':
+    case 'list_app_templates':
       break;
     case 'create_app':
       assert.ok(isString(o['name']));
@@ -411,6 +703,9 @@ function validateCommand(name: string, v: unknown): void {
     case 'start_app':
     case 'stop_app':
     case 'restart_app':
+    case 'get_app_details':
+    case 'retry_app_generation':
+    case 'reset_app_permissions':
     case 'list_app_checkpoints':
     case 'delete_app':
       assert.ok(isString(o['app_id']));
@@ -434,6 +729,26 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'request_app_revision':
       assert.ok(isString(o['app_id']) && isString(o['prompt']));
+      break;
+    case 'request_app_design_suggestion':
+      assert.ok(isString(o['app_id']) && isNumber(o['expected_revision']));
+      if ('prompt' in o) assert.ok(isString(o['prompt']));
+      break;
+    case 'dismiss_app_design_suggestion':
+      assert.ok(isString(o['app_id']) && isString(o['suggestion_id']));
+      break;
+    case 'execute_app_bridge_request':
+      validateAppBridgeRequest(o['request']);
+      break;
+    case 'resolve_app_ui_request':
+      assert.ok(isString(o['request_id']));
+      validateAppAuthorizationDecision(o['decision']);
+      if ('result_json' in o) assert.ok(isString(o['result_json']));
+      if ('error' in o) assert.ok(isString(o['error']));
+      break;
+    case 'resolve_app_capability_request':
+      assert.ok(isString(o['request_id']));
+      validateAppAuthorizationDecision(o['decision']);
       break;
     case 'restore_app_checkpoint':
       assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
@@ -460,6 +775,22 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'system_notice':
       assert.ok(isString(o['message']) && isBool(o['is_error']));
+      break;
+    case 'ask_user_question':
+      validateAskUserQuestionRequest(o['request']);
+      break;
+    case 'ask_user_question_resolved':
+      assert.ok(isNumber(o['request_id']));
+      break;
+    case 'attachment':
+      validateAttachment(o['attachment']);
+      break;
+    case 'commands_changed':
+      assert.ok(Array.isArray(o['commands']));
+      for (const cmd of o['commands'] as unknown[]) {
+        const s = rec(cmd);
+        assert.ok(isString(s['name']) && isString(s['description']) && isString(s['source']));
+      }
       break;
     case 'text_delta':
       assert.ok(isString(o['text']));
@@ -651,6 +982,9 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(Array.isArray(o['apps']));
       for (const app of o['apps'] as unknown[]) validateAppRecord(app);
       break;
+    case 'app_event':
+      validateAppEvent(o['event']);
+      break;
     case 'app_designer_requested':
       assert.ok(
         isString(o['app_id']) && isString(o['interaction_id']) && isNumber(o['revision']),
@@ -690,6 +1024,7 @@ function validateEvent(name: string, v: unknown): void {
     case 'app_runtime_changed':
       assert.ok(isString(o['app_id']));
       validateAppRuntimeState(o['state']);
+      if ('details' in o) validateAppRuntimeDetails(o['details']);
       if ('last_error' in o) assert.ok(isString(o['last_error']));
       break;
     case 'app_preview_ready':
@@ -798,7 +1133,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 40, `expected 40 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 51, `expected 51 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -806,7 +1141,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 47, `expected 47 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 58, `expected 58 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

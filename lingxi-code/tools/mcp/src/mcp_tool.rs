@@ -908,7 +908,7 @@ impl Tool for MCPTool {
             }
         };
 
-        if registry.get_client(&server).await.is_none() {
+        if !registry.has_callable_server(&server).await {
             emit(
                 self.bus(),
                 MCP_FAILED,

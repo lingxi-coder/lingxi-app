@@ -23,16 +23,22 @@
 //! storage I/O runs on the blocking pool (`spawn_blocking`) over owned
 //! clones, never on the async executor threads.
 
+use crate::checkpoints::AppCheckpointStore;
 use crate::continuation::ContinuationSink;
 use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
 use crate::ids;
+use crate::manifest::{
+    save_manifest, validate_domain, validate_identifier, AppLayout, AppManifest,
+};
+use crate::permissions::{save_permissions, AppPermissions};
 use crate::state::{self, AppState};
 use crate::storage;
 use crate::types::{
-    AppCheckpoint, AppContinuation, AppDesignDraft, AppDesignPatch, AppDesignPatchOp,
-    AppDesignSuggestion, AppGenerationProgress, AppInteractionKind, AppInteractionRequest,
-    AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppTemplateKind, DesignValue,
+    AppCheckpoint, AppCheckpointKind, AppContinuation, AppDesignDraft, AppDesignPatch,
+    AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress, AppInteractionKind,
+    AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeMode, AppRuntimeRecord,
+    AppRuntimeState, AppTemplateKind, DesignValue,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -62,8 +68,6 @@ const MAX_ID_MINT_ATTEMPTS: usize = 32;
 // uncapped value would be amplified on every subsequent edit of any app.
 // String caps are UTF-8 bytes (what memory/disk/the wire actually pay).
 
-/// Maximum number of apps in the store.
-pub const MAX_APPS: usize = 100;
 /// Maximum app name length in bytes (after trimming).
 pub const MAX_NAME_BYTES: usize = 200;
 /// Maximum `conversation_id` length in bytes.
@@ -146,6 +150,55 @@ fn validate_design_value(field_id: &str, value: &DesignValue) -> Result<(), AppE
                     item.len(),
                     MAX_LIST_ITEM_BYTES,
                 )?;
+            }
+            Ok(())
+        }
+        // The domain list and the data-field ids below are the only draft
+        // values the scaffold copies VERBATIM onto the manifest, where
+        // `AppManifest::validate` rejects them while the app is already
+        // `generating` — a state whose only exit replays the same input. The
+        // manifest contract is therefore enforced here, at ingest, where a
+        // rejection leaves the draft revision and the workflow state intact.
+        DesignValue::DomainList(domains) => {
+            if domains.len() > MAX_LIST_ITEMS {
+                return Err(AppError::InvalidRequest(format!(
+                    "value of field {field_id:?} has {} domains (limit {MAX_LIST_ITEMS})",
+                    domains.len()
+                )));
+            }
+            for domain in domains {
+                // `validate_domain` caps at 253 bytes, stricter than
+                // `MAX_LIST_ITEM_BYTES`, so no separate length check.
+                validate_domain(domain)?;
+            }
+            Ok(())
+        }
+        DesignValue::DataFieldList(fields) => {
+            if fields.len() > MAX_LIST_ITEMS {
+                return Err(AppError::InvalidRequest(format!(
+                    "value of field {field_id:?} has {} data fields (limit {MAX_LIST_ITEMS})",
+                    fields.len()
+                )));
+            }
+            for field in fields {
+                // Shape (and the 64-byte cap) per the manifest contract. The
+                // label / enum-option / duplicate-id rules are NOT mirrored:
+                // the designer patches the whole list on every keystroke, so a
+                // field that is still being typed would have its edit rejected
+                // mid-flight.
+                validate_identifier("data field", &field.id)?;
+                ensure_within(
+                    &format!("data field label of field {field_id:?}"),
+                    field.label.len(),
+                    MAX_TEXT_VALUE_BYTES,
+                )?;
+                for option in &field.enum_options {
+                    ensure_within(
+                        &format!("enum option of field {field_id:?}"),
+                        option.len(),
+                        MAX_LIST_ITEM_BYTES,
+                    )?;
+                }
             }
             Ok(())
         }
@@ -668,6 +721,18 @@ impl AppService {
         Ok(apps[idx].record.clone())
     }
 
+    /// Snapshot every app record without emitting an event. Embedders use
+    /// this for durable worker recovery where a client snapshot would be an
+    /// unrelated side effect.
+    pub async fn records(&self) -> Vec<AppRecord> {
+        self.state
+            .lock()
+            .await
+            .iter()
+            .map(|app| app.record.clone())
+            .collect()
+    }
+
     /// The design draft of one app.
     pub async fn draft(&self, app_id: &str) -> Result<AppDesignDraft, AppError> {
         let apps = self.state.lock().await;
@@ -699,12 +764,75 @@ impl AppService {
         Ok(apps[idx].runtime.clone())
     }
 
-    /// Checkpoints of one app. Phase 1 always returns an empty list — git
-    /// checkpoint wiring is phase 5; only existence is validated here.
+    /// Git-backed checkpoints of one app, newest first.
     pub async fn list_checkpoints(&self, app_id: &str) -> Result<Vec<AppCheckpoint>, AppError> {
-        let apps = self.state.lock().await;
-        Self::position(&apps, app_id)?;
-        Ok(Vec::new())
+        {
+            let apps = self.state.lock().await;
+            Self::position(&apps, app_id)?;
+        }
+        let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
+        Self::run_blocking(move || AppCheckpointStore::new(&layout).list()).await
+    }
+
+    /// Commit the current workspace as a retained Git checkpoint and emit its
+    /// domain event after the durable reference has been written.
+    pub async fn create_checkpoint(
+        &self,
+        app_id: &str,
+        kind: AppCheckpointKind,
+        label: &str,
+    ) -> Result<AppCheckpoint, AppError> {
+        {
+            let apps = self.state.lock().await;
+            Self::position(&apps, app_id)?;
+        }
+        let order = self.acquire_emit_order().await;
+        let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
+        let label = label.to_string();
+        let now = self.now_ms();
+        let checkpoint =
+            Self::run_blocking(move || AppCheckpointStore::new(&layout).create(kind, &label, now))
+                .await?;
+        Self::spawn_emission(
+            Arc::clone(&self.observer),
+            order,
+            vec![AppEvent::CheckpointCreated {
+                app_id: app_id.to_string(),
+                checkpoint: checkpoint.clone(),
+            }],
+        );
+        Ok(checkpoint)
+    }
+
+    /// Restore only the app workspace to a retained checkpoint. A durable
+    /// `pre_restore` checkpoint is created first; data/runtime/build paths sit
+    /// outside the Git repository and are never reset.
+    pub async fn restore_checkpoint(
+        &self,
+        app_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<AppCheckpoint, AppError> {
+        {
+            let apps = self.state.lock().await;
+            Self::position(&apps, app_id)?;
+        }
+        let order = self.acquire_emit_order().await;
+        let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
+        let checkpoint_id = checkpoint_id.to_string();
+        let now = self.now_ms();
+        let safety = Self::run_blocking(move || {
+            AppCheckpointStore::new(&layout).restore(&checkpoint_id, now)
+        })
+        .await?;
+        Self::spawn_emission(
+            Arc::clone(&self.observer),
+            order,
+            vec![AppEvent::CheckpointCreated {
+                app_id: app_id.to_string(),
+                checkpoint: safety.clone(),
+            }],
+        );
+        Ok(safety)
     }
 
     /// Create a new app record (workflow starts in `collecting_spec`) and its
@@ -735,11 +863,6 @@ impl AppService {
         // `with_app`).
         let now = self.now_ms();
         let mut apps = Arc::clone(&self.state).lock_owned().await;
-        if apps.len() >= MAX_APPS {
-            return Err(AppError::InvalidRequest(format!(
-                "app limit reached ({MAX_APPS}); delete an app first"
-            )));
-        }
         let existing_ids: Vec<String> = apps.iter().map(|app| app.record.id.clone()).collect();
         let existing_records: Vec<AppRecord> = apps.iter().map(|app| app.record.clone()).collect();
         let known = self.known_ids(&apps);
@@ -753,6 +876,15 @@ impl AppService {
                 let app = AppState::create(id, name, template, conversation_id, now);
                 // Per-app files first; the index entry is the commit point.
                 storage::save_app_files(&root, &app)?;
+                let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
+                layout.initialize()?;
+                let manifest = AppManifest::for_new_app(
+                    app.record.id.clone(),
+                    app.record.name.clone(),
+                    app.record.template,
+                );
+                save_manifest(&layout, &manifest)?;
+                save_permissions(&layout, &AppPermissions::default())?;
                 let mut records = existing_records;
                 records.push(app.record.clone());
                 storage::save_index_preserving(&root, &records, &known)?;
@@ -867,7 +999,7 @@ impl AppService {
             .map_err(|error| AppError::Io(format!("delete completion task failed: {error}")))?
     }
 
-    /// Open the designer gate (`collecting_spec ->
+    /// Open the designer gate (`collecting_spec | generation_failed ->
     /// awaiting_spec_confirmation`). The returned interaction carries the id
     /// the UI must echo back to [`Self::confirm_design`]. Gate-opening event
     /// pairs are state-change-first everywhere: `WorkflowChanged`, then the
@@ -948,6 +1080,28 @@ impl AppService {
                     };
                     (Ok(suggestion), vec![event])
                 }
+                Err(error) => (Err(error), Vec::new()),
+            }
+        })
+        .await
+    }
+
+    /// Dismiss the pending suggestion without mutating the draft revision.
+    pub async fn dismiss_suggestion(
+        &self,
+        app_id: &str,
+        suggestion_id: &str,
+    ) -> Result<(), AppError> {
+        self.with_app(app_id, |app, now| {
+            match app.dismiss_suggestion(suggestion_id, now) {
+                Ok(()) => (
+                    Ok(()),
+                    vec![AppEvent::DesignDraftChanged {
+                        app_id: app.record.id.clone(),
+                        revision: app.draft.revision,
+                        fields: app.draft.fields.clone(),
+                    }],
+                ),
                 Err(error) => (Err(error), Vec::new()),
             }
         })
@@ -1156,6 +1310,14 @@ impl AppService {
             .await
     }
 
+    /// `ready -> revising` for an automatic post-restore validation/build.
+    /// Unlike [`Self::request_revision`], this does not enqueue a source-
+    /// generation continuation; the coordinator queues a restore build.
+    pub async fn begin_restore_rebuild(&self, app_id: &str) -> Result<(), AppError> {
+        self.workflow_step(app_id, None, AppState::begin_restore_rebuild)
+            .await
+    }
+
     /// THE workflow-transition scaffold: run `step`, emit one
     /// `WorkflowChanged { detail }` on success, nothing on failure. Every
     /// plain transition AND every gate confirmation/cancellation routes
@@ -1210,13 +1372,33 @@ impl AppService {
                     let runtime = app.runtime.clone();
                     let event = AppEvent::RuntimeChanged {
                         app_id: app.record.id.clone(),
-                        state: runtime.state,
-                        last_error: runtime.last_error.clone(),
+                        runtime: runtime.clone(),
                     };
                     (Ok(runtime), vec![event])
                 }
                 Err(error) => (Err(error), Vec::new()),
             }
+        })
+        .await
+    }
+
+    /// Persist the Store/Play vs Full/Direct runtime mode selected by the
+    /// native distribution before starting a loopback server.
+    pub async fn set_runtime_mode(
+        &self,
+        app_id: &str,
+        mode: AppRuntimeMode,
+    ) -> Result<AppRuntimeRecord, AppError> {
+        self.with_app(app_id, move |app, now| {
+            app.set_runtime_mode(mode, now);
+            let runtime = app.runtime.clone();
+            (
+                Ok(runtime.clone()),
+                vec![AppEvent::RuntimeChanged {
+                    app_id: app.record.id.clone(),
+                    runtime,
+                }],
+            )
         })
         .await
     }
@@ -1459,6 +1641,7 @@ mod tests {
     use crate::continuation::{NoopContinuationSink, RecordingContinuationSink};
     use crate::error::AppErrorCode;
     use crate::events::RecordingAppEventObserver;
+    use crate::manifest::{DataFieldKind, DataFieldSchema};
     use crate::test_support::FixedClock;
     use crate::types::{
         AppContinuation, AppContinuationKind, AppDesignPatchOp, AppWorkflowState, DesignValue,
@@ -1883,8 +2066,7 @@ mod tests {
             events,
             vec![AppEvent::RuntimeChanged {
                 app_id: record.id.clone(),
-                state: AppRuntimeState::Starting,
-                last_error: None,
+                runtime: runtime.clone(),
             }]
         );
         // Illegal transition is refused and not persisted.
@@ -2084,6 +2266,100 @@ mod tests {
             .is_empty());
     }
 
+    /// The store's own documents live inside `apps/<id>/workspace`, which is
+    /// exactly the tree a checkpoint restore hard-resets. Nothing rewrites
+    /// the design draft after a restore — persistence compares in-memory
+    /// `committed` against in-memory `working`, so a draft rewound ON DISK is
+    /// invisible to it — which is why the restore must not be able to rewind
+    /// it in the first place. Asserted through a real reload from disk.
+    #[tokio::test]
+    async fn restore_checkpoint_does_not_rewind_the_design_draft_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app("Restorable", AppTemplateKind::Dashboard, None)
+            .await
+            .unwrap();
+        h.service
+            .update_draft(&record.id, 0, &patch("title", "v1"))
+            .await
+            .unwrap();
+        let first = h
+            .service
+            .create_checkpoint(
+                &record.id,
+                crate::types::AppCheckpointKind::ScaffoldCreated,
+                "Scaffold created",
+            )
+            .await
+            .unwrap();
+        h.service
+            .update_draft(&record.id, 1, &patch("title", "v2"))
+            .await
+            .unwrap();
+        assert_eq!(h.service.draft(&record.id).await.unwrap().revision, 2);
+
+        h.service
+            .restore_checkpoint(&record.id, &first.id)
+            .await
+            .unwrap();
+
+        drop(h);
+        let h2 = harness(dir.path()).await;
+        let draft = h2.service.draft(&record.id).await.unwrap();
+        assert_eq!(draft.revision, 2);
+        assert_eq!(
+            draft.fields.get("title"),
+            Some(&DesignValue::ShortText("v2".into()))
+        );
+    }
+
+    /// The same contract for the population that actually has data: an app
+    /// whose checkpoint history was written before the service documents were
+    /// excluded. Its checkpoint tree still carries `design-spec.json`, so the
+    /// restore's hard reset checks that blob back out — and nothing rewrites
+    /// the draft afterwards, so the loss is silent and permanent. The fixture
+    /// commits the documents with the pre-fix `add_all(["*"])` semantics,
+    /// which is the only way to reach the state; a store that builds its own
+    /// repository cannot.
+    #[tokio::test]
+    async fn restoring_a_legacy_checkpoint_does_not_rewind_the_design_draft_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app("Legacy", AppTemplateKind::Dashboard, None)
+            .await
+            .unwrap();
+        h.service
+            .update_draft(&record.id, 0, &patch("title", "v1"))
+            .await
+            .unwrap();
+        let workspace = dir.path().join(&record.workspace_rel);
+        let legacy = crate::checkpoints::seed_legacy_checkpoint(&workspace, 1_000);
+
+        h.service
+            .update_draft(&record.id, 1, &patch("title", "v2"))
+            .await
+            .unwrap();
+        assert_eq!(h.service.draft(&record.id).await.unwrap().revision, 2);
+
+        h.service
+            .restore_checkpoint(&record.id, &legacy)
+            .await
+            .unwrap();
+
+        drop(h);
+        let h2 = harness(dir.path()).await;
+        let draft = h2.service.draft(&record.id).await.unwrap();
+        assert_eq!(draft.revision, 2);
+        assert_eq!(
+            draft.fields.get("title"),
+            Some(&DesignValue::ShortText("v2".into()))
+        );
+    }
+
     #[tokio::test]
     async fn generation_progress_requires_existing_app() {
         let dir = tempfile::tempdir().unwrap();
@@ -2267,29 +2543,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_app_enforces_the_app_count_cap() {
+    async fn create_app_library_is_not_artificially_capped() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
-        for i in 0..MAX_APPS {
+        for i in 0..101 {
             h.service
                 .create_app(&format!("App {i}"), AppTemplateKind::Dashboard, None)
                 .await
                 .unwrap();
         }
-        let err = h
+        assert_eq!(h.service.list_apps().await.len(), 101);
+    }
+
+    #[tokio::test]
+    async fn dismiss_suggestion_persists_without_changing_revision_and_refreshes_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
             .service
-            .create_app("One Too Many", AppTemplateKind::Dashboard, None)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        assert_eq!(h.service.list_apps().await.len(), MAX_APPS);
-        // Deleting one frees a slot.
-        let first = h.service.list_apps().await[0].clone();
-        h.service.delete_app(&first.id).await.unwrap();
-        h.service
-            .create_app("Replacement", AppTemplateKind::Dashboard, None)
+            .create_app("Suggestion", AppTemplateKind::Dashboard, None)
             .await
             .unwrap();
+        h.take_events().await;
+        let suggestion = h
+            .service
+            .store_suggestion(&record.id, patch("accent", "#3366ff"))
+            .await
+            .unwrap();
+        h.take_events().await;
+        let wrong = h
+            .service
+            .dismiss_suggestion(&record.id, "wrong")
+            .await
+            .unwrap_err();
+        assert_eq!(wrong.code(), AppErrorCode::InteractionInvalid);
+        h.service
+            .dismiss_suggestion(&record.id, &suggestion.suggestion_id)
+            .await
+            .unwrap();
+        let draft = h.service.draft(&record.id).await.unwrap();
+        assert_eq!(draft.revision, 0);
+        assert!(draft.pending_suggestion.is_none());
+        assert!(matches!(
+            h.take_events().await.as_slice(),
+            [AppEvent::DesignDraftChanged { revision: 0, .. }]
+        ));
+        drop(h);
+        let reloaded = harness(dir.path()).await;
+        assert!(reloaded
+            .service
+            .draft(&record.id)
+            .await
+            .unwrap()
+            .pending_suggestion
+            .is_none());
     }
 
     #[tokio::test]
@@ -2366,6 +2673,87 @@ mod tests {
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 0);
+    }
+
+    /// Data-field ids and HTTPS domains are copied verbatim onto the manifest
+    /// by the scaffold, which validates them while the app is already
+    /// `generating` — a state whose only exit replays the same input. The
+    /// draft gate must therefore reject them here, where the revision and the
+    /// workflow state both survive. Both clients mint hyphenated field ids
+    /// (`UUID().uuidString.lowercased()` / `field-$index`), so this is the
+    /// ordinary "add a data field" path, not an exotic one.
+    #[tokio::test]
+    async fn draft_gate_rejects_values_the_manifest_contract_forbids() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app("Contract", AppTemplateKind::CrudTracker, None)
+            .await
+            .unwrap();
+        let data_fields = |id: &str| AppDesignPatch {
+            ops: vec![AppDesignPatchOp::Set {
+                field_id: "collection_fields".into(),
+                value: DesignValue::DataFieldList(vec![DataFieldSchema {
+                    id: id.into(),
+                    label: "Title".into(),
+                    kind: DataFieldKind::Text,
+                    required: false,
+                    enum_options: Vec::new(),
+                }]),
+            }],
+            note: None,
+        };
+        let domains = |domain: &str| AppDesignPatch {
+            ops: vec![AppDesignPatchOp::Set {
+                field_id: "network_domains".into(),
+                value: DesignValue::DomainList(vec![domain.into()]),
+            }],
+            note: None,
+        };
+        let rejected: Vec<AppDesignPatch> = vec![
+            // The iOS mint: a lowercased UUID (hyphens, digit-initial).
+            data_fields("6f0b62b9-5d4a-4d33-9c56-2c9c8a1c2f21"),
+            // The Android mint.
+            data_fields("field-1"),
+            // A pasted URL and a host typed with capitals.
+            domains("https://api.example.com"),
+            domains("API.Example.com"),
+        ];
+        for (i, bad) in rejected.iter().enumerate() {
+            let err = h
+                .service
+                .update_draft(&record.id, 0, bad)
+                .await
+                .expect_err("patch violating the manifest contract must be rejected");
+            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "patch #{i}");
+            let err = h
+                .service
+                .store_suggestion(&record.id, bad.clone())
+                .await
+                .expect_err("suggestion violating the manifest contract must be rejected");
+            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "suggestion #{i}");
+        }
+        // The rejection is revision- and state-preserving, so the next edit
+        // resubmits at the same `expected_revision`.
+        let draft = h.service.draft(&record.id).await.unwrap();
+        assert_eq!(draft.revision, 0);
+        assert!(draft.fields.is_empty());
+        // Contract-valid values still pass (no over-rejection).
+        assert_eq!(
+            h.service
+                .update_draft(&record.id, 0, &data_fields("recorded_at"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.service
+                .update_draft(&record.id, 1, &domains("api.example.com"))
+                .await
+                .unwrap(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -3041,8 +3429,7 @@ mod tests {
             h.take_events().await,
             vec![AppEvent::RuntimeChanged {
                 app_id: record.id.clone(),
-                state: AppRuntimeState::Starting,
-                last_error: Some(stored),
+                runtime: runtime.clone(),
             }]
         );
 

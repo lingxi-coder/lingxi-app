@@ -87,6 +87,32 @@
         }
       },
       {
+        "op": "set",
+        "field_id": "collection_fields",
+        "value": {
+          "kind": "data_field_list",
+          "value": [
+            {
+              "id": "title",
+              "label": "Title",
+              "field_type": "text",
+              "required": true,
+              "options": []
+            }
+          ]
+        }
+      },
+      {
+        "op": "set",
+        "field_id": "network_domains",
+        "value": {
+          "kind": "domain_list",
+          "value": [
+            "api.example.com"
+          ]
+        }
+      },
+      {
         "op": "remove",
         "field_id": "accent"
       }

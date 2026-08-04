@@ -35,6 +35,7 @@ enum AppRoute: Hashable {
     )
     case cron(scopeID: String?, taskID: String?)
     case cronRun(runID: String)
+    case localApps(appID: String?)
 }
 
 extension AppRoute: Identifiable {
@@ -46,6 +47,8 @@ extension AppRoute: Identifiable {
             return "cron:\(scopeID ?? "global"):\(taskID ?? "list")"
         case .cronRun(let runID):
             return "cron-run:\(runID)"
+        case .localApps(let appID):
+            return "local-apps:\(appID ?? "library")"
         }
     }
 }
@@ -132,6 +135,12 @@ final class AppNavigationModel {
         drawerOpen = false
         settingsOpen = false
         presentedRoute = .cronRun(runID: runID)
+    }
+
+    func openLocalApps(appID: String? = nil) {
+        drawerOpen = false
+        settingsOpen = false
+        presentedRoute = .localApps(appID: appID)
     }
 
     func closePresentedRoute() { presentedRoute = nil }

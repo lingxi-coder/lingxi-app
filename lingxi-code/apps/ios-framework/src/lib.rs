@@ -162,6 +162,10 @@ pub struct IosEngineLaunchConfigFfi {
     pub project_cwd: Option<String>,
     pub provider_config: Option<IosProviderConfigFfi>,
     pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
+    /// Compile-time distribution mode: false for Store, true for Full.
+    pub local_apps_full_runtime: bool,
+    /// Verified read-only local-app runtime bundle staged by the iOS build.
+    pub local_apps_runtime_root: Option<String>,
 }
 
 /// FFI rootfs lifecycle state.
@@ -582,6 +586,11 @@ fn ios_mobile_config_from_launch_config(
     let mut cfg = MobileConfig {
         cwd,
         lingxi_home: std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
+        local_apps_full_runtime: config.local_apps_full_runtime,
+        local_apps_runtime_root: config
+            .local_apps_runtime_root
+            .as_ref()
+            .map(std::path::PathBuf::from),
         // P0.2: production injects the real LINGXI.md hierarchy provider so the
         // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
         // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -2196,6 +2205,15 @@ pub fn build_ios_engine_with_config(
         use platform_ios::{IosPlatform, IosPlatformInputs};
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
+        // The app generator uses the bundled runtime independently of the
+        // user-facing terminal mode. The iOS tool registry has no mobile shell
+        // carrier, so selecting this internal runtime cannot expose a shell.
+        let mut local_apps_mobile_linux = config.mobile_linux.clone();
+        if config.local_apps_runtime_root.is_some() {
+            if let Some(runtime) = local_apps_mobile_linux.as_mut() {
+                runtime.mode = MobileLinuxRuntimeModeFfi::MobileLinux;
+            }
+        }
         let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
             Some(mobile_linux) => {
                 validate_mobile_linux_workspace_config(&config.app_sandbox_root, mobile_linux)
@@ -2220,7 +2238,7 @@ pub fn build_ios_engine_with_config(
             secure_storage: secure_storage.map(|s| {
                 Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
             }),
-            mobile_linux: ios_mobile_linux_runtime(config.mobile_linux.as_ref()),
+            mobile_linux: ios_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
             stable_workspace_id: Some(stable_workspace_id),
         }));
@@ -2276,6 +2294,8 @@ pub fn build_ios_engine(
             project_cwd: None,
             provider_config: None,
             mobile_linux,
+            local_apps_full_runtime: false,
+            local_apps_runtime_root: None,
         },
         listener,
         stt,
@@ -3122,12 +3142,10 @@ mod tests {
         let _gate = handle.permission_gate();
         let _listener: Arc<dyn ClientEventListener> = handle.listener();
 
-        // The M8 smoke signal still works: `skill_count` reflects the assembled
-        // mobile builtin skill set (currently empty — mobile builtin skills are
-        // markdown loaded from disk, not Rust-bundled — so it is 0, matching
-        // `skill_api::builtin::BUILTIN_MOBILE`). The signal is that the call resolves
-        // against the real wired handle, not that the count is non-zero.
-        assert_eq!(handle.skill_count(), 0);
+        // The M8 smoke signal reflects the Rust-bundled mobile skill catalog.
+        // `create-local-app` is always present so the agent can enter the
+        // template-guided, approval-gated local-app workflow offline.
+        assert_eq!(handle.skill_count(), 1);
     }
 
     /// F3-04: `create_session` is no longer the M8 stub (which returned an
@@ -3452,6 +3470,8 @@ mod tests {
                 routing_json: Some(r#"{"default":"openai"}"#.to_string()),
             }),
             mobile_linux: None,
+            local_apps_full_runtime: false,
+            local_apps_runtime_root: None,
         })
         .expect("launch config");
 

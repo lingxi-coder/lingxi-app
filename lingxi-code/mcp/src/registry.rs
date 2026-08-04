@@ -642,6 +642,41 @@ impl McpRegistry {
             .map(|(_, entry)| Arc::clone(&entry.client))
     }
 
+    /// Whether `name` can currently accept tool calls.
+    ///
+    /// Most transports dispatch through a live [`McpClient`]. Same-process
+    /// providers are deliberately different: their [`McpTransport`] already
+    /// is the invocation boundary, so requiring an otherwise-unused JSON-RPC
+    /// connection would turn a successfully discovered `InProcess` server
+    /// into an uncallable catalog. Only a connected `InProcess` server may use
+    /// this direct path; stdio and network transports remain fail-closed on a
+    /// missing client.
+    pub async fn has_callable_server(&self, name: &str) -> bool {
+        self.get_client(name).await.is_some()
+            || self.direct_inprocess_connection(name).await.is_some()
+    }
+
+    async fn direct_inprocess_connection(&self, name: &str) -> Option<(McpConnectionId, String)> {
+        let connections = self.connections.read().await;
+        connections.iter().find_map(|(raw_name, state)| {
+            if normalize_name_for_mcp(raw_name) != name {
+                return None;
+            }
+            match state {
+                McpConnectionState::Connected {
+                    config:
+                        McpServerConfig {
+                            spec: McpTransportSpec::InProcess { registry_key },
+                            ..
+                        },
+                    connection_id,
+                    ..
+                } => Some((*connection_id, registry_key.clone())),
+                _ => None,
+            }
+        })
+    }
+
     /// Return the [`McpServerConfig`] for `name`, if any (M4-07).
     ///
     /// Reads the current state-map; returns the config from any variant
@@ -676,11 +711,31 @@ impl McpRegistry {
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
     ) -> Result<traits::McpToolResultDto, crate::client::McpClientError> {
-        let client = self.get_client(server).await.ok_or_else(|| {
-            crate::client::McpClientError::Rpc(format!(
-                "MCP server \"{server}\" has no live client"
-            ))
-        })?;
+        let Some(client) = self.get_client(server).await else {
+            let Some((connection_id, _registry_key)) =
+                self.direct_inprocess_connection(server).await
+            else {
+                return Err(crate::client::McpClientError::Rpc(format!(
+                    "MCP server \"{server}\" has no live client"
+                )));
+            };
+
+            // `full_name` is the model-facing `mcp__<server>__<tool>` name.
+            // The caller has already resolved the final segment back to the
+            // server's raw tool name, so stripping the fixed prefix is safe and
+            // avoids teaching an in-process provider about FQN normalization.
+            let prefix = format!("mcp__{server}__");
+            let tool_name = full_name.strip_prefix(&prefix).ok_or_else(|| {
+                crate::client::McpClientError::Rpc(format!(
+                    "invalid MCP tool name {full_name:?} for server {server:?}"
+                ))
+            })?;
+            return self
+                .transport
+                .call_tool(&McpRawConnection { connection_id }, tool_name, input)
+                .await
+                .map_err(|error| crate::client::McpClientError::Rpc(error.to_string()));
+        };
         let first = client
             .call_tool_with_progress(full_name, input.clone(), tool_use_id, on_progress.clone())
             .await;
@@ -2755,6 +2810,126 @@ mod tests {
         }
     }
 
+    /// Same-process transport used to prove that an `InProcess` catalog is
+    /// callable without manufacturing a JSON-RPC client solely for dispatch.
+    struct DirectInProcessMock {
+        connection_id: ConnId,
+        calls: TestMutex<Vec<(String, Value)>>,
+    }
+
+    impl DirectInProcessMock {
+        fn new() -> Self {
+            Self {
+                connection_id: ConnId::new(),
+                calls: TestMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for DirectInProcessMock {
+        async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            assert!(
+                matches!(spec, McpTransportSpec::InProcess { registry_key } if registry_key == "local_apps")
+            );
+            Ok(McpRawConnection {
+                connection_id: self.connection_id,
+            })
+        }
+
+        async fn initialize(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            Ok(ServerCapabilitiesDto {
+                tools: true,
+                resources: false,
+                prompts: false,
+                logging: false,
+                experimental: HashMap::new(),
+            })
+        }
+
+        async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            Ok(vec![McpToolDto {
+                server_name: String::new(),
+                tool_name: "list".into(),
+                description: "list local apps".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                full_name: String::new(),
+                search_hint: None,
+                always_load: Some(true),
+            }])
+        }
+
+        async fn list_resources(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpPromptDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _conn: &McpRawConnection,
+            tool: &str,
+            input: Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool.into(), input.clone()));
+            Ok(McpToolResultDto {
+                content: serde_json::json!([{"type":"text","text":"ok"}]),
+                structured_content: Some(serde_json::json!({"tool": tool, "input": input})),
+                is_error: false,
+                ..Default::default()
+            })
+        }
+
+        async fn read_resource(
+            &self,
+            _conn: &McpRawConnection,
+            _uri: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            Err(McpError::Internal("resources disabled".into()))
+        }
+
+        async fn ping(&self, _connection_id: ConnId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!("direct registry connections do not subscribe to JSON-RPC notifications")
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _conn: &McpRawConnection,
+            _request: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            Err(McpError::Internal("elicitation disabled".into()))
+        }
+
+        async fn disconnect(&self, _connection_id: ConnId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::InProcess]
+        }
+    }
+
     struct NoopWake;
 
     impl Wake for NoopWake {
@@ -2790,6 +2965,48 @@ mod tests {
         assert!(
             registry.get_client("mock").await.is_some(),
             "a live McpClient must be registered when raw_conn is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn inprocess_server_dispatches_directly_without_jsonrpc_client() {
+        let transport = Arc::new(DirectInProcessMock::new());
+        let registry = McpRegistry::new(transport.clone());
+        registry
+            .connect(McpServerConfig {
+                name: "local_apps".into(),
+                spec: McpTransportSpec::InProcess {
+                    registry_key: "local_apps".into(),
+                },
+                scope: ConfigScope::Managed,
+                disabled: false,
+                timeout_ms: None,
+                always_load: true,
+                config_error: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(registry.get_client("local_apps").await.is_none());
+        assert!(registry.has_callable_server("local_apps").await);
+        let result = registry
+            .call_tool_with_auth_retry(
+                "local_apps",
+                "mcp__local_apps__list",
+                serde_json::json!({"limit": 5}),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"tool":"list","input":{"limit":5}}))
+        );
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![("list".into(), serde_json::json!({"limit": 5}))]
         );
     }
 

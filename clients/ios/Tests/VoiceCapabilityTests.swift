@@ -289,6 +289,7 @@ final class VoiceCapabilityTests: XCTestCase {
 
         await Task.yield()
         XCTAssertEqual(session.transcribeCalls, 1)
+        XCTAssertNil(session.automaticEndpointAfterSilence)
 
         capture.finish()
         XCTAssertEqual(capture.phase, .finishing)
@@ -354,14 +355,19 @@ private final class StubVoiceTranscriptionSession: VoiceTranscriptionSession {
     private(set) var transcribeCalls = 0
     private(set) var finishCalls = 0
     private(set) var cancelCalls = 0
+    private(set) var automaticEndpointAfterSilence: Duration?
 
     init(transcript: String, ignoresCancellation: Bool = false) {
         self.transcript = transcript
         self.ignoresCancellation = ignoresCancellation
     }
 
-    func transcribe(language _: String?) async throws -> String {
+    func transcribe(
+        language _: String?,
+        automaticEndpointAfterSilence: Duration?
+    ) async throws -> String {
         transcribeCalls += 1
+        self.automaticEndpointAfterSilence = automaticEndpointAfterSilence
         return try await withCheckedThrowingContinuation { continuation in
             if pendingCancellation {
                 continuation.resume(throwing: CancellationError())

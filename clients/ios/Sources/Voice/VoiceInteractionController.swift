@@ -1,5 +1,6 @@
 import AVFoundation
 import Observation
+import OSLog
 import SwiftUI
 
 #if canImport(UIKit)
@@ -17,6 +18,7 @@ enum VoiceInteractionPhase: Equatable {
     case recognizing
     case thinking
     case speaking
+    case interrupting
     case paused
     case failed
 }
@@ -28,78 +30,337 @@ struct VoiceSpeechRequest: Equatable {
     let speed: Double
 }
 
+struct VoiceSpeechConfiguration: Equatable {
+    let voiceIdentifier: String
+    let languageIdentifier: String
+    let speed: Double
+
+    func request(text: String) -> VoiceSpeechRequest {
+        VoiceSpeechRequest(
+            text: text,
+            voiceIdentifier: voiceIdentifier,
+            languageIdentifier: languageIdentifier,
+            speed: speed
+        )
+    }
+}
+
 enum VoiceSpeechPlaybackOutcome: Equatable {
     case completed
     case interrupted
 }
 
 @MainActor
+protocol VoiceSpeechStreamingSession: AnyObject {
+    func enqueue(_ text: String)
+    func pause()
+    func resume()
+    func finish() async throws -> VoiceSpeechPlaybackOutcome
+    func stop() async
+}
+
+@MainActor
 protocol VoiceSpeechPlaying: AnyObject {
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome
     func stop()
+    func openStream(
+        configuration: VoiceSpeechConfiguration,
+        managesAudioSession: Bool
+    ) async throws -> any VoiceSpeechStreamingSession
+}
+
+extension VoiceSpeechPlaying {
+    func openStream(
+        configuration: VoiceSpeechConfiguration,
+        managesAudioSession _: Bool
+    ) async throws -> any VoiceSpeechStreamingSession {
+        BufferedVoiceSpeechSession(player: self, configuration: configuration)
+    }
+}
+
+/// Compatibility path for injected previews/tests that only implement the old
+/// one-shot player. Production uses `SystemVoiceSpeechStream`, which speaks as
+/// soon as each segment is enqueued.
+@MainActor
+private final class BufferedVoiceSpeechSession: VoiceSpeechStreamingSession {
+    private weak var player: (any VoiceSpeechPlaying)?
+    private let configuration: VoiceSpeechConfiguration
+    private var segments: [String] = []
+    private var stopped = false
+
+    init(player: any VoiceSpeechPlaying, configuration: VoiceSpeechConfiguration) {
+        self.player = player
+        self.configuration = configuration
+    }
+
+    func enqueue(_ text: String) {
+        guard !stopped, !text.isEmpty else { return }
+        segments.append(text)
+    }
+
+    func pause() {}
+    func resume() {}
+
+    func finish() async throws -> VoiceSpeechPlaybackOutcome {
+        guard !stopped, let player else { return .interrupted }
+        for segment in segments {
+            try Task.checkCancellation()
+            let outcome = try await player.speak(configuration.request(text: segment))
+            guard outcome == .completed else { return outcome }
+        }
+        segments = []
+        return .completed
+    }
+
+    func stop() async {
+        stopped = true
+        segments = []
+        player?.stop()
+    }
 }
 
 @MainActor
 final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
-    private let synthesizer = AVSpeechSynthesizer()
-    private var activePlaybackID: UUID?
-    private var playbackInterrupted = false
+    private var activeStream: SystemVoiceSpeechStream?
 
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
-        let lease = try await VoiceAudioSessionCoordinator.shared.acquire(.playback)
-        let playbackID = UUID()
-        activePlaybackID = playbackID
-        playbackInterrupted = false
-        let observers = installInterruptionObservers(playbackID: playbackID)
-        defer {
-            observers.forEach(NotificationCenter.default.removeObserver)
-            if activePlaybackID == playbackID {
-                activePlaybackID = nil
-                playbackInterrupted = false
-            }
-        }
-        do {
-            try Task.checkCancellation()
-            let utterance = AVSpeechUtterance(string: request.text)
-            utterance.voice = AVSpeechSynthesisVoice(identifier: request.voiceIdentifier)
-                ?? AVSpeechSynthesisVoice(language: request.languageIdentifier)
-            utterance.rate = VoiceCapabilityModel.utteranceRate(from: request.speed)
-            synthesizer.speak(utterance)
-            while synthesizer.isSpeaking, !playbackInterrupted {
-                try await Task.sleep(for: .milliseconds(50))
-            }
-            try Task.checkCancellation()
-            let outcome: VoiceSpeechPlaybackOutcome = playbackInterrupted ? .interrupted : .completed
-            if outcome == .interrupted {
-                synthesizer.stopSpeaking(at: .immediate)
-            }
-            await VoiceAudioSessionCoordinator.shared.release(lease)
-            return outcome
-        } catch {
-            synthesizer.stopSpeaking(at: .immediate)
-            await VoiceAudioSessionCoordinator.shared.release(lease)
-            throw error
-        }
+        let stream = try await openStream(
+            configuration: VoiceSpeechConfiguration(
+                voiceIdentifier: request.voiceIdentifier,
+                languageIdentifier: request.languageIdentifier,
+                speed: request.speed
+            ),
+            managesAudioSession: true
+        )
+        stream.enqueue(request.text)
+        return try await stream.finish()
     }
 
     func stop() {
-        synthesizer.stopSpeaking(at: .immediate)
+        activeStream?.stopImmediately()
     }
 
-    private func installInterruptionObservers(playbackID: UUID) -> [NSObjectProtocol] {
+    func openStream(
+        configuration: VoiceSpeechConfiguration,
+        managesAudioSession: Bool
+    ) async throws -> any VoiceSpeechStreamingSession {
+        if let activeStream {
+            await activeStream.stop()
+        }
+        let lease = managesAudioSession
+            ? try await VoiceAudioSessionCoordinator.shared.acquire(.playback)
+            : nil
+        let stream = SystemVoiceSpeechStream(configuration: configuration, audioLease: lease)
+        stream.onTerminal = { [weak self, weak stream] in
+            guard let self, self.activeStream === stream else { return }
+            self.activeStream = nil
+        }
+        activeStream = stream
+        return stream
+    }
+}
+
+@MainActor
+final class SystemVoiceSpeechStream: NSObject, VoiceSpeechStreamingSession, AVSpeechSynthesizerDelegate {
+    private let configuration: VoiceSpeechConfiguration
+    private let synthesizer = AVSpeechSynthesizer()
+    private var audioLease: VoiceAudioSessionCoordinator.Lease?
+    private var queuedText: [String] = []
+    private var activeUtterance: AVSpeechUtterance?
+    private var finishContinuations: [CheckedContinuation<VoiceSpeechPlaybackOutcome, Error>] = []
+    private var terminalOutcome: VoiceSpeechPlaybackOutcome?
+    private var isCompleting = false
+    private var isFinishing = false
+    private var isPaused = false
+    private var isStopping = false
+    // Notification tokens are only mutated on the main actor; deinit itself is
+    // nonisolated under Swift 6, so expose this teardown-only storage explicitly.
+    private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
+    var onTerminal: (() -> Void)?
+
+    init(
+        configuration: VoiceSpeechConfiguration,
+        audioLease: VoiceAudioSessionCoordinator.Lease?
+    ) {
+        self.configuration = configuration
+        self.audioLease = audioLease
+        super.init()
+        synthesizer.delegate = self
+        synthesizer.usesApplicationAudioSession = true
+        installInterruptionObservers()
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    func enqueue(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard terminalOutcome == nil, !isCompleting, !isStopping, !trimmed.isEmpty else { return }
+        queuedText.append(trimmed)
+        startNextIfPossible()
+    }
+
+    func pause() {
+        guard terminalOutcome == nil, !isCompleting else { return }
+        isPaused = true
+        if activeUtterance != nil {
+            _ = synthesizer.pauseSpeaking(at: .immediate)
+        }
+    }
+
+    func resume() {
+        guard terminalOutcome == nil, !isCompleting, isPaused else { return }
+        isPaused = false
+        if synthesizer.isPaused {
+            _ = synthesizer.continueSpeaking()
+        } else {
+            startNextIfPossible()
+        }
+        // The queue can drain while paused (a `didFinish` delivered after a
+        // barge-in `pause()` bails out of `completeIfDrained` on `!isPaused`),
+        // so re-check here exactly as `didFinishUtterance` does. Without this a
+        // `finish()` continuation parked before the pause is never resumed.
+        completeIfDrained()
+    }
+
+    func finish() async throws -> VoiceSpeechPlaybackOutcome {
+        if let terminalOutcome { return terminalOutcome }
+        isFinishing = true
+        completeIfDrained()
+        if let terminalOutcome { return terminalOutcome }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                finishContinuations.append(continuation)
+                completeIfDrained()
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.stopImmediately()
+            }
+        }
+    }
+
+    func stop() async {
+        stopImmediately()
+        _ = try? await finish()
+    }
+
+    func stopImmediately() {
+        guard terminalOutcome == nil, !isCompleting, !isStopping else { return }
+        isStopping = true
+        queuedText.removeAll()
+        if activeUtterance != nil || synthesizer.isSpeaking || synthesizer.isPaused {
+            let requestedStop = synthesizer.stopSpeaking(at: .immediate)
+            if !requestedStop {
+                activeUtterance = nil
+                complete(.interrupted)
+            }
+        } else {
+            complete(.interrupted)
+        }
+    }
+
+    nonisolated func speechSynthesizer(
+        _: AVSpeechSynthesizer,
+        didFinish utterance: AVSpeechUtterance
+    ) {
+        let utteranceID = ObjectIdentifier(utterance)
+        Task { @MainActor [weak self] in self?.didFinishUtterance(utteranceID) }
+    }
+
+    nonisolated func speechSynthesizer(
+        _: AVSpeechSynthesizer,
+        didCancel utterance: AVSpeechUtterance
+    ) {
+        let utteranceID = ObjectIdentifier(utterance)
+        Task { @MainActor [weak self] in self?.didCancelUtterance(utteranceID) }
+    }
+
+    private func didFinishUtterance(_ utteranceID: ObjectIdentifier) {
+        guard let activeUtterance,
+              ObjectIdentifier(activeUtterance) == utteranceID
+        else { return }
+        self.activeUtterance = nil
+        if isStopping {
+            complete(.interrupted)
+            return
+        }
+        startNextIfPossible()
+        completeIfDrained()
+    }
+
+    private func didCancelUtterance(_ utteranceID: ObjectIdentifier) {
+        if let activeUtterance,
+           ObjectIdentifier(activeUtterance) == utteranceID {
+            self.activeUtterance = nil
+        } else if !isStopping {
+            return
+        }
+        complete(.interrupted)
+    }
+
+    private func startNextIfPossible() {
+        guard terminalOutcome == nil,
+              !isCompleting,
+              !isPaused,
+              !isStopping,
+              activeUtterance == nil,
+              !queuedText.isEmpty
+        else { return }
+        let text = queuedText.removeFirst()
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(identifier: configuration.voiceIdentifier)
+            ?? AVSpeechSynthesisVoice(language: configuration.languageIdentifier)
+        utterance.rate = VoiceCapabilityModel.utteranceRate(from: configuration.speed)
+        activeUtterance = utterance
+        synthesizer.speak(utterance)
+    }
+
+    private func completeIfDrained() {
+        guard isFinishing,
+              activeUtterance == nil,
+              queuedText.isEmpty,
+              !isPaused
+        else { return }
+        complete(.completed)
+    }
+
+    private func complete(_ outcome: VoiceSpeechPlaybackOutcome) {
+        guard terminalOutcome == nil, !isCompleting else { return }
+        isCompleting = true
+        queuedText.removeAll()
+        activeUtterance = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        let lease = audioLease
+        audioLease = nil
+        Task { @MainActor [weak self] in
+            if let lease {
+                await VoiceAudioSessionCoordinator.shared.release(lease)
+            }
+            let continuations = self?.finishContinuations ?? []
+            self?.finishContinuations.removeAll()
+            self?.terminalOutcome = outcome
+            self?.isCompleting = false
+            continuations.forEach { $0.resume(returning: outcome) }
+            self?.onTerminal?()
+            self?.onTerminal = nil
+        }
+    }
+
+    private func installInterruptionObservers() {
         let center = NotificationCenter.default
-        let interruption = center.addObserver(
+        observers.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] notification in
             let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-            Task { @MainActor [weak self] in
-                self?.markInterrupted(playbackID: playbackID)
-            }
-        }
-        let routeChange = center.addObserver(
+            Task { @MainActor [weak self] in self?.stopImmediately() }
+        })
+        observers.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
@@ -108,17 +369,8 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
                 let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                 AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable
             else { return }
-            Task { @MainActor [weak self] in
-                self?.markInterrupted(playbackID: playbackID)
-            }
-        }
-        return [interruption, routeChange]
-    }
-
-    private func markInterrupted(playbackID: UUID) {
-        guard activePlaybackID == playbackID else { return }
-        playbackInterrupted = true
-        synthesizer.stopSpeaking(at: .immediate)
+            Task { @MainActor [weak self] in self?.stopImmediately() }
+        })
     }
 }
 
@@ -174,12 +426,35 @@ final class VoicePreviewPlayback {
     }
 }
 
+@MainActor
+private final class FlowResponseContext {
+    let token: ConversationTurnToken
+    let operation: UInt64
+    var segmenter = StreamingSpeechSegmenter()
+    var lastSpeechSequence: UInt64 = 0
+    var pendingSegments: [String] = []
+    var speechSession: (any VoiceSpeechStreamingSession)?
+    var bargeInSession: (any VoiceBargeInSession)?
+    var terminalCompletion: ConversationTurnCompletion?
+    var isOpeningSpeech = false
+    var isFinishingSpeech = false
+    var isInterrupting = false
+    var bargeInUnavailable = false
+
+    init(token: ConversationTurnToken, operation: UInt64) {
+        self.token = token
+        self.operation = operation
+    }
+}
+
 /// Main-actor state machine for both chat dictation and hands-free Flow Mode.
 /// A generation is captured by every async/callback edge so a closed panel or
 /// switched conversation cannot be resurrected by late Speech/TTS/turn events.
 @Observable
 @MainActor
 final class VoiceInteractionController {
+    private static let log = Logger(subsystem: "com.lingxi.code", category: "flow-voice")
+
     private(set) var mode: VoiceInteractionMode?
     private(set) var phase: VoiceInteractionPhase = .paused
     private(set) var caption = ""
@@ -189,18 +464,27 @@ final class VoiceInteractionController {
     let capability: VoiceCapabilityModel
 
     private let speechPlayer: any VoiceSpeechPlaying
+    private let bargeInRecognizer: (any VoiceBargeInRecognizing)?
     private let readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)?
     private let loopDelay: Duration
+    private let flowSilenceInterval: Duration
     private var source: (any ConversationSource)?
+    private var flowContext: FlowResponseContext?
     private var activeFlowToken: ConversationTurnToken?
     private var suppressedFlowToken: ConversationTurnToken?
     private var automaticPlaybackToken: ConversationTurnToken?
     private var dictationCompletion: ((String) -> Void)?
     private var transitionTask: Task<Void, Never>?
     private var speechTask: Task<Void, Never>?
+    private var responseSetupTask: Task<Void, Never>?
+    private var bargeInEventTask: Task<Void, Never>?
+    private var streamOpenTask: Task<Void, Never>?
+    private var audioCleanupTask: (id: UInt64, task: Task<Void, Never>)?
+    private var nextAudioCleanupID: UInt64 = 1
     private var cancellationTask: Task<Void, Error>?
     private var cancellationSourceID: ObjectIdentifier?
     private var isCancellingFlowTurn = false
+    private var pendingInterruptionTranscript: String?
     private var resumeAfterConfiguration = false
     private var generation: UInt64 = 0
 
@@ -208,22 +492,28 @@ final class VoiceInteractionController {
         voiceCapture = VoiceCapture()
         capability = VoiceCapabilityModel()
         speechPlayer = SystemVoiceSpeechPlayer()
+        bargeInRecognizer = VoiceBargeInRecognizer()
         readinessOverride = nil
         loopDelay = .milliseconds(350)
+        flowSilenceInterval = .milliseconds(1_200)
     }
 
     init(
         voiceCapture: VoiceCapture,
         capability: VoiceCapabilityModel,
         speechPlayer: any VoiceSpeechPlaying,
+        bargeInRecognizer: (any VoiceBargeInRecognizing)? = nil,
         readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
-        loopDelay: Duration = .milliseconds(350)
+        loopDelay: Duration = .milliseconds(350),
+        flowSilenceInterval: Duration = .milliseconds(1_200)
     ) {
         self.voiceCapture = voiceCapture
         self.capability = capability
         self.speechPlayer = speechPlayer
+        self.bargeInRecognizer = bargeInRecognizer
         self.readinessOverride = readinessOverride
         self.loopDelay = loopDelay
+        self.flowSilenceInterval = flowSilenceInterval
     }
 
     var isPresented: Bool { mode != nil }
@@ -234,6 +524,7 @@ final class VoiceInteractionController {
         case .listening, .recognizing: return .listening
         case .thinking: return .thinking
         case .speaking: return .speaking
+        case .interrupting: return .listening
         case .configurationRequired, .paused, .failed: return .idle
         }
     }
@@ -245,6 +536,7 @@ final class VoiceInteractionController {
         case .recognizing: return "正在识别"
         case .thinking: return "Agent 正在思考"
         case .speaking: return "正在播报"
+        case .interrupting: return "检测到你在说话"
         case .paused: return "已暂停"
         case .failed: return "语音暂不可用"
         }
@@ -257,10 +549,11 @@ final class VoiceInteractionController {
             guard let mode else { return "请先完成语音识别与系统声音设置" }
             return configurationMessage(for: mode)
         case .listening:
-            return mode == .flow ? "说完后轻点光球收音" : "说完后松开或再次点击"
+            return mode == .flow ? "检测到说话停顿后会自动发送" : "说完后松开或再次点击"
         case .recognizing: return "正在整理刚才的语音…"
-        case .thinking: return "回复完成后会自动播报"
-        case .speaking: return "轻点光球可打断并继续说话"
+        case .thinking: return "自然短句生成后会立即播报，也可以直接说话打断"
+        case .speaking: return "可以直接说话打断，或轻点光球重新监听"
+        case .interrupting: return "正在识别打断内容…"
         case .paused: return "轻点重试恢复语音"
         case .failed: return "请检查设置后重试"
         }
@@ -268,7 +561,7 @@ final class VoiceInteractionController {
 
     var statusColor: Color {
         switch phase {
-        case .listening, .recognizing: return Color(okl: 0.72, 0.18, 150)
+        case .listening, .recognizing, .interrupting: return Color(okl: 0.72, 0.18, 150)
         case .speaking: return Color(okl: 0.75, 0.19, 300)
         case .configurationRequired, .failed: return Color(okl: 0.75, 0.18, 50)
         case .thinking, .paused: return Color(okl: 0.70, 0.16, 260)
@@ -279,9 +572,11 @@ final class VoiceInteractionController {
 
     var orbAccessibilityHint: String {
         switch phase {
-        case .listening: return "轻点结束收音"
-        case .thinking: return "轻点取消当前回复并重新监听"
-        case .speaking: return "轻点停止播报并重新监听"
+        case .listening:
+            return mode == .flow ? "停顿后自动发送，也可轻点立即结束收音" : "轻点结束收音"
+        case .thinking: return "可以直接说话打断；轻点会取消当前回复并重新监听"
+        case .speaking: return "可以直接说话打断；轻点会停止当前回复并重新监听"
+        case .interrupting: return "正在听取新的问题"
         case .paused, .failed: return "轻点重试"
         default: return ""
         }
@@ -332,13 +627,11 @@ final class VoiceInteractionController {
         switch phase {
         case .listening:
             finishListening()
-        case .thinking:
+        case .thinking, .speaking:
             cancelFlowTurnAndRelisten()
-        case .speaking:
-            stopPlaybackAndRelisten()
         case .paused, .failed:
             retry()
-        case .configurationRequired, .recognizing:
+        case .configurationRequired, .recognizing, .interrupting:
             break
         }
     }
@@ -352,6 +645,14 @@ final class VoiceInteractionController {
             : currentReadiness.isReadyForDictation
         guard ready else {
             requireConfiguration(for: mode)
+            return
+        }
+        if mode == .flow,
+           let pendingInterruptionTranscript,
+           let context = flowContext {
+            isCancellingFlowTurn = false
+            context.isInterrupting = true
+            commitBargeInTranscript(pendingInterruptionTranscript, context: context)
             return
         }
         if mode == .flow, activeFlowToken != nil {
@@ -386,29 +687,54 @@ final class VoiceInteractionController {
         }
     }
 
+    func handleTurnSpeechUpdate(_ update: ConversationTurnSpeechUpdate) {
+        guard mode == .flow,
+              let context = flowContext,
+              context.token == activeFlowToken,
+              update.token == context.token,
+              update.sequence > context.lastSpeechSequence,
+              context.token != suppressedFlowToken,
+              !isCancellingFlowTurn
+        else { return }
+
+        context.lastSpeechSequence = update.sequence
+        context.pendingSegments.append(contentsOf: context.segmenter.append(update.delta))
+        enqueuePendingSpeechIfPossible(context)
+    }
+
     func handleTurnCompletion(_ completion: ConversationTurnCompletion) {
         guard mode == .flow else {
             handleAutomaticTurnCompletion(completion, allowPlayback: mode == nil)
             return
         }
-        guard completion.token == activeFlowToken,
+        guard let context = flowContext,
+              completion.token == context.token,
+              completion.token == activeFlowToken,
               completion.token != suppressedFlowToken,
               !isCancellingFlowTurn
         else { return }
 
-        activeFlowToken = nil
-        suppressedFlowToken = nil
+        context.terminalCompletion = completion
+        if completion.outcome == .completed {
+            context.pendingSegments.append(contentsOf: context.segmenter.finish(
+                finalText: completion.finalAssistantText
+            ))
+            if context.segmenter.detectedTerminalRewrite {
+                Self.log.notice(
+                    "terminal assistant text rewrote streamed prefix turn=\(completion.token.clientTurnId, privacy: .public) epoch=\(completion.token.sessionEpoch, privacy: .public) sequence=\(context.lastSpeechSequence, privacy: .public)"
+                )
+            }
+            enqueuePendingSpeechIfPossible(context)
+            guard !context.isInterrupting else { return }
+            finishFlowResponseIfReady(context)
+            return
+        }
+
+        guard !context.isInterrupting else { return }
+        stopFlowResponse(context)
         switch completion.outcome {
         case .completed:
-            let text = Self.spokenText(from: completion.finalAssistantText)
-            guard !text.isEmpty else {
-                caption = ""
-                scheduleListening(after: loopDelay)
-                return
-            }
-            caption = text
-            transition(to: .speaking)
-            speakAndContinue(text)
+            break
         case .cancelled:
             fail("本轮已取消，轻点重试继续心流")
         case .maxTurns:
@@ -426,11 +752,15 @@ final class VoiceInteractionController {
             return
         }
         let ownedSource = activeFlowToken == nil ? nil : source
+        let context = flowContext
         invalidateTasks(keepingMode: true, cancelOwnedTurn: false)
+        stopFlowAudioDetached(context)
         voiceCapture.cancel()
         speechPlayer.stop()
         activeFlowToken = nil
         suppressedFlowToken = nil
+        flowContext = nil
+        pendingInterruptionTranscript = nil
         isCancellingFlowTurn = false
         caption = ""
         detailOverride = "已在后台停止收音，轻点重试恢复"
@@ -446,11 +776,15 @@ final class VoiceInteractionController {
 
     func close() {
         let ownedSource = activeFlowToken == nil ? nil : source
+        let context = flowContext
         invalidateTasks(keepingMode: false, cancelOwnedTurn: false)
+        stopFlowAudioDetached(context)
         voiceCapture.cancel()
         speechPlayer.stop()
         activeFlowToken = nil
         suppressedFlowToken = nil
+        flowContext = nil
+        pendingInterruptionTranscript = nil
         isCancellingFlowTurn = false
         source = nil
         automaticPlaybackToken = nil
@@ -472,11 +806,15 @@ final class VoiceInteractionController {
 
     private func beginOperation(mode: VoiceInteractionMode) {
         if self.mode != mode {
+            let context = flowContext
             invalidateTasks(keepingMode: false, cancelOwnedTurn: false)
+            stopFlowAudioDetached(context)
             voiceCapture.cancel()
             speechPlayer.stop()
             activeFlowToken = nil
             suppressedFlowToken = nil
+            flowContext = nil
+            pendingInterruptionTranscript = nil
             isCancellingFlowTurn = false
             source = nil
             automaticPlaybackToken = nil
@@ -530,6 +868,9 @@ final class VoiceInteractionController {
             if let delay {
                 do { try await Task.sleep(for: delay) } catch { return }
             }
+            guard !Task.isCancelled, self.generation == operation else { return }
+            await self.waitForFlowAudioCleanup()
+            guard !Task.isCancelled, self.generation == operation else { return }
             await self.stopPlaybackAndWait()
             guard !Task.isCancelled, self.generation == operation else { return }
             self.beginCapture(operation: operation)
@@ -556,7 +897,10 @@ final class VoiceInteractionController {
         detailOverride = nil
         resumeAfterConfiguration = false
         transition(to: .listening)
-        voiceCapture.start(language: capability.language) { [weak self] result in
+        voiceCapture.start(
+            language: capability.language,
+            automaticEndpointAfterSilence: mode == .flow ? flowSilenceInterval : nil
+        ) { [weak self] result in
             guard let self, self.generation == operation else { return }
             self.handleCaptureResult(result, operation: operation)
         }
@@ -610,39 +954,360 @@ final class VoiceInteractionController {
         }
         activeFlowToken = token
         suppressedFlowToken = nil
+        pendingInterruptionTranscript = nil
+        let operation = nextGeneration()
+        let context = FlowResponseContext(token: token, operation: operation)
+        flowContext = context
+        startBargeInMonitoring(context)
     }
 
-    private func speakAndContinue(_ text: String) {
-        let operation = nextGeneration()
-        let request = VoiceSpeechRequest(
-            text: text,
+    private var speechConfiguration: VoiceSpeechConfiguration {
+        VoiceSpeechConfiguration(
             voiceIdentifier: capability.voiceIdentifier,
             languageIdentifier: capability.effectiveLanguageIdentifier,
             speed: capability.speed
         )
-        speechTask?.cancel()
-        speechTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+    }
+
+    private func startBargeInMonitoring(
+        _ context: FlowResponseContext,
+        resumeSpeechOnSuccess: Bool = false
+    ) {
+        guard let bargeInRecognizer else {
+            context.bargeInUnavailable = true
+            detailOverride = "免手打断不可用，轻点光球后说话"
+            context.speechSession?.resume()
+            enqueuePendingSpeechIfPossible(context)
+            finishFlowResponseIfReady(context)
+            return
+        }
+
+        responseSetupTask?.cancel()
+        responseSetupTask = Task { @MainActor [weak self, weak context] in
+            guard let self, let context else { return }
             do {
-                let outcome = try await self.speechPlayer.speak(request)
-                try Task.checkCancellation()
+                let session = try await bargeInRecognizer.start(
+                    language: self.capability.language,
+                    prefersOnDevice: self.capability.mode == .onDevice
+                )
+                guard !Task.isCancelled,
+                      self.generation == context.operation,
+                      self.flowContext === context,
+                      self.mode == .flow
+                else {
+                    await session.stop()
+                    return
+                }
+                context.bargeInSession = session
+                context.bargeInUnavailable = false
+                self.responseSetupTask = nil
+                if resumeSpeechOnSuccess {
+                    context.isInterrupting = false
+                    context.speechSession?.resume()
+                    self.detailOverride = nil
+                    self.transition(to: context.speechSession == nil ? .thinking : .speaking)
+                }
+                self.consumeBargeInEvents(session, context: context)
+                self.enqueuePendingSpeechIfPossible(context)
+                self.finishFlowResponseIfReady(context)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.generation == context.operation,
+                      self.flowContext === context
+                else { return }
+                self.responseSetupTask = nil
+                context.bargeInSession = nil
+                context.bargeInUnavailable = true
+                if resumeSpeechOnSuccess {
+                    context.isInterrupting = false
+                    context.speechSession?.resume()
+                    self.transition(to: context.speechSession == nil ? .thinking : .speaking)
+                }
+                self.detailOverride = "免手打断不可用，轻点光球后说话"
+                self.enqueuePendingSpeechIfPossible(context)
+                self.finishFlowResponseIfReady(context)
+            }
+        }
+    }
+
+    private func consumeBargeInEvents(
+        _ session: any VoiceBargeInSession,
+        context: FlowResponseContext
+    ) {
+        bargeInEventTask?.cancel()
+        bargeInEventTask = Task { @MainActor [weak self, weak context] in
+            for await event in session.events {
+                guard !Task.isCancelled,
+                      let self,
+                      let context,
+                      self.generation == context.operation,
+                      self.flowContext === context,
+                      context.bargeInSession === session
+                else { return }
+                self.handleBargeInEvent(event, context: context)
+            }
+        }
+    }
+
+    private func handleBargeInEvent(
+        _ event: VoiceBargeInEvent,
+        context: FlowResponseContext
+    ) {
+        switch event {
+        case .speechStarted:
+            guard !context.isInterrupting else { return }
+            context.isInterrupting = true
+            context.speechSession?.pause()
+            caption = ""
+            detailOverride = "检测到你在说话，正在识别…"
+            transition(to: .interrupting)
+
+        case let .partial(text):
+            guard context.isInterrupting else { return }
+            caption = text
+
+        case let .transcript(text):
+            guard context.isInterrupting else { return }
+            commitBargeInTranscript(text, context: context)
+
+        case .empty:
+            recoverFromFalseBargeIn(context)
+
+        case let .failed(message):
+            if context.isInterrupting {
+                let operation = context.operation
+                Task { @MainActor [weak self, weak context] in
+                    guard let context else { return }
+                    await context.speechSession?.stop()
+                    guard let self,
+                          self.generation == operation,
+                          self.flowContext === context,
+                          self.mode == .flow
+                    else { return }
+                    self.fail("语音打断识别失败：\(message)")
+                }
+            } else {
+                context.bargeInSession = nil
+                context.bargeInUnavailable = true
+                detailOverride = "免手打断不可用，轻点光球后说话"
+                enqueuePendingSpeechIfPossible(context)
+            }
+        }
+    }
+
+    private func recoverFromFalseBargeIn(_ context: FlowResponseContext) {
+        guard context.isInterrupting else { return }
+        context.bargeInSession = nil
+        caption = ""
+        if let completion = context.terminalCompletion,
+           completion.outcome != .completed {
+            context.isInterrupting = false
+            handleTurnCompletion(completion)
+            return
+        }
+        detailOverride = "未识别到新的问题，正在恢复回复…"
+        startBargeInMonitoring(context, resumeSpeechOnSuccess: true)
+    }
+
+    private func commitBargeInTranscript(
+        _ rawText: String,
+        context: FlowResponseContext
+    ) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let source else {
+            recoverFromFalseBargeIn(context)
+            return
+        }
+
+        pendingInterruptionTranscript = text
+        suppressedFlowToken = context.token
+        isCancellingFlowTurn = true
+        caption = text
+        detailOverride = "正在停止上一轮并发送新问题…"
+        transition(to: .paused)
+        let operation = nextGeneration()
+        responseSetupTask?.cancel()
+        responseSetupTask = nil
+        bargeInEventTask?.cancel()
+        bargeInEventTask = nil
+        streamOpenTask?.cancel()
+        streamOpenTask = nil
+        speechTask?.cancel()
+
+        transitionTask?.cancel()
+        transitionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await context.speechSession?.stop()
+            await context.bargeInSession?.stop()
+            do {
+                if source.model.streaming || source.model.isCancelling {
+                    try await self.awaitCancellation(of: source)
+                }
+            } catch {
                 guard self.generation == operation, self.mode == .flow else { return }
-                switch outcome {
-                case .completed:
-                    self.caption = ""
-                    self.scheduleListening(after: self.loopDelay)
-                case .interrupted:
-                    self.caption = ""
-                    self.detailOverride = "语音播报被中断，轻点重试继续心流"
-                    self.transition(to: .paused)
+                self.isCancellingFlowTurn = false
+                self.fail("停止上一轮失败：\(error.localizedDescription)", preservingCaption: true)
+                return
+            }
+            guard self.generation == operation, self.mode == .flow else { return }
+            self.isCancellingFlowTurn = false
+            self.activeFlowToken = nil
+            self.suppressedFlowToken = nil
+            self.flowContext = nil
+            self.pendingInterruptionTranscript = nil
+            self.submitFlowTranscript(text)
+        }
+    }
+
+    private func enqueuePendingSpeechIfPossible(_ context: FlowResponseContext) {
+        guard flowContext === context,
+              generation == context.operation,
+              !context.isInterrupting,
+              !context.pendingSegments.isEmpty
+        else { return }
+
+        if let session = context.speechSession {
+            let segments = context.pendingSegments
+            context.pendingSegments.removeAll()
+            segments.forEach(session.enqueue)
+            caption = segments.last ?? caption
+            transition(to: .speaking)
+            return
+        }
+
+        guard !context.isOpeningSpeech else { return }
+        if bargeInRecognizer != nil,
+           context.bargeInSession == nil,
+           !context.bargeInUnavailable {
+            return
+        }
+
+        context.isOpeningSpeech = true
+        streamOpenTask?.cancel()
+        streamOpenTask = Task { @MainActor [weak self, weak context] in
+            guard let self, let context else { return }
+            do {
+                let session = try await self.speechPlayer.openStream(
+                    configuration: self.speechConfiguration,
+                    managesAudioSession: context.bargeInSession == nil
+                )
+                guard !Task.isCancelled,
+                      self.generation == context.operation,
+                      self.flowContext === context,
+                      !context.isInterrupting
+                else {
+                    // A barge-in that later resolves `.empty` keeps this very
+                    // context alive, so the flag must be released before the
+                    // stop or `enqueuePendingSpeechIfPossible` and
+                    // `finishFlowResponseIfReady` stay wedged on it forever.
+                    context.isOpeningSpeech = false
+                    await session.stop()
+                    return
+                }
+                context.isOpeningSpeech = false
+                context.speechSession = session
+                self.streamOpenTask = nil
+                self.enqueuePendingSpeechIfPossible(context)
+                self.finishFlowResponseIfReady(context)
+            } catch is CancellationError {
+                context.isOpeningSpeech = false
+                return
+            } catch {
+                guard self.generation == context.operation,
+                      self.flowContext === context
+                else { return }
+                context.isOpeningSpeech = false
+                self.pauseFlowResponseForFailure(
+                    context,
+                    message: "语音播报失败：\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func finishFlowResponseIfReady(_ context: FlowResponseContext) {
+        guard flowContext === context,
+              generation == context.operation,
+              context.terminalCompletion?.outcome == .completed,
+              !context.isInterrupting,
+              !context.isOpeningSpeech,
+              context.pendingSegments.isEmpty,
+              !context.isFinishingSpeech
+        else { return }
+
+        context.isFinishingSpeech = true
+        speechTask?.cancel()
+        speechTask = Task { @MainActor [weak self, weak context] in
+            guard let self, let context else { return }
+            let outcome: VoiceSpeechPlaybackOutcome
+            do {
+                if let session = context.speechSession {
+                    outcome = try await session.finish()
+                } else {
+                    outcome = .completed
                 }
             } catch is CancellationError {
                 return
             } catch {
-                guard self.generation == operation else { return }
-                self.fail("语音播报失败：\(error.localizedDescription)")
+                guard self.generation == context.operation,
+                      self.flowContext === context
+                else { return }
+                self.pauseFlowResponseForFailure(
+                    context,
+                    message: "语音播报失败：\(error.localizedDescription)"
+                )
+                return
+            }
+
+            guard self.generation == context.operation,
+                  self.flowContext === context,
+                  self.mode == .flow
+            else { return }
+            await context.bargeInSession?.stop()
+            self.bargeInEventTask?.cancel()
+            self.bargeInEventTask = nil
+            self.flowContext = nil
+            self.activeFlowToken = nil
+            self.suppressedFlowToken = nil
+            self.caption = ""
+            switch outcome {
+            case .completed:
+                self.detailOverride = nil
+                self.scheduleListening(after: self.loopDelay)
+            case .interrupted:
+                self.detailOverride = "语音播报被系统中断，轻点重试继续心流"
+                self.transition(to: .paused)
             }
         }
+    }
+
+    private func stopFlowResponse(_ context: FlowResponseContext) {
+        responseSetupTask?.cancel()
+        responseSetupTask = nil
+        bargeInEventTask?.cancel()
+        bargeInEventTask = nil
+        streamOpenTask?.cancel()
+        streamOpenTask = nil
+        speechTask?.cancel()
+        speechTask = nil
+        stopFlowAudioDetached(context)
+        if flowContext === context { flowContext = nil }
+        if activeFlowToken == context.token { activeFlowToken = nil }
+    }
+
+    private func pauseFlowResponseForFailure(
+        _ context: FlowResponseContext,
+        message: String
+    ) {
+        responseSetupTask?.cancel()
+        responseSetupTask = nil
+        bargeInEventTask?.cancel()
+        bargeInEventTask = nil
+        streamOpenTask = nil
+        speechTask = nil
+        stopFlowAudioDetached(context)
+        fail(message)
     }
 
     private func handleAutomaticTurnCompletion(
@@ -691,10 +1356,22 @@ final class VoiceInteractionController {
         isCancellingFlowTurn = true
         detailOverride = "正在停止当前回复…"
         transition(to: .paused)
+        responseSetupTask?.cancel()
+        responseSetupTask = nil
+        bargeInEventTask?.cancel()
+        bargeInEventTask = nil
+        streamOpenTask?.cancel()
+        streamOpenTask = nil
+        speechTask?.cancel()
+        let context = flowContext
         transitionTask?.cancel()
         transitionTask = Task { @MainActor [weak self] in
+            await context?.speechSession?.stop()
+            await context?.bargeInSession?.stop()
             do {
-                try await self?.awaitCancellation(of: source)
+                if source.model.streaming || source.model.isCancelling {
+                    try await self?.awaitCancellation(of: source)
+                }
             } catch {
                 guard let self, self.generation == operation else { return }
                 self.isCancellingFlowTurn = false
@@ -705,6 +1382,8 @@ final class VoiceInteractionController {
             self.activeFlowToken = nil
             self.suppressedFlowToken = nil
             self.isCancellingFlowTurn = false
+            self.flowContext = nil
+            self.pendingInterruptionTranscript = nil
             self.scheduleListening()
         }
     }
@@ -743,18 +1422,6 @@ final class VoiceInteractionController {
         }
     }
 
-    private func stopPlaybackAndRelisten() {
-        guard mode == .flow else { return }
-        let operation = nextGeneration()
-        transitionTask?.cancel()
-        transitionTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.stopPlaybackAndWait()
-            guard self.generation == operation, self.mode == .flow else { return }
-            self.scheduleListening()
-        }
-    }
-
     private func stopPlaybackAndWait() async {
         let active = speechTask
         active?.cancel()
@@ -763,9 +1430,9 @@ final class VoiceInteractionController {
         speechTask = nil
     }
 
-    private func fail(_ message: String) {
+    private func fail(_ message: String, preservingCaption: Bool = false) {
         voiceCapture.cancel()
-        caption = ""
+        if !preservingCaption { caption = "" }
         detailOverride = message
         resumeAfterConfiguration = false
         transition(to: .failed)
@@ -782,10 +1449,39 @@ final class VoiceInteractionController {
         transitionTask?.cancel()
         transitionTask = nil
         speechTask?.cancel()
+        speechTask = nil
+        responseSetupTask?.cancel()
+        responseSetupTask = nil
+        bargeInEventTask?.cancel()
+        bargeInEventTask = nil
+        streamOpenTask?.cancel()
+        streamOpenTask = nil
         if cancelOwnedTurn, activeFlowToken != nil {
             source?.cancel()
         }
         if !keepingMode { activeFlowToken = nil }
+    }
+
+    private func stopFlowAudioDetached(_ context: FlowResponseContext?) {
+        guard let context else { return }
+        let previousCleanup = audioCleanupTask?.task
+        let cleanupID = nextAudioCleanupID
+        nextAudioCleanupID &+= 1
+        let task = Task { @MainActor in
+            if let previousCleanup { await previousCleanup.value }
+            await context.speechSession?.stop()
+            await context.bargeInSession?.stop()
+        }
+        audioCleanupTask = (cleanupID, task)
+    }
+
+    private func waitForFlowAudioCleanup() async {
+        while let cleanup = audioCleanupTask {
+            await cleanup.task.value
+            if audioCleanupTask?.id == cleanup.id {
+                audioCleanupTask = nil
+            }
+        }
     }
 
     private func transition(to newPhase: VoiceInteractionPhase) {

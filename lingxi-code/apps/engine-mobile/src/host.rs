@@ -47,7 +47,10 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppTemplateKindDto};
+use client_protocol::local_apps::{
+    AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppEventDto, AppTemplateKindDto,
+    DesignValueDto,
+};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -55,7 +58,8 @@ use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
 use cron::CronJobFirer;
-use local_apps::{AppError, AppService, NoopContinuationSink};
+use local_apps::{AppError, AppGenerationCoordinator, AppService};
+use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig};
 
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
@@ -89,6 +93,10 @@ use traits::{
 };
 
 use crate::{
+    local_apps_generation::{lower_job, ClientGenerationJobObserver, MobileAppGenerationExecutor},
+    local_apps_host::LocalAppsHostBroker,
+    local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
+    local_apps_profile::{profile_apps, ProfileApps},
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
     mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
 };
@@ -227,6 +235,13 @@ pub struct MobileConfig {
     /// tests stay deterministic (they never touch the real filesystem). Mirrors
     /// `engine_desktop::DesktopConfig::memory_provider`.
     pub memory_provider: Option<Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>>,
+    /// Whether local apps run through the fixed Next production server. Store
+    /// builds keep this false and serve the static export instead.
+    pub local_apps_full_runtime: bool,
+    /// Host path containing the verified, read-only `node_modules` runtime
+    /// bundle. Its `node_modules` child is mounted at the canonical read-only
+    /// `/opt/lingxi/local-app-runtime/node_modules` path for build/run only.
+    pub local_apps_runtime_root: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -256,6 +271,8 @@ impl std::fmt::Debug for MobileConfig {
                     &"None"
                 },
             )
+            .field("local_apps_full_runtime", &self.local_apps_full_runtime)
+            .field("local_apps_runtime_root", &self.local_apps_runtime_root)
             .finish()
     }
 }
@@ -277,6 +294,8 @@ impl Default for MobileConfig {
             // P0.2: default to NO memory provider (empty, deterministic). The
             // production FFI entry points inject `Some(real_provider())`.
             memory_provider: None,
+            local_apps_full_runtime: false,
+            local_apps_runtime_root: None,
         }
     }
 }
@@ -396,6 +415,13 @@ pub struct MobileRuntime {
     /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
     /// when the platform wires one. `None` preserves the pre-migration state.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    /// The sole mobile MCP registry. It contains exactly the built-in
+    /// `local_apps` in-process provider; mobile never discovers project/user
+    /// MCP configuration.
+    pub mcp_registry: Arc<McpRegistry>,
+    /// Transport retained so the engine handle can attach the AppService after
+    /// the client event bridge has been constructed.
+    local_apps_mcp: Arc<LocalAppsMcpTransport>,
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -858,6 +884,26 @@ async fn build_mobile_inner_with_ask(
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let cwd = cfg.cwd.clone();
+    let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
+    let mcp_registry = Arc::new(McpRegistry::new(
+        local_apps_mcp.clone() as Arc<dyn traits::McpTransport>
+    ));
+    mcp_registry
+        .connect(McpServerConfig {
+            name: LOCAL_APPS_REGISTRY_KEY.into(),
+            spec: traits::McpTransportSpec::InProcess {
+                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
+            },
+            scope: McpConfigScope::Managed,
+            disabled: false,
+            timeout_ms: Some(30_000),
+            always_load: true,
+            config_error: None,
+        })
+        .await
+        .map_err(|error| {
+            MobileBuildError::Orchestrator(format!("local apps MCP bootstrap failed: {error}"))
+        })?;
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
     //     the device supplies these; the host test supplies a portable shim).
@@ -1553,7 +1599,7 @@ async fn build_mobile_inner_with_ask(
         // invoker, so the dispatch gate is unused here. The main loop is still
         // gated via `perms` (passed to the orchestrator below).
         permission_gate: None,
-        mcp_registry: None,
+        mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
         camera: platform.camera(),
         voice: platform.voice(),
@@ -1633,16 +1679,21 @@ async fn build_mobile_inner_with_ask(
             tool_ctx.ask_user_question_timeout.as_deref(),
         );
         mobile_tool_registry_with_skill_loader_and_ask_resolver(
-            tool_ctx,
+            tool_ctx.clone(),
             skill_loader,
             Arc::new(tool_ui::ask_user_question::TuiBridgeResolver::new(
                 timeout, tx,
             )),
         )
     } else {
-        mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader)
+        mobile_tool_registry_with_skill_loader(tool_ctx.clone(), skill_loader)
     };
     register_android_ui_automation(&mut tools, platform.android_ui_automation());
+    for (connection_id, mcp_tools) in
+        tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
+    {
+        tools.register_mcp_tools(connection_id, mcp_tools);
+    }
     let tools = Arc::new(tools);
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
@@ -1749,6 +1800,7 @@ async fn build_mobile_inner_with_ask(
     // `.with_session_cwd(session_cwd)`; inert today — see the binding note
     // above).
     .with_session_cwd(session_cwd);
+    orch_inner = orch_inner.with_mcp_registry(mcp_registry.clone());
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
@@ -1889,6 +1941,8 @@ async fn build_mobile_inner_with_ask(
         oauth_supported,
         credentials,
         mobile_linux,
+        mcp_registry,
+        local_apps_mcp,
     })
 }
 
@@ -2016,6 +2070,33 @@ pub struct MobileEngineHandle {
     /// order (channel order = commit order), and the forwarder task awaits the
     /// sink with NO service lock held (see `local_apps_bridge`).
     app_emissions: crate::local_apps_bridge::AppEmissionQueue,
+    /// Host-owned trust boundary for local-app data, runtime, capability and
+    /// structured WebView operations.  The MCP provider and native command
+    /// surface share this exact broker.
+    local_apps_host: Arc<LocalAppsHostBroker>,
+    /// Durable single-worker generation queue shared with the AppService
+    /// continuation sink.
+    app_generation: Arc<AppGenerationCoordinator>,
+    /// Keeps the process-wide profile service and fanouts alive.
+    profile_apps: Option<Arc<ProfileApps>>,
+    app_client_subscription: Option<u64>,
+    app_domain_subscription: Option<local_apps::AppEventSubscription>,
+    app_domain_observer: Option<Arc<crate::local_apps_bridge::SinkAppEventObserver>>,
+}
+
+impl Drop for MobileEngineHandle {
+    fn drop(&mut self) {
+        if let Some(profile) = &self.profile_apps {
+            if let Some(subscription) = self.app_client_subscription.take() {
+                profile.client_events.unsubscribe(subscription);
+            }
+            if let Some(subscription) = self.app_domain_subscription.take() {
+                profile.domain_events.unsubscribe(subscription);
+            }
+        }
+        // Drop the strong observer after unregistering its weak fanout entry.
+        self.app_domain_observer.take();
+    }
 }
 
 /// Default `ListSessions` row cap when the command omits an explicit `limit`
@@ -2637,6 +2718,73 @@ impl MobileEngineHandle {
             .await;
     }
 
+    fn emit_app_event(&self, event: AppEventDto) {
+        self.app_emissions
+            .enqueue_engine(ClientEvent::AppEvent { event });
+    }
+
+    fn suggested_template_kind(template: local_apps::AppTemplateKind) -> AppTemplateKindDto {
+        match template {
+            local_apps::AppTemplateKind::Dashboard => AppTemplateKindDto::Dashboard,
+            local_apps::AppTemplateKind::CrudTracker => AppTemplateKindDto::CrudTracker,
+            local_apps::AppTemplateKind::ContentShowcase => AppTemplateKindDto::ContentShowcase,
+            local_apps::AppTemplateKind::FormUtility => AppTemplateKindDto::FormUtility,
+        }
+    }
+
+    fn build_design_suggestion(
+        record: &local_apps::AppRecord,
+        draft: &local_apps::AppDesignDraft,
+        prompt: Option<&str>,
+    ) -> AppDesignPatchDto {
+        let mut ops = Vec::new();
+        let template = crate::local_apps_bridge::builtin_templates()
+            .into_iter()
+            .find(|template| template.kind == Self::suggested_template_kind(record.template));
+
+        if let Some(template) = template {
+            for field in template
+                .steps
+                .into_iter()
+                .flat_map(|step| step.fields.into_iter())
+            {
+                if draft.fields.contains_key(&field.id) {
+                    continue;
+                }
+                let value = match field.id.as_str() {
+                    "name" => Some(DesignValueDto::ShortText {
+                        value: record.name.clone(),
+                    }),
+                    "purpose" => prompt
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| DesignValueDto::LongText {
+                            value: value.trim().to_string(),
+                        }),
+                    "final_summary" => {
+                        let summary = prompt
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::trim)
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| format!("{} for local use", record.name));
+                        Some(DesignValueDto::LongText { value: summary })
+                    }
+                    _ => field.default_value,
+                };
+                if let Some(value) = value {
+                    ops.push(AppDesignPatchOpDto::Set {
+                        field_id: field.id,
+                        value,
+                    });
+                }
+            }
+        }
+
+        AppDesignPatchDto {
+            ops,
+            note: Some("Suggested defaults based on the selected template.".into()),
+        }
+    }
+
     /// Post-mutation `AppsChanged` snapshot: every successful mutation
     /// announces the full record set (records carry `workflow_state` /
     /// `updated_at_ms`, so any mutation changes the set). Delegated to
@@ -2671,6 +2819,45 @@ impl MobileEngineHandle {
             return;
         };
         Self::emit_apps_snapshot(&service).await;
+    }
+
+    async fn handle_list_app_templates(&self) {
+        self.emit_app_event(AppEventDto::AppTemplatesChanged {
+            templates: crate::local_apps_bridge::builtin_templates(),
+        });
+    }
+
+    async fn handle_get_app_details(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let root = mobile_apps_data_root(&self.firer_cfg);
+        let result = async {
+            let record = service.record(&app_id).await?;
+            let draft = service.draft(&app_id).await?;
+            let runtime = service.runtime_record(&app_id).await?;
+            let checkpoints = service.list_checkpoints(&app_id).await?;
+            let mut details = crate::local_apps_bridge::lower_details(
+                &root,
+                &record,
+                &draft,
+                &runtime,
+                &checkpoints,
+            )?;
+            details.generation_job = self
+                .app_generation
+                .jobs_for_app(&app_id)
+                .await?
+                .into_iter()
+                .next()
+                .map(lower_job);
+            Ok(details)
+        }
+        .await;
+        match result {
+            Ok(details) => self.emit_app_event(AppEventDto::AppDetailsChanged { details }),
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
     }
 
     async fn handle_create_app(
@@ -2799,6 +2986,80 @@ impl MobileEngineHandle {
         .await;
     }
 
+    async fn handle_request_app_design_suggestion(
+        &self,
+        app_id: String,
+        expected_revision: u64,
+        prompt: Option<String>,
+    ) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let record = match service.record(&app_id).await {
+            Ok(record) => record,
+            Err(error) => {
+                self.emit_app_failure(Some(app_id), &error).await;
+                return;
+            }
+        };
+        let draft = match service.draft(&app_id).await {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.emit_app_failure(Some(app_id), &error).await;
+                return;
+            }
+        };
+        if draft.revision != expected_revision {
+            self.emit_app_failure(
+                Some(app_id),
+                &AppError::RevisionConflict {
+                    expected: expected_revision,
+                    actual: draft.revision,
+                },
+            )
+            .await;
+            return;
+        }
+        let patch_dto = Self::build_design_suggestion(&record, &draft, prompt.as_deref());
+        let patch = match crate::local_apps_bridge::raise_patch(patch_dto) {
+            Ok(patch) => patch,
+            Err(error) => {
+                self.emit_app_failure(Some(app_id), &error).await;
+                return;
+            }
+        };
+        let emissions = self.app_emissions.clone();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.store_suggestion(&app_id, patch).await {
+                Ok(_suggestion) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
+    }
+
+    async fn handle_dismiss_app_design_suggestion(&self, app_id: String, suggestion_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.dismiss_suggestion(&app_id, &suggestion_id).await {
+                Ok(()) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
+    }
+
     async fn handle_confirm_app_design(&self, app_id: String, interaction_id: &str, revision: u64) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
@@ -2885,26 +3146,65 @@ impl MobileEngineHandle {
         .await;
     }
 
+    async fn handle_retry_app_generation(&self, app_id: String) {
+        let Some(_service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        if let Err(error) = self.app_generation.retry_app(&app_id).await {
+            self.emit_app_failure(Some(app_id), &error).await;
+        }
+    }
+
     async fn handle_list_app_checkpoints(&self, app_id: String) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
         match service.list_checkpoints(&app_id).await {
-            // The protocol has no list event — each checkpoint rides its own
-            // `AppCheckpointCreated`, so an empty list is zero events. Phase 1
-            // always returns the empty list (git wiring is phase 5). The rows
-            // ride the ordered emission channel like every other app-surface
-            // event, so they can never overtake or interleave a domain batch.
             Ok(checkpoints) => {
-                for checkpoint in &checkpoints {
-                    self.app_emissions
-                        .enqueue_engine(ClientEvent::AppCheckpointCreated {
-                            app_id: app_id.clone(),
-                            checkpoint: crate::local_apps_bridge::lower_checkpoint(checkpoint),
-                        });
-                }
+                self.emit_app_event(AppEventDto::AppCheckpointsChanged {
+                    app_id,
+                    checkpoints: checkpoints
+                        .iter()
+                        .map(crate::local_apps_bridge::lower_checkpoint)
+                        .collect(),
+                });
             }
             Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_app_runtime_action(&self, app_id: String, action: &str) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        if let Err(error) = service.record(&app_id).await {
+            self.emit_app_failure(Some(app_id), &error).await;
+            return;
+        }
+        let input = serde_json::json!({ "app_id": app_id.clone(), "action": action });
+        if let Err(message) = self.local_apps_host.manage_runtime_value(input).await {
+            self.emit_app_failure(
+                Some(app_id),
+                &AppError::Io(format!("local app runtime {action} failed: {message}")),
+            )
+            .await;
+        }
+    }
+
+    async fn handle_restore_app_checkpoint(&self, app_id: String, checkpoint_id: String) {
+        let input = serde_json::json!({
+            "app_id": app_id.clone(),
+            "checkpoint_id": checkpoint_id,
+        });
+        match self.local_apps_host.restore_checkpoint_value(input).await {
+            Ok(_) => self.handle_list_app_checkpoints(app_id).await,
+            Err(message) => {
+                self.emit_app_failure(
+                    Some(app_id),
+                    &AppError::Io(format!("restore checkpoint failed: {message}")),
+                )
+                .await;
+            }
         }
     }
 
@@ -2912,26 +3212,26 @@ impl MobileEngineHandle {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
+        if let Err(message) = self
+            .local_apps_host
+            .manage_runtime_value(serde_json::json!({
+                "app_id": app_id.clone(),
+                "action": "stop",
+            }))
+            .await
+        {
+            self.emit_app_failure(
+                Some(app_id),
+                &AppError::Io(format!("stop local app before delete failed: {message}")),
+            )
+            .await;
+            return;
+        }
         // Success needs no extra emit: `delete_app` announces the shrunken
         // record set via its own `AppsChanged` domain event.
         if let Err(error) = service.delete_app(&app_id).await {
             self.emit_app_failure(Some(app_id), &error).await;
         }
-    }
-
-    /// Spec §H honesty path for `StartApp` / `StopApp` / `RestartApp` /
-    /// `RestoreAppCheckpoint`: validate the app exists, then fail typed with
-    /// `not_yet_available` — the phase-1 engine NEVER fakes a runtime or
-    /// checkpoint transition.
-    async fn handle_app_phase_gap(&self, app_id: String, unavailable: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let error = match service.record(&app_id).await {
-            Ok(_record) => AppError::NotYetAvailable(unavailable),
-            Err(error) => error,
-        };
-        self.emit_app_failure(Some(app_id), &error).await;
     }
 }
 
@@ -3445,6 +3745,14 @@ impl MobileEngineHandle {
                 self.handle_list_apps().await;
                 Ok(())
             }
+            ClientCommand::ListAppTemplates => {
+                self.handle_list_app_templates().await;
+                Ok(())
+            }
+            ClientCommand::GetAppDetails { app_id } => {
+                self.handle_get_app_details(app_id).await;
+                Ok(())
+            }
             ClientCommand::CreateApp {
                 name,
                 template,
@@ -3481,6 +3789,23 @@ impl MobileEngineHandle {
                 .await;
                 Ok(())
             }
+            ClientCommand::RequestAppDesignSuggestion {
+                app_id,
+                expected_revision,
+                prompt,
+            } => {
+                self.handle_request_app_design_suggestion(app_id, expected_revision, prompt)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::DismissAppDesignSuggestion {
+                app_id,
+                suggestion_id,
+            } => {
+                self.handle_dismiss_app_design_suggestion(app_id, suggestion_id)
+                    .await;
+                Ok(())
+            }
             ClientCommand::ConfirmAppDesign {
                 app_id,
                 revision,
@@ -3494,31 +3819,16 @@ impl MobileEngineHandle {
                 self.handle_cancel_app_design(app_id).await;
                 Ok(())
             }
-            // Spec §H: the runtime commands validate existence, then fail
-            // typed with `not_yet_available` — phase 1 never fakes a runtime
-            // transition (the dev-server runtime arrives in phase 4).
             ClientCommand::StartApp { app_id } => {
-                self.handle_app_phase_gap(
-                    app_id,
-                    "StartApp: the app dev-server runtime arrives in phase 4".into(),
-                )
-                .await;
+                self.handle_app_runtime_action(app_id, "start").await;
                 Ok(())
             }
             ClientCommand::StopApp { app_id } => {
-                self.handle_app_phase_gap(
-                    app_id,
-                    "StopApp: the app dev-server runtime arrives in phase 4".into(),
-                )
-                .await;
+                self.handle_app_runtime_action(app_id, "stop").await;
                 Ok(())
             }
             ClientCommand::RestartApp { app_id } => {
-                self.handle_app_phase_gap(
-                    app_id,
-                    "RestartApp: the app dev-server runtime arrives in phase 4".into(),
-                )
-                .await;
+                self.handle_app_runtime_action(app_id, "restart").await;
                 Ok(())
             }
             ClientCommand::ConfirmAppPreview {
@@ -3534,6 +3844,55 @@ impl MobileEngineHandle {
                 self.handle_request_app_revision(app_id, &prompt).await;
                 Ok(())
             }
+            ClientCommand::RetryAppGeneration { app_id } => {
+                self.handle_retry_app_generation(app_id).await;
+                Ok(())
+            }
+            ClientCommand::ExecuteAppBridgeRequest { request } => {
+                self.local_apps_host.execute_bridge(request).await;
+                Ok(())
+            }
+            ClientCommand::ResolveAppUiRequest {
+                request_id,
+                decision,
+                result_json,
+                error,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_ui(&request_id, decision, result_json, error)
+                    .await
+                {
+                    tracing::debug!(request_id, "unknown or completed local-app UI request");
+                }
+                Ok(())
+            }
+            ClientCommand::ResolveAppCapabilityRequest {
+                request_id,
+                decision,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_capability(&request_id, decision)
+                    .await
+                {
+                    tracing::debug!(
+                        request_id,
+                        "unknown or completed local-app capability request"
+                    );
+                }
+                Ok(())
+            }
+            ClientCommand::ResetAppPermissions { app_id } => {
+                if let Err(message) = self.local_apps_host.reset_permissions(&app_id).await {
+                    self.emit_app_failure(
+                        Some(app_id),
+                        &AppError::Io(format!("reset app permissions failed: {message}")),
+                    )
+                    .await;
+                }
+                Ok(())
+            }
             ClientCommand::ListAppCheckpoints { app_id } => {
                 self.handle_list_app_checkpoints(app_id).await;
                 Ok(())
@@ -3542,14 +3901,8 @@ impl MobileEngineHandle {
                 app_id,
                 checkpoint_id,
             } => {
-                self.handle_app_phase_gap(
-                    app_id,
-                    format!(
-                        "RestoreAppCheckpoint: git checkpoint restore arrives in phase 5 \
-                         (checkpoint {checkpoint_id})"
-                    ),
-                )
-                .await;
+                self.handle_restore_app_checkpoint(app_id, checkpoint_id)
+                    .await;
                 Ok(())
             }
             ClientCommand::DeleteApp { app_id } => {
@@ -5086,42 +5439,88 @@ pub fn build_mobile_engine_inner(
         runtime.spawn(async move { broker.run(ask_user_question_rx).await });
     }
 
-    // LOCAL-APPS (phase 1): the engine-owned `AppService`, rebuilt from disk
-    // alone at every boot and observed onto the connection's event sink
-    // through the bridge's ordered emission channel (`AppEmissionQueue`): the
-    // observer enqueues under the service's emission-order guard, ONE
-    // detached forwarder task delivers to the sink with no lock held, so a
-    // listener that drives an app command from inside its event callback can
-    // never deadlock the app surface. Continuations get the
-    // `NoopContinuationSink` — no conversation-injection seam exists yet
-    // (mobile `NewSession` ignores `cwd`, so an app-workspace-scoped
-    // conversation cannot be opened on the live engine; phase 3 swaps in the
-    // real conversation sink). A load failure must not brick the engine: it
-    // is held on the handle and every app command reports it as a typed
-    // `AppOperationFailed` instead (the channel is built regardless, so those
-    // reports ride the same ordered path).
-    // `AppService::load` is async (it announces still-pending gate events after
-    // rebuilding from disk); engine construction runs on the FFI caller's plain
-    // thread, so blocking on the engine runtime here is safe.
+    // LOCAL-APPS: one process-wide service per profile root. Conversation or
+    // provider source changes only add/remove event subscribers; they do not
+    // open a second SQLite/Git/generation owner for the same application data.
     let app_emissions =
         crate::local_apps_bridge::AppEmissionQueue::spawn(runtime.handle(), event_sink.clone());
-    let local_apps = runtime
-        .block_on(AppService::load(
-            mobile_apps_data_root(&firer_cfg),
-            firer_platform.clock(),
-            Arc::new(NoopContinuationSink),
-            Arc::new(crate::local_apps_bridge::SinkAppEventObserver::new(
+    let loaded_profile = runtime.block_on(profile_apps(
+        mobile_apps_data_root(&firer_cfg),
+        firer_platform.clock(),
+        inner.mobile_linux.clone(),
+        firer_cfg.local_apps_full_runtime,
+        firer_cfg.local_apps_runtime_root.clone(),
+    ));
+    let (
+        local_apps,
+        local_apps_host,
+        app_generation,
+        retained_profile,
+        app_client_subscription,
+        app_domain_subscription,
+        app_domain_observer,
+    ) = match loaded_profile {
+        Ok(profile) => {
+            let client_subscription = profile.client_events.subscribe(event_sink.clone());
+            let observer = Arc::new(crate::local_apps_bridge::SinkAppEventObserver::new(
                 app_emissions.clone(),
-            )),
-        ))
-        .map(Arc::new);
+            ));
+            let domain_subscription = profile.domain_events.subscribe(observer.clone());
+            (
+                Ok(profile.service.clone()),
+                profile.host.clone(),
+                profile.generation.clone(),
+                Some(profile),
+                Some(client_subscription),
+                Some(domain_subscription),
+                Some(observer),
+            )
+        }
+        Err(error) => {
+            // Preserve the established failure contract: a corrupt store does
+            // not brick the conversation engine; every app command returns the
+            // typed load error. These unattached fallbacks can only report that
+            // same unavailable state and never mutate data.
+            let host = LocalAppsHostBroker::new(
+                mobile_apps_data_root(&firer_cfg),
+                event_sink.clone(),
+                inner.mobile_linux.clone(),
+                firer_cfg.local_apps_full_runtime,
+                firer_cfg.local_apps_runtime_root.clone(),
+            );
+            let executor =
+                MobileAppGenerationExecutor::new(inner.mobile_linux.clone(), host.clone());
+            let generation = AppGenerationCoordinator::new_with_observer(
+                mobile_apps_data_root(&firer_cfg),
+                firer_platform.clock(),
+                executor,
+                ClientGenerationJobObserver::new(
+                    mobile_apps_data_root(&firer_cfg),
+                    event_sink.clone(),
+                ),
+            );
+            let _ = host.attach_generation(generation.clone());
+            (Err(error), host, generation, None, None, None, None)
+        }
+    };
+    if inner
+        .local_apps_mcp
+        .attach_host(local_apps_host.clone())
+        .is_err()
+    {
+        tracing::warn!("local-apps MCP host was already attached");
+    }
     match &local_apps {
         Ok(service) => {
-            // Startup redelivery sweep (spec §E at-least-once): prune entries a
-            // pre-crash run already delivered and drain the rest into the
-            // registered sink. With the phase-1 Noop sink a drained
-            // continuation is marked delivered (consumed); once phase 3 wires
-            // the conversation sink this same sweep becomes real redelivery.
+            if inner
+                .local_apps_mcp
+                .attach_service(service.clone())
+                .is_err()
+            {
+                tracing::warn!("local-apps MCP service was already attached");
+            }
+            // Startup redelivery is idempotent; the generation coordinator
+            // deduplicates the durable continuation tuple.
             let service = service.clone();
             runtime.spawn(async move {
                 if let Err(error) = service.redeliver_all_undelivered().await {
@@ -5155,6 +5554,12 @@ pub fn build_mobile_engine_inner(
         firer_platform,
         local_apps,
         app_emissions,
+        local_apps_host,
+        app_generation,
+        profile_apps: retained_profile,
+        app_client_subscription,
+        app_domain_subscription,
+        app_domain_observer,
     }))
 }
 
@@ -7004,7 +7409,7 @@ mod tests {
     //    events out) over the real engine handle ─────────────────────────────
 
     use client_protocol::local_apps::{
-        AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto,
+        AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
         AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto, DesignValueDto,
     };
 
@@ -7041,6 +7446,57 @@ mod tests {
             Ev::AppsChanged { apps } => Some(apps.clone()),
             _ => None,
         })
+    }
+
+    #[test]
+    fn local_apps_templates_and_details_round_trip_through_submit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListAppTemplates)
+                .await
+                .expect("submit(ListAppTemplates)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppEvent {
+                    event: AppEventDto::AppTemplatesChanged { templates }
+                } if templates.len() == 4
+            )));
+
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Tracker".into(),
+                    template: AppTemplateKindDto::CrudTracker,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            handle
+                .submit(ClientCommand::GetAppDetails {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(GetAppDetails)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppEvent {
+                    event: AppEventDto::AppDetailsChanged { details }
+                } if details.app.id == app_id
+                    && details.design_revision == 0
+                    && matches!(details.runtime.state, AppRuntimeStateDto::Stopped)
+            )));
+        });
     }
 
     /// Index of the first event matching `pred`, or a panic naming what was
@@ -7370,7 +7826,7 @@ mod tests {
     }
 
     #[test]
-    fn local_apps_runtime_and_checkpoint_commands_fail_typed_not_yet_available() {
+    fn local_apps_runtime_and_checkpoint_commands_report_real_state() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
@@ -7393,45 +7849,42 @@ mod tests {
             );
             let app_id = apps[0].id.clone();
 
-            // Spec §H honesty: runtime + checkpoint-restore commands validate
-            // the app, then fail typed — and NEVER fake a runtime transition.
-            for command in [
-                ClientCommand::StartApp {
+            // Persisted capability grants are revocable from the native
+            // permissions page without exposing permissions.json to clients.
+            let layout = local_apps::AppLayout::new(tmp.path(), app_id.clone()).unwrap();
+            let mut permissions = local_apps::AppPermissions::default();
+            permissions.grant(local_apps::AppCapability::DataMutation);
+            permissions.grant_domain("api.example.com").unwrap();
+            local_apps::save_permissions(&layout, &permissions).unwrap();
+            handle
+                .submit(ClientCommand::ResetAppPermissions {
                     app_id: app_id.clone(),
-                },
-                ClientCommand::StopApp {
-                    app_id: app_id.clone(),
-                },
-                ClientCommand::RestartApp {
-                    app_id: app_id.clone(),
-                },
-                ClientCommand::RestoreAppCheckpoint {
-                    app_id: app_id.clone(),
-                    checkpoint_id: "cp-1".into(),
-                },
-            ] {
-                handle.submit(command).await.expect("submit(phase-gap)");
-                let events = drain_events(&handle, &listener).await;
-                assert!(events.iter().any(|event| matches!(
-                    event,
-                    Ev::AppOperationFailed {
-                        app_id: Some(id),
-                        code: AppErrorCodeDto::NotYetAvailable,
-                        ..
-                    } if *id == app_id
-                )));
-                assert!(
-                    !events
-                        .iter()
-                        .any(|event| matches!(event, Ev::AppRuntimeChanged { .. })),
-                    "phase 1 must not fake runtime transitions"
-                );
-            }
-            let service = handle.local_apps().expect("local-apps service");
+                })
+                .await
+                .expect("submit(ResetAppPermissions)");
             assert_eq!(
+                local_apps::load_permissions(&layout).unwrap(),
+                local_apps::AppPermissions::default()
+            );
+
+            // A record without generated build output fails honestly and never
+            // reports a false running state.
+            handle
+                .submit(ClientCommand::StartApp {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(StartApp)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed { app_id: Some(id), .. } if *id == app_id
+            )));
+            let service = handle.local_apps().expect("local-apps service");
+            assert_ne!(
                 service.runtime_record(&app_id).await.unwrap().state,
-                local_apps::AppRuntimeState::Stopped,
-                "the runtime record must stay untouched"
+                local_apps::AppRuntimeState::Running,
+                "a missing build must never be surfaced as running"
             );
 
             // A missing app is not_found, not not_yet_available.
@@ -7450,9 +7903,8 @@ mod tests {
                 }
             )));
 
-            // Checkpoints: phase 1 replies with the empty list — zero
-            // checkpoint events and no failure for an existing app; a missing
-            // app still fails typed.
+            // Checkpoint lists now use the explicit snapshot event, including
+            // an empty list for a new app.
             handle
                 .submit(ClientCommand::ListAppCheckpoints {
                     app_id: app_id.clone(),
@@ -7460,9 +7912,11 @@ mod tests {
                 .await
                 .expect("submit(ListAppCheckpoints)");
             let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().all(|event| !matches!(
+            assert!(events.iter().any(|event| matches!(
                 event,
-                Ev::AppOperationFailed { .. } | Ev::AppCheckpointCreated { .. }
+                Ev::AppEvent {
+                    event: AppEventDto::AppCheckpointsChanged { app_id: id, checkpoints }
+                } if *id == app_id && checkpoints.is_empty()
             )));
             handle
                 .submit(ClientCommand::ListAppCheckpoints {
@@ -7906,65 +8360,17 @@ mod tests {
                 }
             )));
 
-            // The revision pass lands → a FRESH preview gate is minted.
-            service
-                .revision_ready(&app_id)
-                .await
-                .expect("revision_ready");
-            service
-                .validation_passed(&app_id)
-                .await
-                .expect("validation_passed after revision");
-            let events = drain_events(&handle, &listener).await;
-            let second_preview = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppPreviewReady { interaction_id, .. } => Some(interaction_id.clone()),
-                    _ => None,
-                })
-                .expect("AppPreviewReady must be emitted after the revision pass");
-            assert_ne!(
-                second_preview, first_preview,
-                "a re-opened gate must mint a fresh interaction id"
-            );
-
-            handle
-                .submit(ClientCommand::ConfirmAppPreview {
-                    app_id: app_id.clone(),
-                    revision: 0,
-                    interaction_id: second_preview,
-                })
-                .await
-                .expect("submit(ConfirmAppPreview)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::Ready,
-                    ..
-                }
-            )));
-
-            // From ready, feedback is also legal → revising again.
-            handle
-                .submit(ClientCommand::RequestAppRevision {
-                    app_id: app_id.clone(),
-                    prompt: "add a favorites screen".into(),
-                })
-                .await
-                .expect("submit(RequestAppRevision from ready)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::Revising,
-                    ..
-                }
-            )));
-            assert_eq!(
+            // The persistent coordinator owns the revision pass now. By the
+            // time the UI event drain completes it may already have advanced
+            // from revising to validation (or a retryable validation failure
+            // in this off-device test, where no Node runtime is installed).
+            // The coordinator's own tests cover minting the fresh preview gate.
+            assert!(matches!(
                 service.record(&app_id).await.unwrap().workflow_state,
                 local_apps::AppWorkflowState::Revising
-            );
+                    | local_apps::AppWorkflowState::Validating
+                    | local_apps::AppWorkflowState::ValidationFailed
+            ));
         });
     }
 
@@ -8319,6 +8725,7 @@ mod tests {
                         app_id: id,
                         state: AppRuntimeStateDto::Starting,
                         last_error: None,
+                        ..
                     } if *id == app_id
                 )
             });
@@ -8329,6 +8736,7 @@ mod tests {
                         app_id: id,
                         state: AppRuntimeStateDto::Failed,
                         last_error: Some(last_error),
+                        ..
                     } if *id == app_id && last_error == "dev server exited: code 1"
                 )
             });

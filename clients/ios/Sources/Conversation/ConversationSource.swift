@@ -19,6 +19,7 @@
 // `EngineConfig.fromEnvironment`. It is NEVER hardcoded, logged, or persisted in
 // plaintext here.
 
+import Combine
 import Foundation
 import OSLog
 import SwiftUI
@@ -106,6 +107,15 @@ struct ConversationTurnCompletion: Equatable, Sendable {
     let finalAssistantText: String
 }
 
+/// One accepted assistant-text fragment for an exact client-owned turn.
+/// Voice playback consumes this instead of observing rendered messages, which
+/// keeps streaming speech isolated across cancellations and session switches.
+struct ConversationTurnSpeechUpdate: Equatable, Sendable {
+    let token: ConversationTurnToken
+    let sequence: UInt64
+    let delta: String
+}
+
 #if canImport(engine_mobileFFI)
 
     /// One engine-parked permission request the UI must answer (SHIP-BLOCKER #3).
@@ -177,6 +187,10 @@ final class ConversationModel: ObservableObject {
     /// last AI message is insufficient because session switches and late events
     /// can otherwise replay stale content.
     @Published var turnCompletion: ConversationTurnCompletion? = nil
+    /// Lossless token-scoped assistant-delta stream. A subject is used instead
+    /// of an `@Published` latest-value slot because SwiftUI may coalesce several
+    /// assignments in one render transaction and silently drop middle deltas.
+    let turnSpeechUpdates = PassthroughSubject<ConversationTurnSpeechUpdate, Never>()
     /// True when the session is brand-new and empty (drives the empty state).
     @Published var isNew: Bool = false
     /// The currently selected model chip.
@@ -485,6 +499,7 @@ final class MockConversationSource: ConversationSource {
     private var nextTurnId: UInt64 = 1
     private var sessionEpoch: UInt64 = 1
     private var activeTurnToken: ConversationTurnToken?
+    private var turnSpeechSequence: UInt64 = 0
 
     #if DEBUG
         static func uiTestFixture(cancelledRun: Bool = false) -> MockConversationSource {
@@ -574,6 +589,7 @@ final class MockConversationSource: ConversationSource {
         model.isNew = false
         model.notice = nil
         model.turnCompletion = nil
+        turnSpeechSequence = 0
         let message = Message(role: .user, text: text)
         model.messages.append(message)
         model.items.append(.message(message))
@@ -595,6 +611,12 @@ final class MockConversationSource: ConversationSource {
             self.model.messages.append(reply)
             self.model.items.append(.message(reply))
             self.model.streaming = false
+            self.turnSpeechSequence &+= 1
+            self.model.turnSpeechUpdates.send(ConversationTurnSpeechUpdate(
+                token: token,
+                sequence: self.turnSpeechSequence,
+                delta: reply.text
+            ))
             self.model.turnCompletion = ConversationTurnCompletion(
                 token: token,
                 outcome: .completed,
@@ -781,6 +803,7 @@ final class MockConversationSource: ConversationSource {
         /// changes so late events from an abandoned session/turn are ignored.
         private var sessionEpoch: UInt64 = 1
         private var activeTurnEpoch: UInt64?
+        private var turnSpeechSequence: UInt64 = 0
         private var activeRunItemIndex: Int?
         private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
         private var testEmptySessionResumer: ((String, String) async throws -> Void)?
@@ -1381,6 +1404,7 @@ final class MockConversationSource: ConversationSource {
             model.streaming = true
             model.isCancelling = false
             model.turnCompletion = nil
+            turnSpeechSequence = 0
             model.statusLine = nil
             streamingIndex = nil
             streamingItemIndex = nil
@@ -1529,7 +1553,9 @@ final class MockConversationSource: ConversationSource {
                 appSandboxRoot: config.appSandboxRoot,
                 projectCwd: config.projectCwd,
                 providerConfig: providerConfig,
-                mobileLinux: config.mobileLinux.map(makeIosMobileLinuxConfig)
+                mobileLinux: config.mobileLinux.map(makeIosMobileLinuxConfig),
+                localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
+                localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot
             )
             let handleBuilder = self.handleBuilder
             handleBuildAttemptID &+= 1
@@ -1656,6 +1682,7 @@ final class MockConversationSource: ConversationSource {
             case let .textDelta(text):
                 guard acceptTurnEvent(event) else { return }
                 appendDelta(text)
+                publishTurnSpeechDelta(text)
 
             case let .thinkingDelta(thinking, signature):
                 guard acceptTurnEvent(event) else { return }
@@ -2049,6 +2076,7 @@ final class MockConversationSource: ConversationSource {
             model.activeSessionId = sessionId
             model.streaming = true
             model.turnCompletion = nil
+            turnSpeechSequence = 0
             currentTurnId = turnId
             activeTurnEpoch = sessionEpoch
             nextTurnId = max(nextTurnId, turnId &+ 1)
@@ -2090,6 +2118,16 @@ final class MockConversationSource: ConversationSource {
                 streamingIndex = model.messages.count - 1
                 streamingItemIndex = model.items.count - 1
             }
+        }
+
+        private func publishTurnSpeechDelta(_ delta: String) {
+            guard !delta.isEmpty, let token = activeConversationTurnToken else { return }
+            turnSpeechSequence &+= 1
+            model.turnSpeechUpdates.send(ConversationTurnSpeechUpdate(
+                token: token,
+                sequence: turnSpeechSequence,
+                delta: delta
+            ))
         }
 
         // MARK: restored-transcript lowering (live ResumeSession)

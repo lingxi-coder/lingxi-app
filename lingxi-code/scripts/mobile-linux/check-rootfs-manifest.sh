@@ -135,14 +135,24 @@ for package in packages:
         sys.exit(1)
     package_names.add(package["name"])
 
-required_packages = {"apk-tools", "busybox", "git", "openssh-client", "python3", "ca-certificates"}
+required_packages = {"apk-tools", "busybox", "git", "nodejs", "openssh-client", "python3", "ca-certificates"}
 missing_packages = required_packages - package_names
 if missing_packages:
     print(f"fixed toolset packages missing: {sorted(missing_packages)}", file=sys.stderr)
     sys.exit(1)
-forbidden_packages = {"py3-pip", "nodejs", "npm"} & package_names
+forbidden_packages = {"corepack", "nodejs-npm", "npm", "pnpm", "py3-pip", "yarn"} & package_names
 if forbidden_packages:
     print(f"forbidden package-manager packages present: {sorted(forbidden_packages)}", file=sys.stderr)
+    sys.exit(1)
+package_versions = {package["name"]: package["version"] for package in packages}
+fixed_versions = {"git": "2.47.3-r0", "nodejs": "22.23.0-r0"}
+version_drift = {
+    name: {"expected": expected, "actual": package_versions.get(name)}
+    for name, expected in fixed_versions.items()
+    if package_versions.get(name) != expected
+}
+if version_drift:
+    print(f"fixed runtime package versions diverged: {version_drift}", file=sys.stderr)
     sys.exit(1)
 
 allowlist = data["executable_allowlist"]
@@ -189,6 +199,7 @@ required_allowlist_paths = {
     "/bin/busybox",
     "/bin/sh",
     "/usr/bin/git",
+    "/usr/bin/node",
     "/usr/bin/ssh",
     "/usr/bin/python3",
 }

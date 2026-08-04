@@ -17,9 +17,30 @@ Fixed primary package set:
 - `apk-tools`
 - `busybox`
 - `git`
+- `nodejs`
 - `openssh-client`
 - `python3`
 - `ca-certificates`
+
+Local-app runtime pins:
+
+- `nodejs 22.23.0-r0`
+- `git 2.47.3-r0`
+- `npm`, `npx`, `corepack`, `yarn`, and `pnpm` are excluded from the image.
+- `node_modules` is built off-device from the committed lockfile and mounted
+  read-only; neither generated code nor MCP jobs may install dependencies.
+
+`docs/mobile-linux/local-app-runtime-pins.json` records the exact APK and npm
+pins. The structural verifier accepts an explicitly recorded upstream gap, but
+the `--release` gate fails until both ABIs have a complete hashed APK closure.
+This distinction prevents development checks from inventing a digest while
+ensuring a release can never ship an unverified substitute.
+
+`docs/mobile-linux/local-app-runtime-policy.json` is the executable contract:
+the host invokes Next through `/usr/bin/node` directly, mounts the committed
+`node_modules` bundle read-only, binds production servers to loopback, and
+enforces the build/start timeout and 800 MiB process-tree limit. npm scripts are
+developer conveniences only and are never part of the device execution path.
 
 Policy decisions:
 
@@ -28,8 +49,9 @@ Policy decisions:
 - Agent-initiated networking, package installation, and external-mount writes
   remain controlled by the host permission gate; PRoot is not a security
   boundary.
-- The source archive format is Alpine's official `tar.gz`. Gradle packages it
-  uncompressed so its bytes continue to match the pinned digest.
+- The source archive format is Alpine's official `tar.gz`; its digest is a
+  source pin. The deterministic package-augmented release archive has a
+  separate manifest digest and Gradle stores it without recompression.
 - The rootfs manifest allowlist must hash every shipped ELF executable,
   interpreter, and shared library that remains in the release archive.
 - The release evidence set must include:
@@ -66,3 +88,7 @@ Tooling:
     evidence
 - `lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh`
   - positive/negative tests for the packaging and verification helpers
+- `clients/android/scripts/verify-local-app-supply-chain.sh`
+- `clients/ios/scripts/verify-local-app-supply-chain.sh`
+  - validate the shared Node/Next/Git pins, template lockfile, source policy,
+    and SPDX inventory

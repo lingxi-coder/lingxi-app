@@ -26,10 +26,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
@@ -81,6 +83,10 @@ import androidx.core.content.ContextCompat
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.model.Role
+import com.lingxi.code.localapps.LocalAppsAction
+import com.lingxi.code.localapps.LocalAppsDestination
+import com.lingxi.code.localapps.LocalAppsRoute
+import com.lingxi.code.localapps.LocalAppsViewModel
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberOrbVoiceListen
@@ -228,6 +234,17 @@ fun RootScreen(
         }
     }
     val state by chatViewModel.state.collectAsState()
+    val localAppsViewModel: LocalAppsViewModel = viewModel(
+        key = "local-apps",
+        factory = LocalAppsViewModel.factory(chatViewModel.engineSource),
+    )
+    val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
+    var showingApps by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(localAppsState.pendingAuthorization, localAppsState.pendingUiAction) {
+        if (localAppsState.pendingAuthorization != null || localAppsState.pendingUiAction != null) {
+            showingApps = true
+        }
+    }
     DisposableEffect(chatViewModel, context) {
         ComputerUseFeatureProvider.attach(context) { chatViewModel.cancel() }
         onDispose { }
@@ -691,6 +708,7 @@ fun RootScreen(
                     DrawerContent(
                         ui = drawerUi,
                         onSelectSession = { ref ->
+                            showingApps = false
                             drawerUi.selectSession(ref.id)
                             chatViewModel.openSession(ref)
                             closeDrawer()
@@ -706,6 +724,7 @@ fun RootScreen(
                         onClose = { closeDrawer() },
                         engineSessions = globalDrawerSessions,
                         onResumeSession = { uuid ->
+                            showingApps = false
                             globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
                                 if (sourceProjectId == null) {
                                     drawerUi.selectSession(uuid)
@@ -730,6 +749,7 @@ fun RootScreen(
                         productionData = drawerProductionData,
                         onCreateProject = { showCreateProject = true },
                         onSelectProjectSession = { projectId, ref ->
+                            showingApps = false
                             val project = projectState.projects.firstOrNull {
                                 it.record.id == projectId
                             } ?: return@DrawerContent
@@ -762,6 +782,7 @@ fun RootScreen(
                             if (switched) closeDrawer()
                         },
                         onNewProjectSession = { projectId ->
+                            showingApps = false
                             val project = projectState.projects.firstOrNull {
                                 it.record.id == projectId
                             } ?: return@DrawerContent
@@ -796,6 +817,12 @@ fun RootScreen(
                             closeDrawer()
                             onOpenCronSettings(null)
                         },
+                        appsCount = localAppsState.apps.size,
+                        onOpenApps = {
+                            showingApps = true
+                            closeDrawer()
+                            localAppsViewModel.onAction(LocalAppsAction.Refresh)
+                        },
                     )
                 }
             },
@@ -806,77 +833,100 @@ fun RootScreen(
                     .windowInsetsPadding(WindowInsets.systemBars)
                     .imePadding(),
             ) {
-                ChatScreen(
-                    state = state,
-                    onSend = { text -> runConversationAction { chatViewModel.send(text) } },
-                    // "新对话": reset the local transcript immediately AND tell the
-                    // engine to begin a new session (NewSession). For the mock the
-                    // engine call is a no-op, so this still behaves like newChat.
-                    onNewChat = { runConversationAction(chatViewModel::startNewSession) },
-                    onSelectModel = chatViewModel::selectModel,
-                    isDark = isDark,
-                    onToggleTheme = onToggleTheme,
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
-                    // Ordinary mic and Flow Mode are separate controls.
-                    onMicClick = {
-                        voiceActive = !voiceActive
-                        if (voiceActive) onVoiceHoldStart() else onVoiceHoldRelease()
-                    },
-                    onMicHoldStart = {
-                        voiceActive = true
-                        onVoiceHoldStart()
-                    },
-                    onMicHoldRelease = {
-                        voiceActive = false
-                        onVoiceHoldRelease()
-                    },
-                    onFlowModeClick = { flowActive = !flowActive },
-                    flowModeActive = flowActive,
-                    flowModePanel = {
-                        FlowModeOverlay(
-                            visible = flowActive,
-                            assistantName = assistantName,
-                            inputDialog = inputDialog,
-                            voiceLang = voiceLang,
-                            streaming = state.streaming,
-                            assistantText = orbAssistantText,
-                            onSend = { text -> runConversationAction { chatViewModel.send(text) } },
-                            onCancel = { chatViewModel.cancel() },
-                            onListen = orbListen,
-                            onClose = { flowActive = false },
-                        )
-                    },
-                    draft = draft,
-                    onDraftChange = {
-                        draft = it
-                        chatViewModel.onDraftChanged(it) // mirror into SavedStateHandle
-                    },
-                    onCameraClick = onCameraClick,
-                    attachment = attachment,
-                    onRemoveAttachment = { attachment = null },
-                    onShare = onShare,
-                    onStop = chatViewModel::cancel,
-                    onDismissError = chatViewModel::dismissError,
-                    showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
-                    onDismissOffline = { dismissedWhileOffline = true },
-                    // "重试" re-sends the last user turn through the same path the
-                    // composer uses; the ConnectivityManager callback keeps the
-                    // banner's visibility honest (it auto-clears once a validated
-                    // network returns, regardless of this tap).
-                    onRetryOffline = {
-                        runConversationAction { chatViewModel.resendLast() }
-                    },
-                    modelSetupRequired = modelSetupRequired,
-                    onOpenModelSettings = onOpenModelSettings,
-                    modelProviderStatuses = modelProviderStatuses,
-                    onOpenProviderSettings = onOpenProviderSettings,
-                    computerUseSetup = computerUseSetup,
-                    onOpenComputerUseSettings = onOpenComputerUseSettings,
-                    onDismissComputerUseSetup = { computerUseSetupDismissed = true },
-                    onOpenTerminal = { sessionId, command ->
-                        onOpenTerminal(sessionId, command)
-                    },
-                )
+                if (showingApps) {
+                    BackHandler {
+                        if (localAppsState.destination == LocalAppsDestination.Library) {
+                            showingApps = false
+                        } else {
+                            localAppsViewModel.onAction(LocalAppsAction.Back)
+                        }
+                    }
+                    LocalAppsRoute(
+                        viewModel = localAppsViewModel,
+                        onOpenDrawer = { scope.launch { drawerState.open() } },
+                        onExternalNavigation = { url ->
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                        .addCategory(Intent.CATEGORY_BROWSABLE),
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    ChatScreen(
+                        state = state,
+                        onSend = { text -> runConversationAction { chatViewModel.send(text) } },
+                        // "新对话": reset the local transcript immediately AND tell the
+                        // engine to begin a new session (NewSession). For the mock the
+                        // engine call is a no-op, so this still behaves like newChat.
+                        onNewChat = { runConversationAction(chatViewModel::startNewSession) },
+                        onSelectModel = chatViewModel::selectModel,
+                        isDark = isDark,
+                        onToggleTheme = onToggleTheme,
+                        onOpenDrawer = { scope.launch { drawerState.open() } },
+                        // Ordinary mic and Flow Mode are separate controls.
+                        onMicClick = {
+                            voiceActive = !voiceActive
+                            if (voiceActive) onVoiceHoldStart() else onVoiceHoldRelease()
+                        },
+                        onMicHoldStart = {
+                            voiceActive = true
+                            onVoiceHoldStart()
+                        },
+                        onMicHoldRelease = {
+                            voiceActive = false
+                            onVoiceHoldRelease()
+                        },
+                        onFlowModeClick = { flowActive = !flowActive },
+                        flowModeActive = flowActive,
+                        flowModePanel = {
+                            FlowModeOverlay(
+                                visible = flowActive,
+                                assistantName = assistantName,
+                                inputDialog = inputDialog,
+                                voiceLang = voiceLang,
+                                streaming = state.streaming,
+                                assistantText = orbAssistantText,
+                                onSend = { text -> runConversationAction { chatViewModel.send(text) } },
+                                onCancel = { chatViewModel.cancel() },
+                                onListen = orbListen,
+                                onClose = { flowActive = false },
+                            )
+                        },
+                        draft = draft,
+                        onDraftChange = {
+                            draft = it
+                            chatViewModel.onDraftChanged(it) // mirror into SavedStateHandle
+                        },
+                        onCameraClick = onCameraClick,
+                        attachment = attachment,
+                        onRemoveAttachment = { attachment = null },
+                        onShare = onShare,
+                        onStop = chatViewModel::cancel,
+                        onDismissError = chatViewModel::dismissError,
+                        showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
+                        onDismissOffline = { dismissedWhileOffline = true },
+                        // "重试" re-sends the last user turn through the same path the
+                        // composer uses; the ConnectivityManager callback keeps the
+                        // banner's visibility honest (it auto-clears once a validated
+                        // network returns, regardless of this tap).
+                        onRetryOffline = {
+                            runConversationAction { chatViewModel.resendLast() }
+                        },
+                        modelSetupRequired = modelSetupRequired,
+                        onOpenModelSettings = onOpenModelSettings,
+                        modelProviderStatuses = modelProviderStatuses,
+                        onOpenProviderSettings = onOpenProviderSettings,
+                        computerUseSetup = computerUseSetup,
+                        onOpenComputerUseSettings = onOpenComputerUseSettings,
+                        onDismissComputerUseSetup = { computerUseSetupDismissed = true },
+                        onOpenTerminal = { sessionId, command ->
+                            onOpenTerminal(sessionId, command)
+                        },
+                    )
+                }
             }
         }
 

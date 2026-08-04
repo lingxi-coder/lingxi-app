@@ -1,0 +1,64 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "app_details_changed",
+    "details": {
+      "app": {
+        "id": "habits-1a2b",
+        "name": "Habits",
+        "template": "dashboard",
+        "created_at_ms": 1750000000000,
+        "updated_at_ms": 1750000000001,
+        "workflow_state": "collecting_spec",
+        "conversation_id": "55555555-5555-4555-8555-555555555555",
+        "workspace_rel": "apps/habits-1a2b/workspace"
+      },
+      "design_revision": 4,
+      "design_fields": [],
+      "manifest": {
+        "schema_version": 1,
+        "app_id": "habits-1a2b",
+        "name": "Habits",
+        "template": "dashboard",
+        "design_revision": 4,
+        "collections": [
+          {
+            "id": "records",
+            "label": "Records",
+            "fields": [
+              {
+                "id": "title",
+                "label": "Title",
+                "field_type": "text",
+                "required": true,
+                "options": []
+              }
+            ],
+            "enabled_by_default": true
+          }
+        ],
+        "allowed_domains": [
+          "api.example.com"
+        ]
+      },
+      "runtime": {
+        "state": "stopped",
+        "mode": "static_export",
+        "suspension_reason": "backgrounded",
+        "recovery_state": "pending"
+      },
+      "generation_job": {
+        "id": "job-00000001",
+        "app_id": "habits-1a2b",
+        "revision": 4,
+        "continuation_seq": 1,
+        "state": "building",
+        "percent": 70,
+        "detail": "exporting static assets",
+        "log_rel": "logs/job-00000001.log",
+        "updated_at_ms": 1750000000002
+      },
+      "checkpoints": []
+    }
+  }
+}

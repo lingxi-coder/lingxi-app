@@ -11,9 +11,12 @@
 
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::local_apps::{
+    builtin_app_templates, AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto,
     AppCheckpointDto, AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto,
-    AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto,
-    DesignValueDto,
+    AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto,
+    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
+    AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
+    AppWorkflowStateDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use std::collections::HashMap;
@@ -318,7 +321,7 @@ fn app_designer_requested_round_trips() {
 }
 
 /// `AppDesignDraftChanged` — carries the new revision + the full field map
-/// ({field_id → {kind, value}}).
+/// ({`field_id` → {kind, value}}).
 #[test]
 fn app_design_draft_changed_round_trips() {
     let mut fields = HashMap::new();
@@ -468,12 +471,13 @@ fn app_generation_progress_round_trips() {
     assert_eq!(back_min, ev_min);
 }
 
-/// `AppRuntimeChanged` — bare-string runtime state + optional last_error.
+/// `AppRuntimeChanged` — bare-string runtime state + optional `last_error`.
 #[test]
 fn app_runtime_changed_round_trips() {
     let ev = ClientEvent::AppRuntimeChanged {
         app_id: "habits-1a2b".to_string(),
         state: AppRuntimeStateDto::Failed,
+        details: None,
         last_error: Some("port already in use".to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize AppRuntimeChanged");
@@ -486,6 +490,7 @@ fn app_runtime_changed_round_trips() {
     let ev_min = ClientEvent::AppRuntimeChanged {
         app_id: "habits-1a2b".to_string(),
         state: AppRuntimeStateDto::Stopped,
+        details: None,
         last_error: None,
     };
     let json_min = serde_json::to_value(&ev_min).expect("serialize minimal AppRuntimeChanged");
@@ -496,6 +501,148 @@ fn app_runtime_changed_round_trips() {
     let back_min: ClientEvent =
         serde_json::from_value(json_min).expect("deserialize minimal AppRuntimeChanged");
     assert_eq!(back_min, ev_min);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // a flat data table: one row per AppEventDto variant
+fn extended_local_app_events_round_trip() {
+    let events = vec![
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppTemplatesChanged {
+                templates: builtin_app_templates(),
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppGenerationJobChanged {
+                job: AppGenerationJobDto {
+                    id: "job-1".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    revision: 4,
+                    continuation_seq: 1,
+                    state: AppGenerationJobStateDto::Building,
+                    percent: Some(70),
+                    detail: None,
+                    log_rel: Some("logs/job-1.log".to_string()),
+                    updated_at_ms: 1,
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppBridgeResponse {
+                response: AppBridgeResponseDto {
+                    request_id: "bridge-1".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    ok: true,
+                    result_json: Some("[]".to_string()),
+                    error: None,
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppUiRequest {
+                request: AppUiRequestDto {
+                    request_id: "ui-1".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    action: AppUiActionKindDto::Inspect,
+                    target: None,
+                    value: None,
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppCapabilityRequested {
+                request: AppCapabilityRequestDto {
+                    request_id: "cap-1".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    capability: AppCapabilityKindDto::NetworkDomain,
+                    domain: Some("api.example.com".to_string()),
+                    reason: "Fetch app data".to_string(),
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppCheckpointsChanged {
+                app_id: "habits-1a2b".to_string(),
+                checkpoints: vec![],
+            },
+        },
+    ];
+    // Pin the WIRE TAG of every inner `AppEventDto` variant, mirroring
+    // `commands_test::extended_local_app_commands_round_trip`. A symmetric
+    // `to_value` → `from_value` round-trip alone renames a tag/field in BOTH
+    // directions and still succeeds, so the literals below are what make a
+    // rename visible here.
+    let expected_types = [
+        "app_templates_changed",
+        "app_generation_job_changed",
+        "app_bridge_response",
+        "app_ui_request",
+        "app_capability_requested",
+        "app_checkpoints_changed",
+    ];
+    // One leaf field name per variant, so a renamed FIELD (not just a renamed
+    // variant tag) is caught too.
+    let expected_leaves: [(&str, serde_json::Value); 6] = [
+        (
+            "/event/templates/0/kind",
+            serde_json::Value::from("dashboard"),
+        ),
+        (
+            "/event/job/continuation_seq",
+            serde_json::Value::from(1_u64),
+        ),
+        (
+            "/event/response/result_json",
+            serde_json::Value::from("[]"),
+        ),
+        ("/event/request/action", serde_json::Value::from("inspect")),
+        (
+            "/event/request/capability",
+            serde_json::Value::from("network_domain"),
+        ),
+        (
+            "/event/app_id",
+            serde_json::Value::from("habits-1a2b"),
+        ),
+    ];
+    assert_eq!(
+        events.len(),
+        expected_types.len(),
+        "every extended app event must have a pinned wire tag"
+    );
+    for ((event, expected_type), (leaf_pointer, leaf_value)) in
+        events.into_iter().zip(expected_types).zip(expected_leaves)
+    {
+        let json = serde_json::to_value(&event).expect("serialize extended app event");
+        assert_eq!(json["type"], "app_event", "outer envelope tag");
+        assert_eq!(json["event"]["type"], expected_type, "inner AppEventDto tag");
+        assert_eq!(
+            json.pointer(leaf_pointer),
+            Some(&leaf_value),
+            "leaf {leaf_pointer} must keep its wire name and value"
+        );
+        let back: ClientEvent =
+            serde_json::from_value(json).expect("deserialize extended app event");
+        assert_eq!(back, event);
+    }
+
+    let runtime = ClientEvent::AppRuntimeChanged {
+        app_id: "habits-1a2b".to_string(),
+        state: AppRuntimeStateDto::Running,
+        details: Some(client_protocol::local_apps::AppRuntimeDetailsDto {
+            state: AppRuntimeStateDto::Running,
+            mode: Some(AppRuntimeModeDto::NextProduction),
+            loopback_url: Some("http://127.0.0.1:43123".to_string()),
+            suspension_reason: Some(AppRuntimeSuspensionReasonDto::Backgrounded),
+            recovery_state: Some(AppRuntimeRecoveryStateDto::Recovered),
+            last_error: None,
+        }),
+        last_error: None,
+    };
+    let json = serde_json::to_value(&runtime).expect("serialize extended runtime");
+    assert_eq!(json["details"]["mode"], "next_production");
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize extended runtime");
+    assert_eq!(back, runtime);
 }
 
 /// `AppPreviewReady` — delivers the pending preview `interaction_id`; `url`

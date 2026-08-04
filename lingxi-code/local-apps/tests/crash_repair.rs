@@ -154,6 +154,30 @@ fn torn_open_designer_repairs_to_awaiting_spec_confirmation() {
     app.confirm_design("int-1", 0, T0 + 3).expect("confirmable");
 }
 
+/// `open_designer` is also the escape hatch out of `generation_failed`, so
+/// the same tear must repair from that source state — otherwise the recovery
+/// leaves an armed gate the record does not admit to.
+#[test]
+fn torn_reopen_designer_from_generation_failed_repairs_to_awaiting_spec_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut before = fresh_app("aaaa1111");
+    before.open_designer("int-1".into(), T0 + 1).unwrap();
+    before.confirm_design("int-1", 0, T0 + 2).unwrap();
+    before.generation_failed(T0 + 3).unwrap();
+    let mut after = before.clone();
+    after.open_designer("int-2".into(), T0 + 4).unwrap();
+    tear(dir.path(), &before, &after, &Tear::AfterInteractions);
+
+    let mut app = load_repaired(dir.path());
+    assert_eq!(
+        app.record.workflow_state,
+        AppWorkflowState::AwaitingSpecConfirmation
+    );
+    let pending = app.interactions.pending.clone().expect("gate survives");
+    assert_eq!(pending.interaction_id, "int-2");
+    app.confirm_design("int-2", 0, T0 + 5).expect("confirmable");
+}
+
 #[test]
 fn torn_validation_passed_repairs_to_awaiting_preview_confirmation() {
     let dir = tempfile::tempdir().unwrap();

@@ -30,14 +30,17 @@ use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
-    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
-    AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto,
-    AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto,
+    AppDataFieldDto, AppDataFieldTypeDto, AppDesignFieldValueDto, AppDesignPatchDto,
+    AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto, AppManifestDto, AppRecordDto,
+    AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
+    AppTemplateDto, AppTemplateKindDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use local_apps::{
-    AppCheckpoint, AppCheckpointKind, AppDesignPatch, AppDesignPatchOp, AppError, AppErrorCode,
-    AppEvent, AppEventObserver, AppRecord, AppRuntimeState, AppService, AppTemplateKind,
-    AppWorkflowState, DensityLevel, DesignValue,
+    load_manifest, AppCheckpoint, AppCheckpointKind, AppDesignDraft, AppDesignPatch,
+    AppDesignPatchOp, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest,
+    AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppTemplateKind, AppWorkflowState,
+    DataCollectionSchema, DataFieldKind, DataFieldSchema, DensityLevel, DesignValue,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -240,14 +243,11 @@ pub(crate) fn lower_app_event(event: AppEvent) -> ClientEvent {
             percent: progress.percent,
             detail: progress.detail,
         },
-        AppEvent::RuntimeChanged {
+        AppEvent::RuntimeChanged { app_id, runtime } => ClientEvent::AppRuntimeChanged {
             app_id,
-            state,
-            last_error,
-        } => ClientEvent::AppRuntimeChanged {
-            app_id,
-            state: lower_runtime_state(state),
-            last_error,
+            state: lower_runtime_state(runtime.state),
+            details: Some(lower_runtime_details(&runtime)),
+            last_error: runtime.last_error,
         },
         AppEvent::PreviewReady {
             app_id,
@@ -376,7 +376,126 @@ fn lower_design_value(value: DesignValue) -> DesignValueDto {
         },
         DesignValue::ScreenList(value) => DesignValueDto::ScreenList { value },
         DesignValue::FeatureList(value) => DesignValueDto::FeatureList { value },
+        DesignValue::DataFieldList(value) => DesignValueDto::DataFieldList {
+            value: value.into_iter().map(lower_data_field).collect(),
+        },
+        DesignValue::DomainList(value) => DesignValueDto::DomainList { value },
     }
+}
+
+fn lower_data_field(value: DataFieldSchema) -> AppDataFieldDto {
+    AppDataFieldDto {
+        id: value.id,
+        label: value.label,
+        field_type: match value.kind {
+            DataFieldKind::Text => AppDataFieldTypeDto::Text,
+            DataFieldKind::LongText => AppDataFieldTypeDto::LongText,
+            DataFieldKind::Integer => AppDataFieldTypeDto::Integer,
+            DataFieldKind::Decimal => AppDataFieldTypeDto::Decimal,
+            DataFieldKind::Boolean => AppDataFieldTypeDto::Boolean,
+            DataFieldKind::DateTime => AppDataFieldTypeDto::DateTime,
+            DataFieldKind::Enum => AppDataFieldTypeDto::Enum,
+            DataFieldKind::ImageRef => AppDataFieldTypeDto::ImageRef,
+        },
+        required: value.required,
+        options: value.enum_options,
+    }
+}
+
+fn lower_collection(value: DataCollectionSchema, enabled_by_default: bool) -> AppDataCollectionDto {
+    AppDataCollectionDto {
+        id: value.id,
+        label: value.name,
+        fields: value.fields.into_iter().map(lower_data_field).collect(),
+        enabled_by_default,
+    }
+}
+
+pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDetailsDto {
+    AppRuntimeDetailsDto {
+        state: lower_runtime_state(runtime.state),
+        mode: runtime.mode.map(|mode| match mode {
+            local_apps::AppRuntimeMode::StaticExport => AppRuntimeModeDto::StaticExport,
+            local_apps::AppRuntimeMode::NextProduction => AppRuntimeModeDto::NextProduction,
+        }),
+        loopback_url: runtime.port.map(|port| format!("http://127.0.0.1:{port}")),
+        // Unconditionally `None` in this phase, and NOT an oversight: the core
+        // `AppRuntimeRecord` records no reason for a non-user-initiated stop
+        // (state / mode / port / pid / last_error / updated_at_ms), and
+        // `AppRuntimeState` has no suspended state at all.  Every stop the
+        // engine can perform — user stop, quota eviction, process exit, a dead
+        // static listener — lands in `Stopped`/`Failed` with the detail in
+        // `last_error`.  Wiring a real producer therefore starts with a new
+        // field on the persisted record, not here; until then no client may
+        // treat a suspended runtime as reachable.
+        suspension_reason: None,
+        recovery_state: Some(match runtime.state {
+            AppRuntimeState::Running => AppRuntimeRecoveryStateDto::Recovered,
+            _ => AppRuntimeRecoveryStateDto::NotNeeded,
+        }),
+        last_error: runtime.last_error.clone(),
+    }
+}
+
+pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
+    AppManifestDto {
+        schema_version: manifest.schema_version,
+        app_id: manifest.app_id,
+        name: manifest.name,
+        template: lower_template(manifest.template),
+        design_revision: manifest.revision,
+        collections: manifest
+            .collections
+            .into_iter()
+            .map(|collection| lower_collection(collection, true))
+            .collect(),
+        allowed_domains: manifest.allowed_domains,
+    }
+}
+
+pub(crate) fn load_manifest_snapshot(
+    root: &std::path::Path,
+    app_id: &str,
+) -> Result<Option<AppManifestDto>, AppError> {
+    let layout = AppLayout::new(root, app_id)?;
+    match load_manifest(&layout) {
+        Ok(manifest) => Ok(Some(lower_manifest(manifest))),
+        Err(AppError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn lower_design_field_values(draft: &AppDesignDraft) -> Vec<AppDesignFieldValueDto> {
+    draft
+        .fields
+        .iter()
+        .map(|(field_id, value)| AppDesignFieldValueDto {
+            field_id: field_id.clone(),
+            value: lower_design_value(value.clone()),
+        })
+        .collect()
+}
+
+pub(crate) fn lower_details(
+    root: &std::path::Path,
+    record: &AppRecord,
+    draft: &AppDesignDraft,
+    runtime: &AppRuntimeRecord,
+    checkpoints: &[AppCheckpoint],
+) -> Result<AppDetailsDto, AppError> {
+    Ok(AppDetailsDto {
+        app: lower_record(record),
+        design_revision: draft.revision,
+        design_fields: lower_design_field_values(draft),
+        manifest: load_manifest_snapshot(root, &record.id)?,
+        runtime: lower_runtime_details(runtime),
+        generation_job: None,
+        checkpoints: checkpoints.iter().map(lower_checkpoint).collect(),
+    })
+}
+
+pub(crate) fn builtin_templates() -> Vec<AppTemplateDto> {
+    client_protocol::local_apps::builtin_app_templates()
 }
 
 /// Lower a full draft field map for `AppDesignDraftChanged`.
@@ -510,11 +629,43 @@ fn raise_design_value(value: DesignValueDto) -> Result<DesignValue, AppError> {
         DesignValueDto::Density { value } => DesignValue::Density(raise_density(value)?),
         DesignValueDto::ScreenList { value } => DesignValue::ScreenList(value),
         DesignValueDto::FeatureList { value } => DesignValue::FeatureList(value),
+        DesignValueDto::DataFieldList { value } => DesignValue::DataFieldList(
+            value
+                .into_iter()
+                .map(raise_data_field)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        DesignValueDto::DomainList { value } => DesignValue::DomainList(value),
         other => {
             return Err(AppError::InvalidRequest(format!(
                 "unsupported design value: {other:?}"
             )))
         }
+    })
+}
+
+fn raise_data_field(value: AppDataFieldDto) -> Result<DataFieldSchema, AppError> {
+    let kind = match value.field_type {
+        AppDataFieldTypeDto::Text => DataFieldKind::Text,
+        AppDataFieldTypeDto::LongText => DataFieldKind::LongText,
+        AppDataFieldTypeDto::Integer => DataFieldKind::Integer,
+        AppDataFieldTypeDto::Decimal => DataFieldKind::Decimal,
+        AppDataFieldTypeDto::Boolean => DataFieldKind::Boolean,
+        AppDataFieldTypeDto::DateTime => DataFieldKind::DateTime,
+        AppDataFieldTypeDto::Enum => DataFieldKind::Enum,
+        AppDataFieldTypeDto::ImageRef => DataFieldKind::ImageRef,
+        other => {
+            return Err(AppError::InvalidRequest(format!(
+                "unsupported data field type: {other:?}"
+            )))
+        }
+    };
+    Ok(DataFieldSchema {
+        id: value.id,
+        label: value.label,
+        kind,
+        required: value.required,
+        enum_options: value.options,
     })
 }
 
@@ -544,6 +695,14 @@ mod tests {
             DesignValue::Density(DensityLevel::Compact),
             DesignValue::ScreenList(vec!["home".into()]),
             DesignValue::FeatureList(vec!["export".into()]),
+            DesignValue::DataFieldList(vec![DataFieldSchema {
+                id: "title".into(),
+                label: "Title".into(),
+                kind: DataFieldKind::Text,
+                required: true,
+                enum_options: Vec::new(),
+            }]),
+            DesignValue::DomainList(vec!["api.example.com".into()]),
         ]
     }
 
@@ -808,12 +967,28 @@ mod tests {
             (
                 AppEvent::RuntimeChanged {
                     app_id: "app00001".into(),
-                    state: AppRuntimeState::Failed,
-                    last_error: Some("port died".into()),
+                    runtime: local_apps::AppRuntimeRecord {
+                        schema_version: local_apps::APPS_SCHEMA_VERSION,
+                        app_id: "app00001".into(),
+                        state: AppRuntimeState::Failed,
+                        mode: Some(local_apps::AppRuntimeMode::StaticExport),
+                        port: Some(3100),
+                        pid: None,
+                        last_error: Some("port died".into()),
+                        updated_at_ms: 1,
+                    },
                 },
                 ClientEvent::AppRuntimeChanged {
                     app_id: "app00001".into(),
                     state: AppRuntimeStateDto::Failed,
+                    details: Some(AppRuntimeDetailsDto {
+                        state: AppRuntimeStateDto::Failed,
+                        mode: Some(AppRuntimeModeDto::StaticExport),
+                        loopback_url: Some("http://127.0.0.1:3100".into()),
+                        suspension_reason: None,
+                        recovery_state: Some(AppRuntimeRecoveryStateDto::NotNeeded),
+                        last_error: Some("port died".into()),
+                    }),
                     last_error: Some("port died".into()),
                 },
             ),

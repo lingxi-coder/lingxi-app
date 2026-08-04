@@ -64,6 +64,23 @@ class MainActivity : ComponentActivity() {
     private val pendingTerminalArgs =
         kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
 
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE
+        ) {
+            com.lingxi.code.localapps.LocalAppsMemoryPressure.notifyPressure()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        com.lingxi.code.localapps.LocalAppsMemoryPressure.notifyPressure()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         pendingCronRunId.value = intent.getStringExtra(
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,

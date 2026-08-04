@@ -10,7 +10,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 
 /**
- * The three lists the drawer can show — the 对话 / 项目 / 定时 tabs.
+ * The four lists the drawer can show — the 对话 / 项目 / 定时 / 应用 tabs.
  *
  * Mirrors the iOS `Drawer.Section` enum; the raw string is the persisted key.
  */
@@ -18,6 +18,7 @@ enum class DrawerSection(val key: String) {
     Chats("chats"),
     Projects("projects"),
     Crons("crons"),
+    Apps("apps"),
 }
 
 /**

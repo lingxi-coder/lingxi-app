@@ -109,6 +109,8 @@ fun DrawerContent(
     onReauthorizeProject: (String) -> Unit = {},
     onOpenCron: (String) -> Unit = {},
     onCreateCron: () -> Unit = {},
+    appsCount: Int = 0,
+    onOpenApps: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -148,12 +150,15 @@ fun DrawerContent(
             activeWs = ui.activeWs,
             onSelect = ui::selectWorkspace,
         )
-        SearchBar(query = query, onQueryChange = { query = it })
+        if (ui.section != DrawerSection.Apps) {
+            SearchBar(query = query, onQueryChange = { query = it })
+        }
         SectionTabs(
             section = ui.section,
             chats = filteredEngineSessions.size,
             projects = projects?.size ?: 0,
             crons = crons?.size ?: 0,
+            apps = appsCount,
             onSelect = { ui.section = it },
         )
 
@@ -198,6 +203,11 @@ fun DrawerContent(
                         onCreateCron = onCreateCron,
                     )
                 }
+
+                DrawerSection.Apps -> AppsSection(
+                    appsCount = appsCount,
+                    onOpenApps = onOpenApps,
+                )
             }
         }
 
@@ -357,6 +367,7 @@ private fun SectionTabs(
     chats: Int,
     projects: Int,
     crons: Int,
+    apps: Int,
     onSelect: (DrawerSection) -> Unit,
 ) {
     Row(
@@ -369,6 +380,46 @@ private fun SectionTabs(
         SectionTab(DrawerSection.Chats, LXIconName.Message, "对话", chats, section, onSelect, Modifier.weight(1f))
         SectionTab(DrawerSection.Projects, LXIconName.Folder, "项目", projects, section, onSelect, Modifier.weight(1f))
         SectionTab(DrawerSection.Crons, LXIconName.Clock, "定时", crons, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Apps, LXIconName.Workflow, "应用", apps, section, onSelect, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun AppsSection(appsCount: Int, onOpenApps: () -> Unit) {
+    val t = LingXiTheme.palette
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 24.dp),
+    ) {
+        LXIcon(name = LXIconName.Workflow, size = 34.dp, color = t.accent, stroke = 1.7f)
+        Text(
+            if (appsCount == 0) "还没有本地应用" else "本地应用 $appsCount 个",
+            color = t.text,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "从模板创建、设计、生成并运行本地应用。",
+            color = t.text3,
+            fontSize = 12.sp,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(t.surfaceActive)
+                .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
+                .clickable(onClick = onOpenApps)
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+        ) {
+            LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.accent, stroke = 1.8f)
+            Text("打开应用库", color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        }
     }
 }
 

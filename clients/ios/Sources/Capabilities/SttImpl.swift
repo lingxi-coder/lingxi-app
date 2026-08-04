@@ -39,6 +39,19 @@ import Foundation
         }
 
         func transcribe(language: String?) async throws -> String {
+            try await transcribe(
+                language: language,
+                automaticEndpointAfterSilence: nil
+            )
+        }
+
+        /// Flow Mode supplies a trailing-silence interval so one spoken
+        /// utterance can finish without an explicit tap. The engine-facing
+        /// `IosStt` entry point above remains manual/one-shot compatible.
+        func transcribe(
+            language: String?,
+            automaticEndpointAfterSilence: Duration?
+        ) async throws -> String {
             let attemptID = try beginAttempt()
             defer { endAttempt(attemptID) }
 
@@ -69,14 +82,15 @@ import Foundation
                     try checkAttempt(attemptID)
 
                     let request = SFSpeechAudioBufferRecognitionRequest()
-                    request.shouldReportPartialResults = false
+                    request.shouldReportPartialResults = automaticEndpointAfterSilence != nil
                     let preferOnDevice = UserDefaults.standard.string(forKey: "voiceRecognitionMode")
                         == VoiceRecognitionMode.onDevice.rawValue
                     request.requiresOnDeviceRecognition = preferOnDevice && recognizer.supportsOnDeviceRecognition
 
                     let operation = SpeechRecognitionOperation(
                         request: request,
-                        timeoutNanoseconds: timeoutNanoseconds
+                        timeoutNanoseconds: timeoutNanoseconds,
+                        automaticEndpointAfterSilence: automaticEndpointAfterSilence
                     )
                     switch attach(operation, to: attemptID) {
                     case .proceed:
@@ -199,28 +213,48 @@ import Foundation
         private let lock = NSRecursiveLock()
         private let request: SFSpeechAudioBufferRecognitionRequest
         private let audioEngine = AVAudioEngine()
+        private let clock = ContinuousClock()
         private let timeoutNanoseconds: UInt64
+        private let automaticEndpointAfterSilence: Duration?
 
         private var continuation: CheckedContinuation<String, Error>?
         private var recognitionTask: SFSpeechRecognitionTask?
         private var timeoutTask: Task<Void, Never>?
+        private var endpointTask: Task<Void, Never>?
         private var terminalResult: Result<String, Error>?
+        private var latestPartialTranscript = ""
+        private var ambientRMS: Float = 0.005
+        private var lastVoiceActivity: ContinuousClock.Instant?
         private var inputStarted = false
         private var inputEnded = false
         private var finishRequested = false
         private var observers: [NSObjectProtocol] = []
 
-        init(request: SFSpeechAudioBufferRecognitionRequest, timeoutNanoseconds: UInt64) {
+        init(
+            request: SFSpeechAudioBufferRecognitionRequest,
+            timeoutNanoseconds: UInt64,
+            automaticEndpointAfterSilence: Duration?
+        ) {
             self.request = request
             self.timeoutNanoseconds = timeoutNanoseconds
+            self.automaticEndpointAfterSilence = automaticEndpointAfterSilence
             installLifecycleObservers()
         }
 
         deinit {
             lock.lock()
+            let timeoutTask = timeoutTask
+            let endpointTask = endpointTask
+            let recognitionTask = recognitionTask
+            self.timeoutTask = nil
+            self.endpointTask = nil
+            self.recognitionTask = nil
             endInputLocked()
             removeLifecycleObserversLocked()
             lock.unlock()
+            timeoutTask?.cancel()
+            endpointTask?.cancel()
+            recognitionTask?.cancel()
         }
 
         func run(with recognizer: SFSpeechRecognizer) async throws -> String {
@@ -242,8 +276,11 @@ import Foundation
         func finishInput() {
             lock.lock()
             finishRequested = true
+            let endpointTask = endpointTask
+            self.endpointTask = nil
             if inputStarted { endInputLocked() }
             lock.unlock()
+            endpointTask?.cancel()
         }
 
         func cancel(with error: Error) {
@@ -260,8 +297,9 @@ import Foundation
 
             let inputNode = audioEngine.inputNode
             let format = inputNode.outputFormat(forBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [request] buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self, request] buffer, _ in
                 request.append(buffer)
+                self?.observeAudioActivity(in: buffer)
             }
             inputStarted = true
             audioEngine.prepare()
@@ -284,11 +322,19 @@ import Foundation
 
             let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
                 guard let self else { return }
-                if let result, result.isFinal {
-                    complete(.success(result.bestTranscription.formattedString))
-                    return
+                if let result {
+                    let transcript = result.bestTranscription.formattedString
+                    if result.isFinal {
+                        complete(.success(transcript))
+                        return
+                    }
+                    observePartialTranscript(transcript)
                 }
                 if let error {
+                    if let transcript = partialTranscriptAfterFinishing() {
+                        complete(.success(transcript))
+                        return
+                    }
                     let nsError = error as NSError
                     if nsError.domain == "kAFAssistantErrorDomain", nsError.code == 1110 {
                         complete(.failure(SpeechFfiError.NoSpeech))
@@ -331,13 +377,116 @@ import Foundation
             self.recognitionTask = nil
             let timeoutTask = timeoutTask
             self.timeoutTask = nil
+            let endpointTask = endpointTask
+            self.endpointTask = nil
             endInputLocked()
             removeLifecycleObserversLocked()
             lock.unlock()
 
             timeoutTask?.cancel()
+            endpointTask?.cancel()
             recognitionTask?.cancel()
             continuation?.resume(with: result)
+        }
+
+        /// Arm endpointing only after Speech has recognized real text. Audio
+        /// activity then keeps advancing the deadline even when the partial
+        /// transcript itself has not changed, avoiding mid-sentence cutoffs.
+        private func observePartialTranscript(_ transcript: String) {
+            let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, let silence = automaticEndpointAfterSilence else { return }
+
+            lock.lock()
+            guard terminalResult == nil,
+                  !inputEnded,
+                  trimmed != latestPartialTranscript
+            else {
+                lock.unlock()
+                return
+            }
+            latestPartialTranscript = trimmed
+            lastVoiceActivity = clock.now
+            if endpointTask == nil {
+                endpointTask = Task { [weak self] in
+                    await self?.finishAfterTrailingSilence(silence)
+                }
+            }
+            lock.unlock()
+        }
+
+        private func observeAudioActivity(in buffer: AVAudioPCMBuffer) {
+            let rms = Self.rms(of: buffer)
+            guard rms > 0 else { return }
+
+            lock.lock()
+            guard terminalResult == nil, !inputEnded else {
+                lock.unlock()
+                return
+            }
+            let threshold = max(0.015, ambientRMS * 2.2)
+            if rms >= threshold {
+                lastVoiceActivity = clock.now
+            } else {
+                ambientRMS = (ambientRMS * 0.95) + (rms * 0.05)
+            }
+            lock.unlock()
+        }
+
+        private func finishAfterTrailingSilence(_ silence: Duration) async {
+            while !Task.isCancelled {
+                guard let elapsed = trailingSilenceElapsed() else { return }
+
+                if elapsed >= silence {
+                    finishInput()
+                    return
+                }
+                do {
+                    try await Task.sleep(for: silence - elapsed)
+                } catch {
+                    return
+                }
+            }
+        }
+
+        private func trailingSilenceElapsed() -> Duration? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard terminalResult == nil,
+                  !inputEnded,
+                  let lastVoiceActivity
+            else { return nil }
+            return lastVoiceActivity.duration(to: clock.now)
+        }
+
+        private static func rms(of buffer: AVAudioPCMBuffer) -> Float {
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0 else { return 0 }
+
+            if let samples = buffer.floatChannelData?[0] {
+                var sum: Float = 0
+                for index in 0..<frameCount {
+                    let sample = samples[index]
+                    sum += sample * sample
+                }
+                return sqrt(sum / Float(frameCount))
+            }
+            if let samples = buffer.int16ChannelData?[0] {
+                var sum: Float = 0
+                for index in 0..<frameCount {
+                    let sample = Float(samples[index]) / Float(Int16.max)
+                    sum += sample * sample
+                }
+                return sqrt(sum / Float(frameCount))
+            }
+            return 0
+        }
+
+        private func partialTranscriptAfterFinishing() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard finishRequested || inputEnded else { return nil }
+            let trimmed = latestPartialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
         }
 
         private func endInputLocked() {

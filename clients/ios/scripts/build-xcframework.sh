@@ -78,8 +78,24 @@ done
 # OpenMinis submodule; no generated binary or rootfs is committed.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
 if [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
-  log "Building iSH ARM64 + Alpine Linux runtime…"
-  "${LINUX_RUNTIME_BUILD}"
+  if [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
+    STAGED_LINUX_RUNTIME="${IOS_DIR}/build/linux-runtime/openminis"
+    for required in \
+      "${STAGED_LINUX_RUNTIME}/manifest.json" \
+      "${STAGED_LINUX_RUNTIME}/libs/libfakefs.a" \
+      "${STAGED_LINUX_RUNTIME}/libs/libish.a" \
+      "${STAGED_LINUX_RUNTIME}/libs/libish_emu.a" \
+      "${STAGED_LINUX_RUNTIME}/resources/alpine-rootfs.zip"; do
+      [[ -f "${required}" ]] || {
+        echo "ERROR: staged Linux runtime is incomplete: ${required}" >&2
+        exit 1
+      }
+    done
+    log "Reusing complete staged iSH ARM64 + Alpine Linux runtime…"
+  else
+    log "Building iSH ARM64 + Alpine Linux runtime…"
+    "${LINUX_RUNTIME_BUILD}"
+  fi
 fi
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
@@ -249,30 +265,50 @@ done
 # `Task` conformance in exactly ONE keeper file and delete BOTH lines from every
 # other file. The two declarations are identical across namespaces and
 # module-internal, so module-internal references resolve to the single kept copy.
-# Keeper = client_adapter.swift (the established async-callback-interface file;
-# it is always present whenever any async callback interface exists). The
+# Prefer client_adapter.swift as the keeper when it contains the exact shared
+# declaration; otherwise keep the first file that actually emits it. The
 # per-namespace `private UNIFFI_FOREIGN_FUTURE_HANDLE_MAP`, the `private`
 # `uniffiTraitInterfaceCallAsync*` helpers, and the namespaced
 # `uniffiForeignFutureHandleCount<Ns>()` are file-local / uniquely named and are
 # left untouched.
 log "Deduplicating async-foreign-future task protocol into a single module copy…"
-FUTURE_KEEPER="client_adapter"
+# Newer UniFFI output may namespace the client_adapter copy
+# (`ClientAdapterUniffiForeignFutureTask`) while leaving the ios_framework copy
+# unnamespaced. Only files containing the exact shared declaration participate
+# in this pass; if there is a single copy, keep it where bindgen emitted it.
+FUTURE_PROTOCOL_FILES=()
 for sw in "${GEN_DIR}"/*.swift; do
-  stem="$(basename "${sw}" .swift)"
-  [[ "${stem}" == "${FUTURE_KEEPER}" ]] && continue
-  tmp="${sw}.fdedup"
-  # Strip the `protocol UniffiForeignFutureTask { … }` block (column-0 `protocol`
-  # line through its closing column-0 `}`) and the immediately-following
-  # `extension Task: UniffiForeignFutureTask {}` one-liner. Other lines verbatim.
-  awk '
-    /^protocol UniffiForeignFutureTask / { in_proto = 1; next }
-    in_proto && /^}/                     { in_proto = 0; next }
-    in_proto                             { next }
-    /^extension Task: UniffiForeignFutureTask \{\}/ { next }
-    { print }
-  ' "${sw}" > "${tmp}"
-  mv "${tmp}" "${sw}"
+  if grep -q '^protocol UniffiForeignFutureTask ' "${sw}"; then
+    FUTURE_PROTOCOL_FILES+=("${sw}")
+  fi
 done
+
+if [[ ${#FUTURE_PROTOCOL_FILES[@]} -gt 1 ]]; then
+  FUTURE_KEEPER="${FUTURE_PROTOCOL_FILES[0]}"
+  for sw in "${FUTURE_PROTOCOL_FILES[@]}"; do
+    if [[ "$(basename "${sw}" .swift)" == "client_adapter" ]]; then
+      FUTURE_KEEPER="${sw}"
+      break
+    fi
+  done
+
+  for sw in "${FUTURE_PROTOCOL_FILES[@]}"; do
+    [[ "${sw}" == "${FUTURE_KEEPER}" ]] && continue
+    tmp="${sw}.fdedup"
+    # Strip the `protocol UniffiForeignFutureTask { … }` block (column-0
+    # `protocol` line through its closing column-0 `}`) and the
+    # immediately-following `extension Task: UniffiForeignFutureTask {}`
+    # one-liner. Other lines are emitted verbatim.
+    awk '
+      /^protocol UniffiForeignFutureTask / { in_proto = 1; next }
+      in_proto && /^}/                     { in_proto = 0; next }
+      in_proto                             { next }
+      /^extension Task: UniffiForeignFutureTask \{\}/ { next }
+      { print }
+    ' "${sw}" > "${tmp}"
+    mv "${tmp}" "${sw}"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # 1d. Force callback-vtable registration in `buildIosEngine`

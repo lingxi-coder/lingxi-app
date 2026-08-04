@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import Network
 import ObjectiveC.runtime
 
 struct LXISHMountSpec: Codable, Hashable {
@@ -88,6 +89,36 @@ struct LXISHPollRequest: Codable {
     }
 }
 
+struct LXISHBackgroundProcessRequest: Codable {
+    var processId: String
+
+    enum CodingKeys: String, CodingKey {
+        case processId = "process_id"
+    }
+}
+
+struct LXISHBackgroundPollRequest: Codable {
+    var processId: String
+    var afterSequence: UInt64?
+    var limit: UInt32?
+
+    enum CodingKeys: String, CodingKey {
+        case processId = "process_id"
+        case afterSequence = "after_sequence"
+        case limit
+    }
+}
+
+struct LXISHLoopbackProbeRequest: Codable {
+    var port: UInt16
+    var timeoutMs: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case port
+        case timeoutMs = "timeout_ms"
+    }
+}
+
 private struct LXISHErrorPayload: Codable {
     var code: String
     var message: String
@@ -123,6 +154,24 @@ private struct LXISHPtyEventPayload: Codable {
         case kind
         case dataBase64 = "data_base64"
         case detail
+    }
+}
+
+private struct LXISHBackgroundEventPayload: Codable {
+    var sequence: UInt64
+    var processId: String
+    var kind: String
+    var line: String?
+    var dataBase64: String?
+    var exitCode: Int?
+    var cancelled: Bool?
+    var detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sequence, kind, line, cancelled, detail
+        case processId = "process_id"
+        case dataBase64 = "data_base64"
+        case exitCode = "exit_code"
     }
 }
 
@@ -417,6 +466,95 @@ private final class LXISHShellExecutorRuntimeBridge {
         )
     }
 
+    func spawnExecutable(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String],
+        stdin: String?,
+        cwd: String?,
+        lineSink: @escaping (String, Bool) -> Void,
+        completion: @escaping (LXISHShellExecutionResultBox) -> Void
+    ) throws -> Int32 {
+        guard let executorClass = NSClassFromString("ISHShellExecutor") else {
+            throw LXISHBridgeError.unavailable(Self.availabilityReason())
+        }
+        let selector = NSSelectorFromString("executeExecutable:arguments:environment:stdinData:lineCallback:completion:")
+        guard let method = class_getClassMethod(executorClass, selector) else {
+            throw LXISHBridgeError.unavailable(
+                "ISHShellExecutor is missing executeExecutable:arguments:environment:stdinData:lineCallback:completion:"
+            )
+        }
+
+        let launch: (String, [String])
+        if let cwd, !cwd.isEmpty {
+            launch = (
+                "/bin/sh",
+                ["-c", "cd \"$1\" && shift && exec \"$@\"", "lingxi-background", cwd, executable] + arguments
+            )
+        } else {
+            launch = (executable, arguments)
+        }
+
+        typealias LineBlock = @convention(block) (NSString, Bool) -> Void
+        let lineBlock: LineBlock = { line, isStdErr in
+            lineSink(line as String, isStdErr)
+        }
+        typealias CompletionBlock = @convention(block) (AnyObject) -> Void
+        let completionBlock: CompletionBlock = { [weak self] result in
+            guard let self else { return }
+            completion(
+                LXISHShellExecutionResultBox(
+                    exitCode: self.intValue(from: result, selector: "exitCode"),
+                    errorCode: self.intValue(from: result, selector: "error"),
+                    stdoutText: self.stringValue(from: result, selector: "output"),
+                    stderrText: self.stringValue(from: result, selector: "errorOutput"),
+                    durationSeconds: self.doubleValue(from: result, selector: "duration")
+                )
+            )
+        }
+        typealias Fn = @convention(c) (
+            AnyClass,
+            Selector,
+            NSString,
+            NSArray,
+            NSDictionary,
+            NSData?,
+            AnyObject?,
+            AnyObject
+        ) -> Int32
+        let fn = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        let pid = fn(
+            executorClass,
+            selector,
+            launch.0 as NSString,
+            launch.1 as NSArray,
+            environment as NSDictionary,
+            stdin.map { Data($0.utf8) } as NSData?,
+            lineBlock as AnyObject,
+            completionBlock as AnyObject
+        )
+        guard pid >= 0 else {
+            throw LXISHBridgeError.unavailable("ISHShellExecutor failed to launch background process: \(pid)")
+        }
+        return pid
+    }
+
+    func killProcessGroup(_ pid: Int32) throws {
+        guard pid > 1 else {
+            throw LXISHBridgeError.invalidRequest("refusing to terminate iSH pid \(pid)")
+        }
+        guard let executorClass = NSClassFromString("ISHShellExecutor") else {
+            throw LXISHBridgeError.unavailable(Self.availabilityReason())
+        }
+        let selector = NSSelectorFromString("killProcessGroup:")
+        guard let method = class_getClassMethod(executorClass, selector) else {
+            throw LXISHBridgeError.unavailable("ISHShellExecutor is missing killProcessGroup:")
+        }
+        typealias Fn = @convention(c) (AnyClass, Selector, Int32) -> Void
+        let fn = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        fn(executorClass, selector, pid)
+    }
+
     private func killProcessGroup(_ pid: Int32, executorClass: AnyClass) {
         let selector = NSSelectorFromString("killProcessGroup:")
         guard let method = class_getClassMethod(executorClass, selector) else { return }
@@ -453,6 +591,18 @@ private final class LXISHShellExecutorRuntimeBridge {
 private final class LXISHNativeCoordinator {
     static let shared = LXISHNativeCoordinator()
 
+    private final class BackgroundProcessState {
+        let processId: String
+        let guestPid: Int32
+        var killRequested = false
+        var terminal = false
+
+        init(processId: String, guestPid: Int32) {
+            self.processId = processId
+            self.guestPid = guestPid
+        }
+    }
+
     private struct RuntimeState {
         var config: LXISHNativeConfig
         var kernel = LXISHKernelRuntimeBridge()
@@ -462,6 +612,8 @@ private final class LXISHNativeCoordinator {
         var ptySessionId: String?
         var nextSequence: UInt64 = 0
         var events: [LXISHPtyEventPayload] = []
+        var backgroundProcesses: [String: BackgroundProcessState] = [:]
+        var backgroundEvents: [LXISHBackgroundEventPayload] = []
     }
 
     private let queue = DispatchQueue(label: "com.lingxi.ish-native.bridge")
@@ -583,6 +735,132 @@ private final class LXISHNativeCoordinator {
         }
     }
 
+    func spawnBackground(config: LXISHNativeConfig, request: LXISHRunRequest) -> String {
+        execute(config: config) { runtime in
+            guard request.network == "allowed" else {
+                throw LXISHBridgeError.unavailable(
+                    "iSH cannot enforce the requested network isolation policy"
+                )
+            }
+            _ = try self.rootfsManager.installIfNeeded(for: config)
+            runtime.mounts = request.mounts ?? runtime.mounts
+            try self.rootfsManager.cacheMounts(runtime.mounts, for: config)
+            guard LXISHKernelRuntimeBridge.isDeviceBridgeAvailable(),
+                  LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable()
+            else {
+                throw LXISHBridgeError.unavailable(LXISHShellExecutorRuntimeBridge.availabilityReason())
+            }
+            try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
+            runtime.kernelBooted = true
+            try self.applyMountsIfNeeded(to: &runtime)
+            try self.validateEnvironment(request.env)
+
+            let processId = UUID().uuidString.lowercased()
+            let runtimeKey = config.normalizedManagedRoot.path
+            let pid = try runtime.executor.spawnExecutable(
+                request.command,
+                arguments: request.args,
+                environment: request.env,
+                stdin: request.stdin,
+                cwd: request.cwd,
+                lineSink: { [weak self] line, isStdErr in
+                    self?.recordBackgroundLine(
+                        runtimeKey: runtimeKey,
+                        processId: processId,
+                        line: line,
+                        isStdErr: isStdErr
+                    )
+                },
+                completion: { [weak self] result in
+                    self?.recordBackgroundCompletion(
+                        runtimeKey: runtimeKey,
+                        processId: processId,
+                        result: result
+                    )
+                }
+            )
+            runtime.backgroundProcesses[processId] = BackgroundProcessState(
+                processId: processId,
+                guestPid: pid
+            )
+            return ["process_id": processId, "guest_pid": Int(pid)]
+        }
+    }
+
+    func killBackground(config: LXISHNativeConfig, request: LXISHBackgroundProcessRequest) -> String {
+        execute(config: config) { runtime in
+            guard let process = runtime.backgroundProcesses[request.processId] else {
+                throw LXISHBridgeError.invalidRequest("unknown background process")
+            }
+            if process.terminal {
+                return ["process_id": request.processId, "already_stopped": true]
+            }
+            try runtime.executor.killProcessGroup(process.guestPid)
+            process.killRequested = true
+            return ["process_id": request.processId, "termination_requested": true]
+        }
+    }
+
+    func pollBackground(config: LXISHNativeConfig, request: LXISHBackgroundPollRequest) -> String {
+        queue.sync {
+            let key = config.normalizedManagedRoot.path
+            guard let runtime = runtimes[key] else {
+                return encodeEnvelope(ok: true, payload: ["events": [LXISHBackgroundEventPayload]()])
+            }
+            guard runtime.backgroundProcesses[request.processId] != nil else {
+                return encodeError(code: "invalid_request", message: "unknown background process")
+            }
+            let filtered = runtime.backgroundEvents.filter { event in
+                guard event.processId == request.processId else { return false }
+                guard let after = request.afterSequence else { return true }
+                return event.sequence > after
+            }
+            let limit = Int(request.limit ?? UInt32.max)
+            return encodeEnvelope(ok: true, payload: ["events": Array(filtered.prefix(limit))])
+        }
+    }
+
+    func probeLoopback(config: LXISHNativeConfig, request: LXISHLoopbackProbeRequest) -> String {
+        guard request.port > 0,
+              let port = NWEndpoint.Port(rawValue: request.port)
+        else {
+            return encodeError(code: "invalid_request", message: "loopback port must be greater than zero")
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultLock = NSLock()
+        var reachable = false
+        var finished = false
+        let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                resultLock.lock()
+                if !finished {
+                    reachable = true
+                    finished = true
+                    semaphore.signal()
+                }
+                resultLock.unlock()
+            case .failed, .cancelled:
+                resultLock.lock()
+                if !finished {
+                    finished = true
+                    semaphore.signal()
+                }
+                resultLock.unlock()
+            default:
+                break
+            }
+        }
+        connection.start(queue: DispatchQueue(label: "com.lingxi.ish-native.loopback-probe"))
+        _ = semaphore.wait(timeout: .now() + .milliseconds(Int(request.timeoutMs)))
+        connection.cancel()
+        resultLock.lock()
+        let result = reachable
+        resultLock.unlock()
+        return encodeEnvelope(ok: true, payload: ["reachable": result])
+    }
+
     func openPty(config: LXISHNativeConfig, request: LXISHPtyOpenRequest) -> String {
         execute(config: config) { runtime in
             _ = try self.rootfsManager.installIfNeeded(for: config)
@@ -681,6 +959,79 @@ private final class LXISHNativeCoordinator {
             }
             let limit = Int(request.limit ?? UInt32.max)
             return encodeEnvelope(ok: true, payload: ["events": Array(filtered.prefix(limit))])
+        }
+    }
+
+    private func recordBackgroundLine(
+        runtimeKey: String,
+        processId: String,
+        line: String,
+        isStdErr: Bool
+    ) {
+        queue.async {
+            guard var runtime = self.runtimes[runtimeKey],
+                  let process = runtime.backgroundProcesses[processId],
+                  !process.terminal
+            else { return }
+            runtime.nextSequence += 1
+            runtime.backgroundEvents.append(
+                LXISHBackgroundEventPayload(
+                    sequence: runtime.nextSequence,
+                    processId: processId,
+                    kind: isStdErr ? "stderr_chunk" : "stdout_line",
+                    line: isStdErr ? nil : line,
+                    dataBase64: isStdErr ? Data("\(line)\n".utf8).base64EncodedString() : nil,
+                    exitCode: nil,
+                    cancelled: nil,
+                    detail: nil
+                )
+            )
+            self.trimBackgroundEvents(&runtime)
+            self.runtimes[runtimeKey] = runtime
+        }
+    }
+
+    private func recordBackgroundCompletion(
+        runtimeKey: String,
+        processId: String,
+        result: LXISHShellExecutionResultBox
+    ) {
+        queue.async {
+            guard var runtime = self.runtimes[runtimeKey],
+                  let process = runtime.backgroundProcesses[processId],
+                  !process.terminal
+            else { return }
+            process.terminal = true
+            let cancelled = process.killRequested || result.errorCode == -4
+            let detail: String?
+            switch result.errorCode {
+            case -3: detail = "background process timed out"
+            case -4: detail = "background process cancelled"
+            case 0: detail = nil
+            default: detail = "background process failed with executor error \(result.errorCode)"
+            }
+            runtime.nextSequence += 1
+            runtime.backgroundEvents.append(
+                LXISHBackgroundEventPayload(
+                    sequence: runtime.nextSequence,
+                    processId: processId,
+                    kind: "process_exited",
+                    line: nil,
+                    dataBase64: nil,
+                    exitCode: result.exitCode,
+                    cancelled: cancelled,
+                    detail: detail
+                )
+            )
+            self.trimBackgroundEvents(&runtime)
+            self.runtimes[runtimeKey] = runtime
+        }
+    }
+
+    private func trimBackgroundEvents(_ runtime: inout RuntimeState) {
+        let overflow = runtime.backgroundEvents.count - 4096
+        if overflow > 0 {
+            runtime.backgroundEvents.removeFirst(overflow)
         }
     }
 
@@ -822,6 +1173,8 @@ private func encodeEnvelope(ok: Bool, payload: [String: Any]) -> String {
         case let value as UInt32:
             result[item.key] = AnyEncodable(value)
         case let value as [LXISHPtyEventPayload]:
+            result[item.key] = AnyEncodable(value)
+        case let value as [LXISHBackgroundEventPayload]:
             result[item.key] = AnyEncodable(value)
         case let value as LXISHRootfsStatus:
             result[item.key] = AnyEncodable(value)
@@ -988,6 +1341,54 @@ func lx_ish_native_run_sync_json(
     }
 }
 
+@_cdecl("lx_ish_native_background_spawn_json")
+func lx_ish_native_background_spawn_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHRunRequest.self)
+        return LXISHNativeCoordinator.shared.spawnBackground(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_background_kill_json")
+func lx_ish_native_background_kill_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHBackgroundProcessRequest.self)
+        return LXISHNativeCoordinator.shared.killBackground(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_background_poll_json")
+func lx_ish_native_background_poll_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHBackgroundPollRequest.self)
+        return LXISHNativeCoordinator.shared.pollBackground(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_probe_loopback_json")
+func lx_ish_native_probe_loopback_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHLoopbackProbeRequest.self)
+        return LXISHNativeCoordinator.shared.probeLoopback(config: config, request: request)
+    }
+}
+
 @_cdecl("lx_ish_native_pty_open_json")
 func lx_ish_native_pty_open_json(
     _ configJSON: UnsafePointer<CChar>?,
@@ -1098,6 +1499,38 @@ func lingxi_ish_run_json(
     _ requestJSON: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>? {
     lx_ish_native_run_sync_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_background_spawn_json")
+func lingxi_ish_background_spawn_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_background_spawn_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_background_kill_json")
+func lingxi_ish_background_kill_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_background_kill_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_background_poll_json")
+func lingxi_ish_background_poll_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_background_poll_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_probe_loopback_json")
+func lingxi_ish_probe_loopback_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_probe_loopback_json(configJSON, requestJSON)
 }
 
 @_cdecl("lingxi_ish_pty_open_json")

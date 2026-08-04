@@ -14,6 +14,9 @@ thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
+rusqlite = { version = "0.32.1", features = ["backup", "bundled"] }
+sha2 = "0.10"
+git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2"] }
 # Feature-scoped persisted ids (8 lowercase hex chars), same generator family as
 # `tools/cron::generate_cron_task_id`.
 rand = "0.9"

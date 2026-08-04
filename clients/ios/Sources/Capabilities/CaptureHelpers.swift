@@ -67,7 +67,10 @@ enum VoiceCapturePhase: Equatable {
 /// and lets tests prove that a cancelled recording never submits a transcript.
 @MainActor
 protocol VoiceTranscriptionSession: AnyObject {
-    func transcribe(language: String?) async throws -> String
+    func transcribe(
+        language: String?,
+        automaticEndpointAfterSilence: Duration?
+    ) async throws -> String
     func finishRecording()
     func cancelRecognition()
 }
@@ -77,8 +80,14 @@ protocol VoiceTranscriptionSession: AnyObject {
     private final class SystemVoiceTranscriptionSession: VoiceTranscriptionSession {
         private let implementation = SttImpl()
 
-        func transcribe(language: String?) async throws -> String {
-            try await implementation.transcribe(language: language)
+        func transcribe(
+            language: String?,
+            automaticEndpointAfterSilence: Duration?
+        ) async throws -> String {
+            try await implementation.transcribe(
+                language: language,
+                automaticEndpointAfterSilence: automaticEndpointAfterSilence
+            )
         }
 
         func finishRecording() {
@@ -127,9 +136,14 @@ final class VoiceCapture {
     }
 
     /// Begin opening the microphone immediately. A matching `finish()` ends the
-    /// audio request and lets Speech return its final result; `cancel()` tears the
-    /// whole session down and deliberately suppresses completion delivery.
-    func start(language: String? = nil, completion: @escaping Completion) {
+    /// audio request and lets Speech return its final result. Flow Mode can also
+    /// supply a trailing-silence interval for automatic endpointing; `cancel()`
+    /// tears the whole session down and suppresses completion delivery.
+    func start(
+        language: String? = nil,
+        automaticEndpointAfterSilence: Duration? = nil,
+        completion: @escaping Completion
+    ) {
         cancel()
         guard let session = makeSession() else {
             completion(.failed("speech unavailable on this platform"))
@@ -141,7 +155,10 @@ final class VoiceCapture {
         let task = Task { [weak self, session] in
             let result: VoiceCaptureResult
             do {
-                let text = try await session.transcribe(language: language)
+                let text = try await session.transcribe(
+                    language: language,
+                    automaticEndpointAfterSilence: automaticEndpointAfterSilence
+                )
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 result = text.isEmpty ? .empty : .transcript(text)
             } catch is CancellationError {

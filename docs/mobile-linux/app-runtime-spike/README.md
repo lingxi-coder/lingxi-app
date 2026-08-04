@@ -1,5 +1,12 @@
 # local-apps phase-0 spike: Node + Next.js dev under the Alpine PRoot runtime
 
+> Historical measurement fixture only. Production pins, the production-only
+> runtime command contract, SBOM, and static-export-compatible scaffold now
+> live in `docs/mobile-linux/local-app-runtime-pins.json`,
+> `docs/mobile-linux/local-app-runtime-policy.json`, and
+> `lingxi-code/local-apps/templates/next-static-v1`. Never use the placeholder
+> spike manifest as a release input.
+
 This directory is a **manual feasibility spike kit**, not product code. It
 answers one question with numbers from a real device: *can the existing
 Alpine 3.21.3 PRoot runtime (see `docs/mobile-linux/rootfs/README.md` and

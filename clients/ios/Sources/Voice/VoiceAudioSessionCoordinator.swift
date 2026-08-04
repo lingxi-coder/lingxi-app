@@ -7,6 +7,9 @@ actor VoiceAudioSessionCoordinator {
         case recognition
         case recording
         case playback
+        /// Flow Mode owns input monitoring and speech output simultaneously.
+        /// The monitor enables voice processing on its AVAudioEngine I/O node.
+        case flowDuplex
     }
 
     struct Lease: Equatable, Sendable {
@@ -43,14 +46,21 @@ actor VoiceAudioSessionCoordinator {
             object: AVAudioSession.sharedInstance(),
             queue: nil
         ) { [weak self] note in
-            Task { await self?.handleInterruption(note) }
+            guard let rawType = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else {
+                return
+            }
+            let rawOptions = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            Task { await self?.handleInterruption(rawType: rawType, rawOptions: rawOptions) }
         })
         observers.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(),
             queue: nil
         ) { [weak self] note in
-            Task { await self?.handleRouteChange(note) }
+            guard let rawReason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else {
+                return
+            }
+            Task { await self?.handleRouteChange(rawReason: rawReason) }
         })
     }
 
@@ -77,6 +87,12 @@ actor VoiceAudioSessionCoordinator {
             try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetoothHFP])
         case .playback:
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        case .flowDuplex:
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.defaultToSpeaker, .allowBluetoothHFP]
+            )
         }
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
@@ -99,7 +115,10 @@ actor VoiceAudioSessionCoordinator {
             try configureAndActivate(lease.purpose)
             state = .active(lease)
         } catch {
-            state = .idle
+            // The caller still owns the lease even when reactivation fails.
+            // Only `release` may make the coordinator idle; otherwise a second
+            // microphone or synthesizer could start over the stale owner.
+            state = .backgrounded(lease)
         }
     }
 
@@ -110,37 +129,32 @@ actor VoiceAudioSessionCoordinator {
         }
     }
 
-    private func handleInterruption(_ notification: Notification) {
-        guard
-            let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-            let type = AVAudioSession.InterruptionType(rawValue: raw)
-        else { return }
+    private func handleInterruption(rawType: UInt, rawOptions: UInt) {
+        guard let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
         switch type {
         case .began:
             if case .active(let lease) = state { state = .interrupted(lease) }
         case .ended:
             guard case .interrupted(let lease) = state else { return }
-            let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             if AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume) {
                 do {
                     try configureAndActivate(lease.purpose)
                     state = .active(lease)
                 } catch {
-                    state = .idle
+                    state = .interrupted(lease)
                 }
             } else {
-                state = .idle
+                state = .interrupted(lease)
             }
         @unknown default:
-            state = .idle
+            break
         }
     }
 
-    private func handleRouteChange(_ notification: Notification) {
+    private func handleRouteChange(rawReason: UInt) {
         guard case .active(let lease) = state else { return }
         guard
-            let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-            let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
+            let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason),
             reason == .oldDeviceUnavailable || reason == .newDeviceAvailable
         else { return }
         // Reapply the purpose-specific category so Bluetooth HFP and speaker
@@ -149,7 +163,7 @@ actor VoiceAudioSessionCoordinator {
             try configureAndActivate(lease.purpose)
             state = .active(lease)
         } catch {
-            state = .idle
+            state = .interrupted(lease)
         }
     }
 }

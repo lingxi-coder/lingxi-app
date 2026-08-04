@@ -17,12 +17,14 @@ use traits::{
     LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
-    MountSpec, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
-    SandboxBackend,
+    MountSpec, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
+    RootfsStatus, SandboxBackend,
 };
 
 const MAX_EVENTS: usize = 4096;
 const PTY_IDLE_POLL: Duration = Duration::from_millis(25);
+const BACKGROUND_IDLE_POLL: Duration = Duration::from_millis(25);
+const BACKGROUND_REAP_BUDGET: Duration = Duration::from_secs(3);
 const LINGXI_DOT_DIR: &str = ".lingxi";
 
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
@@ -85,6 +87,7 @@ impl IosIshRuntimeConfig {
 #[derive(Debug)]
 struct TaskControl {
     snapshot: Mutex<MobileLinuxTaskSnapshot>,
+    native_handle: Mutex<Option<String>>,
     cancel_requested: AtomicBool,
     terminal_emitted: AtomicBool,
 }
@@ -101,6 +104,7 @@ impl TaskControl {
                 exit_code: None,
                 detail: None,
             }),
+            native_handle: Mutex::new(None),
             cancel_requested: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
         }
@@ -403,6 +407,188 @@ impl IosIshRuntime {
         .map_err(|error| MobileLinuxError::Io(format!("join run_json: {error}")))?
         .map_err(MobileLinuxError::Io)?;
         parse_run_response(&response_json)
+    }
+
+    async fn native_spawn_background(
+        &self,
+        request: &LinuxCommandRequest,
+        mounts: &[MountSpec],
+    ) -> Result<String, MobileLinuxError> {
+        let config_json = self.native_config_json()?;
+        let payload = RunRequestPayload::from_request(request, mounts);
+        let request_json = serde_json::to_string(&payload).map_err(|error| {
+            MobileLinuxError::Io(format!("serialize background request: {error}"))
+        })?;
+        let native_lock = self.state.native_lock.clone();
+        let response = spawn_blocking(move || {
+            let _guard = native_lock.lock().expect("ios-ish native lock");
+            native::spawn_background_json(&config_json, &request_json)
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join spawn_background: {error}")))?
+        .map_err(MobileLinuxError::Io)?;
+        parse_process_id_response(&response)
+    }
+
+    async fn native_kill_background(&self, process_id: &str) -> Result<bool, MobileLinuxError> {
+        let config_json = self.native_config_json()?;
+        let request_json = serde_json::to_string(&BackgroundProcessPayload {
+            process_id: process_id.to_string(),
+        })
+        .map_err(|error| MobileLinuxError::Io(format!("serialize background kill: {error}")))?;
+        let native_lock = self.state.native_lock.clone();
+        let response = spawn_blocking(move || {
+            let _guard = native_lock.lock().expect("ios-ish native lock");
+            native::kill_background_json(&config_json, &request_json)
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join kill_background: {error}")))?
+        .map_err(MobileLinuxError::Io)?;
+        parse_background_kill_response(&response)
+    }
+
+    async fn native_poll_background(
+        &self,
+        process_id: &str,
+        after_sequence: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<NativeBackgroundEventPayload>, MobileLinuxError> {
+        let config_json = self.native_config_json()?;
+        let request_json = serde_json::to_string(&BackgroundPollPayload {
+            process_id: process_id.to_string(),
+            after_sequence,
+            limit: Some(limit),
+        })
+        .map_err(|error| MobileLinuxError::Io(format!("serialize background poll: {error}")))?;
+        let native_lock = self.state.native_lock.clone();
+        let response = spawn_blocking(move || {
+            let _guard = native_lock.lock().expect("ios-ish native lock");
+            native::poll_background_json(&config_json, &request_json)
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join poll_background: {error}")))?
+        .map_err(MobileLinuxError::Io)?;
+        parse_background_events(&response)
+    }
+
+    fn spawn_background_reader(
+        &self,
+        task_id: String,
+        native_process_id: String,
+        task: Arc<TaskControl>,
+    ) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let mut last_sequence = None;
+            loop {
+                match runtime
+                    .native_poll_background(
+                        &native_process_id,
+                        last_sequence,
+                        traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH as u32,
+                    )
+                    .await
+                {
+                    Ok(events) if events.is_empty() => {
+                        if task.terminal_emitted.load(Ordering::Acquire) {
+                            break;
+                        }
+                        tokio::time::sleep(BACKGROUND_IDLE_POLL).await;
+                    }
+                    Ok(events) => {
+                        let mut terminal = false;
+                        for event in events {
+                            last_sequence = Some(
+                                last_sequence
+                                    .map_or(event.sequence, |current| current.max(event.sequence)),
+                            );
+                            match event.kind.as_str() {
+                                "stdout_line" => runtime.emit(
+                                    Some(task_id.clone()),
+                                    MobileLinuxEventKind::StdoutLine {
+                                        line: event.line.unwrap_or_default(),
+                                    },
+                                ),
+                                "stderr_chunk" => match event.data_base64.as_deref() {
+                                    Some(encoded) => match decode_base64(encoded) {
+                                        Ok(chunk) => runtime.emit(
+                                            Some(task_id.clone()),
+                                            MobileLinuxEventKind::StderrChunk { chunk },
+                                        ),
+                                        Err(error) => runtime.emit_runtime_error(
+                                            Some(task_id.clone()),
+                                            error.to_string(),
+                                        ),
+                                    },
+                                    None => runtime.emit_runtime_error(
+                                        Some(task_id.clone()),
+                                        "native stderr event omitted data_base64",
+                                    ),
+                                },
+                                "process_exited" => {
+                                    let (status, exit_code, detail) = background_terminal_state(
+                                        task.cancel_requested.load(Ordering::Acquire),
+                                        &event,
+                                    );
+                                    runtime.finish_task(&task_id, &task, status, exit_code, detail);
+                                    terminal = true;
+                                }
+                                other => runtime.emit_runtime_error(
+                                    Some(task_id.clone()),
+                                    format!("unknown native background event kind: {other}"),
+                                ),
+                            }
+                        }
+                        if terminal {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        runtime.emit_runtime_error(Some(task_id.clone()), error.to_string());
+                        runtime.finish_task(
+                            &task_id,
+                            &task,
+                            MobileLinuxTaskStatus::Failed,
+                            None,
+                            Some(error.to_string()),
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Probe whether an app-owned loopback server is accepting TCP connections.
+    ///
+    /// This is deliberately exposed on the concrete iSH runtime rather than the
+    /// shared trait because only the iOS native bridge needs host-side probing.
+    pub async fn probe_loopback_port(
+        &self,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<bool, MobileLinuxError> {
+        self.ensure_native_available()?;
+        if port == 0 {
+            return Err(MobileLinuxError::InvalidRequest(
+                "loopback port must be greater than zero".to_string(),
+            ));
+        }
+        let config_json = self.native_config_json()?;
+        let request_json = serde_json::to_string(&LoopbackProbePayload {
+            port,
+            timeout_ms: timeout.as_millis().clamp(1, u128::from(u32::MAX)) as u32,
+        })
+        .map_err(|error| MobileLinuxError::Io(format!("serialize loopback probe: {error}")))?;
+        let native_lock = self.state.native_lock.clone();
+        let response = spawn_blocking(move || {
+            let _guard = native_lock.lock().expect("ios-ish native lock");
+            native::probe_loopback_json(&config_json, &request_json)
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join loopback probe: {error}")))?
+        .map_err(MobileLinuxError::Io)?;
+        parse_loopback_probe(&response)
     }
 
     async fn run_inner(
@@ -747,8 +933,8 @@ impl MobileLinuxRuntime for IosIshRuntime {
             backend: SandboxBackend::IosIsh,
             mode: MobileLinuxRuntimeMode::MobileLinux,
             reason,
-            streaming_output: false,
-            background_processes: false,
+            streaming_output: true,
+            background_processes: true,
             pty: true,
             bind_mounts: true,
             rootfs_integrity: true,
@@ -831,15 +1017,155 @@ impl MobileLinuxRuntime for IosIshRuntime {
         Ok(result)
     }
 
-    async fn spawn_background(
+    async fn run_streaming(
         &self,
-        _request: LinuxCommandRequest,
-    ) -> Result<LinuxProcessHandle, MobileLinuxError> {
-        Err(MobileLinuxError::Unsupported)
+        request: LinuxCommandRequest,
+        sink: Arc<dyn ProcessStreamSink>,
+    ) -> Result<LinuxCommandResult, MobileLinuxError> {
+        let mut cursor = self
+            .state
+            .next_sequence
+            .load(Ordering::Acquire)
+            .saturating_sub(1);
+        let handle = self.spawn_background(request).await?;
+        let mut stdout = String::new();
+        let mut stderr = Vec::new();
+
+        loop {
+            for event in self
+                .read_events(
+                    Some(cursor),
+                    traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH,
+                )
+                .await?
+            {
+                cursor = cursor.max(event.sequence);
+                if event.task_id.as_deref() != Some(handle.id.as_str()) {
+                    continue;
+                }
+                let sink_result = match event.kind {
+                    MobileLinuxEventKind::StdoutLine { line } => {
+                        stdout.push_str(&line);
+                        stdout.push('\n');
+                        sink.stdout_line(line).await
+                    }
+                    MobileLinuxEventKind::StderrChunk { chunk } => {
+                        stderr.extend_from_slice(&chunk);
+                        sink.stderr_chunk(chunk).await
+                    }
+                    _ => Ok(()),
+                };
+                if let Err(error) = sink_result {
+                    let _ = self.kill(&handle).await;
+                    return Err(MobileLinuxError::from(error));
+                }
+            }
+
+            let snapshot = self.task_status(&handle.id).await?.ok_or_else(|| {
+                MobileLinuxError::Io("streaming task disappeared from the runtime".to_string())
+            })?;
+            if matches!(
+                snapshot.status,
+                MobileLinuxTaskStatus::Completed
+                    | MobileLinuxTaskStatus::Failed
+                    | MobileLinuxTaskStatus::Cancelled
+                    | MobileLinuxTaskStatus::TimedOut
+            ) {
+                return Ok(LinuxCommandResult {
+                    stdout,
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    exit_code: snapshot.exit_code.unwrap_or(-1),
+                    timed_out: matches!(snapshot.status, MobileLinuxTaskStatus::TimedOut),
+                    cancelled: matches!(snapshot.status, MobileLinuxTaskStatus::Cancelled),
+                });
+            }
+            tokio::time::sleep(BACKGROUND_IDLE_POLL).await;
+        }
     }
 
-    async fn kill(&self, _handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
-        Err(MobileLinuxError::Unsupported)
+    async fn spawn_background(
+        &self,
+        request: LinuxCommandRequest,
+    ) -> Result<LinuxProcessHandle, MobileLinuxError> {
+        validate_request(&request)?;
+        self.boot().await?;
+        let mounts = self.merged_mounts(&request.mounts)?;
+        self.apply_mounts(&mounts).await?;
+        let (task_id, task) = self.create_task(
+            "bg",
+            display_command(&request.command, &request.args),
+            MobileLinuxTaskStatus::Backgrounded,
+        );
+        let native_process_id = match self.native_spawn_background(&request, &mounts).await {
+            Ok(process_id) if !process_id.trim().is_empty() => process_id,
+            Ok(_) => {
+                let error = MobileLinuxError::Io(
+                    "native background spawn returned an empty process id".to_string(),
+                );
+                self.finish_task(
+                    &task_id,
+                    &task,
+                    MobileLinuxTaskStatus::Failed,
+                    None,
+                    Some(error.to_string()),
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                self.finish_task(
+                    &task_id,
+                    &task,
+                    MobileLinuxTaskStatus::Failed,
+                    None,
+                    Some(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        *task
+            .native_handle
+            .lock()
+            .expect("ios-ish native handle mutex") = Some(native_process_id.clone());
+        self.spawn_background_reader(task_id.clone(), native_process_id, task);
+        Ok(LinuxProcessHandle { id: task_id })
+    }
+
+    async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
+        let task = self
+            .state
+            .tasks
+            .lock()
+            .expect("ios-ish tasks mutex")
+            .get(&handle.id)
+            .cloned()
+            .ok_or_else(|| MobileLinuxError::InvalidRequest("unknown task handle".to_string()))?;
+        if task.terminal_emitted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let native_process_id = task
+            .native_handle
+            .lock()
+            .expect("ios-ish native handle mutex")
+            .clone()
+            .ok_or_else(|| {
+                MobileLinuxError::InvalidRequest(
+                    "task is not a killable background process".to_string(),
+                )
+            })?;
+        if self.native_kill_background(&native_process_id).await? {
+            task.cancel_requested.store(true, Ordering::Release);
+        }
+        let deadline = tokio::time::Instant::now() + BACKGROUND_REAP_BUDGET;
+        while !task.terminal_emitted.load(Ordering::Acquire) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MobileLinuxError::Io(format!(
+                    "background task {} did not reap within 3 seconds",
+                    handle.id
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
     }
 
     async fn open_pty(
@@ -1175,6 +1501,24 @@ struct PtyPollPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct BackgroundProcessPayload {
+    process_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BackgroundPollPayload {
+    process_id: String,
+    after_sequence: Option<u64>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoopbackProbePayload {
+    port: u16,
+    timeout_ms: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct MountPayload {
     host_path: String,
     guest_path: String,
@@ -1246,6 +1590,21 @@ struct NativeSessionEnvelope {
     session_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NativeProcessEnvelope {
+    ok: bool,
+    error: Option<NativeErrorPayload>,
+    process_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeBackgroundKillEnvelope {
+    ok: bool,
+    error: Option<NativeErrorPayload>,
+    termination_requested: Option<bool>,
+    already_stopped: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct NativePtyEventPayload {
     sequence: u64,
@@ -1261,6 +1620,51 @@ struct NativePollEnvelope {
     error: Option<NativeErrorPayload>,
     #[serde(default)]
     events: Vec<NativePtyEventPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NativeBackgroundEventPayload {
+    sequence: u64,
+    kind: String,
+    line: Option<String>,
+    data_base64: Option<String>,
+    exit_code: Option<i32>,
+    cancelled: Option<bool>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeBackgroundPollEnvelope {
+    ok: bool,
+    error: Option<NativeErrorPayload>,
+    #[serde(default)]
+    events: Vec<NativeBackgroundEventPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeLoopbackProbeEnvelope {
+    ok: bool,
+    error: Option<NativeErrorPayload>,
+    reachable: Option<bool>,
+}
+
+fn background_terminal_state(
+    cancel_requested: bool,
+    event: &NativeBackgroundEventPayload,
+) -> (MobileLinuxTaskStatus, Option<i32>, Option<String>) {
+    let cancelled = cancel_requested || event.cancelled.unwrap_or(false);
+    let status = if cancelled {
+        MobileLinuxTaskStatus::Cancelled
+    } else if event.exit_code == Some(0) {
+        MobileLinuxTaskStatus::Completed
+    } else {
+        MobileLinuxTaskStatus::Failed
+    };
+    let detail = event
+        .detail
+        .clone()
+        .or_else(|| cancelled.then(|| "task cancelled".to_string()));
+    (status, event.exit_code, detail)
 }
 
 fn parse_run_response(json: &str) -> Result<LinuxCommandResult, MobileLinuxError> {
@@ -1317,6 +1721,43 @@ fn parse_session_id_response(json: &str) -> Result<String, MobileLinuxError> {
         .ok_or_else(|| MobileLinuxError::Io("native PTY response omitted session_id".to_string()))
 }
 
+fn parse_process_id_response(json: &str) -> Result<String, MobileLinuxError> {
+    let envelope = serde_json::from_str::<NativeProcessEnvelope>(json)
+        .map_err(|error| MobileLinuxError::Io(format!("parse background response: {error}")))?;
+    if !envelope.ok {
+        return Err(native_error_to_mobile(envelope.error.unwrap_or(
+            NativeErrorPayload {
+                code: "io".to_string(),
+                message: "native background response indicated failure".to_string(),
+            },
+        )));
+    }
+    envelope.process_id.ok_or_else(|| {
+        MobileLinuxError::Io("native background response omitted process_id".to_string())
+    })
+}
+
+fn parse_background_kill_response(json: &str) -> Result<bool, MobileLinuxError> {
+    let envelope = serde_json::from_str::<NativeBackgroundKillEnvelope>(json).map_err(|error| {
+        MobileLinuxError::Io(format!("parse background kill response: {error}"))
+    })?;
+    if !envelope.ok {
+        return Err(native_error_to_mobile(envelope.error.unwrap_or(
+            NativeErrorPayload {
+                code: "io".to_string(),
+                message: "native background kill response indicated failure".to_string(),
+            },
+        )));
+    }
+    match (envelope.termination_requested, envelope.already_stopped) {
+        (Some(requested), _) => Ok(requested),
+        (None, Some(true)) => Ok(false),
+        _ => Err(MobileLinuxError::Io(
+            "native background kill response omitted termination state".to_string(),
+        )),
+    }
+}
+
 fn parse_poll_events(json: &str) -> Result<Vec<NativePtyEventPayload>, MobileLinuxError> {
     let envelope = serde_json::from_str::<NativePollEnvelope>(json)
         .map_err(|error| MobileLinuxError::Io(format!("parse PTY poll response: {error}")))?;
@@ -1330,6 +1771,40 @@ fn parse_poll_events(json: &str) -> Result<Vec<NativePtyEventPayload>, MobileLin
             },
         )))
     }
+}
+
+fn parse_background_events(
+    json: &str,
+) -> Result<Vec<NativeBackgroundEventPayload>, MobileLinuxError> {
+    let envelope = serde_json::from_str::<NativeBackgroundPollEnvelope>(json).map_err(|error| {
+        MobileLinuxError::Io(format!("parse background poll response: {error}"))
+    })?;
+    if envelope.ok {
+        Ok(envelope.events)
+    } else {
+        Err(native_error_to_mobile(envelope.error.unwrap_or(
+            NativeErrorPayload {
+                code: "io".to_string(),
+                message: "native background poll indicated failure".to_string(),
+            },
+        )))
+    }
+}
+
+fn parse_loopback_probe(json: &str) -> Result<bool, MobileLinuxError> {
+    let envelope = serde_json::from_str::<NativeLoopbackProbeEnvelope>(json)
+        .map_err(|error| MobileLinuxError::Io(format!("parse loopback probe response: {error}")))?;
+    if !envelope.ok {
+        return Err(native_error_to_mobile(envelope.error.unwrap_or(
+            NativeErrorPayload {
+                code: "io".to_string(),
+                message: "native loopback probe indicated failure".to_string(),
+            },
+        )));
+    }
+    envelope
+        .reachable
+        .ok_or_else(|| MobileLinuxError::Io("native loopback probe omitted reachable".to_string()))
 }
 
 fn parse_availability_reason(json: &str) -> Option<String> {
@@ -1760,6 +2235,22 @@ mod native {
                 config_json: *const c_char,
                 request_json: *const c_char,
             ) -> *mut c_char;
+            fn lingxi_ish_background_spawn_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_background_kill_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_background_poll_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_probe_loopback_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
             fn lingxi_ish_pty_open_json(
                 config_json: *const c_char,
                 request_json: *const c_char,
@@ -1818,6 +2309,34 @@ mod native {
 
         pub fn run_sync_json(config_json: &str, request_json: &str) -> Result<String, String> {
             call_binary(config_json, request_json, lingxi_ish_run_json)
+        }
+
+        pub fn spawn_background_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_background_spawn_json)
+        }
+
+        pub fn kill_background_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_background_kill_json)
+        }
+
+        pub fn poll_background_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_background_poll_json)
+        }
+
+        pub fn probe_loopback_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_probe_loopback_json)
         }
 
         pub fn pty_open_json(config_json: &str, request_json: &str) -> Result<String, String> {
@@ -1912,6 +2431,34 @@ mod native {
         }
 
         pub fn run_sync_json(_config_json: &str, _request_json: &str) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn spawn_background_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn kill_background_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn poll_background_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn probe_loopback_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
             Err(unavailable())
         }
 
@@ -2153,7 +2700,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_and_background_apis_report_no_background_support() {
+    fn capability_reports_background_contract_even_when_native_bridge_is_unavailable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("app");
         let runtime = IosIshRuntime::new(test_config(&root));
@@ -2163,18 +2710,79 @@ mod tests {
             .expect("tokio runtime");
 
         let capability = rt.block_on(runtime.probe_capability());
-        assert!(!capability.background_processes);
+        assert!(capability.background_processes);
+        assert!(capability.streaming_output);
+        assert!(!capability.available);
 
         let error = rt
             .block_on(runtime.spawn_background(command_request()))
-            .expect_err("background spawn must be unsupported");
-        assert!(matches!(error, MobileLinuxError::Unsupported));
+            .expect_err("background spawn requires the device bridge");
+        assert!(matches!(error, MobileLinuxError::Unavailable(_)));
 
         let error = rt
             .block_on(runtime.kill(&LinuxProcessHandle {
                 id: String::from("bg-1"),
             }))
-            .expect_err("background kill must be unsupported");
-        assert!(matches!(error, MobileLinuxError::Unsupported));
+            .expect_err("unknown background handle must fail");
+        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn native_background_envelopes_preserve_stream_and_terminal_state() {
+        let process_id =
+            parse_process_id_response(r#"{"ok":true,"process_id":"process-42","guest_pid":42}"#)
+                .expect("parse process id");
+        assert_eq!(process_id, "process-42");
+        assert!(parse_background_kill_response(
+            r#"{"ok":true,"process_id":"process-42","termination_requested":true}"#
+        )
+        .expect("parse requested termination"));
+        assert!(!parse_background_kill_response(
+            r#"{"ok":true,"process_id":"process-42","already_stopped":true}"#
+        )
+        .expect("parse idempotent termination"));
+
+        let events = parse_background_events(
+            r#"{"ok":true,"events":[{"sequence":7,"kind":"stdout_line","line":"ready","data_base64":null,"exit_code":null,"cancelled":null,"detail":null},{"sequence":8,"kind":"stderr_chunk","line":null,"data_base64":"d2Fybg==","exit_code":null,"cancelled":null,"detail":null},{"sequence":9,"kind":"process_exited","line":null,"data_base64":null,"exit_code":143,"cancelled":true,"detail":"terminated"}]}"#,
+        )
+        .expect("parse background events");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].line.as_deref(), Some("ready"));
+        assert_eq!(
+            decode_base64(events[1].data_base64.as_deref().unwrap()).unwrap(),
+            b"warn"
+        );
+        assert_eq!(events[2].exit_code, Some(143));
+        assert_eq!(events[2].cancelled, Some(true));
+
+        let (status, exit_code, detail) = background_terminal_state(false, &events[2]);
+        assert_eq!(status, MobileLinuxTaskStatus::Cancelled);
+        assert_eq!(exit_code, Some(143));
+        assert_eq!(detail.as_deref(), Some("terminated"));
+
+        let completed = NativeBackgroundEventPayload {
+            sequence: 10,
+            kind: "process_exited".to_string(),
+            line: None,
+            data_base64: None,
+            exit_code: Some(0),
+            cancelled: Some(false),
+            detail: None,
+        };
+        assert_eq!(
+            background_terminal_state(false, &completed).0,
+            MobileLinuxTaskStatus::Completed
+        );
+        assert_eq!(
+            background_terminal_state(true, &completed).0,
+            MobileLinuxTaskStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn loopback_probe_requires_reachable_field() {
+        assert!(parse_loopback_probe(r#"{"ok":true,"reachable":true}"#).unwrap());
+        let error = parse_loopback_probe(r#"{"ok":true}"#).expect_err("reachable is required");
+        assert!(matches!(error, MobileLinuxError::Io(_)));
     }
 }

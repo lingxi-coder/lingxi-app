@@ -34,9 +34,11 @@
 //! field, a dropped variant) flips the matching golden and the test fails — that
 //! is the contract-freeze guarantee.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
     ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto, ProviderCredentialSecretDto,
 };
@@ -45,15 +47,23 @@ use client_protocol::computer_access::{
     TccStateDto,
 };
 use client_protocol::error::ClientError;
-use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
+use client_protocol::events::{
+    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto,
+};
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
-    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
-    AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto,
+    builtin_app_templates, AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
+    AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
+    AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
+    AppDataFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto,
+    AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppManifestDto, AppRecordDto,
+    AppRuntimeDetailsDto,
+    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
+    AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
     AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -425,6 +435,22 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/app_templates_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppTemplatesChanged {
+                    templates: builtin_app_templates(),
+                },
+            },
+        ),
+        (
+            "event/app_details_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppDetailsChanged {
+                    details: canonical_app_details(),
+                },
+            },
+        ),
+        (
             "event/app_designer_requested.json",
             ClientEvent::AppDesignerRequested {
                 app_id: "habits-1a2b".to_string(),
@@ -483,10 +509,19 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/app_generation_job_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppGenerationJobChanged {
+                    job: canonical_generation_job(),
+                },
+            },
+        ),
+        (
             "event/app_runtime_changed.json",
             ClientEvent::AppRuntimeChanged {
                 app_id: "habits-1a2b".to_string(),
                 state: AppRuntimeStateDto::Stopped,
+                details: Some(canonical_app_details().runtime),
                 last_error: None,
             },
         ),
@@ -500,6 +535,48 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/app_bridge_response.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppBridgeResponse {
+                    response: AppBridgeResponseDto {
+                        request_id: "bridge-00000001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        ok: true,
+                        result_json: Some("[]".to_string()),
+                        error: None,
+                    },
+                },
+            },
+        ),
+        (
+            "event/app_ui_request.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppUiRequest {
+                    request: AppUiRequestDto {
+                        request_id: "ui-00000001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        action: AppUiActionKindDto::Inspect,
+                        target: None,
+                        value: None,
+                    },
+                },
+            },
+        ),
+        (
+            "event/app_capability_requested.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppCapabilityRequested {
+                    request: AppCapabilityRequestDto {
+                        request_id: "cap-00000001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        capability: AppCapabilityKindDto::NetworkDomain,
+                        domain: Some("api.example.com".to_string()),
+                        reason: "Fetch approved remote data".to_string(),
+                    },
+                },
+            },
+        ),
+        (
             "event/app_checkpoint_created.json",
             ClientEvent::AppCheckpointCreated {
                 app_id: "habits-1a2b".to_string(),
@@ -508,6 +585,15 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     label: "Preview approved".to_string(),
                     kind: AppCheckpointKindDto::PreviewApproved,
                     created_at_ms: 1_750_000_000_000,
+                },
+            },
+        ),
+        (
+            "event/app_checkpoints_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppCheckpointsChanged {
+                    app_id: "habits-1a2b".to_string(),
+                    checkpoints: vec![],
                 },
             },
         ),
@@ -544,10 +630,52 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 delay_ms: 1_000,
             },
         ),
+        (
+            "event/ask_user_question.json",
+            ClientEvent::AskUserQuestion {
+                request: AskUserQuestionRequestDto {
+                    request_id: 9,
+                    questions: vec![AskQuestionDto {
+                        question: "Which database should the app use?".to_string(),
+                        header: "Storage".to_string(),
+                        options: vec![AskOptionDto {
+                            label: "SQLite".to_string(),
+                            description: "Local, file-backed, zero setup.".to_string(),
+                            preview: Some("app.sqlite".to_string()),
+                        }],
+                        multi_select: false,
+                    }],
+                    timeout_secs: Some(120),
+                },
+            },
+        ),
+        (
+            "event/ask_user_question_resolved.json",
+            ClientEvent::AskUserQuestionResolved { request_id: 9 },
+        ),
+        (
+            "event/commands_changed.json",
+            ClientEvent::CommandsChanged {
+                commands: vec![SlashCommandDto {
+                    name: "compact".to_string(),
+                    description: "Compact the conversation history.".to_string(),
+                    source: "builtin".to_string(),
+                }],
+            },
+        ),
+        (
+            "event/attachment.json",
+            ClientEvent::Attachment {
+                attachment: AttachmentDto::NestedMemory {
+                    display_path: "src/LINGXI.md".to_string(),
+                },
+            },
+        ),
     ]
 }
 
 /// Every `ClientCommand` variant, paired with its golden filename.
+#[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
         (
@@ -683,6 +811,16 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ),
         ("command/list_apps.json", ClientCommand::ListApps),
         (
+            "command/list_app_templates.json",
+            ClientCommand::ListAppTemplates,
+        ),
+        (
+            "command/get_app_details.json",
+            ClientCommand::GetAppDetails {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
             "command/create_app.json",
             ClientCommand::CreateApp {
                 name: "Habits".to_string(),
@@ -711,6 +849,21 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 app_id: "habits-1a2b".to_string(),
                 suggestion_id: "sugg-00000001".to_string(),
                 expected_revision: 4,
+            },
+        ),
+        (
+            "command/request_app_design_suggestion.json",
+            ClientCommand::RequestAppDesignSuggestion {
+                app_id: "habits-1a2b".to_string(),
+                expected_revision: 4,
+                prompt: Some("Use a calmer layout".to_string()),
+            },
+        ),
+        (
+            "command/dismiss_app_design_suggestion.json",
+            ClientCommand::DismissAppDesignSuggestion {
+                app_id: "habits-1a2b".to_string(),
+                suggestion_id: "sugg-00000001".to_string(),
             },
         ),
         (
@@ -761,6 +914,45 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
+            "command/retry_app_generation.json",
+            ClientCommand::RetryAppGeneration {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/execute_app_bridge_request.json",
+            ClientCommand::ExecuteAppBridgeRequest {
+                request: AppBridgeRequestDto {
+                    request_id: "bridge-00000001".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    operation: AppBridgeOperationDto::QueryData,
+                    payload_json: Some(r#"{"collection":"items"}"#.to_string()),
+                },
+            },
+        ),
+        (
+            "command/resolve_app_ui_request.json",
+            ClientCommand::ResolveAppUiRequest {
+                request_id: "ui-00000001".to_string(),
+                decision: AppAuthorizationDecisionDto::AllowSession,
+                result_json: Some(r#"{"elements":[]}"#.to_string()),
+                error: None,
+            },
+        ),
+        (
+            "command/resolve_app_capability_request.json",
+            ClientCommand::ResolveAppCapabilityRequest {
+                request_id: "cap-00000001".to_string(),
+                decision: AppAuthorizationDecisionDto::AllowAlways,
+            },
+        ),
+        (
+            "command/reset_app_permissions.json",
+            ClientCommand::ResetAppPermissions {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
             "command/list_app_checkpoints.json",
             ClientCommand::ListAppCheckpoints {
                 app_id: "habits-1a2b".to_string(),
@@ -779,8 +971,120 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 app_id: "habits-1a2b".to_string(),
             },
         ),
+        (
+            // Exactly ONE answer entry: `answers` is a `HashMap`, which
+            // `to_string_pretty` writes in (randomly seeded) iteration order —
+            // two or more entries would make the golden bytes non-deterministic.
+            "command/answer_ask_user_question.json",
+            ClientCommand::AnswerAskUserQuestion {
+                request_id: 9,
+                answers: HashMap::from([(
+                    "Which database should the app use?".to_string(),
+                    "SQLite".to_string(),
+                )]),
+            },
+        ),
+        (
+            "command/cancel_ask_user_question.json",
+            ClientCommand::CancelAskUserQuestion { request_id: 9 },
+        ),
         ("command/request_exit.json", ClientCommand::RequestExit),
     ]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Variant-coverage anchor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read the `snake_case` wire tags declared by one `#[serde(tag = "type",
+/// rename_all = "snake_case")]` enum straight out of the crate source.
+///
+/// This exists because `ClientCommand` / `ClientEvent` are `#[non_exhaustive]`:
+/// an integration test is a DOWNSTREAM crate, so a `match` over them always
+/// needs a wildcard arm and the compiler can never force a new variant to be
+/// handled here. Parsing the declaration is the only mechanism left that makes
+/// adding a variant automatically visible to [`every_variant_has_a_golden`] —
+/// a hand-maintained count or variant list would just drift the same way the
+/// goldens did.
+fn declared_wire_tags(source_file: &str, enum_name: &str) -> BTreeSet<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join(source_file);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let header = format!("pub enum {enum_name} {{");
+    let start = src
+        .find(&header)
+        .unwrap_or_else(|| panic!("`{header}` not found in {source_file}"));
+
+    let mut tags = BTreeSet::new();
+    let mut depth = 0_i32;
+    for line in src[start..].lines() {
+        let trimmed = line.trim_start();
+        // Doc comments legitimately contain unbalanced-looking braces; skip
+        // them before counting, and never read a variant name out of one.
+        if !trimmed.starts_with("//") {
+            if depth == 1 {
+                assert!(
+                    !(trimmed.starts_with("#[") && trimmed.contains("rename")),
+                    "{enum_name} now carries a per-variant serde rename; \
+                     `declared_wire_tags` derives the tag from the variant NAME \
+                     and must be taught about it"
+                );
+                if let Some(name) = line
+                    .strip_prefix("    ")
+                    .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+                {
+                    let name: String = name
+                        .chars()
+                        .take_while(char::is_ascii_alphanumeric)
+                        .collect();
+                    tags.insert(to_snake_case(&name));
+                }
+            }
+            depth += i32::try_from(line.matches('{').count()).expect("brace count fits i32");
+            depth -= i32::try_from(line.matches('}').count()).expect("brace count fits i32");
+        }
+        if depth == 0 && !tags.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        !tags.is_empty(),
+        "no variants parsed out of {enum_name} — the extractor is broken, not the enum"
+    );
+    tags
+}
+
+/// serde's `rename_all = "snake_case"` rule: lowercase, `_` before each
+/// non-leading uppercase letter.
+fn to_snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The wire tags actually covered by a golden table.
+fn goldened_wire_tags<T: Serialize>(goldens: &[(&'static str, T)]) -> BTreeSet<String> {
+    goldens
+        .iter()
+        .map(|(filename, value)| {
+            let json = serde_json::to_value(value)
+                .unwrap_or_else(|e| panic!("serialize golden instance for {filename}: {e}"));
+            json.get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("golden {filename} is not internally tagged on `type`"))
+                .to_string()
+        })
+        .collect()
 }
 
 /// The permission DTOs — one golden per `PermissionKindDto` variant + the
@@ -837,7 +1141,7 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
 }
 
 /// The `computer` tool `request_access` DTOs — one golden per
-/// `ComputerAccessRequestDto` example (tcc_state present / absent) plus the
+/// `ComputerAccessRequestDto` example (`tcc_state` present / absent) plus the
 /// response.
 fn computer_access_goldens() -> Vec<(&'static str, ComputerAccessRequestDto)> {
     vec![
@@ -1046,6 +1350,69 @@ fn canonical_app_record() -> AppRecordDto {
     }
 }
 
+fn canonical_generation_job() -> AppGenerationJobDto {
+    AppGenerationJobDto {
+        id: "job-00000001".to_string(),
+        app_id: "habits-1a2b".to_string(),
+        revision: 4,
+        continuation_seq: 1,
+        state: AppGenerationJobStateDto::Building,
+        percent: Some(70),
+        detail: Some("exporting static assets".to_string()),
+        log_rel: Some("logs/job-00000001.log".to_string()),
+        updated_at_ms: 1_750_000_000_002,
+    }
+}
+
+/// The canonical generated manifest.
+///
+/// This MUST stay `Some(...)` inside [`canonical_app_details`]: it is the only
+/// place an `AppManifestDto` reaches a golden, and the TS mirror's
+/// `validateAppManifest` guard (clients/shared/test/snapshots.test.ts) is
+/// reached only through `if ('manifest' in o)`. With `manifest: None` the
+/// `skip_serializing_if` drops the key and that whole guard never executes.
+fn canonical_app_manifest() -> AppManifestDto {
+    AppManifestDto {
+        schema_version: 1,
+        app_id: "habits-1a2b".to_string(),
+        name: "Habits".to_string(),
+        template: AppTemplateKindDto::Dashboard,
+        design_revision: 4,
+        collections: vec![AppDataCollectionDto {
+            id: "records".to_string(),
+            label: "Records".to_string(),
+            fields: vec![AppDataFieldDto {
+                id: "title".to_string(),
+                label: "Title".to_string(),
+                field_type: AppDataFieldTypeDto::Text,
+                required: true,
+                options: vec![],
+            }],
+            enabled_by_default: true,
+        }],
+        allowed_domains: vec!["api.example.com".to_string()],
+    }
+}
+
+fn canonical_app_details() -> AppDetailsDto {
+    AppDetailsDto {
+        app: canonical_app_record(),
+        design_revision: 4,
+        design_fields: vec![],
+        manifest: Some(canonical_app_manifest()),
+        runtime: AppRuntimeDetailsDto {
+            state: AppRuntimeStateDto::Stopped,
+            mode: Some(AppRuntimeModeDto::StaticExport),
+            loopback_url: None,
+            suspension_reason: Some(AppRuntimeSuspensionReasonDto::Backgrounded),
+            recovery_state: Some(AppRuntimeRecoveryStateDto::Pending),
+            last_error: None,
+        },
+        generation_job: Some(canonical_generation_job()),
+        checkpoints: vec![],
+    }
+}
+
 /// The canonical design patch: one `set` (a `{kind, value}` design value) and
 /// one `remove`, plus a note — pinning the spec-§A `{op, field_id, value}` op
 /// shape exactly.
@@ -1111,6 +1478,24 @@ fn canonical_design_patch() -> AppDesignPatchDto {
                     value: vec!["streaks".to_string(), "reminders".to_string()],
                 },
             },
+            AppDesignPatchOpDto::Set {
+                field_id: "collection_fields".to_string(),
+                value: DesignValueDto::DataFieldList {
+                    value: vec![AppDataFieldDto {
+                        id: "title".to_string(),
+                        label: "Title".to_string(),
+                        field_type: AppDataFieldTypeDto::Text,
+                        required: true,
+                        options: vec![],
+                    }],
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "network_domains".to_string(),
+                value: DesignValueDto::DomainList {
+                    value: vec!["api.example.com".to_string()],
+                },
+            },
             AppDesignPatchOpDto::Remove {
                 field_id: "accent".to_string(),
             },
@@ -1132,6 +1517,45 @@ fn every_client_event_variant_matches_golden() {
         check_golden(filename, &ev, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// EVERY declared `ClientCommand` / `ClientEvent` variant appears in the golden
+/// table — the exhaustiveness anchor.
+///
+/// `every_client_*_variant_matches_golden` only checks the rows it is handed,
+/// so a variant that was never added to `command_goldens()` / `event_goldens()`
+/// is silently uncovered (that is exactly how `reset_app_permissions` shipped
+/// without a golden). This compares the tags DECLARED in the enum source
+/// against the tags the golden tables actually serialize.
+#[test]
+fn every_variant_has_a_golden() {
+    for (source_file, enum_name, goldened) in [
+        (
+            "commands.rs",
+            "ClientCommand",
+            goldened_wire_tags(&command_goldens()),
+        ),
+        (
+            "events.rs",
+            "ClientEvent",
+            goldened_wire_tags(&event_goldens()),
+        ),
+    ] {
+        let declared = declared_wire_tags(source_file, enum_name);
+        let missing: Vec<&String> = declared.difference(&goldened).collect();
+        assert!(
+            missing.is_empty(),
+            "{enum_name} variant(s) with no golden: {missing:?}. Add a row to \
+             the golden table and re-bless with `BLESS=1 cargo test -p \
+             client-protocol --test snapshot_test`."
+        );
+        let unknown: Vec<&String> = goldened.difference(&declared).collect();
+        assert!(
+            unknown.is_empty(),
+            "golden table serializes {enum_name} tag(s) the enum does not \
+             declare: {unknown:?}"
+        );
+    }
 }
 
 /// EVERY `ClientCommand` variant has a byte-stable golden.
@@ -1163,7 +1587,7 @@ fn every_permission_dto_matches_golden() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// EVERY `ComputerAccessRequestDto` example (tcc_state present / absent) has a
+/// EVERY `ComputerAccessRequestDto` example (`tcc_state` present / absent) has a
 /// byte-stable golden, plus a standalone `ComputerAccessResponseDto` golden.
 #[test]
 fn every_computer_access_dto_matches_golden() {

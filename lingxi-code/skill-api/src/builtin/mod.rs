@@ -4,10 +4,8 @@
 //!
 //! Folded in from the former standalone `skill-builtin` crate (its only deps
 //! were on this crate). There are no Rust-bundled skills today (skills are
-//! markdown loaded from disk), so [`bundled::BUILTIN_DESKTOP`] /
-//! [`bundled::BUILTIN_MOBILE`] are empty and both registration entry points
-//! produce an empty registry. The loader plumbing (`parse_builtin`) is in place
-//! so adding a template later is a one-line const entry — no wiring changes.
+//! markdown loaded from disk). Mobile additionally bundles the constrained
+//! local-app workflow so it remains available inside the device sandbox.
 
 mod bundled;
 
@@ -58,5 +56,6 @@ mod tests {
         let mut r = SkillRegistry::new();
         register_mobile(&mut r);
         assert_eq!(r.names().len(), BUILTIN_MOBILE.len());
+        assert_eq!(r.names(), vec!["create-local-app"]);
     }
 }

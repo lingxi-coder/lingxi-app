@@ -8,6 +8,7 @@ struct Drawer: View {
     @Environment(\.theme) private var t
     @Bindable var projectStore: ProjectStore
     @Bindable var cronRepository: CronRepository
+    @Bindable var localAppsStore: LocalAppsStore
     @Binding var activeSession: String
 
     let source: any ConversationSource
@@ -15,6 +16,7 @@ struct Drawer: View {
     let openSettings: () -> Void
     let openTerminal: () -> Void
     let openCron: (String?, String?) -> Void
+    let openApps: (String?) -> Void
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
     let onNewChat: (String?) -> Void
@@ -29,30 +31,34 @@ struct Drawer: View {
     @State private var pickerMode: FolderPickerMode = .importProject
     @FocusState private var searchFocused: Bool
 
-    private enum Section: String { case chats, projects, crons }
+    private enum Section: String { case chats, projects, crons, apps }
     private enum FolderPickerMode { case importProject, reauthorize(String) }
 
     init(
         projectStore: ProjectStore,
         cronRepository: CronRepository,
+        localAppsStore: LocalAppsStore,
         activeSession: Binding<String>,
         source: any ConversationSource,
         onClose: @escaping () -> Void,
         openSettings: @escaping () -> Void,
         openTerminal: @escaping () -> Void,
         openCron: @escaping (String?, String?) -> Void,
+        openApps: @escaping (String?) -> Void,
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
         onNewChat: @escaping (String?) -> Void
     ) {
         self.projectStore = projectStore
         self.cronRepository = cronRepository
+        self.localAppsStore = localAppsStore
         _activeSession = activeSession
         self.source = source
         self.onClose = onClose
         self.openSettings = openSettings
         self.openTerminal = openTerminal
         self.openCron = openCron
+        self.openApps = openApps
         self.onSelectProject = onSelectProject
         self.onSelectSession = onSelectSession
         self.onNewChat = onNewChat
@@ -100,6 +106,7 @@ struct Drawer: View {
                     source.listSessions()
                     if let active = projectStore.activeProjectId { openProjects.insert(active) }
                     Task { await cronRepository.refresh() }
+                    Task { await localAppsStore.refresh() }
                 }
         }
         .alert("新建本地项目", isPresented: $showCreateAlert) {
@@ -182,7 +189,7 @@ struct Drawer: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             LXIcon(name: .search, size: 16, color: t.text4, stroke: 2)
-            TextField("搜索会话、项目或定时任务", text: $query)
+            TextField("搜索会话、项目、定时任务或应用", text: $query)
                 .font(.scaledSystem(14, relativeTo: .subheadline))
                 .foregroundColor(t.text)
                 .focused($searchFocused)
@@ -211,6 +218,7 @@ struct Drawer: View {
             tab(.chats, .message, "对话", engineSessions.count)
             tab(.projects, .folder, "项目", projects.count)
             tab(.crons, .clock, "定时", cronTasks.count)
+            tab(.apps, .skill, "应用", localApps.count)
         }
         .padding(.horizontal, 14).padding(.bottom, 8)
     }
@@ -242,6 +250,7 @@ struct Drawer: View {
                     case .chats: chatsSection
                     case .projects: projectsSection
                     case .crons: cronsSection
+                    case .apps: appsSection
                     }
                 }
             }
@@ -255,12 +264,13 @@ struct Drawer: View {
         case .chats: engineSessions.isEmpty
         case .projects: projects.isEmpty
         case .crons: cronTasks.isEmpty
+        case .apps: localApps.isEmpty
         }
     }
 
     private var emptyState: some View {
         VStack(spacing: 10) {
-            LXIcon(name: searching ? .search : section == .projects ? .folder : section == .crons ? .clock : .message,
+            LXIcon(name: searching ? .search : section == .projects ? .folder : section == .crons ? .clock : section == .apps ? .skill : .message,
                    size: 24, color: t.text4, stroke: 1.8)
             Text(searching ? "没有匹配结果" : emptyCopy)
                 .font(.system(size: 13)).foregroundColor(t.text4).multilineTextAlignment(.center)
@@ -273,6 +283,9 @@ struct Drawer: View {
                     openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
                 }
             }
+            if !searching, section == .apps {
+                dashedButton("创建应用") { openApps(nil) }
+            }
         }
         .frame(maxWidth: .infinity).padding(.top, 38).padding(.horizontal, 10)
     }
@@ -282,7 +295,20 @@ struct Drawer: View {
         case .chats: return "当前作用域暂无会话"
         case .projects: return "还没有真实项目工作区"
         case .crons: return "还没有定时任务"
+        case .apps: return "还没有本地应用"
         }
+    }
+
+    private var localApps: [LocalAppSummary] {
+        localAppsStore.apps.filter { matches($0.name, $0.workflow.label) }
+    }
+
+    private var appsSection: some View {
+        LocalAppsDrawerSection(
+            apps: localApps,
+            onOpenLibrary: { openApps(nil) },
+            onOpenApp: { openApps($0) }
+        )
     }
 
     private var chatsSection: some View {

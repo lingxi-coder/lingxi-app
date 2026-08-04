@@ -221,6 +221,10 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub project_cwd: Option<String>,
     pub provider_config: Option<AndroidProviderConfigFfi>,
     pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
+    /// Compile-time distribution mode: false for Play, true for Direct.
+    pub local_apps_full_runtime: bool,
+    /// Verified read-only local-app runtime bundle staged under app files.
+    pub local_apps_runtime_root: Option<String>,
 }
 
 #[cfg(feature = "uniffi")]
@@ -3398,6 +3402,8 @@ pub fn build_android_engine(
             project_cwd: None,
             provider_config: None,
             mobile_linux: None,
+            local_apps_full_runtime: false,
+            local_apps_runtime_root: None,
         },
         listener,
         stt,
@@ -3445,6 +3451,8 @@ pub fn build_android_engine_with_mobile_linux(
         project_cwd,
         provider_config,
         mobile_linux,
+        local_apps_full_runtime,
+        local_apps_runtime_root,
     } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -3458,10 +3466,13 @@ pub fn build_android_engine_with_mobile_linux(
         // bundled-shell bootstrap (which must run BEFORE `shell_cfg` is built +
         // moved) needs it to stage the applet symlink farm under it.
         let app_files_root_str = app_files_root.clone();
+        let local_apps_runtime_requested = local_apps_runtime_root.is_some();
         let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
             cwd,
             lingxi_home: std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
+            local_apps_full_runtime,
+            local_apps_runtime_root: local_apps_runtime_root.map(std::path::PathBuf::from),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -3518,6 +3529,16 @@ pub fn build_android_engine_with_mobile_linux(
             .map_or(traits::MobileLinuxRuntimeMode::Legacy, |cfg| {
                 cfg.mode.into()
             });
+        // Local-app generation always needs the verified internal Linux
+        // runtime, even when the user-facing terminal remains in Legacy mode.
+        // Keep `mobile_linux_mode` unchanged so this does not enable shell/git
+        // tools or change the terminal selection.
+        let mut local_apps_mobile_linux = mobile_linux.clone();
+        if local_apps_runtime_requested {
+            if let Some(config) = local_apps_mobile_linux.as_mut() {
+                config.mode = MobileLinuxRuntimeModeFfi::MobileLinux;
+            }
+        }
         let android_platform = AndroidPlatform::new_with_mode(
             AndroidPlatformInputs {
                 app_files_root: std::path::PathBuf::from(app_files_root),
@@ -3530,7 +3551,7 @@ pub fn build_android_engine_with_mobile_linux(
                     inner: notifications,
                 })),
                 clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
-                mobile_linux: android_mobile_linux_runtime(mobile_linux.as_ref()),
+                mobile_linux: android_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
                 mobile_linux_workspace_root: mobile_linux
                     .as_ref()
                     .and_then(|cfg| cfg.workspace_host_path.clone())
@@ -4588,12 +4609,10 @@ mod tests {
         let _gate = handle.permission_gate();
         let _listener: Arc<dyn ClientEventListener> = handle.listener();
 
-        // The M8 smoke signal still works: `skill_count` reflects the assembled
-        // mobile builtin skill set (currently empty — mobile builtin skills are
-        // markdown loaded from disk, not Rust-bundled — so it is 0, matching
-        // `skill_api::builtin::BUILTIN_MOBILE`). The signal is that the call resolves
-        // against the real wired handle, not that the count is non-zero.
-        assert_eq!(handle.skill_count(), 0);
+        // The M8 smoke signal reflects the Rust-bundled mobile skill catalog.
+        // `create-local-app` is always present so the agent can enter the
+        // template-guided, approval-gated local-app workflow offline.
+        assert_eq!(handle.skill_count(), 1);
     }
 
     /// F3-04: `create_session` is no longer the M8 stub (which returned an

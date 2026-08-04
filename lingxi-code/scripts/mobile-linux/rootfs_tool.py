@@ -18,17 +18,35 @@ FIXED_PRIMARY_PACKAGES = [
     "apk-tools",
     "busybox",
     "git",
+    "nodejs",
     "openssh-client",
     "python3",
     "ca-certificates",
 ]
+
+FIXED_PACKAGE_VERSIONS = {
+    "git": "2.47.3-r0",
+    "nodejs": "22.23.0-r0",
+}
 
 FORBIDDEN_PACKAGE_MANAGER_PATHS = [
     "/usr/bin/pip",
     "/usr/bin/pip3",
     "/usr/bin/npm",
     "/usr/bin/npx",
+    "/usr/bin/corepack",
+    "/usr/bin/pnpm",
+    "/usr/bin/yarn",
 ]
+
+FORBIDDEN_PACKAGE_NAMES = {
+    "corepack",
+    "nodejs-npm",
+    "npm",
+    "pnpm",
+    "py3-pip",
+    "yarn",
+}
 
 REQUIRED_INTERACTIVE_PACKAGE_MANAGER_PATHS = [
     "/sbin/apk",
@@ -45,6 +63,7 @@ BINARY_SYMLINK_FORBIDDEN_PREFIXES = [
 WORLD_WRITABLE_ALLOWED = {"/tmp", "/var/tmp"}
 WRITABLE_ROOTS = {"/root", "/tmp", "/var/tmp", "/workspace"}
 DEFAULT_SOURCE_DATE_EPOCH = 0
+EXPECTED_ALPINE_RELEASE = "3.21.3"
 
 
 @dataclass
@@ -199,9 +218,17 @@ def parse_apk_installed(installed_path: pathlib.Path) -> List[PackageRecord]:
     missing = sorted(set(FIXED_PRIMARY_PACKAGES) - names)
     if missing:
         fail(f"fixed primary packages missing from APK installed database: {missing}")
-    forbidden = sorted(names & {"py3-pip", "nodejs", "npm"})
+    forbidden = sorted(names & FORBIDDEN_PACKAGE_NAMES)
     if forbidden:
         fail(f"forbidden package-manager packages present in rootfs: {forbidden}")
+    versions = {package.name: package.version for package in packages}
+    mismatches = {
+        name: {"expected": expected, "actual": versions.get(name)}
+        for name, expected in FIXED_PACKAGE_VERSIONS.items()
+        if versions.get(name) != expected
+    }
+    if mismatches:
+        fail(f"fixed runtime package versions diverged: {mismatches}")
     return sorted(packages, key=lambda package: package.name)
 
 
@@ -225,6 +252,16 @@ def classify_elf(path_rel: str) -> str:
 def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
     if not root.is_dir():
         fail(f"rootfs directory not found: {root}")
+
+    release_path = root / "etc" / "alpine-release"
+    if not release_path.is_file() or release_path.is_symlink():
+        fail("rootfs must contain a real /etc/alpine-release file")
+    actual_release = release_path.read_text(encoding="utf-8").strip()
+    if actual_release != EXPECTED_ALPINE_RELEASE:
+        fail(
+            "Alpine release diverged: "
+            f"expected {EXPECTED_ALPINE_RELEASE}, got {actual_release or '<empty>'}"
+        )
 
     busybox = root / "bin" / "busybox"
     sh_path = root / "bin" / "sh"
@@ -323,6 +360,7 @@ def collect_allowlist(root: pathlib.Path) -> List[dict]:
         "/bin/sh",
         "/sbin/apk",
         "/usr/bin/git",
+        "/usr/bin/node",
         "/usr/bin/ssh",
         "/usr/bin/python3",
     }
@@ -491,6 +529,7 @@ def generate_lock(args: argparse.Namespace) -> None:
             "interactive_package_install_allowed": True,
             "forbidden_package_manager_paths": FORBIDDEN_PACKAGE_MANAGER_PATHS,
             "fixed_primary_packages": FIXED_PRIMARY_PACKAGES,
+            "fixed_package_versions": FIXED_PACKAGE_VERSIONS,
         },
         "resolved_packages": [
             {
@@ -546,6 +585,8 @@ def validate_lock(args: argparse.Namespace) -> None:
         fail("rootfs lock must allow interactive package installation")
     if policy.get("fixed_primary_packages") != FIXED_PRIMARY_PACKAGES:
         fail("rootfs lock fixed_primary_packages diverged")
+    if policy.get("fixed_package_versions") != FIXED_PACKAGE_VERSIONS:
+        fail("rootfs lock fixed_package_versions diverged")
     if policy.get("forbidden_package_manager_paths") != FORBIDDEN_PACKAGE_MANAGER_PATHS:
         fail("rootfs lock forbidden_package_manager_paths diverged")
     resolved = lock.get("resolved_packages")
@@ -773,6 +814,37 @@ def build_archive(args: argparse.Namespace) -> None:
     print(f"deterministic tar archive built: {output}")
 
 
+def verify_release_archive(args: argparse.Namespace) -> None:
+    pins = json.loads(pathlib.Path(args.pins).read_text(encoding="utf-8"))
+    archives = pins.get("rootfs", {}).get("release_archives")
+    record = archives.get(args.abi) if isinstance(archives, dict) else None
+    expected = record.get("sha256") if isinstance(record, dict) else None
+    # `rootfs.archives` pins the official minirootfs, whose bytes the shipped
+    # archive can never match: the release archive is the deterministic,
+    # package-augmented rebuild. Refuse a rebuild that carries no committed
+    # digest of its own rather than trust the hash its own evidence directory
+    # issues for itself.
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        fail(
+            f"no committed release rootfs digest for {args.abi}: add "
+            f"rootfs.release_archives.{args.abi}.sha256 to mobile-linux-pins.json"
+        )
+    archive = pathlib.Path(args.archive)
+    if not archive.is_file() or archive.is_symlink():
+        fail(f"release rootfs archive not found or unsafe: {archive}")
+    digest = read_sha256(archive)
+    if digest != expected:
+        fail(
+            f"release rootfs SHA-256 mismatch for {args.abi}: "
+            f"expected {expected}, got {digest}"
+        )
+    print(f"release rootfs archive pin verified: {archive}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -784,6 +856,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_archive_cmd = sub.add_parser("verify-archive")
     verify_archive_cmd.add_argument("--archive", required=True)
     verify_archive_cmd.set_defaults(func=verify_archive)
+
+    verify_release_cmd = sub.add_parser("verify-release-archive")
+    verify_release_cmd.add_argument("--pins", required=True)
+    verify_release_cmd.add_argument("--abi", required=True)
+    verify_release_cmd.add_argument("--archive", required=True)
+    verify_release_cmd.set_defaults(func=verify_release_archive)
 
     build_archive_cmd = sub.add_parser("build-archive")
     build_archive_cmd.add_argument("--root", required=True)

@@ -44,6 +44,9 @@ jobs:
       - name: Test mobile Linux rootfs tooling
         run: bash lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh
 
+      - name: Test local-app dependency and source-policy gates
+        run: bash lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
+
   # ---------------------------------------------------------------------------
   # 1. node-clients — shared TS SDK + Electron typecheck (ubuntu).
   #    The Electron app depends on the shared SDK via `file:../shared`, so the

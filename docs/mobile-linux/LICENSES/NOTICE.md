@@ -14,6 +14,11 @@ The source and license baseline is fixed by
 | OpenMinis PRoot fork | `8cf13e997cdc9472997aae19df8050c073c9a86c` | GPL-2.0-or-later |
 | talloc | 2.4.2 | LGPL-3.0-or-later |
 | Alpine minirootfs | 3.21.3 | aggregate package licenses |
+| Alpine Node.js | 22.23.0-r0 | MIT |
+| Alpine Git | 2.47.3-r0 | GPL-2.0-only |
+| Next.js | 16.2.11 | MIT |
+| React / ReactDOM | 19.2.8 | MIT |
+| Next Linux musl SWC bindings | 16.2.11 | Apache-2.0 |
 
 The complete GPL-3.0 text is stored at `LICENSE` in the pinned OpenMinis source.
 The complete PRoot GPL-2.0 text is stored at `COPYING` in the pinned PRoot

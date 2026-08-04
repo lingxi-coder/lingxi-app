@@ -1,0 +1,6 @@
+{
+  "type": "request_app_design_suggestion",
+  "app_id": "habits-1a2b",
+  "expected_revision": 4,
+  "prompt": "Use a calmer layout"
+}

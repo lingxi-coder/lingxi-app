@@ -1,4 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LingXi Code</string>
+    <string name="local_apps_title">应用</string>
+    <string name="local_apps_create">创建应用</string>
+    <string name="local_apps_refresh">刷新应用</string>
+    <string name="local_apps_search">搜索应用</string>
+    <string name="local_apps_empty">还没有本地应用</string>
+    <string name="local_apps_empty_detail">从模板开始，Agent 会在确认设计后生成应用。</string>
+    <string name="local_apps_templates_title">选择模板</string>
+    <string name="local_apps_designer_title">应用设计</string>
+    <string name="local_apps_confirm_generate">确认并生成</string>
+    <string name="local_apps_allow_once">允许一次</string>
+    <string name="local_apps_allow_session">本次会话允许</string>
+    <string name="local_apps_allow_always">始终允许</string>
+    <string name="local_apps_deny">拒绝</string>
 </resources>

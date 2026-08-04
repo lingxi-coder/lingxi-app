@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '1.0.0';
+export const CLIENT_PROTOCOL_VERSION = '1.2.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -149,6 +149,8 @@ export type ClientCommand =
   | { type: 'task_stop'; task_id: string }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'list_apps' }
+  | { type: 'list_app_templates' }
+  | { type: 'get_app_details'; app_id: string }
   | {
       type: 'create_app';
       name: string;
@@ -169,6 +171,13 @@ export type ClientCommand =
       suggestion_id: string;
       expected_revision: number;
     }
+  | {
+      type: 'request_app_design_suggestion';
+      app_id: string;
+      expected_revision: number;
+      prompt?: string;
+    }
+  | { type: 'dismiss_app_design_suggestion'; app_id: string; suggestion_id: string }
   | { type: 'confirm_app_design'; app_id: string; revision: number; interaction_id: string }
   | { type: 'cancel_app_design'; app_id: string }
   | { type: 'start_app'; app_id: string }
@@ -176,6 +185,21 @@ export type ClientCommand =
   | { type: 'restart_app'; app_id: string }
   | { type: 'confirm_app_preview'; app_id: string; revision: number; interaction_id: string }
   | { type: 'request_app_revision'; app_id: string; prompt: string }
+  | { type: 'retry_app_generation'; app_id: string }
+  | { type: 'execute_app_bridge_request'; request: AppBridgeRequestDto }
+  | {
+      type: 'resolve_app_ui_request';
+      request_id: string;
+      decision: AppAuthorizationDecisionDto;
+      result_json?: string;
+      error?: string;
+    }
+  | {
+      type: 'resolve_app_capability_request';
+      request_id: string;
+      decision: AppAuthorizationDecisionDto;
+    }
+  | { type: 'reset_app_permissions'; app_id: string }
   | { type: 'list_app_checkpoints'; app_id: string }
   | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
   | { type: 'delete_app'; app_id: string }
@@ -500,6 +524,85 @@ export type AppCheckpointKindDto =
 /** Layout density for a `density` design value (local_apps.rs `DensityLevelDto`). */
 export type DensityLevelDto = 'compact' | 'comfortable';
 
+/** Field type in an app-owned data collection (local_apps.rs `AppDataFieldTypeDto`). */
+export type AppDataFieldTypeDto =
+  | 'text'
+  | 'long_text'
+  | 'integer'
+  | 'decimal'
+  | 'boolean'
+  | 'date_time'
+  | 'enum'
+  | 'image_ref';
+
+/** One field in a structured app data collection (local_apps.rs `AppDataFieldDto`). */
+export interface AppDataFieldDto {
+  id: string;
+  label: string;
+  field_type: AppDataFieldTypeDto;
+  required: boolean;
+  /** Choices for an `enum` field; empty for every other type. */
+  options: string[];
+}
+
+/** A collection exposed through the native data API (local_apps.rs `AppDataCollectionDto`). */
+export interface AppDataCollectionDto {
+  id: string;
+  label: string;
+  fields: AppDataFieldDto[];
+  enabled_by_default: boolean;
+}
+
+/** Dynamic designer field kind (local_apps.rs `AppDesignFieldTypeDto`). */
+export type AppDesignFieldTypeDto =
+  | 'short_text'
+  | 'long_text'
+  | 'single_choice'
+  | 'multiple_choice'
+  | 'boolean'
+  | 'color'
+  | 'density'
+  | 'screen_list'
+  | 'feature_list'
+  | 'data_field_list'
+  | 'domain_list';
+
+/** One selectable option for a designer field (local_apps.rs `AppDesignFieldOptionDto`). */
+export interface AppDesignFieldOptionDto {
+  value: string;
+  label: string;
+}
+
+/** One Rust-defined designer input rendered by the clients (local_apps.rs `AppDesignFieldDto`). */
+export interface AppDesignFieldDto {
+  id: string;
+  label: string;
+  description?: string;
+  field_type: AppDesignFieldTypeDto;
+  required: boolean;
+  default_value?: DesignValueDto;
+  options: AppDesignFieldOptionDto[];
+}
+
+/** One ordered step in the five-step app designer (local_apps.rs `AppDesignStepDto`). */
+export interface AppDesignStepDto {
+  id: string;
+  order: number;
+  title: string;
+  description?: string;
+  fields: AppDesignFieldDto[];
+}
+
+/** A versioned, server-owned template definition (local_apps.rs `AppTemplateDto`). */
+export interface AppTemplateDto {
+  kind: AppTemplateKindDto;
+  version: number;
+  name: string;
+  description: string;
+  steps: AppDesignStepDto[];
+  collections: AppDataCollectionDto[];
+}
+
 /** One draft field value, tagged by field kind (local_apps.rs `DesignValueDto`). */
 export type DesignValueDto =
   | { kind: 'short_text'; value: string }
@@ -510,7 +613,9 @@ export type DesignValueDto =
   | { kind: 'color'; value: string }
   | { kind: 'density'; value: DensityLevelDto }
   | { kind: 'screen_list'; value: string[] }
-  | { kind: 'feature_list'; value: string[] };
+  | { kind: 'feature_list'; value: string[] }
+  | { kind: 'data_field_list'; value: AppDataFieldDto[] }
+  | { kind: 'domain_list'; value: string[] };
 
 /** One patch operation against the draft field map (local_apps.rs `AppDesignPatchOpDto`). */
 export type AppDesignPatchOpDto =
@@ -543,9 +648,187 @@ export interface AppCheckpointDto {
   created_at_ms: number;
 }
 
+/** How an approved build is served on the device (local_apps.rs `AppRuntimeModeDto`). */
+export type AppRuntimeModeDto = 'static_export' | 'next_production';
+
+/** Why a runtime stopped outside a user stop (local_apps.rs `AppRuntimeSuspensionReasonDto`). */
+export type AppRuntimeSuspensionReasonDto =
+  | 'backgrounded'
+  | 'memory_warning'
+  | 'runtime_quota'
+  | 'process_exited';
+
+/** Foreground recovery state of a suspended runtime (local_apps.rs `AppRuntimeRecoveryStateDto`). */
+export type AppRuntimeRecoveryStateDto =
+  | 'not_needed'
+  | 'pending'
+  | 'recovering'
+  | 'recovered'
+  | 'failed';
+
+/** Persisted generation/build queue state (local_apps.rs `AppGenerationJobStateDto`). */
+export type AppGenerationJobStateDto =
+  | 'queued'
+  | 'scaffolding'
+  | 'generating'
+  | 'validating'
+  | 'building'
+  | 'starting_preview'
+  | 'awaiting_approval'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+/** One durable generation job (local_apps.rs `AppGenerationJobDto`). */
+export interface AppGenerationJobDto {
+  id: string;
+  app_id: string;
+  revision: number;
+  continuation_seq: number;
+  state: AppGenerationJobStateDto;
+  percent?: number;
+  detail?: string;
+  log_rel?: string;
+  updated_at_ms: number;
+}
+
+/** Generated application manifest (local_apps.rs `AppManifestDto`). */
+export interface AppManifestDto {
+  schema_version: number;
+  app_id: string;
+  name: string;
+  template: AppTemplateKindDto;
+  design_revision: number;
+  collections: AppDataCollectionDto[];
+  allowed_domains: string[];
+}
+
+/** Runtime snapshot inside an app detail response (local_apps.rs `AppRuntimeDetailsDto`). */
+export interface AppRuntimeDetailsDto {
+  state: AppRuntimeStateDto;
+  mode?: AppRuntimeModeDto;
+  loopback_url?: string;
+  suspension_reason?: AppRuntimeSuspensionReasonDto;
+  recovery_state?: AppRuntimeRecoveryStateDto;
+  last_error?: string;
+}
+
+/** A deterministic design field/value pair (local_apps.rs `AppDesignFieldValueDto`). */
+export interface AppDesignFieldValueDto {
+  field_id: string;
+  value: DesignValueDto;
+}
+
+/** Full application detail snapshot (local_apps.rs `AppDetailsDto`). */
+export interface AppDetailsDto {
+  app: AppRecordDto;
+  design_revision: number;
+  design_fields: AppDesignFieldValueDto[];
+  manifest?: AppManifestDto;
+  runtime: AppRuntimeDetailsDto;
+  generation_job?: AppGenerationJobDto;
+  checkpoints: AppCheckpointDto[];
+}
+
+/** Operations accepted by the `window.lingxi.v1` bridge (local_apps.rs `AppBridgeOperationDto`). */
+export type AppBridgeOperationDto =
+  | 'query_data'
+  | 'mutate_data'
+  | 'network_request'
+  | 'runtime_status';
+
+/** One host-bound, data-only bridge request (local_apps.rs `AppBridgeRequestDto`). */
+export interface AppBridgeRequestDto {
+  request_id: string;
+  app_id: string;
+  operation: AppBridgeOperationDto;
+  payload_json?: string;
+}
+
+/** Result of a bridge request (local_apps.rs `AppBridgeResponseDto`). */
+export interface AppBridgeResponseDto {
+  request_id: string;
+  app_id: string;
+  ok: boolean;
+  result_json?: string;
+  error?: string;
+}
+
+/** Allow-listed UI operations; arbitrary script is absent (local_apps.rs `AppUiActionKindDto`). */
+export type AppUiActionKindDto =
+  | 'inspect'
+  | 'click'
+  | 'fill'
+  | 'select'
+  | 'toggle'
+  | 'scroll'
+  | 'navigate'
+  | 'back'
+  | 'reload';
+
+/** A structured target resolved by the `WebView` host (local_apps.rs `AppUiTargetDto`). */
+export interface AppUiTargetDto {
+  element_id?: string;
+  role?: string;
+  name?: string;
+}
+
+/** One permission-gated UI automation request (local_apps.rs `AppUiRequestDto`). */
+export interface AppUiRequestDto {
+  request_id: string;
+  app_id: string;
+  action: AppUiActionKindDto;
+  target?: AppUiTargetDto;
+  value?: string;
+}
+
+/** Native capability whose first use needs a decision (local_apps.rs `AppCapabilityKindDto`). */
+export type AppCapabilityKindDto =
+  | 'data_mutation'
+  | 'ui_control'
+  | 'network_domain'
+  | 'restore_checkpoint';
+
+/** A capability approval request surfaced by the host (local_apps.rs `AppCapabilityRequestDto`). */
+export interface AppCapabilityRequestDto {
+  request_id: string;
+  app_id: string;
+  capability: AppCapabilityKindDto;
+  domain?: string;
+  reason: string;
+}
+
+/** User decision for data/UI/capability requests (local_apps.rs `AppAuthorizationDecisionDto`). */
+export type AppAuthorizationDecisionDto =
+  | 'deny'
+  | 'allow_once'
+  | 'allow_session'
+  | 'allow_always';
+
+/**
+ * The local-app payload carried by the single {@link ClientEvent} `app_event`
+ * envelope (local_apps.rs `AppEventDto`) — one envelope keeps the generated
+ * mobile enum metadata bounded. Internally tagged on `type`, `snake_case`.
+ */
+export type AppEventDto =
+  | { type: 'app_templates_changed'; templates: AppTemplateDto[] }
+  | { type: 'app_details_changed'; details: AppDetailsDto }
+  | { type: 'app_generation_job_changed'; job: AppGenerationJobDto }
+  | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
+  | { type: 'app_ui_request'; request: AppUiRequestDto }
+  | { type: 'app_capability_requested'; request: AppCapabilityRequestDto }
+  | { type: 'app_checkpoints_changed'; app_id: string; checkpoints: AppCheckpointDto[] };
+
 // ─────────────────────────────────────────────────────────────────────────────
 // events.rs
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A user-visible attachment surfaced during a turn (events.rs `AttachmentDto`).
+ * Internally tagged on `type`; `#[non_exhaustive]` on the Rust side ⇒ a future
+ * attachment kind is additive.
+ */
+export type AttachmentDto = { type: 'nested_memory'; display_path: string };
 
 /** Coarse error class carried by {@link ClientEvent} `error` (events.rs `ErrorKindDto`). */
 export type ErrorKindDto =
@@ -645,6 +928,7 @@ export type ClientEvent =
   | { type: 'commands_changed'; commands: SlashCommandDto[] }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'apps_changed'; apps: AppRecordDto[] }
+  | { type: 'app_event'; event: AppEventDto }
   | { type: 'app_designer_requested'; app_id: string; interaction_id: string; revision: number }
   | {
       type: 'app_design_draft_changed';
@@ -673,7 +957,13 @@ export type ClientEvent =
       percent?: number;
       detail?: string;
     }
-  | { type: 'app_runtime_changed'; app_id: string; state: AppRuntimeStateDto; last_error?: string }
+  | {
+      type: 'app_runtime_changed';
+      app_id: string;
+      state: AppRuntimeStateDto;
+      details?: AppRuntimeDetailsDto;
+      last_error?: string;
+    }
   | {
       type: 'app_preview_ready';
       app_id: string;
@@ -689,6 +979,7 @@ export type ClientEvent =
       type: 'coordinator_worker';
       worker: { agent_id: string; name: string; agent_type: string; status: string };
     }
+  | { type: 'attachment'; attachment: AttachmentDto }
   | { type: 'thinking_delta'; thinking: string; signature?: string }
   | {
       type: 'usage_update';

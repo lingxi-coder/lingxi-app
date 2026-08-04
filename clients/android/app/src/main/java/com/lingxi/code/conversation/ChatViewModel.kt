@@ -197,6 +197,16 @@ class ChatViewModel(
     private val _sourceProjectId = MutableStateFlow<String?>(null)
     val sourceProjectId: StateFlow<String?> = _sourceProjectId.asStateFlow()
 
+    /**
+     * Current engine connection for profile-global feature stores.
+     *
+     * Local Apps collects this flow with `collectLatest`; switching Project or
+     * Provider therefore cancels the old event binding, attaches to the new
+     * source, and requests authoritative app/template snapshots again.
+     */
+    private val _engineSource = MutableStateFlow(source)
+    internal val engineSource: StateFlow<ConversationSource> = _engineSource.asStateFlow()
+
     /** Permission and MCP state mirrored from the same source this ViewModel owns. */
     private val _pendingPermission = MutableStateFlow(source.pendingPermission.value)
     val pendingPermission: StateFlow<PermissionPromptState?> = _pendingPermission.asStateFlow()
@@ -351,6 +361,7 @@ class ChatViewModel(
         sourceBindingJob?.cancel()
 
         source = replacement
+        _engineSource.value = replacement
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null
         _mcpServers.value = emptyList()
@@ -441,6 +452,7 @@ class ChatViewModel(
         sourceGeneration++
         sourceBindingJob?.cancel()
         source = replacement
+        _engineSource.value = replacement
         _sourceProjectId.value = projectId
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null

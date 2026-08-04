@@ -17,16 +17,24 @@
       "/usr/bin/pip",
       "/usr/bin/pip3",
       "/usr/bin/npm",
-      "/usr/bin/npx"
+      "/usr/bin/npx",
+      "/usr/bin/corepack",
+      "/usr/bin/pnpm",
+      "/usr/bin/yarn"
     ],
     "fixed_primary_packages": [
       "apk-tools",
       "busybox",
       "git",
+      "nodejs",
       "openssh-client",
       "python3",
       "ca-certificates"
-    ]
+    ],
+    "fixed_package_versions": {
+      "git": "2.47.3-r0",
+      "nodejs": "22.23.0-r0"
+    }
   },
   "resolved_packages": [
     {
@@ -45,10 +53,17 @@
     },
     {
       "name": "git",
-      "version": "REPLACE_WITH_REAL_VERSION",
+      "version": "2.47.3-r0",
       "license": "REPLACE_WITH_REAL_LICENSE",
       "architecture": "arm64",
       "origin": "git"
+    },
+    {
+      "name": "nodejs",
+      "version": "22.23.0-r0",
+      "license": "MIT",
+      "architecture": "arm64",
+      "origin": "nodejs"
     },
     {
       "name": "openssh-client",

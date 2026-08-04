@@ -2,7 +2,8 @@
 //!
 //! `tests/fixtures/v1/` holds a complete checked-in on-disk store —
 //! `apps/index.json` plus every per-app document (`interactions.json`,
-//! `runtime.json`, `workspace/.lingxi/app.json`,
+//! `runtime.json`, `permissions.json`, `workspace/.lingxi/app.json`,
+//! `workspace/.lingxi/app.manifest.json`,
 //! `workspace/.lingxi/design-spec.json`) — captured at `schemaVersion` 1.
 //! The tree is produced by DRIVING A REAL [`AppService`] through a legal
 //! transition trace (deterministic [`FixedClock`], continuations queued
@@ -43,10 +44,11 @@
 use local_apps::storage::{self, save_app_files, save_index};
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    AppContinuation, AppContinuationKind, AppDesignDraft, AppDesignPatch, AppDesignPatchOp,
-    AppDesignSuggestion, AppEventObserver, AppInteractionKind, AppInteractionRequest,
-    AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppState,
-    AppTemplateKind, AppWorkflowState, ContinuationSink, DensityLevel, DesignValue,
+    save_manifest, save_permissions, AppContinuation,
+    AppContinuationKind, AppDesignDraft, AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion,
+    AppEventObserver, AppInteractionKind, AppInteractionRequest, AppInteractions, AppLayout,
+    AppManifest, AppPermissions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppService,
+    AppState, AppTemplateKind, AppWorkflowState, ContinuationSink, DensityLevel, DesignValue,
     NoopAppEventObserver, RecordingContinuationSink, APPS_SCHEMA_VERSION,
 };
 use std::collections::BTreeMap;
@@ -98,6 +100,12 @@ fn seed_app(
         T0,
     );
     save_app_files(root, &app).expect("seed app files");
+    // `create_app` also mints the native contract and the permission
+    // document; both are pinned like the other five. Each writer creates the
+    // layout skeleton itself, so no separate `initialize` is needed.
+    let layout = AppLayout::new(root, id).expect("seed layout");
+    save_manifest(&layout, &AppManifest::for_new_app(id, name, template)).expect("seed manifest");
+    save_permissions(&layout, &AppPermissions::default()).expect("seed permissions");
     existing.push(app);
     let records: Vec<AppRecord> = existing.iter().map(|app| app.record.clone()).collect();
     save_index(root, &records).expect("seed index");
@@ -399,6 +407,7 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
             schema_version: APPS_SCHEMA_VERSION,
             app_id: "aaaa1111".to_string(),
             state: AppRuntimeState::Failed,
+            mode: None,
             port: Some(3111),
             pid: Some(4242),
             last_error: Some("dev server exited with code 1".to_string()),
@@ -442,6 +451,7 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
             schema_version: APPS_SCHEMA_VERSION,
             app_id: "bbbb2222".to_string(),
             state: AppRuntimeState::Stopped,
+            mode: None,
             port: None,
             pid: None,
             last_error: None,
@@ -453,10 +463,21 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
 }
 
 /// Persist `states` under `root` through the REAL writer path (per-app files
-/// first, index last — the same order the service commits in).
+/// first, index last — the same order the service commits in). The manifest
+/// and permission documents are not part of [`AppState`], so each is minted
+/// from the same PRODUCER `create_app` uses ([`seed_app`] does the same) —
+/// copying them out of the fixture instead would compare the fixture against
+/// a round-trip of itself for exactly the two documents this pins.
 fn write_store(root: &Path, states: &[AppState]) {
     for app in states {
         save_app_files(root, app).expect("save app files");
+        let layout = AppLayout::new(root, app.record.id.clone()).expect("target layout");
+        save_manifest(
+            &layout,
+            &AppManifest::for_new_app(&app.record.id, &app.record.name, app.record.template),
+        )
+        .expect("save manifest");
+        save_permissions(&layout, &AppPermissions::default()).expect("save permissions");
     }
     let records: Vec<AppRecord> = states.iter().map(|app| app.record.clone()).collect();
     save_index(root, &records).expect("save index");

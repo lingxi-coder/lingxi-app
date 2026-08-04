@@ -75,7 +75,7 @@ class AppFlowUiTest {
     // --- 1. drawer tab switch ---------------------------------------------
 
     @Test
-    fun drawer_switchesBetweenChatsProjectsAndCrons() {
+    fun drawer_switchesBetweenChatsProjectsCronsAndApps() {
         openDrawer()
 
         rule.onNodeWithText("知识库").assertDoesNotExist()
@@ -97,6 +97,10 @@ class AppFlowUiTest {
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).performClick()
         rule.waitForIdle()
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).assertIsDisplayed()
+
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Apps.key)).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("打开应用库").assertIsDisplayed()
     }
 
     // --- 2. settings push-nav + system back -------------------------------

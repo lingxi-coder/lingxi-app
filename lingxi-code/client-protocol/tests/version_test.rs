@@ -32,9 +32,9 @@ fn version_is_semver() {
     }
 }
 
-/// The foundation pins the contract at `1.0.0` (§0.10). A change here is a
+/// The local-app bridge result expansion pins the contract at `1.2.0`. A change here is a
 /// deliberate, reviewed bump — this test makes an accidental edit visible.
 #[test]
-fn version_is_one_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "1.0.0");
+fn version_is_one_two_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "1.2.0");
 }

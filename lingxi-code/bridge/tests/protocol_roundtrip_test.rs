@@ -29,7 +29,11 @@ fn capabilities_default_shape() {
     let json = serde_json::to_string(&c).unwrap();
     assert_eq!(
         json,
-        r#"{"supports_streaming":true,"supports_tools":true,"supports_skills":true,"supports_commands":true,"client_protocol_version":"1.0.0"}"#
+        // Key ORDER is what this locks; the version tracks the constant so a
+        // reviewed §0.10 bump cannot break an unrelated shape assertion.
+        format!(
+            r#"{{"supports_streaming":true,"supports_tools":true,"supports_skills":true,"supports_commands":true,"client_protocol_version":"{CLIENT_PROTOCOL_VERSION}"}}"#
+        )
     );
 }
 

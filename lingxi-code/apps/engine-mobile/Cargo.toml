@@ -89,6 +89,14 @@ uniffi = [
     # routes the 15 `*App*` client commands to it, so the crate rides the same
     # uniffi gate as the client-protocol DTO surface it is lowered onto.
     "dep:local-apps",
+    # Local Apps MCP is the sole mobile MCP provider. It is an in-process
+    # transport only; mobile still does not discover .mcp.json, stdio or remote
+    # servers.
+    "dep:mcp",
+    "dep:tool-mcp",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:sha2",
 ]
 
 [dependencies]
@@ -157,6 +165,11 @@ sidequery = { path = "../../sidequery", optional = true }
 # (no `apps/*` edge), optional + uniffi-gated like its runtime-wiring siblings
 # above.
 local-apps = { path = "../../local-apps", optional = true }
+mcp = { path = "../../mcp", optional = true }
+tool-mcp = { path = "../../tools/mcp", optional = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
+sha2 = { version = "0.10", optional = true }
 # SESSIONS/HISTORY: enumerates the on-disk `<claude_home>/projects/<cwd>/*.jsonl`
 # session catalog for the `ListSessions` command. Engine-tier, optional +
 # uniffi-gated like its siblings above.
@@ -165,7 +178,7 @@ session = { path = "../../session", optional = true }
 # into a `uuid::Uuid`. Parse-only (no v4/serde) — optional + uniffi-gated.
 uuid = { version = "1.10", optional = true }
 
-tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
 # F3-05: `CancellationToken` for the cancelable streaming turn the async `submit`
 # spawns. Optional + pulled ONLY under the `uniffi` feature (engine-tier).
 tokio-util = { workspace = true, optional = true }

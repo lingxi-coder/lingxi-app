@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "node_executable": "/usr/bin/node",
+  "next_executable": "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+  "node_modules_mount": {
+    "source": "bundled:local-app-runtime/node_modules",
+    "target": "/opt/lingxi/local-app-runtime/node_modules",
+    "read_only": true
+  },
+  "commands": {
+    "store_build": {
+      "argv": [
+        "/usr/bin/node",
+        "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+        "build"
+      ],
+      "environment": {
+        "LINGXI_APP_OUTPUT": "export",
+        "NODE_ENV": "production"
+      },
+      "timeout_ms": 180000
+    },
+    "full_build": {
+      "argv": [
+        "/usr/bin/node",
+        "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+        "build"
+      ],
+      "environment": {
+        "LINGXI_APP_OUTPUT": "server",
+        "NODE_ENV": "production"
+      },
+      "timeout_ms": 180000
+    },
+    "full_start": {
+      "argv": [
+        "/usr/bin/node",
+        "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+        "start",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "{loopback_port}"
+      ],
+      "environment": {
+        "LINGXI_APP_OUTPUT": "server",
+        "NODE_ENV": "production"
+      },
+      "cold_start_timeout_ms": 120000,
+      "warm_start_timeout_ms": 30000
+    }
+  },
+  "limits": {
+    "build_concurrency": 1,
+    "node_process_tree_memory_bytes": 838860800,
+    "max_page_size": 100,
+    "max_batch_mutations": 50
+  },
+  "package_manager_policy": {
+    "interactive_terminal_apk": true,
+    "generation_jobs": false,
+    "mcp": false,
+    "npm_family_present": false
+  }
+}

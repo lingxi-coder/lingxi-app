@@ -25,25 +25,55 @@
 
 #![forbid(unsafe_code)]
 
+pub mod checkpoints;
 pub mod continuation;
+pub mod data;
 pub mod error;
 pub mod events;
+pub mod generation;
 pub mod ids;
+pub mod manifest;
+pub mod permissions;
 pub mod service;
+pub mod source_validator;
 pub mod state;
 pub mod storage;
 pub mod test_support;
 pub mod types;
 
+pub use checkpoints::AppCheckpointStore;
 pub use continuation::{ContinuationSink, NoopContinuationSink, RecordingContinuationSink};
+pub use data::{
+    AppDataStore, DataFilter, DataFilterOperator, DataMigrationPreview, DataMigrationResult,
+    DataMutation, DataMutationResult, DataPage, DataQuery, DataRecord, DataSchemaState,
+    DataSortDirection, DataSortKey, DATA_SCHEMA_VERSION, MAX_MUTATION_BATCH_SIZE,
+    MAX_QUERY_PAGE_SIZE,
+};
 pub use error::{AppError, AppErrorCode};
-pub use events::{AppEvent, AppEventObserver, NoopAppEventObserver, RecordingAppEventObserver};
+pub use events::{
+    AppEvent, AppEventFanout, AppEventObserver, AppEventSubscription, NoopAppEventObserver,
+    RecordingAppEventObserver,
+};
+pub use generation::{
+    AppGenerationCoordinator, AppGenerationExecutor, GenerationJob, GenerationJobKey,
+    GenerationJobObserver, GenerationJobStatus, GenerationRequest, GenerationRequestKind,
+    NoopGenerationJobObserver,
+};
+pub use manifest::{
+    load_manifest, save_manifest, AppLayout, AppManifest, DataCollectionSchema, DataFieldKind,
+    DataFieldSchema,
+};
+pub use permissions::{
+    load_permissions, save_permissions, AppCapability, AppPermissions, PermissionDecision,
+    SessionPermissions,
+};
 pub use service::AppService;
+pub use source_validator::{validate_workspace_source, WorkspaceSourcePolicy};
 pub use state::{runtime_transition_allowed, AppState, DRAFT_EDITABLE_STATES};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppContinuationKind, AppDesignDraft,
     AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress,
     AppInteractionKind, AppInteractionRequest, AppInteractions, AppPreview, AppRecord,
-    AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState, DensityLevel,
-    DesignValue, APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState,
+    DensityLevel, DesignValue, APPS_SCHEMA_VERSION,
 };

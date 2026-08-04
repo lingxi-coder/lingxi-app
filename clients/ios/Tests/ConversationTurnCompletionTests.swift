@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 @testable import LingxiCode
@@ -82,6 +83,41 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     finalAssistantText: "final answer"
                 )
             )
+        }
+
+        func testEnginePublishesSequencedSpeechDeltasForOwnedTurn() {
+            let source = makeSource()
+            var updates: [ConversationTurnSpeechUpdate] = []
+            let subscription = source.model.turnSpeechUpdates.sink { updates.append($0) }
+            guard let token = source.send("question") else {
+                return XCTFail("expected a turn token")
+            }
+
+            source.applyForTesting(.textDelta(text: "same"))
+            XCTAssertEqual(updates.last, ConversationTurnSpeechUpdate(
+                token: token,
+                sequence: 1,
+                delta: "same"
+            ))
+
+            source.applyForTesting(.textDelta(text: "same"))
+            XCTAssertEqual(updates.map(\.sequence), [1, 2])
+            XCTAssertEqual(updates.map(\.delta), ["same", "same"])
+            withExtendedLifetime(subscription) {}
+        }
+
+        func testSessionSwitchDropsLateSpeechDelta() {
+            let source = makeSource()
+            var updates: [ConversationTurnSpeechUpdate] = []
+            let subscription = source.model.turnSpeechUpdates.sink { updates.append($0) }
+            XCTAssertNotNil(source.send("old question"))
+            source.applyForTesting(.textDelta(text: "old"))
+            XCTAssertEqual(updates.count, 1)
+
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
+            source.applyForTesting(.textDelta(text: "late"))
+            XCTAssertEqual(updates.count, 1)
+            withExtendedLifetime(subscription) {}
         }
 
         func testCompletedTurnPublishesOnlyAssistantTextBlocksForSpeech() {

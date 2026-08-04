@@ -137,6 +137,9 @@ struct ChatView: View {
         .onDisappear {
             voiceInteraction.handleContextChange()
         }
+        .onReceive(convo.turnSpeechUpdates) { update in
+            voiceInteraction.handleTurnSpeechUpdate(update)
+        }
         .onChange(of: convo.turnCompletion) { _, completion in
             guard let completion else { return }
             voiceInteraction.handleTurnCompletion(completion)

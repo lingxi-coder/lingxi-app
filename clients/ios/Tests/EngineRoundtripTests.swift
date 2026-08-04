@@ -156,7 +156,9 @@ import XCTest
                     providerProfilesJson: snapshot.providerProfilesJSON,
                     routingJson: snapshot.routingJSON
                 ),
-                mobileLinux: nil
+                mobileLinux: nil,
+                localAppsFullRuntime: false,
+                localAppsRuntimeRoot: nil
             )
 
             XCTAssertNoThrow(

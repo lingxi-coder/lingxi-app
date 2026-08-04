@@ -9,4 +9,4 @@
 
 /// The client-protocol contract version, pinned for the M10 foundation
 /// (decision §0.10). A change here is a deliberate, reviewed bump.
-pub const CLIENT_PROTOCOL_VERSION: &str = "1.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "1.2.0";

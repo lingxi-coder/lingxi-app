@@ -14,6 +14,8 @@ struct RootView: View {
     @State private var projectStore: ProjectStore
     @State private var cronRepository: CronRepository
     @State private var providerRepository: ProviderRepository
+    @State private var localAppsStore: LocalAppsStore
+    @State private var clientEventCenter: ClientEventCenter
     @State private var source: any ConversationSource
     @State private var sourceGeneration = UUID()
     @State private var activeSession: String
@@ -94,7 +96,15 @@ struct RootView: View {
         _navigation = State(initialValue: AppNavigationModel())
         _projectStore = State(initialValue: projects)
         _cronRepository = State(initialValue: cron)
+        let localApps = LocalAppsStore()
+        let eventCenter = ClientEventCenter()
+        #if canImport(engine_mobileFFI)
+            eventCenter.subscribe { event in providers.handle(event: event) }
+            eventCenter.subscribe { event in localApps.handle(event: event) }
+        #endif
         _providerRepository = State(initialValue: providers)
+        _localAppsStore = State(initialValue: localApps)
+        _clientEventCenter = State(initialValue: eventCenter)
         _source = State(initialValue: conversation)
         let storedSessionID = preferences.storedActiveSessionID(projectID: projectID)
             ?? projects.activeProject?.record.lastActiveSessionId
@@ -133,6 +143,11 @@ struct RootView: View {
         .onChange(of: providerRepository.syncRevision) { _, _ in
             settingsStore.llmProviders = providerRepository.legacyProviders()
         }
+        .onChange(of: localAppsStore.requestedPresentationAppID) { _, appID in
+            guard let requestedAppID = appID else { return }
+            navigation.openLocalApps(appID: requestedAppID)
+            _ = localAppsStore.consumeRequestedPresentationAppID()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
             cronRepository.handleNotificationUserInfo(note.userInfo ?? [:])
             if let runID = note.userInfo?["lingxi.cron.run_id"] as? String {
@@ -141,6 +156,9 @@ struct RootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .lingxiAppActionPending)) { _ in
             Task { await consumePendingAppActions() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            Task { await localAppsStore.handleMemoryWarning() }
         }
         .onOpenURL(perform: handleIncomingURL)
         .task(id: sourceGeneration) {
@@ -160,6 +178,7 @@ struct RootView: View {
                     )
                 }
                 await providerRepository.refreshCredentialStatus()
+                await localAppsStore.refreshAfterEngineRebind()
             } catch {
                 guard generation == sourceGeneration else { return }
                 current.warmUp()
@@ -200,6 +219,18 @@ struct RootView: View {
         ) { route in
             modalDestination(route)
         }
+        // One controller presents one modal. While the local-apps cover is up it
+        // owns the prompt (LocalAppsRootView); this presenter only covers requests
+        // raised with the cover down — e.g. a destructive data migration approved
+        // during background generation.
+        .sheet(
+            item: Binding(
+                get: { navigation.presentedRoute == nil ? localAppsStore.pendingPermission : nil },
+                set: { _ in }
+            )
+        ) { prompt in
+            LocalAppPermissionSheet(store: localAppsStore, prompt: prompt)
+        }
     }
 
     private var rootSurface: some View {
@@ -238,6 +269,7 @@ struct RootView: View {
                 Drawer(
                     projectStore: projectStore,
                     cronRepository: cronRepository,
+                    localAppsStore: localAppsStore,
                     activeSession: $activeSession,
                     source: source,
                     onClose: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { navigation.closeDrawer() } },
@@ -249,6 +281,9 @@ struct RootView: View {
                     },
                     openCron: { scopeID, taskID in
                         closeDrawerThen { navigation.openCron(scopeID: scopeID, taskID: taskID) }
+                    },
+                    openApps: { appID in
+                        closeDrawerThen { navigation.openLocalApps(appID: appID) }
                     },
                     onSelectProject: { switchProject(to: $0) },
                     onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
@@ -326,6 +361,12 @@ struct RootView: View {
             CronRootView(repository: cronRepository, initialRoute: route)
         case .cronRun(let runID):
             CronRootView(repository: cronRepository, initialRoute: .run(runID: runID))
+        case .localApps(let appID):
+            LocalAppsRootView(
+                store: localAppsStore,
+                initialAppID: appID,
+                onDismiss: { navigation.closePresentedRoute() }
+            )
         }
     }
 
@@ -347,6 +388,12 @@ struct RootView: View {
             )
         case .terminal:
             EmptyView()
+        case .localApps(let appID):
+            LocalAppsRootView(
+                store: localAppsStore,
+                initialAppID: appID,
+                onDismiss: { navigation.closePresentedRoute() }
+            )
         }
     }
 
@@ -366,7 +413,12 @@ struct RootView: View {
         let current = source
         #if canImport(engine_mobileFFI)
             current.setExternalEventHandler { event in
-                Task { @MainActor in providerRepository.handle(event: event) }
+                Task { @MainActor in
+                    clientEventCenter.publish(event)
+                }
+            }
+            localAppsStore.configure { command in
+                try await current.submitEngineCommand(command)
             }
             providerRepository.configure(
                 submitCommand: { command in try await current.submitEngineCommand(command) },
@@ -408,7 +460,7 @@ struct RootView: View {
         let replacement = makeSource(projectID: projectStore.activeProjectId, snapshot: snapshot)
         #if canImport(engine_mobileFFI)
             replacement.setExternalEventHandler { event in
-                Task { @MainActor in providerRepository.handle(event: event) }
+                Task { @MainActor in clientEventCenter.publish(event) }
             }
         #endif
         try await replacement.prepare()
@@ -457,7 +509,7 @@ struct RootView: View {
                 let replacement = makeSource(projectID: projectID, snapshot: providerRepository.makeLaunchSnapshot())
                 #if canImport(engine_mobileFFI)
                     replacement.setExternalEventHandler { event in
-                        Task { @MainActor in providerRepository.handle(event: event) }
+                        Task { @MainActor in clientEventCenter.publish(event) }
                     }
                 #endif
                 try await replacement.prepare()
@@ -584,6 +636,7 @@ struct RootView: View {
         switch phase {
         case .background:
             persistConversationScope()
+            localAppsStore.sceneDidEnterBackground()
             voiceInteraction.handleBackground()
             source.handleBackground()
             Task {
@@ -592,6 +645,7 @@ struct RootView: View {
             }
         case .active:
             source.handleForeground()
+            Task { await localAppsStore.sceneWillEnterForeground() }
             Task { await VoiceAudioSessionCoordinator.shared.resumeAfterForeground() }
             Task { await cronRepository.handleSceneBecameActive() }
             Task { await consumePendingAppActions() }

@@ -650,9 +650,13 @@ pub(crate) fn resolve_gate_evidence(app: &mut AppState) -> bool {
                 AppWorkflowState::AwaitingPreviewConfirmation
             }
         }),
-        (AppWorkflowState::CollectingSpec, Some(AppInteractionKind::Designer)) => {
-            Some(AppWorkflowState::AwaitingSpecConfirmation)
-        }
+        // `open_designer` accepts GenerationFailed as well as CollectingSpec
+        // (state.rs), so a crash between the interactions.json and the mirror
+        // writes can leave either source state with the gate already armed.
+        (
+            AppWorkflowState::CollectingSpec | AppWorkflowState::GenerationFailed,
+            Some(AppInteractionKind::Designer),
+        ) => Some(AppWorkflowState::AwaitingSpecConfirmation),
         (AppWorkflowState::Validating, Some(AppInteractionKind::Preview)) => {
             Some(AppWorkflowState::AwaitingPreviewConfirmation)
         }

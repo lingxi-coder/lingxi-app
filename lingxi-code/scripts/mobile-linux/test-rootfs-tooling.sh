@@ -29,6 +29,7 @@ write_elf(root / "bin" / "busybox", b"busybox")
 os.link(root / "bin" / "busybox", root / "bin" / "sh")
 write_elf(root / "sbin" / "apk", b"apk")
 write_elf(root / "usr" / "bin" / "git", b"git")
+write_elf(root / "usr" / "bin" / "node", b"node")
 write_elf(root / "usr" / "bin" / "ssh", b"ssh")
 write_elf(root / "usr" / "bin" / "python3", b"python3")
 write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
@@ -42,10 +43,12 @@ write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
     "https://dl-cdn.alpinelinux.org/alpine/v3.21/community\n",
     encoding="utf-8",
 )
+(root / "etc" / "alpine-release").write_text("3.21.3\n", encoding="utf-8")
 (root / "lib" / "apk" / "db" / "installed").write_text(
     "P:apk-tools\nV:2.14-r0\nA:arm64\nL:GPL-2.0-only\n\n"
     "P:busybox\nV:1.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
-    "P:git\nV:2.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
+    "P:git\nV:2.47.3-r0\nA:arm64\nL:GPL-2.0-only\n\n"
+    "P:nodejs\nV:22.23.0-r0\nA:arm64\nL:MIT\n\n"
     "P:openssh-client\nV:9.0-r0\nA:arm64\nL:BSD-2-Clause\n\n"
     "P:python3\nV:3.12-r0\nA:arm64\nL:Python-2.0\n\n"
     "P:ca-certificates\nV:1-r0\nA:arm64\nL:MPL-2.0\n",
@@ -54,6 +57,21 @@ write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
 PY
 
 python3 "${tool}" verify-tree --root "${fixture_root}"
+
+cp "${fixture_root}/lib/apk/db/installed" "${tmp_root}/installed.good"
+sed -i.bak 's/V:2.47.3-r0/V:2.47.4-r0/' "${fixture_root}/lib/apk/db/installed"
+if python3 "${tool}" verify-tree --root "${fixture_root}"; then
+  echo "expected verify-tree to fail on fixed Git version drift" >&2
+  exit 1
+fi
+cp "${tmp_root}/installed.good" "${fixture_root}/lib/apk/db/installed"
+
+touch "${fixture_root}/usr/bin/npm"
+if python3 "${tool}" verify-tree --root "${fixture_root}"; then
+  echo "expected verify-tree to reject npm in the runtime image" >&2
+  exit 1
+fi
+rm -f "${fixture_root}/usr/bin/npm"
 
 manifest_path="${tmp_root}/rootfs-manifest.json"
 lock_path="${tmp_root}/rootfs-build.lock.json"

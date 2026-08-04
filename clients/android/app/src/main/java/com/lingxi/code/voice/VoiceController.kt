@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.PackageInfoCompat
+import com.lingxi.code.BuildConfig
 import com.lingxi.code.bindings.AndroidEventListener
 import com.lingxi.code.bindings.AndroidEngineLaunchConfigFfi
 import com.lingxi.code.bindings.AndroidPermissionSink
@@ -22,6 +23,7 @@ import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
+import com.lingxi.code.localapps.LocalAppRuntimeAssets
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.voice.audio.AndroidSttAdapter
 import com.lingxi.code.voice.audio.AndroidTtsAdapter
@@ -180,6 +182,8 @@ fun buildVoiceEngine(
                     mode = linuxRuntimeMode,
                     workspace = projectWorkspace,
                 ),
+                localAppsFullRuntime = BuildConfig.MOBILE_LINUX_FULL,
+                localAppsRuntimeRoot = LocalAppRuntimeAssets.prepare(appContext),
             ),
             listener = listener,
             stt = stt,

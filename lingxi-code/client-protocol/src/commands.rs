@@ -33,7 +33,10 @@
 
 use crate::computer_access::ComputerAccessResponseDto;
 use crate::listings::TaskStatusDto;
-use crate::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppTemplateKindDto};
+use crate::local_apps::{
+    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppDesignPatchDto,
+    AppTemplateKindDto,
+};
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -317,6 +320,15 @@ pub enum ClientCommand {
     /// the full record set.
     ListApps,
 
+    /// List the Rust-owned dynamic app templates.
+    ListAppTemplates,
+
+    /// Request the complete detail snapshot for one app.
+    GetAppDetails {
+        /// App whose detail snapshot is requested.
+        app_id: String,
+    },
+
     /// Create a new local-app record and its workspace. Confirmed by an
     /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event.
     CreateApp {
@@ -365,6 +377,25 @@ pub enum ClientCommand {
         suggestion_id: String,
         /// Draft revision the client believes to be current.
         expected_revision: u64,
+    },
+
+    /// Ask the agent to propose a patch against the current draft revision.
+    RequestAppDesignSuggestion {
+        /// App whose draft should receive a suggestion.
+        app_id: String,
+        /// Current draft revision used as the suggestion base.
+        expected_revision: u64,
+        /// Optional user direction for the suggestion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+
+    /// Dismiss the current suggestion without changing the draft.
+    DismissAppDesignSuggestion {
+        /// App that owns the pending suggestion.
+        app_id: String,
+        /// Pending suggestion to dismiss.
+        suggestion_id: String,
     },
 
     /// Confirm the design spec and start generation. `interaction_id` must be
@@ -430,6 +461,47 @@ pub enum ClientCommand {
         app_id: String,
         /// The user's revision feedback.
         prompt: String,
+    },
+
+    /// Retry a persisted failed generation job for its confirmed revision.
+    RetryAppGeneration {
+        /// App whose persisted failed job should be retried.
+        app_id: String,
+    },
+
+    /// Execute one data-only request from the versioned local-app bridge.
+    ExecuteAppBridgeRequest {
+        /// Data-only request to execute.
+        request: AppBridgeRequestDto,
+    },
+
+    /// Resolve a permission-gated structured `WebView` action.
+    ResolveAppUiRequest {
+        /// Pending UI request correlator.
+        request_id: String,
+        /// User's scoped authorization decision.
+        decision: AppAuthorizationDecisionDto,
+        /// Structured `WebView` inspection/action result as JSON data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_json: Option<String>,
+        /// Host-side action failure, if the authorized action failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
+    /// Resolve a native app capability request.
+    ResolveAppCapabilityRequest {
+        /// Pending capability request correlator.
+        request_id: String,
+        /// User's scoped authorization decision.
+        decision: AppAuthorizationDecisionDto,
+    },
+
+    /// Revoke every session and durable capability grant for one app. Future
+    /// gated operations prompt again; the design manifest is not changed.
+    ResetAppPermissions {
+        /// App whose saved grants should be cleared.
+        app_id: String,
     },
 
     /// List an app's restorable checkpoints. Phase 1 replies with an empty

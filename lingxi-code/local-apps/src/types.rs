@@ -67,7 +67,8 @@ pub enum AppWorkflowState {
     Revising,
     /// The app is generated, validated and user-approved.
     Ready,
-    /// Generation failed; retry requires a confirmed, unchanged draft.
+    /// Generation failed; retry requires a confirmed, unchanged draft, and
+    /// `open_designer` re-opens the draft when that input must change.
     GenerationFailed,
     /// Validation failed; `begin_revision` starts a fix-up pass.
     ValidationFailed,
@@ -196,6 +197,10 @@ pub enum DesignValue {
     ScreenList(Vec<String>),
     /// Ordered list of feature names.
     FeatureList(Vec<String>),
+    /// Structured data-field declarations rendered by the dynamic designer.
+    DataFieldList(Vec<crate::manifest::DataFieldSchema>),
+    /// HTTPS host names declared for the native network bridge.
+    DomainList(Vec<String>),
 }
 
 /// One patch operation against the draft field map.
@@ -428,6 +433,16 @@ pub struct AppContinuation {
 }
 
 /// Per-app runtime record persisted at `apps/<id>/runtime.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppRuntimeMode {
+    /// Store/Play static export served by the Rust loopback asset server.
+    StaticExport,
+    /// Full/Direct fixed Next production server.
+    NextProduction,
+}
+
+/// Per-app runtime record persisted at `apps/<id>/runtime.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppRuntimeRecord {
@@ -437,6 +452,10 @@ pub struct AppRuntimeRecord {
     pub app_id: String,
     /// Current runtime state.
     pub state: AppRuntimeState,
+    /// Explicit runtime mode; absent only for pre-1.2 migrated records that
+    /// have not been started since upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<AppRuntimeMode>,
     /// Dev-server port (phase 4). Once assigned it is NEVER reassigned —
     /// the `localhost:<port>` origin anchors the app's `IndexedDB` data.
     #[serde(default, skip_serializing_if = "Option::is_none")]

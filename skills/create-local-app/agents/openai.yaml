@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Local App"
+  short_description: "Design and build a constrained local LingXi app"
+  default_prompt: "Use $create-local-app to design and generate a local app from a LingXi template."

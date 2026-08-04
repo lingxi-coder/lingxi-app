@@ -21,7 +21,8 @@ use client_protocol::commands::{
 };
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
-    AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppTemplateKindDto, DesignValueDto,
+    AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
+    AppDesignPatchDto, AppDesignPatchOpDto, AppTemplateKindDto, DesignValueDto,
 };
 use client_protocol::permission::PermissionResponseDto;
 
@@ -469,6 +470,68 @@ fn list_apps_round_trips() {
     assert_eq!(back, cmd);
 }
 
+#[test]
+fn extended_local_app_commands_round_trip() {
+    let commands = vec![
+        ClientCommand::ListAppTemplates,
+        ClientCommand::GetAppDetails {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::RequestAppDesignSuggestion {
+            app_id: "habits-1a2b".to_string(),
+            expected_revision: 4,
+            prompt: Some("make it calmer".to_string()),
+        },
+        ClientCommand::DismissAppDesignSuggestion {
+            app_id: "habits-1a2b".to_string(),
+            suggestion_id: "sugg-1".to_string(),
+        },
+        ClientCommand::RetryAppGeneration {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::ExecuteAppBridgeRequest {
+            request: AppBridgeRequestDto {
+                request_id: "bridge-1".to_string(),
+                app_id: "habits-1a2b".to_string(),
+                operation: AppBridgeOperationDto::QueryData,
+                payload_json: Some(r#"{"collection":"items"}"#.to_string()),
+            },
+        },
+        ClientCommand::ResolveAppUiRequest {
+            request_id: "ui-1".to_string(),
+            decision: AppAuthorizationDecisionDto::AllowSession,
+            result_json: Some(r#"{"elements":[]}"#.to_string()),
+            error: None,
+        },
+        ClientCommand::ResolveAppCapabilityRequest {
+            request_id: "cap-1".to_string(),
+            decision: AppAuthorizationDecisionDto::AllowAlways,
+        },
+        ClientCommand::ResetAppPermissions {
+            app_id: "habits-1a2b".to_string(),
+        },
+    ];
+
+    let expected_types = [
+        "list_app_templates",
+        "get_app_details",
+        "request_app_design_suggestion",
+        "dismiss_app_design_suggestion",
+        "retry_app_generation",
+        "execute_app_bridge_request",
+        "resolve_app_ui_request",
+        "resolve_app_capability_request",
+        "reset_app_permissions",
+    ];
+    for (command, expected_type) in commands.into_iter().zip(expected_types) {
+        let json = serde_json::to_value(&command).expect("serialize extended app command");
+        assert_eq!(json["type"], expected_type);
+        let back: ClientCommand =
+            serde_json::from_value(json).expect("deserialize extended app command");
+        assert_eq!(back, command);
+    }
+}
+
 /// `CreateApp` — name + bare-string template/origin + an optional
 /// `conversation_id` (present for `origin: chat`, skipped when `None`).
 #[test]
@@ -724,6 +787,7 @@ fn delete_app_round_trips() {
 /// that smuggles a `session_id` field (other than `ResumeSession`) breaks this
 /// test, enforcing that `session_id` stays a CONNECTION ATTRIBUTE.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn no_live_command_carries_session_id() {
     // One canonical instance of every command EXCEPT ResumeSession.
     let commands: Vec<ClientCommand> = vec![

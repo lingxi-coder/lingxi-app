@@ -9,9 +9,10 @@
 //! equivalence.
 
 use client_protocol::local_apps::{
-    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
-    AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto,
-    AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    builtin_app_templates, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
+    AppDataFieldTypeDto, AppDesignFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto,
+    AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto,
+    DensityLevelDto, DesignValueDto,
 };
 
 /// `AppTemplateKindDto` is a bare wire STRING, byte-identical to the core
@@ -284,7 +285,7 @@ fn design_patch_matches_exact_wire_shape() {
     assert_eq!(back_n, with_note);
 }
 
-/// `AppRecordDto` — snake_case protocol fields; an absent `conversation_id` is
+/// `AppRecordDto` — `snake_case` protocol fields; an absent `conversation_id` is
 /// omitted from the wire.
 #[test]
 fn app_record_round_trips_and_skips_none_conversation() {
@@ -322,7 +323,7 @@ fn app_record_round_trips_and_skips_none_conversation() {
     assert_eq!(back_c, chat_born);
 }
 
-/// `AppCheckpointDto` — snake_case protocol fields + bare-string kind.
+/// `AppCheckpointDto` — `snake_case` protocol fields + bare-string kind.
 #[test]
 fn app_checkpoint_round_trips() {
     let checkpoint = AppCheckpointDto {
@@ -339,4 +340,69 @@ fn app_checkpoint_round_trips() {
     let back: AppCheckpointDto =
         serde_json::from_value(json).expect("deserialize AppCheckpointDto");
     assert_eq!(back, checkpoint);
+}
+
+#[test]
+fn builtin_templates_define_the_same_five_ordered_steps() {
+    let templates = builtin_app_templates();
+    assert_eq!(templates.len(), 4);
+    for template in &templates {
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .steps
+                .iter()
+                .map(|step| (step.order, step.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "basic"),
+                (2, "structure"),
+                (3, "data"),
+                (4, "appearance"),
+                (5, "permissions"),
+            ]
+        );
+        assert_eq!(template.collections.len(), 1);
+        assert!(template
+            .steps
+            .iter()
+            .flat_map(|step| &step.fields)
+            .any(|field| { field.field_type == AppDesignFieldTypeDto::DataFieldList }));
+        assert!(template
+            .steps
+            .iter()
+            .flat_map(|step| &step.fields)
+            .any(|field| { field.field_type == AppDesignFieldTypeDto::DomainList }));
+    }
+    assert_eq!(templates[0].collections[0].id, "records");
+    assert_eq!(templates[1].collections[0].id, "items");
+    assert_eq!(templates[2].collections[0].id, "entries");
+    assert_eq!(templates[3].collections[0].id, "submissions");
+    assert!(!templates[3].collections[0].enabled_by_default);
+}
+
+#[test]
+fn structured_design_values_round_trip_without_untyped_json() {
+    let value = DesignValueDto::DataFieldList {
+        value: vec![client_protocol::local_apps::AppDataFieldDto {
+            id: "priority".to_string(),
+            label: "Priority".to_string(),
+            field_type: AppDataFieldTypeDto::Enum,
+            required: true,
+            options: vec!["low".to_string(), "high".to_string()],
+        }],
+    };
+    let json = serde_json::to_value(&value).expect("serialize data field list");
+    assert_eq!(json["kind"], "data_field_list");
+    assert_eq!(json["value"][0]["field_type"], "enum");
+    let back: DesignValueDto = serde_json::from_value(json).expect("deserialize data field list");
+    assert_eq!(back, value);
+
+    let domains = DesignValueDto::DomainList {
+        value: vec!["api.example.com".to_string()],
+    };
+    let json = serde_json::to_value(&domains).expect("serialize domain list");
+    assert_eq!(json["kind"], "domain_list");
+    let back: DesignValueDto = serde_json::from_value(json).expect("deserialize domain list");
+    assert_eq!(back, domains);
 }

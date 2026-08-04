@@ -11,7 +11,8 @@ use crate::storage;
 use crate::types::{
     AppContinuation, AppContinuationKind, AppDesignDraft, AppDesignPatch, AppDesignPatchOp,
     AppDesignSuggestion, AppInteractionKind, AppInteractionRequest, AppInteractions, AppRecord,
-    AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState, APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState,
+    APPS_SCHEMA_VERSION,
 };
 use std::collections::BTreeMap;
 
@@ -157,6 +158,7 @@ impl AppState {
                 schema_version: APPS_SCHEMA_VERSION,
                 app_id: id,
                 state: AppRuntimeState::Stopped,
+                mode: None,
                 port: None,
                 pid: None,
                 last_error: None,
@@ -246,14 +248,26 @@ impl AppState {
         continuation
     }
 
-    /// `collecting_spec -> awaiting_spec_confirmation`; opens the single
-    /// pending designer interaction at the current revision.
+    /// `collecting_spec | generation_failed -> awaiting_spec_confirmation`;
+    /// opens the single pending designer interaction at the current revision.
+    ///
+    /// `generation_failed` is a legal source because generation usually fails
+    /// on the DESIGN (an id or domain the manifest contract rejects) and
+    /// [`Self::retry_generation`] can only replay the same confirmed revision
+    /// — so re-opening the designer is what returns the draft to an editable
+    /// state, the role [`Self::begin_revision`] plays for `validation_failed`.
     pub fn open_designer(
         &mut self,
         interaction_id: String,
         now_ms: u64,
     ) -> Result<AppInteractionRequest, AppError> {
-        self.ensure_workflow("open_designer", &[AppWorkflowState::CollectingSpec])?;
+        self.ensure_workflow(
+            "open_designer",
+            &[
+                AppWorkflowState::CollectingSpec,
+                AppWorkflowState::GenerationFailed,
+            ],
+        )?;
         let interaction = AppInteractionRequest {
             interaction_id,
             app_id: self.record.id.clone(),
@@ -302,6 +316,30 @@ impl AppState {
         self.draft.pending_suggestion = Some(suggestion.clone());
         self.record.updated_at_ms = now_ms;
         Ok(suggestion)
+    }
+
+    /// Consume the addressed pending suggestion without changing fields or
+    /// the draft revision. A mismatched id leaves the suggestion intact.
+    pub fn dismiss_suggestion(&mut self, suggestion_id: &str, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow("dismiss_suggestion", &DRAFT_EDITABLE_STATES)?;
+        match self.draft.pending_suggestion.take() {
+            Some(pending) if pending.suggestion_id == suggestion_id => {
+                self.record.updated_at_ms = now_ms;
+                Ok(())
+            }
+            Some(pending) => {
+                let pending_id = pending.suggestion_id.clone();
+                self.draft.pending_suggestion = Some(pending);
+                Err(AppError::InteractionInvalid(format!(
+                    "dismiss_suggestion: {suggestion_id:?} does not match the pending suggestion {pending_id:?} for app {}",
+                    self.record.id
+                )))
+            }
+            None => Err(AppError::InteractionInvalid(format!(
+                "dismiss_suggestion: app {} has no pending suggestion",
+                self.record.id
+            ))),
+        }
     }
 
     /// Apply the stored suggestion. Same state/revision gating as
@@ -527,6 +565,15 @@ impl AppState {
         Ok(())
     }
 
+    /// Enter validation for a checkpoint restore without creating a second
+    /// user-revision continuation. The generation coordinator owns the single
+    /// durable restore-build job.
+    pub fn begin_restore_rebuild(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow("begin_restore_rebuild", &[AppWorkflowState::Ready])?;
+        self.set_workflow(AppWorkflowState::Revising, now_ms);
+        Ok(())
+    }
+
     /// Update the runtime record (spec §C). A state change must follow the
     /// runtime transition table; a same-state call just refreshes
     /// `pid`/`last_error`. `port` semantics: `Some(p)` assigns the port when
@@ -564,6 +611,13 @@ impl AppState {
         self.runtime.last_error = last_error;
         self.runtime.updated_at_ms = now_ms;
         Ok(())
+    }
+
+    /// Persist the distribution-selected runtime mode independently from the
+    /// process-state transition table.
+    pub fn set_runtime_mode(&mut self, mode: AppRuntimeMode, now_ms: u64) {
+        self.runtime.mode = Some(mode);
+        self.runtime.updated_at_ms = now_ms;
     }
 }
 
@@ -667,9 +721,12 @@ mod tests {
     }
 
     #[test]
-    fn open_designer_only_from_collecting_spec() {
+    fn open_designer_reopens_a_failed_generation() {
         assert_allowed_exactly(
-            &[AppWorkflowState::CollectingSpec],
+            &[
+                AppWorkflowState::CollectingSpec,
+                AppWorkflowState::GenerationFailed,
+            ],
             |a| a.open_designer("int-1".into(), 11).map(|_| ()),
             "open_designer",
         );
@@ -815,6 +872,20 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_suggestion_consumes_only_the_matching_id_without_revision_change() {
+        let mut app = app_in(AppWorkflowState::CollectingSpec);
+        app.store_suggestion("sugg-1".into(), set_patch("accent", "#112233"), 11)
+            .unwrap();
+        let error = app.dismiss_suggestion("wrong", 12).unwrap_err();
+        assert_eq!(error.code(), crate::error::AppErrorCode::InteractionInvalid);
+        assert!(app.draft.pending_suggestion.is_some());
+        app.dismiss_suggestion("sugg-1", 13).unwrap();
+        assert!(app.draft.pending_suggestion.is_none());
+        assert_eq!(app.draft.revision, 0);
+        assert_eq!(app.record.updated_at_ms, 13);
+    }
+
+    #[test]
     fn apply_suggestion_state_gating() {
         assert_allowed_exactly(
             &DRAFT_EDITABLE_STATES,
@@ -936,6 +1007,26 @@ mod tests {
         a.draft.confirmed_revision = Some(a.draft.revision);
         a.retry_generation(12).unwrap();
         assert_eq!(a.record.workflow_state, AppWorkflowState::Generating);
+    }
+
+    /// A generation failure caused by the DESIGN must be fixable: re-opening
+    /// the designer returns the draft to an editable state, and the fixed
+    /// draft confirms into a fresh generation.
+    #[test]
+    fn generation_failed_recovers_through_the_designer() {
+        let mut a = app_in(AppWorkflowState::GenerationFailed);
+        let gate = a.open_designer("int-fix".into(), 11).unwrap();
+        assert_eq!(
+            a.record.workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation
+        );
+        let current = a.draft.revision;
+        let revision = a
+            .update_draft(current, &set_patch("title", "fixed"), 12)
+            .unwrap();
+        a.confirm_design(&gate.interaction_id, revision, 13).unwrap();
+        assert_eq!(a.record.workflow_state, AppWorkflowState::Generating);
+        assert_eq!(a.draft.confirmed_revision, Some(revision));
     }
 
     #[test]

@@ -53,6 +53,15 @@ mod skill_loader;
 mod local_apps_bridge;
 
 #[cfg(feature = "uniffi")]
+mod local_apps_generation;
+#[cfg(feature = "uniffi")]
+mod local_apps_host;
+#[cfg(feature = "uniffi")]
+mod local_apps_mcp;
+#[cfg(feature = "uniffi")]
+mod local_apps_profile;
+
+#[cfg(feature = "uniffi")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,

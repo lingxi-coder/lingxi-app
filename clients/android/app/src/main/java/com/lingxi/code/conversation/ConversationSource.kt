@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.transformWhile
@@ -139,6 +140,19 @@ internal class PermissionIngress(
  * fail-closed unavailable state when the engine can't build.
  */
 interface ConversationSource {
+
+    /**
+     * Out-of-band engine events consumed by feature stores such as Local Apps.
+     *
+     * Conversation rendering still observes its purpose-built state flows; this
+     * generic stream exists so profile-global features can share the exact same
+     * engine connection instead of constructing a second [MobileEngineHandle].
+     */
+    val clientEvents: Flow<ClientEvent>
+        get() = emptyFlow()
+
+    /** Submit a non-conversation protocol command through this source. */
+    suspend fun submitClientCommand(command: ClientCommand) {}
 
     /** The conversation a freshly-opened session starts with. */
     fun initialMessages(): List<Message> = emptyList()
@@ -742,6 +756,12 @@ class EngineConversationSource private constructor(
     private val activeSession: MutableStateFlow<ActivatedSession?>,
     private val mcp: MutableStateFlow<List<MCPServer>>,
 ) : ConversationSource {
+
+    override val clientEvents: Flow<ClientEvent> = events
+
+    override suspend fun submitClientCommand(command: ClientCommand) {
+        handle.submit(command)
+    }
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
     override fun initialMessages(): List<Message> = emptyList()

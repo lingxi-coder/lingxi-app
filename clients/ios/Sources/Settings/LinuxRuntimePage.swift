@@ -58,6 +58,7 @@ private enum LinuxRuntimeBridge {
     private static let cache = HandleCache()
 
     private static func config(for mode: LinuxRuntimeMode) -> IosMobileLinuxConfigFfi {
+        let manifest = LXISHRuntimeBundleMetadata.current()
         let workspaceID = stableWorkspaceID()
         let appSupportRoot = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -74,17 +75,15 @@ private enum LinuxRuntimeBridge {
             .first?
             .appendingPathComponent("mobile-linux/ios-ish", isDirectory: true)
             .path ?? ""
-        let authorizationFile = Bundle.main
-            .url(forResource: "AUTHORIZATION_MANIFEST", withExtension: "json")?
-            .path
+        let authorizationFile = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
         return IosMobileLinuxConfigFfi(
             mode: mode == .legacy ? .legacy : .mobileLinux,
             managedRoot: managedRoot,
             workspaceHostPath: workspaceHostPath,
             stableWorkspaceId: workspaceID,
             abi: "arm64",
-            rootfsVersion: "1.0.0",
-            archiveSha256: nil,
+            rootfsVersion: manifest.rootfsVersion,
+            archiveSha256: manifest.archiveSha256,
             authorizationFile: authorizationFile
         )
     }
@@ -205,7 +204,7 @@ private enum LinuxRuntimeBridge {
                 request: MobileLinuxCommandRequestFfi(
                     command: "/bin/sh",
                     args: ["-lc", command],
-                    cwd: nil,
+                    cwd: "/workspace/\(cfg.stableWorkspaceId)",
                     env: [:],
                     stdin: nil,
                     timeoutMs: 30_000,

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/../../.." && pwd)"
 tool="${script_dir}/rootfs_tool.py"
 packager="${script_dir}/package-rootfs-release.sh"
 manifest_validator="${script_dir}/check-rootfs-manifest.sh"
@@ -12,11 +13,14 @@ export SOURCE_DATE_EPOCH=0
 fixture_root="${tmp_root}/rootfs"
 mkdir -p "${fixture_root}/bin" "${fixture_root}/sbin" "${fixture_root}/usr/bin" "${fixture_root}/usr/lib" "${fixture_root}/lib/apk/db" "${fixture_root}/etc/apk" "${fixture_root}/tmp" "${fixture_root}/var/tmp" "${fixture_root}/workspace" "${fixture_root}/root"
 
-python3 - <<'PY' "${fixture_root}"
+python3 - <<'PY' "${fixture_root}" "${repo_root}/docs/mobile-linux/local-app-runtime-pins.json"
+import json
 import os
 import pathlib
 import stat
 import sys
+
+PINS_PATH = pathlib.Path(sys.argv[2])
 
 root = pathlib.Path(sys.argv[1])
 
@@ -38,20 +42,28 @@ write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
     "# immutable stdlib fixture\n",
     encoding="utf-8",
 )
+# Derived from the pins so the fixture cannot drift away from the versions
+# the tool enforces -- hardcoding them here is what made this test fail the
+# moment the product moved to Alpine 3.24.1.
+_pins = json.loads(PINS_PATH.read_text(encoding="utf-8"))
+_alpine = _pins["alpine"]
 (root / "etc" / "apk" / "repositories").write_text(
-    "https://dl-cdn.alpinelinux.org/alpine/v3.21/main\n"
-    "https://dl-cdn.alpinelinux.org/alpine/v3.21/community\n",
-    encoding="utf-8",
+    "\n".join(_alpine["repositories"]) + "\n", encoding="utf-8"
 )
-(root / "etc" / "alpine-release").write_text("3.21.3\n", encoding="utf-8")
+(root / "etc" / "alpine-release").write_text(_alpine["version"] + "\n", encoding="utf-8")
+_entries = [
+    ("apk-tools", "2.14-r0", "GPL-2.0-only"),
+    ("busybox", "1.0-r0", "GPL-2.0-only"),
+]
+_entries += [
+    (name, version, "NOASSERTION")
+    for name, version in sorted(_pins["runtime_packages"].items())
+]
 (root / "lib" / "apk" / "db" / "installed").write_text(
-    "P:apk-tools\nV:2.14-r0\nA:arm64\nL:GPL-2.0-only\n\n"
-    "P:busybox\nV:1.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
-    "P:git\nV:2.47.3-r0\nA:arm64\nL:GPL-2.0-only\n\n"
-    "P:nodejs\nV:22.23.0-r0\nA:arm64\nL:MIT\n\n"
-    "P:openssh-client\nV:9.0-r0\nA:arm64\nL:BSD-2-Clause\n\n"
-    "P:python3\nV:3.12-r0\nA:arm64\nL:Python-2.0\n\n"
-    "P:ca-certificates\nV:1-r0\nA:arm64\nL:MPL-2.0\n",
+    "\n".join(
+        f"P:{name}\nV:{version}\nA:arm64\nL:{license}\n"
+        for name, version, license in _entries
+    ),
     encoding="utf-8",
 )
 PY
@@ -59,19 +71,88 @@ PY
 python3 "${tool}" verify-tree --root "${fixture_root}"
 
 cp "${fixture_root}/lib/apk/db/installed" "${tmp_root}/installed.good"
-sed -i.bak 's/V:2.47.3-r0/V:2.47.4-r0/' "${fixture_root}/lib/apk/db/installed"
+# Bump the pinned Git version inside the fixture. Derived from the pins and the
+# substitution is asserted, because a sed pattern that silently stops matching
+# leaves this test passing while proving nothing.
+python3 - <<'MUTATE' "${fixture_root}/lib/apk/db/installed" "${repo_root}/docs/mobile-linux/local-app-runtime-pins.json"
+import json
+import pathlib
+import sys
+
+db = pathlib.Path(sys.argv[1])
+pinned = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))["runtime_packages"]["git"]
+text = db.read_text(encoding="utf-8")
+needle = f"V:{pinned}"
+if needle not in text:
+    raise SystemExit(f"fixture does not contain the pinned Git version {needle!r}")
+db.write_text(text.replace(needle, "V:0.0.0-r0", 1), encoding="utf-8")
+MUTATE
 if python3 "${tool}" verify-tree --root "${fixture_root}"; then
   echo "expected verify-tree to fail on fixed Git version drift" >&2
   exit 1
 fi
 cp "${tmp_root}/installed.good" "${fixture_root}/lib/apk/db/installed"
 
-touch "${fixture_root}/usr/bin/npm"
-if python3 "${tool}" verify-tree --root "${fixture_root}"; then
-  echo "expected verify-tree to reject npm in the runtime image" >&2
+# npm and npx are shipped now, so they must be ACCEPTED; the alternative
+# package managers are what stay out. Assert both directions -- testing only
+# the rejection would keep passing if the allow-list silently emptied.
+touch "${fixture_root}/usr/bin/npm" "${fixture_root}/usr/bin/npx"
+python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null || {
+  echo "verify-tree must accept the shipped npm/npx" >&2
+  exit 1
+}
+for forbidden in corepack pnpm yarn; do
+  touch "${fixture_root}/usr/bin/${forbidden}"
+  if python3 "${tool}" verify-tree --root "${fixture_root}"; then
+    echo "expected verify-tree to reject ${forbidden} in the runtime image" >&2
+    exit 1
+  fi
+  rm -f "${fixture_root}/usr/bin/${forbidden}"
+done
+rm -f "${fixture_root}/usr/bin/npm" "${fixture_root}/usr/bin/npx"
+
+# Alpine ships npm, npx and git's helper commands as relative symlinks in
+# binary directories, so those must be ACCEPTED -- but only while they stay
+# safe. Assert the accept case first: a policy that rejected everything would
+# otherwise pass all the reject cases below and look correct.
+ln -sf ../lib/node_modules/npm/bin/npm-cli.js "${fixture_root}/usr/bin/npm-link"
+mkdir -p "${fixture_root}/usr/lib/node_modules/npm/bin"
+printf '#!/bin/sh\n' > "${fixture_root}/usr/lib/node_modules/npm/bin/npm-cli.js"
+python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null || {
+  echo "verify-tree must accept a safe relative symlink in a binary directory" >&2
+  exit 1
+}
+rm -f "${fixture_root}/usr/bin/npm-link"
+
+# Each of these is what makes such a link dangerous.
+ln -sf ./definitely-not-here "${fixture_root}/usr/bin/lx-dangling"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject a dangling symlink in /usr/bin" >&2
   exit 1
 fi
-rm -f "${fixture_root}/usr/bin/npm"
+rm -f "${fixture_root}/usr/bin/lx-dangling"
+
+ln -sf /etc/passwd "${fixture_root}/usr/bin/lx-absolute"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject an absolute symlink in /usr/bin" >&2
+  exit 1
+fi
+rm -f "${fixture_root}/usr/bin/lx-absolute"
+
+ln -sf ../../../../../../etc/passwd "${fixture_root}/usr/bin/lx-escape"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject a rootfs-escaping symlink in /usr/bin" >&2
+  exit 1
+fi
+rm -f "${fixture_root}/usr/bin/lx-escape"
+
+ln -sf ../lib "${fixture_root}/usr/bin/lx-dir"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject a directory symlink in /usr/bin" >&2
+  exit 1
+fi
+rm -f "${fixture_root}/usr/bin/lx-dir"
+rm -rf "${fixture_root}/usr/lib/node_modules"
 
 manifest_path="${tmp_root}/rootfs-manifest.json"
 lock_path="${tmp_root}/rootfs-build.lock.json"
@@ -141,12 +222,21 @@ if python3 "${tool}" verify-archive --archive "${tmp_root}/bad-archive.tar"; the
   exit 1
 fi
 
+# A relative, resolvable symlink in /bin is legitimate (busybox applets, npm,
+# git's helpers) and must be accepted; the dangerous shapes are covered above.
 ln -s busybox "${fixture_root}/bin/sh.symlink-test"
-if python3 "${tool}" verify-tree --root "${fixture_root}"; then
-  echo "expected verify-tree to fail with a symlink in /bin" >&2
+python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null || {
+  echo "verify-tree must accept a safe relative symlink in /bin" >&2
+  exit 1
+}
+rm -f "${fixture_root}/bin/sh.symlink-test"
+
+ln -s ../../../etc/passwd "${fixture_root}/bin/escape.symlink-test"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to fail with a rootfs-escaping symlink in /bin" >&2
   exit 1
 fi
-rm -f "${fixture_root}/bin/sh.symlink-test"
+rm -f "${fixture_root}/bin/escape.symlink-test"
 
 mv "${fixture_root}/sbin/apk" "${fixture_root}/sbin/apk.disabled"
 if python3 "${tool}" verify-tree --root "${fixture_root}"; then

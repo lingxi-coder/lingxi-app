@@ -235,6 +235,7 @@ pub enum MobileLinuxNetworkPolicyFfi {
 #[derive(Debug, Clone, Copy)]
 pub enum MobileLinuxMountPurposeFfi {
     Workspace,
+    LocalAppBuild,
     Memory,
     Skills,
     Shared,
@@ -1006,6 +1007,7 @@ fn linked_ios_mobile_linux_runtime(
 fn mount_purpose_from_ffi(value: MobileLinuxMountPurposeFfi) -> traits::MountPurpose {
     match value {
         MobileLinuxMountPurposeFfi::Workspace => traits::MountPurpose::Workspace,
+        MobileLinuxMountPurposeFfi::LocalAppBuild => traits::MountPurpose::LocalAppBuild,
         MobileLinuxMountPurposeFfi::Memory => traits::MountPurpose::Memory,
         MobileLinuxMountPurposeFfi::Skills => traits::MountPurpose::Skills,
         MobileLinuxMountPurposeFfi::Shared => traits::MountPurpose::Shared,

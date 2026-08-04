@@ -29,6 +29,8 @@ targets:
       # Gitignored; compiled directly into this app target. They import the
       # per-namespace C/FFI clang modules from LingxiCodeFFI.xcframework below.
       - path: Generated
+    resources:
+      - path: Resources
     dependencies:
       # UniFFI FFI static-library xcframework: exports the engine_mobile /
       # client_protocol C symbols the generated bindings call, and ships the
@@ -111,6 +113,7 @@ targets:
           if [ "${PLATFORM_NAME}" != "iphoneos" ]; then
             exit 0
           fi
+          RUNTIME_STAGE_ROOT="${SRCROOT}/build/linux-runtime/openminis"
           RUNTIME_RESOURCES="${SRCROOT}/build/linux-runtime/openminis/resources"
           ROOTFS_ARCHIVE="${RUNTIME_RESOURCES}/alpine-rootfs.zip"
           if [ ! -f "${ROOTFS_ARCHIVE}" ]; then
@@ -126,6 +129,18 @@ targets:
           fi
           if [ -f "${RUNTIME_RESOURCES}/libvdso.so.elf" ]; then
             cp "${RUNTIME_RESOURCES}/libvdso.so.elf" "${DESTINATION}/libvdso.so.elf"
+          fi
+          if [ -f "${RUNTIME_STAGE_ROOT}/manifest.json" ]; then
+            cp "${RUNTIME_STAGE_ROOT}/manifest.json" "${DESTINATION}/linux-runtime-manifest.json"
+          elif [ -f "${RUNTIME_RESOURCES}/runtime-manifest.json" ]; then
+            cp "${RUNTIME_RESOURCES}/runtime-manifest.json" "${DESTINATION}/linux-runtime-manifest.json"
+          else
+            echo "error: Linux runtime manifest is missing; rebuild the Alpine runtime."
+            exit 1
+          fi
+          AUTH_MANIFEST="${SRCROOT}/../../docs/mobile-linux/authorization/AUTHORIZATION_MANIFEST.json"
+          if [ -f "${AUTH_MANIFEST}" ]; then
+            cp "${AUTH_MANIFEST}" "${DESTINATION}/AUTHORIZATION_MANIFEST.json"
           fi
 
   # XCTest simulator e2e (M10 A2 / P4): builds the in-process engine via

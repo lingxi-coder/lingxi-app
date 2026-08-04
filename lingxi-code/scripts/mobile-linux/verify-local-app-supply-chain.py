@@ -13,24 +13,28 @@ EXPECTED_DEPENDENCIES = {
     "react": "19.2.8",
     "react-dom": "19.2.8",
 }
-EXPECTED_NODE = "22.23.0"
-EXPECTED_APK_PACKAGES = {
-    "git": "2.47.3-r0",
-    "nodejs": "22.23.0-r0",
-}
 EXPECTED_SWCS = {
     "@next/swc-linux-arm64-musl": "16.2.11",
     "@next/swc-linux-x64-musl": "16.2.11",
 }
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
-FORBIDDEN_PACKAGE_NAMES = {"corepack", "nodejs-npm", "npm", "pnpm", "yarn"}
+
+# Package-manager policy for the *rootfs* APK closure. npm and npx are now
+# first-class members of the shipped developer environment, so only the
+# alternative managers stay out — keeping them would give the guest three ways
+# to resolve a dependency tree and make the lockfile contract unenforceable.
+# The separate node_modules-scope list in stage-local-app-runtime.py still
+# forbids npm, because a vendored copy inside the app's own node_modules is a
+# different thing from the interpreter's package manager.
+FORBIDDEN_PACKAGE_NAMES = {"corepack", "pnpm", "yarn"}
 FORBIDDEN_EXECUTABLES = {
     "/usr/bin/corepack",
-    "/usr/bin/npm",
-    "/usr/bin/npx",
     "/usr/bin/pnpm",
     "/usr/bin/yarn",
 }
+APK_VERSION_RE = re.compile(r"[0-9][0-9A-Za-z._]*(?:_[a-z]+[0-9]*)?-r[0-9]+")
+ALPINE_RELEASE_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+ALPINE_CDN = "https://dl-cdn.alpinelinux.org/alpine"
 SOURCE_SUFFIXES = {
     ".css",
     ".htm",
@@ -71,14 +75,67 @@ def valid_sha256(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
-def validate_apk_pins(pins: dict, release: bool, apk_dir: pathlib.Path | None) -> None:
-    if pins.get("schema_version") != 1:
-        fail("local-app runtime pins must use schema_version 1")
+def expected_apk_packages(pins: dict) -> dict:
+    """The pinned primary APK set, read from the pins rather than duplicated.
+
+    The pins file is the single source of version truth: everything else in the
+    tree is checked *against* it. Holding a second copy of these versions here
+    is what let the template move to Node 24.18.1 while this module still said
+    22.23.0, which took the whole release gate red.
+    """
+    packages = pins.get("runtime_packages")
+    if not isinstance(packages, dict) or not packages:
+        fail("local-app runtime pins must list runtime_packages")
+    for name, version in packages.items():
+        if not isinstance(name, str) or not name:
+            fail("runtime_packages keys must be package names")
+        if not isinstance(version, str) or not APK_VERSION_RE.fullmatch(version):
+            fail(f"runtime_packages must pin an exact APK version: {name}={version!r}")
+        if name in FORBIDDEN_PACKAGE_NAMES:
+            fail(f"runtime_packages must not install a forbidden package manager: {name}")
+    return packages
+
+
+def validate_alpine_pin(pins: dict) -> dict:
+    """Structural checks on the Alpine pin itself.
+
+    Nothing here asserts a specific release — advancing Alpine is a pins edit,
+    not a code edit. What must hold is that the pin is internally coherent and
+    points only at official repositories.
+    """
     alpine = pins.get("alpine")
-    if not isinstance(alpine, dict) or alpine.get("version") != "3.21.3" or alpine.get("branch") != "v3.21":
-        fail("local-app runtime must pin Alpine 3.21.3 / v3.21")
-    if pins.get("runtime_packages") != EXPECTED_APK_PACKAGES:
-        fail("local-app APK package versions diverged from the product pins")
+    if not isinstance(alpine, dict):
+        fail("local-app runtime pins must carry an `alpine` record")
+    version = alpine.get("version")
+    if not isinstance(version, str) or not ALPINE_RELEASE_RE.fullmatch(version):
+        fail("alpine.version must be an exact three-part Alpine release")
+    branch = "v" + ".".join(version.split(".")[:2])
+    if alpine.get("branch") != branch:
+        fail(f"alpine.branch must be {branch} for Alpine {version}")
+    expected_repositories = [f"{ALPINE_CDN}/{branch}/main", f"{ALPINE_CDN}/{branch}/community"]
+    if alpine.get("repositories") != expected_repositories:
+        fail("alpine.repositories must be the official main+community CDN URLs for the pinned branch")
+    minirootfs = alpine.get("minirootfs")
+    if not isinstance(minirootfs, dict) or not minirootfs:
+        fail("alpine.minirootfs must pin the release tarball per architecture")
+    for arch, record in minirootfs.items():
+        if not isinstance(record, dict):
+            fail(f"invalid minirootfs pin for {arch}")
+        expected_url = (
+            f"{ALPINE_CDN}/{branch}/releases/{arch}/alpine-minirootfs-{version}-{arch}.tar.gz"
+        )
+        if record.get("url") != expected_url:
+            fail(f"minirootfs URL for {arch} must be {expected_url}")
+        if not valid_sha256(record.get("sha256")):
+            fail(f"minirootfs pin for {arch} needs a SHA-256")
+    return alpine
+
+
+def validate_apk_pins(pins: dict, release: bool, apk_dir: pathlib.Path | None) -> None:
+    if pins.get("schema_version") != 2:
+        fail("local-app runtime pins must use schema_version 2")
+    alpine = validate_alpine_pin(pins)
+    EXPECTED_APK_PACKAGES = expected_apk_packages(pins)
     if set(pins.get("forbidden_packages", [])) != FORBIDDEN_PACKAGE_NAMES:
         fail("forbidden package-manager package set diverged")
     if set(pins.get("forbidden_executables", [])) != FORBIDDEN_EXECUTABLES:
@@ -115,9 +172,20 @@ def validate_apk_pins(pins: dict, release: bool, apk_dir: pathlib.Path | None) -
                 primary_identities.add(name)
             elif role != "transitive":
                 fail(f"APK artifact role must be primary or transitive for {abi}: {name}")
-            expected_suffix = f"/{abi_record.get('alpine_arch')}/{name}-{version}.apk"
-            if not str(artifact.get("url", "")).endswith(expected_suffix):
-                fail(f"APK URL does not match its identity for {abi}: {name}")
+            # Pin the whole URL, not just its tail. A suffix match accepts any
+            # host and any branch, which is precisely what a supply-chain pin
+            # exists to prevent.
+            section = artifact.get("repository")
+            if section not in ("main", "community"):
+                fail(f"APK artifact must record repository main|community for {abi}: {name}")
+            alpine_arch = abi_record.get("alpine_arch")
+            expected_url = (
+                f"{ALPINE_CDN}/{alpine['branch']}/{section}/{alpine_arch}/{name}-{version}.apk"
+            )
+            if artifact.get("url") != expected_url:
+                fail(f"APK URL for {abi}/{name} must be {expected_url}")
+            if artifact.get("arch") != alpine_arch:
+                fail(f"APK artifact arch must be {alpine_arch} for {abi}: {name}")
             availability = artifact.get("availability")
             digest = artifact.get("sha256")
             if availability == "available":
@@ -158,9 +226,33 @@ def validate_apk_pins(pins: dict, release: bool, apk_dir: pathlib.Path | None) -
         fail("release_ready must reflect APK closure completeness")
 
 
+def expected_node(pins: dict) -> str:
+    """Node version the template must pin, read from the pins.
+
+    Derived rather than duplicated: the Node version appears in the pins, the
+    template package.json, the lockfile, and the Alpine `nodejs` APK, and a
+    second hardcoded copy here is what let three of them advance while the
+    fourth silently stayed behind.
+    """
+    runtime = pins.get("next_runtime")
+    if not isinstance(runtime, dict):
+        fail("local-app runtime pins must carry a next_runtime record")
+    version = runtime.get("node")
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        fail("next_runtime.node must be an exact three-part Node version")
+    apk_version = pins.get("runtime_packages", {}).get("nodejs")
+    if not isinstance(apk_version, str) or not apk_version.startswith(f"{version}-r"):
+        fail(
+            f"runtime_packages.nodejs ({apk_version!r}) must be the Alpine build of "
+            f"next_runtime.node ({version})"
+        )
+    return version
+
+
 def validate_lock(template: pathlib.Path, pins: dict) -> None:
     package_json = load_json(template / "package.json")
     lock = load_json(template / "package-lock.json")
+    EXPECTED_NODE = expected_node(pins)
     if package_json.get("engines") != {"node": EXPECTED_NODE}:
         fail("template package.json must pin Node exactly")
     if package_json.get("dependencies") != EXPECTED_DEPENDENCIES:
@@ -208,7 +300,12 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         "react_dom": EXPECTED_DEPENDENCIES["react-dom"],
         "swc": EXPECTED_SWCS,
         "lockfile": "lingxi-code/local-apps/templates/next-static-v1/package-lock.json",
-        "lockfile_sha256": "2575ec5d1740fc6a652bbbb7b7e72bbd7f809aa0b48579ae6a7623eda9d63781",
+        # Checked against the file on disk rather than a literal, so a lockfile
+        # edit that forgets to refresh the pin is caught as drift instead of
+        # being frozen into a constant that has to be hand-updated in lockstep.
+        "lockfile_sha256": hashlib.sha256(
+            (template / "package-lock.json").read_bytes()
+        ).hexdigest(),
     }
     if runtime != expected_runtime:
         fail("Next runtime pin manifest diverged from the template lock")

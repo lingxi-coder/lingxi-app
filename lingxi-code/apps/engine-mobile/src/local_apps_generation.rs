@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use traits::{LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy};
 
 const BUILD_TIMEOUT_MS: u64 = 180_000;
+const LOCAL_APP_BUILD_GUEST_ROOT: &str = "/var/lingxi/local-app-build";
 
 const LOCKED_FILES: &[(&str, &[u8])] = &[
     (
@@ -1438,13 +1439,15 @@ impl MobileAppGenerationExecutor {
             )
         })?;
         let build_root = layout.root().join(layout.build_rel(full));
+        let build_channel = if full { "full" } else { "store" };
+        let build_guest_path = local_app_build_guest_path(layout.app_id(), build_channel);
         let request = LinuxCommandRequest {
             command: "/usr/bin/node".into(),
             args: vec![
                 "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next".into(),
                 "build".into(),
             ],
-            cwd: Some("/workspace".into()),
+            cwd: Some(build_guest_path.clone()),
             env: [
                 (
                     "LINGXI_APP_OUTPUT".into(),
@@ -1465,9 +1468,9 @@ impl MobileAppGenerationExecutor {
             mounts: vec![
                 MountSpec {
                     host_path: build_root,
-                    guest_path: "/workspace".into(),
+                    guest_path: build_guest_path,
                     read_only: false,
-                    purpose: MountPurpose::Workspace,
+                    purpose: MountPurpose::LocalAppBuild,
                 },
                 self.host
                     .fixed_runtime_mount()
@@ -1490,6 +1493,10 @@ impl MobileAppGenerationExecutor {
         }
         Ok(())
     }
+}
+
+fn local_app_build_guest_path(app_id: &str, channel: &str) -> String {
+    format!("{LOCAL_APP_BUILD_GUEST_ROOT}/{app_id}/{channel}")
 }
 
 async fn migrate_manifest_with_approval(
@@ -1978,8 +1985,8 @@ mod tests {
     use tokio::time::{sleep, Duration};
     use traits::{
         LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability, MobileLinuxError,
-        MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, PtyOpenRequest, PtySessionHandle, PtySize,
-        RootfsState, RootfsStatus, SandboxBackend,
+        MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MountPurpose, PtyOpenRequest,
+        PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
     };
 
     /// Captures the one `run` request `run_next_build` issues. Every other
@@ -2159,6 +2166,26 @@ mod tests {
             runtime.recorded().network,
             traits::NetworkPolicy::Allowed
         ));
+        assert_eq!(
+            runtime.recorded().cwd.as_deref(),
+            Some("/var/lingxi/local-app-build/abcd1234/store")
+        );
+        assert!(matches!(
+            runtime
+                .recorded()
+                .mounts
+                .first()
+                .map(|mount| &mount.purpose),
+            Some(MountPurpose::LocalAppBuild)
+        ));
+        assert_eq!(
+            runtime
+                .recorded()
+                .mounts
+                .first()
+                .map(|mount| mount.guest_path.as_str()),
+            Some("/var/lingxi/local-app-build/abcd1234/store")
+        );
     }
 
     #[test]

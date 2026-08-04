@@ -28,39 +28,60 @@
       "origin": "busybox"
     },
     {
+      "name": "ca-certificates",
+      "version": "20260611-r0",
+      "license": "MPL-2.0 AND MIT",
+      "architecture": "arm64",
+      "origin": "ca-certificates"
+    },
+    {
       "name": "git",
-      "version": "2.47.3-r0",
-      "license": "REPLACE_WITH_REAL_LICENSE",
+      "version": "2.54.0-r0",
+      "license": "GPL-2.0-only",
       "architecture": "arm64",
       "origin": "git"
     },
     {
       "name": "nodejs",
-      "version": "22.23.0-r0",
+      "version": "24.18.1-r0",
       "license": "MIT",
       "architecture": "arm64",
       "origin": "nodejs"
     },
     {
-      "name": "openssh-client",
-      "version": "REPLACE_WITH_REAL_VERSION",
-      "license": "REPLACE_WITH_REAL_LICENSE",
+      "name": "npm",
+      "version": "11.12.1-r0",
+      "license": "Artistic-2.0",
+      "architecture": "arm64",
+      "origin": "npm"
+    },
+    {
+      "name": "openssh-client-default",
+      "version": "10.3_p1-r0",
+      "license": "SSH-OpenSSH",
       "architecture": "arm64",
       "origin": "openssh"
     },
     {
-      "name": "python3",
-      "version": "REPLACE_WITH_REAL_VERSION",
-      "license": "REPLACE_WITH_REAL_LICENSE",
+      "name": "py3-pip",
+      "version": "26.1.2-r0",
+      "license": "MIT",
       "architecture": "arm64",
-      "origin": "python3"
+      "origin": "py3-pip"
     },
     {
-      "name": "ca-certificates",
-      "version": "REPLACE_WITH_REAL_VERSION",
-      "license": "REPLACE_WITH_REAL_LICENSE",
+      "name": "py3-virtualenv",
+      "version": "21.3.3-r0",
+      "license": "MIT",
       "architecture": "arm64",
-      "origin": "ca-certificates"
+      "origin": "py3-virtualenv"
+    },
+    {
+      "name": "python3",
+      "version": "3.14.5-r0",
+      "license": "PSF-2.0",
+      "architecture": "arm64",
+      "origin": "python3"
     }
   ],
   "executable_allowlist": [

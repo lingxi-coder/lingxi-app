@@ -8,6 +8,7 @@
 //  SPDX-License-Identifier: GPL-3.0-only
 //
 
+import CryptoKit
 import Foundation
 
 struct LXISHRootfsStatus: Codable {
@@ -47,8 +48,8 @@ struct LXISHNativeConfig: Codable, Hashable {
         rootfsURL.appendingPathComponent("data", isDirectory: true)
     }
 
-    var rootfsMetadataURL: URL {
-        normalizedManagedRoot.appendingPathComponent("bridge-state.json")
+    var persistentHomeURL: URL {
+        normalizedManagedRoot.appendingPathComponent("persistent/root", isDirectory: true)
     }
 
     var mountsCacheURL: URL {
@@ -70,6 +71,21 @@ enum LXISHRootfsError: LocalizedError {
     }
 }
 
+private struct LXISHInstalledRootfsMetadata: Codable {
+    var abi: String
+    var rootfsVersion: String
+    var archiveSha256: String?
+    var arch: String
+    var updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case abi, arch
+        case rootfsVersion = "rootfs_version"
+        case archiveSha256 = "archive_sha256"
+        case updatedAt = "updated_at"
+    }
+}
+
 final class LXISHNativeRootfsManager {
     private let fileManager = FileManager.default
     private let currentArch = "aarch64"
@@ -79,11 +95,13 @@ final class LXISHNativeRootfsManager {
         let dataURL = config.rootfsDataURL
         let metaDB = rootfsURL.appendingPathComponent("meta.db")
         let installed = fileManager.fileExists(atPath: dataURL.path) && fileManager.fileExists(atPath: metaDB.path)
+        let installedMetadata = readInstalledMetadata(for: config)
+        let metadataMatches = metadataMatches(installedMetadata, config: config)
         let archMatches = readArchTag(at: rootfsURL) == currentArch
         let state: String
         if !fileManager.fileExists(atPath: rootfsURL.path) {
             state = "missing"
-        } else if installed && archMatches {
+        } else if installed && archMatches && metadataMatches {
             state = "ready"
         } else {
             state = "corrupt"
@@ -95,12 +113,12 @@ final class LXISHNativeRootfsManager {
             mode: "mobileLinux",
             platform: "ios",
             abi: config.abi,
-            version: config.rootfsVersion,
+            version: installedMetadata?.rootfsVersion ?? config.rootfsVersion,
             managedRoot: config.normalizedManagedRoot.path,
-            activeRoot: installed ? rootfsURL.path : nil,
+            activeRoot: state == "ready" ? rootfsURL.path : nil,
             stagedRoot: nil,
-            archiveSha256: config.archiveSha256,
-            installedSizeBytes: installed ? directorySize(at: rootfsURL) : nil,
+            archiveSha256: installedMetadata?.archiveSha256 ?? config.archiveSha256,
+            installedSizeBytes: state == "ready" ? directorySize(at: rootfsURL) : nil,
             writableGuestPaths: ["/workspace/\(config.stableWorkspaceId)", "/tmp", "/var/tmp", "/root"],
             lastError: lastError
         )
@@ -109,25 +127,40 @@ final class LXISHNativeRootfsManager {
     @discardableResult
     func installIfNeeded(for config: LXISHNativeConfig) throws -> LXISHRootfsStatus {
         try fileManager.createDirectory(at: config.normalizedManagedRoot, withIntermediateDirectories: true)
-        let rootfsURL = config.rootfsURL
+        try migrateLegacyHomeIfNeeded(for: config)
+        try ensurePersistentHome(for: config)
         let existing = status(for: config)
         if existing.state == "ready" {
             try ensureGuestDirectories(for: config)
-            try persistBridgeMetadata(for: config)
             return status(for: config)
-        }
-        if fileManager.fileExists(atPath: rootfsURL.path) {
-            try fileManager.removeItem(at: rootfsURL)
         }
         guard let zipURL = resolveBundledArchive(for: config) else {
             throw LXISHRootfsError.archiveMissing
         }
-        try fileManager.createDirectory(at: rootfsURL, withIntermediateDirectories: true)
-        try LXISHZipArchive(url: zipURL).extractAll(to: rootfsURL, strippingPrefix: "alpine-rootfs/")
-        try currentArch.write(to: rootfsURL.appendingPathComponent(".arch"), atomically: true, encoding: .utf8)
-        try ensureGuestDirectories(for: config)
-        try applyDefaultMountOverlay(for: config, into: config.rootfsDataURL)
-        try persistBridgeMetadata(for: config)
+        try verifyArchiveHashIfNeeded(for: config, zipURL: zipURL)
+
+        let stagingURL = config.normalizedManagedRoot
+            .appendingPathComponent("alpine-rootfs.staging-\(UUID().uuidString.lowercased())", isDirectory: true)
+
+        do {
+            if fileManager.fileExists(atPath: stagingURL.path) {
+                try fileManager.removeItem(at: stagingURL)
+            }
+            try fileManager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+            try LXISHZipArchive(url: zipURL).extractAll(to: stagingURL, strippingPrefix: "alpine-rootfs/")
+            try currentArch.write(
+                to: stagingURL.appendingPathComponent(".arch"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try ensureGuestDirectories(at: stagingURL.appendingPathComponent("data", isDirectory: true), for: config)
+            try applyDefaultMountOverlay(for: config, into: stagingURL.appendingPathComponent("data", isDirectory: true))
+            try persistInstalledMetadata(for: config, rootfsURL: stagingURL)
+            try replaceInstalledRootfs(at: config.rootfsURL, with: stagingURL)
+        } catch {
+            try? fileManager.removeItem(at: stagingURL)
+            throw error
+        }
         return status(for: config)
     }
 
@@ -135,10 +168,8 @@ final class LXISHNativeRootfsManager {
         let current = status(for: config)
         if current.state == "ready" {
             try ensureGuestDirectories(for: config)
-            try persistBridgeMetadata(for: config)
             return status(for: config)
         }
-        _ = try reset(for: config)
         return try installIfNeeded(for: config)
     }
 
@@ -148,7 +179,6 @@ final class LXISHNativeRootfsManager {
             try fileManager.removeItem(at: config.rootfsURL)
         }
         try? fileManager.removeItem(at: config.mountsCacheURL)
-        try? fileManager.removeItem(at: config.rootfsMetadataURL)
         return status(for: config)
     }
 
@@ -194,7 +224,10 @@ final class LXISHNativeRootfsManager {
     }
 
     private func ensureGuestDirectories(for config: LXISHNativeConfig) throws {
-        let dataRoot = config.rootfsDataURL
+        try ensureGuestDirectories(at: config.rootfsDataURL, for: config)
+    }
+
+    private func ensureGuestDirectories(at dataRoot: URL, for config: LXISHNativeConfig) throws {
         let directories = [
             "var/lingxi",
             "var/lingxi/shared",
@@ -202,7 +235,6 @@ final class LXISHNativeRootfsManager {
             "var/lingxi/skills",
             "var/lingxi/tmp",
             "workspace/\(config.stableWorkspaceId)",
-            "root",
             "tmp",
             "var/tmp"
         ]
@@ -223,8 +255,7 @@ final class LXISHNativeRootfsManager {
         }
         for case let sourceURL as URL in enumerator {
             let values = try sourceURL.resourceValues(forKeys: [.isDirectoryKey])
-            let relativePath = sourceURL.path.replacingOccurrences(of: overlayURL.path, with: "")
-            guard !relativePath.isEmpty else { continue }
+            guard let relativePath = Self.relativePath(of: sourceURL, under: overlayURL) else { continue }
             let destinationURL = rootfsDataURL.appendingPathComponent(relativePath)
             if values.isDirectory == true {
                 try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
@@ -238,15 +269,150 @@ final class LXISHNativeRootfsManager {
         }
     }
 
-    private func persistBridgeMetadata(for config: LXISHNativeConfig) throws {
-        let payload: [String: String] = [
-            "abi": config.abi,
-            "rootfs_version": config.rootfsVersion,
-            "arch": currentArch,
-            "updated_at": ISO8601DateFormatter().string(from: Date())
+    private func ensurePersistentHome(for config: LXISHNativeConfig) throws {
+        try fileManager.createDirectory(at: config.persistentHomeURL, withIntermediateDirectories: true)
+        let childDirectories = [".cache", ".cache/pip", ".npm", ".local"]
+        for relative in childDirectories {
+            try fileManager.createDirectory(
+                at: config.persistentHomeURL.appendingPathComponent(relative, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+    }
+
+    private func migrateLegacyHomeIfNeeded(for config: LXISHNativeConfig) throws {
+        let legacyHomeURL = config.rootfsDataURL.appendingPathComponent("root", isDirectory: true)
+        guard fileManager.fileExists(atPath: legacyHomeURL.path) else { return }
+        guard isDirectoryEmpty(config.persistentHomeURL) else { return }
+        guard let enumerator = fileManager.enumerator(at: legacyHomeURL, includingPropertiesForKeys: [.isDirectoryKey]) else {
+            return
+        }
+        for case let sourceURL as URL in enumerator {
+            let values = try sourceURL.resourceValues(forKeys: [.isDirectoryKey])
+            guard let relativePath = Self.relativePath(of: sourceURL, under: legacyHomeURL) else { continue }
+            let destinationURL = config.persistentHomeURL.appendingPathComponent(relativePath)
+            if values.isDirectory == true {
+                try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
+                continue
+            }
+            try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                continue
+            }
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        }
+    }
+
+    private func replaceInstalledRootfs(at activeURL: URL, with stagedURL: URL) throws {
+        guard fileManager.fileExists(atPath: activeURL.path) else {
+            try fileManager.moveItem(at: stagedURL, to: activeURL)
+            return
+        }
+        let backupName = "alpine-rootfs.backup-\(UUID().uuidString.lowercased())"
+        let backupURL = activeURL.deletingLastPathComponent().appendingPathComponent(backupName, isDirectory: true)
+        _ = try fileManager.replaceItemAt(activeURL, withItemAt: stagedURL, backupItemName: backupName)
+        try? fileManager.removeItem(at: backupURL)
+    }
+
+    private func persistInstalledMetadata(for config: LXISHNativeConfig, rootfsURL: URL) throws {
+        let payload = LXISHInstalledRootfsMetadata(
+            abi: config.abi,
+            rootfsVersion: config.rootfsVersion,
+            archiveSha256: config.archiveSha256,
+            arch: currentArch,
+            updatedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        let data = try JSONEncoder().encode(payload)
+        try data.write(
+            to: rootfsURL.appendingPathComponent("bridge-state.json"),
+            options: .atomic
+        )
+    }
+
+    private func readInstalledMetadata(for config: LXISHNativeConfig) -> LXISHInstalledRootfsMetadata? {
+        let metadataURL = config.rootfsURL.appendingPathComponent("bridge-state.json")
+        guard let data = try? Data(contentsOf: metadataURL) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(LXISHInstalledRootfsMetadata.self, from: data)
+    }
+
+    private func metadataMatches(_ metadata: LXISHInstalledRootfsMetadata?, config: LXISHNativeConfig) -> Bool {
+        guard let metadata else { return false }
+        guard metadata.arch == currentArch,
+              metadata.abi == config.abi,
+              metadata.rootfsVersion == config.rootfsVersion
+        else {
+            return false
+        }
+        return metadata.archiveSha256 == config.archiveSha256
+    }
+
+    private func verifyArchiveHashIfNeeded(for config: LXISHNativeConfig, zipURL: URL) throws {
+        guard let expected = normalizedExpectedArchiveHash(config.archiveSha256)
+        else {
+            throw LXISHRootfsError.corrupt(
+                "runtime manifest is missing a valid 64-character alpine-rootfs.zip SHA-256"
+            )
+        }
+        let archiveData = try Data(contentsOf: zipURL, options: [.mappedIfSafe])
+        let actual = SHA256.hash(data: archiveData).map { String(format: "%02x", $0) }.joined()
+        guard actual == expected else {
+            throw LXISHRootfsError.corrupt(
+                "bundled alpine-rootfs.zip SHA-256 mismatch: expected \(expected), got \(actual)"
+            )
+        }
+    }
+
+    private func normalizedExpectedArchiveHash(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              trimmed.count == 64,
+              trimmed.unicodeScalars.allSatisfy({ scalar in
+                  CharacterSet(charactersIn: "0123456789abcdef").contains(scalar)
+              })
+        else {
+            return nil
+        }
+        return trimmed
+    }
+
+    /// Component-wise path of `url` relative to `base`, or nil when `url` does
+    /// not sit beneath it.
+    ///
+    /// `FileManager.enumerator` can hand back URLs whose prefix differs from
+    /// the base by symlink resolution (`/var` versus `/private/var` on iOS), so
+    /// subtracting the base as a string leaves the entry's own absolute path in
+    /// place and copies it to a garbage destination instead. Matching whole path
+    /// components against both spellings keeps a mismatch a skip rather than a
+    /// stray write — which matters most for the legacy `/root` migration, whose
+    /// source is destroyed by the staged rootfs replacement that follows it.
+    private static func relativePath(of url: URL, under base: URL) -> String? {
+        let entry = url.standardizedFileURL.pathComponents
+        let candidates = [
+            base.standardizedFileURL,
+            base.standardizedFileURL.resolvingSymlinksInPath()
         ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        try data.write(to: config.rootfsMetadataURL, options: .atomic)
+        for candidate in candidates {
+            let prefix = candidate.pathComponents
+            guard entry.count > prefix.count,
+                  Array(entry.prefix(prefix.count)) == prefix
+            else {
+                continue
+            }
+            return entry.dropFirst(prefix.count).joined(separator: "/")
+        }
+        return nil
+    }
+
+    private func isDirectoryEmpty(_ url: URL) -> Bool {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return true
+        }
+        return enumerator.nextObject() == nil
     }
 
     private func directorySize(at url: URL) -> UInt64 {

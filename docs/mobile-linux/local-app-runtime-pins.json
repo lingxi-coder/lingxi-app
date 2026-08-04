@@ -1,91 +1,1270 @@
 {
-  "schema_version": 1,
-  "release_ready": false,
   "alpine": {
-    "version": "3.21.3",
-    "branch": "v3.21",
+    "branch": "v3.24",
+    "minirootfs": {
+      "aarch64": {
+        "sha256": "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
+      },
+      "x86_64": {
+        "sha256": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
+      }
+    },
     "repositories": [
-      "https://dl-cdn.alpinelinux.org/alpine/v3.21/main",
-      "https://dl-cdn.alpinelinux.org/alpine/v3.21/community"
-    ]
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/main",
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
+    ],
+    "version": "3.24.1"
   },
-  "runtime_packages": {
-    "git": "2.47.3-r0",
-    "nodejs": "22.23.0-r0"
-  },
-  "forbidden_packages": [
-    "corepack",
-    "nodejs-npm",
-    "npm",
-    "pnpm",
-    "yarn"
-  ],
-  "forbidden_executables": [
-    "/usr/bin/corepack",
-    "/usr/bin/npm",
-    "/usr/bin/npx",
-    "/usr/bin/pnpm",
-    "/usr/bin/yarn"
-  ],
   "apk_artifacts": {
     "arm64-v8a": {
       "alpine_arch": "aarch64",
-      "closure_status": "blocked",
-      "blocker": "Alpine v3.21 no longer serves nodejs-22.23.0-r0 for aarch64; the official CDN returned HTTP 404 on 2026-08-03. Do not substitute 22.23.2-r0 without changing the product pin.",
       "artifacts": [
         {
-          "name": "git",
-          "version": "2.47.3-r0",
-          "role": "primary",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/git-2.47.3-r0.apk",
-          "sha256": "6449c9bd31b7e47221a54f68f6fddb4122351f65b9a1b371b737872ef5a1b68b",
-          "availability": "available"
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "ada-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "70dd9fe3d2e2153213a93f7a76cef202b2d939839696a7c4d8a4c97cb29cca04",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ada-libs-3.3.0-r0.apk",
+          "version": "3.3.0-r0"
         },
         {
-          "name": "nodejs",
-          "version": "22.23.0-r0",
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "brotli-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "e0e7a7892f28326a9f18e09607b1aea72baedda470bc4e3d2b11262b9ae5dda3",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/brotli-libs-1.2.0-r1.apk",
+          "version": "1.2.0-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "busybox",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "18e3490a6f024004b2b13dd4b54bd50ccd82894938023b2d4eab389a4edcba70",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-1.37.0-r31.apk",
+          "version": "1.37.0-r31"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "busybox-binsh",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "f3a1b2257cfa114ff20de05c665f380695385d589908bfc9af5768f39fef9ef5",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-binsh-1.37.0-r31.apk",
+          "version": "1.37.0-r31"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "c-ares",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "689603d300dc56f0b99e313506e4d7b3a3ffb87cec536324f8a306bc218afe67",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/c-ares-1.34.8-r0.apk",
+          "version": "1.34.8-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "ca-certificates",
+          "repository": "main",
           "role": "primary",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/nodejs-22.23.0-r0.apk",
-          "sha256": null,
-          "availability": "unavailable"
+          "sha256": "be5bd3346e2057d1771ea461cb1f790ef03521450572f0698b9bebf35b4c14d2",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ca-certificates-20260611-r0.apk",
+          "version": "20260611-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "ca-certificates-bundle",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "bc5d3ae0b602748852e0bc601a4348cabc4f654f12f27578919cbf3c810f1c1e",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ca-certificates-bundle-20260611-r0.apk",
+          "version": "20260611-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "gdbm",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "bad50eb26533e2f58e014fbcd3c1744f2fdb79954af6e3c188ccd059251c7790",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/gdbm-1.26-r0.apk",
+          "version": "1.26-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "git",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "ea41e2f837f1f6a8b66e72a5ece0fc75cca44f76f49cf5500d467fc5627d0ab7",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/git-2.54.0-r0.apk",
+          "version": "2.54.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "git-init-template",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "bad163db30bfd90c99f86fac54e7ac082040024d214c0e1d0c7d98a4f5a7edb5",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/git-init-template-2.54.0-r0.apk",
+          "version": "2.54.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "icu-data-en",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "3fa1dfb91a081f73c32a46f6ec054196caa37c9fd9569c433ddf6b29415dcf13",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/icu-data-en-78.1-r0.apk",
+          "version": "78.1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "icu-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "2393882dcf1e3f5be98696665c3468dd0d2a85cd568d50abd232729863df9738",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/icu-libs-78.1-r0.apk",
+          "version": "78.1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libbz2",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "28cb76bb6d11d2a55c3061b5fcb2ab84996412a248b2c9fe52bb710d0a2a84e7",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libbz2-1.0.8-r6.apk",
+          "version": "1.0.8-r6"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libcrypto3",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "936ce77a0f5621c9ebc91395d01c62d1127b13e6981d5eb55cdcae7a389540d0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libcrypto3-3.5.7-r0.apk",
+          "version": "3.5.7-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libcurl",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "df0c0e4b870bf48759fd751116986019e92d40279669e9f0348ea079a7735013",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libcurl-8.21.0-r0.apk",
+          "version": "8.21.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libedit",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "3055936ce398b3657fe6b0c7c6ce95618bfb2b21364d7aea823a192bb8237ac3",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libedit-20260508.3.1-r1.apk",
+          "version": "20260508.3.1-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libexpat",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "3c112b8ce1dd8211a6446921654e5f85047db803ed6827147691b4789a523209",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libexpat-2.8.2-r0.apk",
+          "version": "2.8.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libffi",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "9a67280b0c7c62db658c2d4d32ed1199903bef859c32dd4245e1a7e35c89ab4b",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libffi-3.5.2-r1.apk",
+          "version": "3.5.2-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libgcc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "369aaa6e9d099a737bad6dd3e6c2fe7bb1547ca26d22b94ee0411228f709b403",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libgcc-15.2.0-r5.apk",
+          "version": "15.2.0-r5"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libidn2",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "d02ffda4510652f89c5fb89cd2e7ff721afb0c74e7d75476ad60bebe7ac0ae20",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libidn2-2.3.8-r0.apk",
+          "version": "2.3.8-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libncursesw",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "51a7aa4b3ec40b144d0801c0544e0a9f62e2a41d04b6067bb5e95786040741c6",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libncursesw-6.6_p20260516-r0.apk",
+          "version": "6.6_p20260516-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libpanelw",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "a6912c654c821db4f8a801321709205bd482b0e515b862f2d02045e21b73d97d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libpanelw-6.6_p20260516-r0.apk",
+          "version": "6.6_p20260516-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libpsl",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b31e91371425d5f80c1db5cba2a849956b65c802add0b49de844b2ca961aa8da",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libpsl-0.21.5-r3.apk",
+          "version": "0.21.5-r3"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libssl3",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "7b8f7b8b83d799987ad892ff16efd838368e778b4406bd5f4b046547ab7e5551",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libssl3-3.5.7-r0.apk",
+          "version": "3.5.7-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libstdc++",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "2302e766d4e4926038ec166ecb85837ee884576115236ddb565e3a5fca4a11d7",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libstdc++-15.2.0-r5.apk",
+          "version": "15.2.0-r5"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "libunistring",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "58abfcbce2459071c505771a572a79953d6043d72b643ed0d5285ca39cdaf85c",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libunistring-1.4.2-r0.apk",
+          "version": "1.4.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "mpdecimal",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "358959600f99f58deee30ca9089c7f6f0f1bd73cc0021e321a7dbf6f735935c6",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/mpdecimal-4.0.1-r0.apk",
+          "version": "4.0.1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "musl",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "5e9674b7f41152fe2119093b5cb4c13eaaadb19c2d5422b2d7267913e663ee6e",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/musl-1.2.6-r2.apk",
+          "version": "1.2.6-r2"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "ncurses-terminfo-base",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "e0c546b9461bdce206a90bc720cb69aa4628b5a5b8d908c3e5084e00f28f6a9d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ncurses-terminfo-base-6.6_p20260516-r0.apk",
+          "version": "6.6_p20260516-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "nghttp2-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "10ec950fca526db87bbdc0702ba623fca6639df15abb48229f548d6812563b33",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/nghttp2-libs-1.69.0-r0.apk",
+          "version": "1.69.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "nodejs",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "73bb381ae2387f3e5ee661ee23628bb25e6aba5c7c82b54fd6e869be2edb4071",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/nodejs-24.18.1-r0.apk",
+          "version": "24.18.1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "npm",
+          "repository": "community",
+          "role": "primary",
+          "sha256": "447d8304ed66a2d49267f5b239de43912554d7d152eb467c493bb6d213666583",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/community/aarch64/npm-11.12.1-r0.apk",
+          "version": "11.12.1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "openssh-client-common",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "fe11caff9e70615c1dc9e4c141a3fee61bac9c4afc44403c42c54fadb4f8f384",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/openssh-client-common-10.3_p1-r0.apk",
+          "version": "10.3_p1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "openssh-client-default",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "69587399264f4d27c5d3b43728763488a0eacbd60754532e5ab87aaa5885e45f",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/openssh-client-default-10.3_p1-r0.apk",
+          "version": "10.3_p1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "openssh-keygen",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "fc8e184c7694ccc4911958ff399f0c2f19344bb51b0df75246161e62e09e9788",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/openssh-keygen-10.3_p1-r0.apk",
+          "version": "10.3_p1-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "pcre2",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "7bdff8ceaae86798a468382c02ae1548531681c1def07671e0511d8a06931a57",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/pcre2-10.47-r1.apk",
+          "version": "10.47-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-distlib",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "40013d153f7e360461cedea833a16edcd3a48574e685292b5145a7b09a18e9c8",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-distlib-0.4.0-r1.apk",
+          "version": "0.4.0-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-distlib-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "fe85b5ddd965d943cd5de884209e362011fc0eb5906001b22c9862f684c6d06d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-distlib-pyc-0.4.0-r1.apk",
+          "version": "0.4.0-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-filelock",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "47be7aa60d4ff2db2edbf51cfa0dbe39ebff83b350dfb2d611badfd2107e1b23",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-filelock-3.29.0-r0.apk",
+          "version": "3.29.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-filelock-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "d2991f90bedf63bb05d7a35538811f068667e084b15f863e65f3828a6559a01a",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-filelock-pyc-3.29.0-r0.apk",
+          "version": "3.29.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-pip",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "c6f12afeaf15c7f4c4d2f9d4e4f3203da2f71a3fc2ba5fe7846cf0d8d8cd15dc",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-pip-26.1.2-r0.apk",
+          "version": "26.1.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-pip-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "c0e417e669c35724ce74c1e90c66ea80dec4a8883a3e7e0f5045b2023c16b9ea",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-pip-pyc-26.1.2-r0.apk",
+          "version": "26.1.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-platformdirs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "4cedc3b0c26d14c7702ecb8fb68586425fbb6fdae7068488ee2ac8baf61bc3d5",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-platformdirs-4.9.6-r0.apk",
+          "version": "4.9.6-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-platformdirs-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "bfe718c616048c076471228a6e85196a6de6f5d05a47d59d5c7af7a654f0207e",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-platformdirs-pyc-4.9.6-r0.apk",
+          "version": "4.9.6-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-python-discovery",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "5d5b0fa2f07b2decc04f2a2f0a7ea945e53b569c0f19fea413abbb51f79730d4",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-python-discovery-1.2.2-r0.apk",
+          "version": "1.2.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-python-discovery-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b16ad27ed92c1a0fed2602716851d1d3bf914a021fe952fabaec65d7c60a0f66",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-python-discovery-pyc-1.2.2-r0.apk",
+          "version": "1.2.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-virtualenv",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "a67cf8d3118421ac7dff2ba2d155aaced2eb8ec379486027bdeef7704011ca8f",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-virtualenv-21.3.3-r0.apk",
+          "version": "21.3.3-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "py3-virtualenv-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "f84c80820547ea8eb33ae22906febd53da29ab5c57f218b350d8544a7e761ff1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/py3-virtualenv-pyc-21.3.3-r0.apk",
+          "version": "21.3.3-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "aa480cd7f9f475eed1c6130df255af267341d140e40ddd0e3340cc33ec39ceb8",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/pyc-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "python3",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "d5b84827794a6e869e3e411b02b15b2c82b59c0404c3be0981105bc267d1c7c4",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "python3-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "5851754490435c627986ec2cdbc90f69e417d3ac33dac96095cccb09a93c2917",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pyc-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "python3-pycache-pyc0",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "375735abbcbed4201f5619084e6b723fb4057dcb7b468ab8c835355ca8315936",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pycache-pyc0-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "readline",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "9f0ae0923c02b0d6aba62e9173542b65396ba3f0efefcbf087ea32f1120e7b34",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/readline-8.3.3-r1.apk",
+          "version": "8.3.3-r1"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "simdjson",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "8e35f0644c8157c0d5ccdaaf001e70bb6640777b1b680e714e6a453d178829fd",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/simdjson-4.2.4-r0.apk",
+          "version": "4.2.4-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "simdutf",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "336f5dfe8b0f784462cbccb4b58f71c15d64388c784ebca8568c8615b6f3c6b2",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/simdutf-9.0.0-r0.apk",
+          "version": "9.0.0-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "sqlite-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "cac0cd8542620ec91ad0bb7b0f67eabc8245a77a42cb22a03aed8d5d4692729d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/sqlite-libs-3.53.2-r0.apk",
+          "version": "3.53.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "ssl_client",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "fa2911d412b7922b17a07829914ee630c2cd7091ef558abd4329ffb6020f879d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ssl_client-1.37.0-r31.apk",
+          "version": "1.37.0-r31"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "xz-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "76dce86852903fef7adba0285d816e5ce9ffbe9fb3ca86bbb349b97afaba1f63",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/xz-libs-5.8.3-r0.apk",
+          "version": "5.8.3-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "zlib",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "a535991af7c9e8369ebbf33c1e388c1bc63c87ead5142eddaee71f65836c33e3",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/zlib-1.3.2-r0.apk",
+          "version": "1.3.2-r0"
+        },
+        {
+          "arch": "aarch64",
+          "availability": "available",
+          "name": "zstd-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "2bb5136c89f5b0bbe1554c8915a3b520d5aa63ae2a51d4d821eb81698db5a818",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/zstd-libs-1.5.7-r2.apk",
+          "version": "1.5.7-r2"
         }
-      ]
+      ],
+      "closure_status": "complete"
     },
     "x86_64": {
       "alpine_arch": "x86_64",
-      "closure_status": "blocked",
-      "blocker": "The exact primary APKs are pinned, but a signed recursive APK closure has not been captured yet. Release verification remains closed until every transitive APK is hashed.",
       "artifacts": [
         {
-          "name": "git",
-          "version": "2.47.3-r0",
-          "role": "primary",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/git-2.47.3-r0.apk",
-          "sha256": "1d3696aaf8b7afdbd3fff8cf0954145ff79a9763a602aaa93d249482ef4114bc",
-          "availability": "available"
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "ada-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b52b68118ed5ef4e59547e6d5dd29630e4ac33fa30e48b2795d78441ce925466",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/ada-libs-3.3.0-r0.apk",
+          "version": "3.3.0-r0"
         },
         {
-          "name": "nodejs",
-          "version": "22.23.0-r0",
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "brotli-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "f0823de7c6d45859aeb6a7facfc5cfbf2dadb83ad4f27c794cb6ecc74e578cee",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/brotli-libs-1.2.0-r1.apk",
+          "version": "1.2.0-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "busybox",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "0e626fa97cf937fda7bba4ed4dde8e2f2dbb5083ac34e02180cec0c4eba9351b",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/busybox-1.37.0-r31.apk",
+          "version": "1.37.0-r31"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "busybox-binsh",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "93f803ae5db6b729c0f66f4afba6e907ccc17d7d5f8b8c3d25bdb4636de2c48a",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/busybox-binsh-1.37.0-r31.apk",
+          "version": "1.37.0-r31"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "c-ares",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "123fdeadc5ec884b897787f98d865492bf70402697b251cd1f3591a00b8c9d73",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/c-ares-1.34.8-r0.apk",
+          "version": "1.34.8-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "ca-certificates",
+          "repository": "main",
           "role": "primary",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/nodejs-22.23.0-r0.apk",
-          "sha256": "5dcd09cf2268f8ba2f45d10baceb67064da650fa453bd117963d2ef9ce744eb4",
-          "availability": "available"
+          "sha256": "abe8a3badeb99bd147a0c5cba70364e8774e6ae05c625a86c01f11532d9721c8",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/ca-certificates-20260611-r0.apk",
+          "version": "20260611-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "ca-certificates-bundle",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "cd7752154d0fa628a5f7360218e9e8e83edf31f7fa26f58ee42d26b507bd0372",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/ca-certificates-bundle-20260611-r0.apk",
+          "version": "20260611-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "gdbm",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "3278ccba30b241168ca4ab93c919be805411b918fdc062f06d3684d12dc33ae3",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/gdbm-1.26-r0.apk",
+          "version": "1.26-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "git",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "5a2c6782774d2e891fc2fc3fdc50c3c2743b8eb2dc7cda69b6b723af2eedcf78",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/git-2.54.0-r0.apk",
+          "version": "2.54.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "git-init-template",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "e8094a47bfa6e66b7d550ae12a7a8bcab0bc4af502aacd5d2a6fc62d2c5e488d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/git-init-template-2.54.0-r0.apk",
+          "version": "2.54.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "icu-data-en",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "7fc4d3abd06b6e3301c82e9f872e4555d4a41e2abc28087f4286aba01e5dd5a7",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/icu-data-en-78.1-r0.apk",
+          "version": "78.1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "icu-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "ef9a3035f23886cf0da5869902c736a775cf3db151ae1ab7f1406e2a0f84bd64",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/icu-libs-78.1-r0.apk",
+          "version": "78.1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libbz2",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "2737e2b23ed08d4911ee62cd0163b5f4bf0379cacf4dc35b23a00209584c98fd",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libbz2-1.0.8-r6.apk",
+          "version": "1.0.8-r6"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libcrypto3",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b709346666ff1343ebbc780950e61d9a0217e460c5e0836fe11b7cd3c5656b04",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libcrypto3-3.5.7-r0.apk",
+          "version": "3.5.7-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libcurl",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "78538a948a4b8453184ddeb85818a82439735c3384c15b04d37c1e69be2bef19",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libcurl-8.21.0-r0.apk",
+          "version": "8.21.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libedit",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "dfb62b3fb06346a525ffea788c6a48a0581d61a89014f57885b84b1df5a365c0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libedit-20260508.3.1-r1.apk",
+          "version": "20260508.3.1-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libexpat",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "cbd8ae7af319512615ae546970112667136ac88e6c18dcb2059bd0dfceb877fb",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libexpat-2.8.2-r0.apk",
+          "version": "2.8.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libffi",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "6da1a19313a40c56cac756fb11e2c4d5267831e1c22fc8323f24c943c94da6e0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libffi-3.5.2-r1.apk",
+          "version": "3.5.2-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libgcc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "393dcd32629f06d7d85409c272d142d0c082772d10b87ef55ee82f47de3be637",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libgcc-15.2.0-r5.apk",
+          "version": "15.2.0-r5"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libidn2",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "7d038ac558dde464964b033ce5126dd2eaf84cc414dc15e77c5424a321d0ebee",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libidn2-2.3.8-r0.apk",
+          "version": "2.3.8-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libncursesw",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "cf8caa8a88bc4ce9d9e395567fefaf9ef7fbd55c50ae6155b35c1b58f3755023",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libncursesw-6.6_p20260516-r0.apk",
+          "version": "6.6_p20260516-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libpanelw",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "057be8b1b788580f4cb72c382a6dcc03467d15bd69700f32192bd709e7a57a12",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libpanelw-6.6_p20260516-r0.apk",
+          "version": "6.6_p20260516-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libpsl",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "ec665a344b6e887f00f0a47015cc732c3a281b69e84641dc8662ea234fde6cdb",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libpsl-0.21.5-r3.apk",
+          "version": "0.21.5-r3"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libssl3",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "84b1da6cb64ab8018c3dcfb80647c03b14d609de3d49ff90dd8356f63836217e",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libssl3-3.5.7-r0.apk",
+          "version": "3.5.7-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libstdc++",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "14c987b556f5385a5db18376e788c75f37d85321b8dc1920d926ea7daac1d6f6",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libstdc++-15.2.0-r5.apk",
+          "version": "15.2.0-r5"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "libunistring",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "3aa6030e603e34d96192742f327c0509f409c6769ce2e7b1463685dede38d714",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libunistring-1.4.2-r0.apk",
+          "version": "1.4.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "mpdecimal",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "1278f374bbc8b4aad674244458cca5fc63e0780a921138eef400d5db64381a31",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/mpdecimal-4.0.1-r0.apk",
+          "version": "4.0.1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "musl",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "573712e2f49c15bfc20a2699f204acdfc74c772722b15e7353d768057fae0e71",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/musl-1.2.6-r2.apk",
+          "version": "1.2.6-r2"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "ncurses-terminfo-base",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "ce83be6d0bd10584a53c3a5868cc1595ce5f0f8e0b621f8f7f70b6144e521fc9",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/ncurses-terminfo-base-6.6_p20260516-r0.apk",
+          "version": "6.6_p20260516-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "nghttp2-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "7d7705cea464389989d3ca6b9505dbfce3cf25cfca1eeb06709a9909f93f4f11",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/nghttp2-libs-1.69.0-r0.apk",
+          "version": "1.69.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "nodejs",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "e02ef91fb73a6d96e0c0ba3945b1069651c981528cef483f2f94a62715939d19",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/nodejs-24.18.1-r0.apk",
+          "version": "24.18.1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "npm",
+          "repository": "community",
+          "role": "primary",
+          "sha256": "015fa1cf5fac5ede0d2675581389883c0cd01059ba8be8d7e4af0382129630c8",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/community/x86_64/npm-11.12.1-r0.apk",
+          "version": "11.12.1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "openssh-client-common",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "25b3780d8672fc10a4cb44ce4d69bda0d7e473a06b2762e9c5232c1188d00a72",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/openssh-client-common-10.3_p1-r0.apk",
+          "version": "10.3_p1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "openssh-client-default",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "e8f8fde702b9b78c06f0bf52de41dcbb02fc741029b685ffd6ea1cce567588ff",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/openssh-client-default-10.3_p1-r0.apk",
+          "version": "10.3_p1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "openssh-keygen",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "a0cad2c6cd87c5fb337651fdb6d47b4263b771caa0232921def6e19d66ec25cc",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/openssh-keygen-10.3_p1-r0.apk",
+          "version": "10.3_p1-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "pcre2",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "e2be27046bc933ff6716e5c6e08e301fc0cc3ddb28db1db5510057846238f276",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/pcre2-10.47-r1.apk",
+          "version": "10.47-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-distlib",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "0a447a8fd62b18d93dec7ed5f7880bd683ac702832bf7719a12c22cfa6a10d26",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-distlib-0.4.0-r1.apk",
+          "version": "0.4.0-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-distlib-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "63251f7acebf810f5b78149f4f73e77bda017660c122ba526e657bc3cd143c74",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-distlib-pyc-0.4.0-r1.apk",
+          "version": "0.4.0-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-filelock",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "6b568d9a8eef424ab872ddf547964b3a200c4320562ed69ce1ff43db3e1e6bf6",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-filelock-3.29.0-r0.apk",
+          "version": "3.29.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-filelock-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "79d3008a023112479efcdfc8879c9204fb330df9529945c78268c3c615aba59a",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-filelock-pyc-3.29.0-r0.apk",
+          "version": "3.29.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-pip",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "8ab13441fd0abfd625ac4e91eed5648d90a6422359d45469307bd78ad4f1b223",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-pip-26.1.2-r0.apk",
+          "version": "26.1.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-pip-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b7a66a9b68224468f9398220df4620f74747ee98e7526c2968c469c09a04cc37",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-pip-pyc-26.1.2-r0.apk",
+          "version": "26.1.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-platformdirs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b767356a107e8f812acbac58cc9a45e133dd6dff5a93240354363f2d0804161d",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-platformdirs-4.9.6-r0.apk",
+          "version": "4.9.6-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-platformdirs-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "a8d1f075ca7d342ce9699cd22eee0e686fc308893ffa0f2de063e71aeb9dc202",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-platformdirs-pyc-4.9.6-r0.apk",
+          "version": "4.9.6-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-python-discovery",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "a92bfcec5e39eb37e01b8d43478f172ebd3d320d77bb158e6020c8e4de750534",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-python-discovery-1.2.2-r0.apk",
+          "version": "1.2.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-python-discovery-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "f191b0c4c6dd4c315e3bc30dec54dc50c81b23a92b4f2f8181d3205f3c193fbf",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-python-discovery-pyc-1.2.2-r0.apk",
+          "version": "1.2.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-virtualenv",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "3fe0a3bcbf3b753fefcf2162aa51c1645531e7cdf8df883bd585ba6cf390c155",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-virtualenv-21.3.3-r0.apk",
+          "version": "21.3.3-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "py3-virtualenv-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "84c3d3c7fd9695fbc49ae6cc1cb78d3772f195c62c5a3dc8fb236e7600261cc2",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/py3-virtualenv-pyc-21.3.3-r0.apk",
+          "version": "21.3.3-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "cf22516f476361192fd7e9270fc3382043037e4c9cc072082a1c4ab474610ba1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/pyc-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "python3",
+          "repository": "main",
+          "role": "primary",
+          "sha256": "5963c3228946f4c8c56e89f63011f9659ab29d1a0c4bec2d4c04740ee894efb3",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "python3-pyc",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "aaec365b247e2598dcec22db068971f6ca7afc64106b826404d439fc61834fa7",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pyc-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "python3-pycache-pyc0",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "aa015113f2122e8706365aad37f45bac6f27f9e43ea9ab5c758ff19a239aebe8",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pycache-pyc0-3.14.5-r0.apk",
+          "version": "3.14.5-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "readline",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "766911ecb986a6c5cf0841a6b556cd1e9dbbf22b3559726de32416486cd15c81",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/readline-8.3.3-r1.apk",
+          "version": "8.3.3-r1"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "simdjson",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b57ae504ace2b17f62da0de606d1d982d4a35ba9e3dd589c8a37f1444f84f535",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/simdjson-4.2.4-r0.apk",
+          "version": "4.2.4-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "simdutf",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "5d286fce7f98524973e72a1e50a89dfc2043d37565b9ee5266968c5ee64e20c6",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/simdutf-9.0.0-r0.apk",
+          "version": "9.0.0-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "sqlite-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "717a9875d752fdc9fc528a4e52cd828154d51eb365721c8d77d7caa73541ed97",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/sqlite-libs-3.53.2-r0.apk",
+          "version": "3.53.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "ssl_client",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "e578a140670e4cf9816117b0c2063632bf3754ecbe8fa593a7fd2b4039372bf0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/ssl_client-1.37.0-r31.apk",
+          "version": "1.37.0-r31"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "xz-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "95162110d7b67e3e2fd243fa4a43f75170a9c4839c47f86bb5e34340a6dfe930",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/xz-libs-5.8.3-r0.apk",
+          "version": "5.8.3-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "zlib",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "b636306cbf8a0c15493b38de608ba11605fd8f11ade631f5ece6f7fdf5a1e09e",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/zlib-1.3.2-r0.apk",
+          "version": "1.3.2-r0"
+        },
+        {
+          "arch": "x86_64",
+          "availability": "available",
+          "name": "zstd-libs",
+          "repository": "main",
+          "role": "transitive",
+          "sha256": "23c6065b0049b2406441564bcf0032515a43f78e80d76fcb85535a3803ef5d4e",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/zstd-libs-1.5.7-r2.apk",
+          "version": "1.5.7-r2"
         }
-      ]
+      ],
+      "blocker": "Offline install unverified on this host: podman's Rosetta amd64 emulation fails apk post-install scripts with 'Unable to open /proc/self/exe' (icu-data-en post-install, busybox and ca-certificates triggers). All 60 artifacts are resolved and hashed, and 68 packages extract cleanly; re-run build-local-app-rootfs.sh --arch x86_64 on an x86_64 host or a qemu-backed machine to clear this.",
+      "closure_status": "blocked"
     }
   },
+  "forbidden_executables": [
+    "/usr/bin/corepack",
+    "/usr/bin/pnpm",
+    "/usr/bin/yarn"
+  ],
+  "forbidden_packages": [
+    "corepack",
+    "pnpm",
+    "yarn"
+  ],
   "next_runtime": {
-    "template": "lingxi-code/local-apps/templates/next-static-v1",
-    "node": "22.23.0",
+    "lockfile": "lingxi-code/local-apps/templates/next-static-v1/package-lock.json",
+    "lockfile_sha256": "6cc014b95e5e828eecab6ce725dab1ca2aa6ebbfacbecabd6a73f6391932eb89",
     "next": "16.2.11",
+    "node": "24.18.1",
     "react": "19.2.8",
     "react_dom": "19.2.8",
     "swc": {
       "@next/swc-linux-arm64-musl": "16.2.11",
       "@next/swc-linux-x64-musl": "16.2.11"
     },
-    "lockfile": "lingxi-code/local-apps/templates/next-static-v1/package-lock.json",
-    "lockfile_sha256": "2575ec5d1740fc6a652bbbb7b7e72bbd7f809aa0b48579ae6a7623eda9d63781"
-  }
+    "template": "lingxi-code/local-apps/templates/next-static-v1"
+  },
+  "release_ready": false,
+  "runtime_packages": {
+    "ca-certificates": "20260611-r0",
+    "git": "2.54.0-r0",
+    "nodejs": "24.18.1-r0",
+    "npm": "11.12.1-r0",
+    "openssh-client-default": "10.3_p1-r0",
+    "py3-pip": "26.1.2-r0",
+    "py3-virtualenv": "21.3.3-r0",
+    "python3": "3.14.5-r0"
+  },
+  "schema_version": 2
 }

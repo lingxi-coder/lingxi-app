@@ -183,6 +183,84 @@ private struct LXISHShellExecutionResultBox {
     var durationSeconds: Double
 }
 
+struct LXISHGuestEnvironment {
+    static func merged(
+        requestEnvironment: [String: String],
+        cwd: String?,
+        stableWorkspaceId: String
+    ) -> [String: String] {
+        var environment = requestEnvironment
+        let workspaceGuestPath = "/workspace/\(stableWorkspaceId)"
+        let defaultHome = "/root"
+        let defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        let resolvedCwd = cwd?.isEmpty == false ? cwd! : workspaceGuestPath
+        let defaults: [String: String] = [
+            "HOME": defaultHome,
+            "PWD": resolvedCwd,
+            "PATH": defaultPath,
+            "TMPDIR": "/tmp",
+            "TMP": "/tmp",
+            "TEMP": "/tmp",
+            "XDG_CACHE_HOME": "\(defaultHome)/.cache",
+            "NPM_CONFIG_CACHE": "\(defaultHome)/.npm",
+            "npm_config_cache": "\(defaultHome)/.npm",
+            "PIP_CACHE_DIR": "\(defaultHome)/.cache/pip",
+            "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+            "SSL_CERT_DIR": "/etc/ssl/certs",
+            "GIT_SSL_CAINFO": "/etc/ssl/cert.pem"
+        ]
+        for (key, value) in defaults where environment[key] == nil {
+            environment[key] = value
+        }
+        environment["GIT_CONFIG_COUNT"] = "1"
+        environment["GIT_CONFIG_KEY_0"] = "safe.directory"
+        environment["GIT_CONFIG_VALUE_0"] = workspaceGuestPath
+        return environment
+    }
+}
+
+struct LXISHRuntimeMountPlanner {
+    static func effectiveMounts(
+        requestedMounts: [LXISHMountSpec],
+        config: LXISHNativeConfig
+    ) -> [LXISHMountSpec] {
+        let workspaceGuestPath = "/workspace/\(config.stableWorkspaceId)"
+        var mounts: [LXISHMountSpec] = [
+            LXISHMountSpec(
+                hostPath: config.persistentHomeURL.path,
+                guestPath: "/root",
+                readOnly: false,
+                purpose: "home"
+            )
+        ]
+        if !config.workspaceHostPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            mounts.append(
+                LXISHMountSpec(
+                    hostPath: URL(fileURLWithPath: config.workspaceHostPath, isDirectory: true)
+                        .standardizedFileURL
+                        .path,
+                    guestPath: workspaceGuestPath,
+                    readOnly: false,
+                    purpose: "workspace"
+                )
+            )
+        }
+        for mount in requestedMounts where mount.guestPath != "/root" && mount.guestPath != workspaceGuestPath {
+            mounts.append(
+                LXISHMountSpec(
+                    hostPath: URL(fileURLWithPath: mount.hostPath, isDirectory: true)
+                        .standardizedFileURL
+                        .path,
+                    guestPath: mount.guestPath,
+                    readOnly: mount.readOnly,
+                    purpose: mount.purpose
+                )
+            )
+        }
+        return mounts
+    }
+}
+
 private enum LXISHBridgeError: LocalizedError {
     case invalidRequest(String)
     case unavailable(String)
@@ -222,6 +300,16 @@ private final class LXISHKernelRuntimeBridge {
         return "iSH bridge is disabled in the iOS Simulator"
         #else
         return isDeviceBridgeAvailable() ? "" : "OpenMinis ISHKernel is not linked into the app target"
+        #endif
+    }
+
+    static func refreshDnsIfAvailable() {
+        #if !targetEnvironment(simulator)
+        do {
+            try LXISHKernelRuntimeBridge().refreshDns()
+        } catch {
+            return
+        }
         #endif
     }
 
@@ -326,6 +414,17 @@ private final class LXISHKernelRuntimeBridge {
         fn(kernel, selector, Int32(cols), Int32(rows))
     }
 
+    func refreshDns() throws {
+        let kernel = try resolveKernel()
+        let selector = NSSelectorFromString("refreshDns")
+        guard let method = class_getInstanceMethod(type(of: kernel), selector) else {
+            throw LXISHBridgeError.unavailable("ISHKernel is missing refreshDns")
+        }
+        typealias Fn = @convention(c) (AnyObject, Selector) -> Void
+        let fn = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        fn(kernel, selector)
+    }
+
     func closeInteractiveShell() throws {
         if interactiveShellOpen {
             try writeInputData(Data("exit\n".utf8))
@@ -349,6 +448,45 @@ private final class LXISHKernelRuntimeBridge {
         let kernel = fn(kernelClass, selector)
         kernelObject = kernel
         return kernel
+    }
+}
+
+private final class LXISHDNSRefreshMonitor {
+    static let shared = LXISHDNSRefreshMonitor()
+
+    private let lock = NSLock()
+    private var monitor: NWPathMonitor?
+    private var started = false
+
+    func startIfNeeded() {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.handlePathUpdate(path)
+        }
+        monitor.start(queue: DispatchQueue(label: "com.lingxi.ish-native.dns-monitor"))
+        self.monitor = monitor
+        started = true
+        #endif
+    }
+
+    /// NWPathMonitor only fires when the path actually changes, so refreshing on
+    /// every satisfied update is not a busy loop — and it is the only policy
+    /// that is correct here. Deduplicating on the interface-*type* set missed
+    /// the most common real case: moving between two Wi-Fi networks keeps both
+    /// the type and the `en0` interface identical while the resolvers behind
+    /// them change completely, and NWPath exposes nothing that distinguishes
+    /// them. Requiring a previous signature was wrong for the same reason in
+    /// the other direction — it discarded the first update, which is the one
+    /// that lands just after the runtime boots.
+    private func handlePathUpdate(_ path: NWPath) {
+        guard path.status == .satisfied else { return }
+        LXISHKernelRuntimeBridge.refreshDnsIfAvailable()
     }
 }
 
@@ -704,6 +842,7 @@ private final class LXISHNativeCoordinator {
                     "iSH cannot enforce the requested network isolation policy"
                 )
             }
+            let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
             _ = try self.rootfsManager.installIfNeeded(for: config)
             runtime.mounts = request.mounts ?? runtime.mounts
             try self.rootfsManager.cacheMounts(runtime.mounts, for: config)
@@ -713,11 +852,11 @@ private final class LXISHNativeCoordinator {
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
             try self.applyMountsIfNeeded(to: &runtime)
-            try self.validateEnvironment(request.env)
+            try self.validateEnvironment(environment)
             let result = try runtime.executor.runExecutable(
                 request.command,
                 arguments: request.args,
-                environment: request.env,
+                environment: environment,
                 stdin: request.stdin,
                 cwd: request.cwd,
                 timeout: self.timeoutSeconds(from: request)
@@ -742,6 +881,7 @@ private final class LXISHNativeCoordinator {
                     "iSH cannot enforce the requested network isolation policy"
                 )
             }
+            let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
             _ = try self.rootfsManager.installIfNeeded(for: config)
             runtime.mounts = request.mounts ?? runtime.mounts
             try self.rootfsManager.cacheMounts(runtime.mounts, for: config)
@@ -753,14 +893,14 @@ private final class LXISHNativeCoordinator {
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
             try self.applyMountsIfNeeded(to: &runtime)
-            try self.validateEnvironment(request.env)
+            try self.validateEnvironment(environment)
 
             let processId = UUID().uuidString.lowercased()
             let runtimeKey = config.normalizedManagedRoot.path
             let pid = try runtime.executor.spawnExecutable(
                 request.command,
                 arguments: request.args,
-                environment: request.env,
+                environment: environment,
                 stdin: request.stdin,
                 cwd: request.cwd,
                 lineSink: { [weak self] line, isStdErr in
@@ -863,6 +1003,7 @@ private final class LXISHNativeCoordinator {
 
     func openPty(config: LXISHNativeConfig, request: LXISHPtyOpenRequest) -> String {
         execute(config: config) { runtime in
+            let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
             _ = try self.rootfsManager.installIfNeeded(for: config)
             runtime.mounts = request.mounts ?? runtime.mounts
             try self.rootfsManager.cacheMounts(runtime.mounts, for: config)
@@ -876,8 +1017,18 @@ private final class LXISHNativeCoordinator {
                 throw LXISHBridgeError.unavailable("only one interactive PTY session is supported per managed root")
             }
             let sessionId = UUID().uuidString.lowercased()
-            try self.validateEnvironment(request.env)
-            let ptyCommand = self.ptyCommand(from: request)
+            try self.validateEnvironment(environment)
+            let ptyCommand = self.ptyCommand(
+                from: LXISHPtyOpenRequest(
+                    command: request.command,
+                    args: request.args,
+                    cwd: request.cwd,
+                    env: environment,
+                    cols: request.cols,
+                    rows: request.rows,
+                    mounts: request.mounts
+                )
+            )
             try runtime.kernel.openInteractiveShell(
                 withCommand: ptyCommand,
                 cols: request.cols,
@@ -1040,6 +1191,7 @@ private final class LXISHNativeCoordinator {
             var runtime = runtimes[config.normalizedManagedRoot.path] ?? RuntimeState(config: config)
             runtime.config = config
             do {
+                LXISHDNSRefreshMonitor.shared.startIfNeeded()
                 let payload = try work(&runtime)
                 runtimes[config.normalizedManagedRoot.path] = runtime
                 return encodeEnvelope(ok: true, payload: payload)
@@ -1054,9 +1206,13 @@ private final class LXISHNativeCoordinator {
     }
 
     private func applyMountsIfNeeded(to runtime: inout RuntimeState) throws {
-        try ensureHostMountsExist(runtime.mounts)
-        guard !runtime.mounts.isEmpty else { return }
-        try runtime.kernel.configureMounts(runtime.mounts.map(dictionary(from:)))
+        let mounts = LXISHRuntimeMountPlanner.effectiveMounts(
+            requestedMounts: runtime.mounts,
+            config: runtime.config
+        )
+        try ensureHostMountsExist(mounts)
+        guard !mounts.isEmpty else { return }
+        try runtime.kernel.configureMounts(mounts.map(dictionary(from:)))
     }
 
     private func ensureHostMountsExist(_ mounts: [LXISHMountSpec]) throws {
@@ -1071,6 +1227,18 @@ private final class LXISHNativeCoordinator {
     private func timeoutSeconds(from request: LXISHRunRequest) -> Double {
         guard let timeoutMs = request.timeoutMs else { return 0 }
         return Double(timeoutMs) / 1000
+    }
+
+    private func preparedEnvironment(
+        from requestEnvironment: [String: String],
+        cwd: String?,
+        config: LXISHNativeConfig
+    ) -> [String: String] {
+        LXISHGuestEnvironment.merged(
+            requestEnvironment: requestEnvironment,
+            cwd: cwd,
+            stableWorkspaceId: config.stableWorkspaceId
+        )
     }
 
     private func ptyCommand(from request: LXISHPtyOpenRequest) -> [String] {

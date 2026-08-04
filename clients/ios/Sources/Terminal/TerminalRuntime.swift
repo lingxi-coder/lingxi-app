@@ -101,6 +101,7 @@ extension TerminalRuntimeDescriptor {
         initialCommand: String? = nil,
         requestedCwd: TerminalRouteCwd? = nil
     ) -> TerminalRuntimeDescriptor {
+        let manifest = LXISHRuntimeBundleMetadata.current()
         let projectId = project?.record.id ?? UUID().uuidString.lowercased()
         let workspaceHostPath = project?.workspace.hostURL.path ?? ""
         let workspaceGuestPath = project?.workspace.guestPath ?? ""
@@ -116,11 +117,9 @@ extension TerminalRuntimeDescriptor {
             workspaceHostPath: workspaceHostPath,
             stableWorkspaceId: projectId,
             abi: "arm64",
-            rootfsVersion: linuxRuntime.version ?? "1.0.0",
-            archiveSha256: nil,
-            authorizationFile: Bundle.main
-                .url(forResource: "AUTHORIZATION_MANIFEST", withExtension: "json")?
-                .path
+            rootfsVersion: manifest.rootfsVersion,
+            archiveSha256: manifest.archiveSha256,
+            authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path
         )
 
         let requestedResolution = resolveRequestedCwd(

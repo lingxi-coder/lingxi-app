@@ -10,10 +10,13 @@
 //! blocked/unlinked mobile-linux runtime never silently falls back to the
 //! legacy Android shell. Desktop `BashTool` remains untouched.
 //!
-//! Network-intent commands (`git clone`, `curl`, …) are refused up-front with
-//! an advisory pointing at the (future) structured Git tool, rather than run to
-//! a confusing seccomp `EPERM` — see [`net_intent`]. That advisory is UX
-//! guidance; the actual boundary is the runner's net-deny seccomp filter.
+//! Network-intent commands (`git clone`, `curl`, `apk add`, `npm install`, …)
+//! are refused up-front on legacy deny-net shells with an advisory pointing at
+//! the structured Git tool or the mobile-linux permission gate, rather than run
+//! to a confusing seccomp `EPERM` — see [`net_intent`]. In mobile-linux/iSH the
+//! same capability report remains advisory only; the actual control point is
+//! the shell invocation permission gate because iSH cannot provide a true
+//! per-command deny-net sandbox.
 
 #![forbid(unsafe_code)]
 
@@ -216,38 +219,59 @@ impl Tool for ShellMobileTool {
             .is_some_and(|shell| shell.force_platform_sandbox)
         {
             prompt.push_str(
-                "This Alpine guest may use the network only after the Android \
-                 permission gate approves the shell invocation. Interactive users \
-                 may install packages with `apk add`; agent calls remain permission-gated.\n\n",
+                "This mobile guest shell provides a basic development environment. \
+                 Agent-initiated network access is available only after the existing \
+                 shell permission gate approves the invocation (one-time, session, \
+                 or permanent approval). iSH/OpenMinis cannot provide a true \
+                 per-command deny-net sandbox, so network-intent detection here is \
+                 advisory and the permission gate is the actual control point. \
+                 Interactive users may still install packages with `apk add`; agent \
+                 calls remain permission-gated.\n\n",
             );
         } else {
             prompt.push_str(
-                "This shell is DENY-NET: it has no network access. Network commands \
-                 (curl/wget/ssh/git clone/fetch/pull/push) are refused — use the Git tool \
-                 for remote git operations; local git works here.\n\n",
+                "This mobile shell provides a basic development environment with \
+                 no network access. Network commands (curl/wget/ssh/git clone/fetch/pull/push/\
+                 apk add/npm install/pip install) are refused up-front. Use the Git \
+                 tool for remote git operations; local git works here.\n\n",
             );
         }
         prompt.push_str(
             "Commands run rooted at the workspace directory. Output is captured and \
-             truncated if very large. This is an app-sandboxed workspace shell, NOT \
-             Android's adb/system shell: do not use `monkey`, `am`, `cmd`, `pm`, \
-             `input`, `settings`, `dumpsys`, `/sdcard`, or other Android host paths. \
-             Use relative workspace paths. ",
+             truncated if very large. ",
         );
-        if self.ctx.computer_control.is_some() {
+        if self
+            .ctx
+            .mobile_shell()
+            .is_some_and(|shell| shell.force_platform_sandbox)
+        {
             prompt.push_str(
-                "To open/control Android apps, call `android_use.status` and then \
-                 `android_use.open_app`/UI actions in a user-started authorized Computer \
-                 Use session. If that session is inactive, ask the user to enable/start \
-                 it; never fall back to host commands or hide permission errors with \
-                 `|| true`/`2>/dev/null`.\n\n",
+                "This is an app-sandboxed guest shell, not the host process \
+                 environment. Use guest/workspace paths only, and do not pretend \
+                 host-level automation or device management can run here.\n\n",
             );
         } else {
             prompt.push_str(
-                "Android Computer Use is unavailable in this build; ask the user to \
-                 complete Android UI/app operations manually. Never retry with host \
-                 commands or hide permission errors with `|| true`/`2>/dev/null`.\n\n",
+                "This is an app-sandboxed workspace shell, not a host-device \
+                 management shell: do not use host-only commands such as `monkey`, \
+                 `am`, `cmd`, `pm`, `input`, `settings`, `dumpsys`, `/sdcard`, or \
+                 other platform host paths. Use relative workspace paths. ",
             );
+            if self.ctx.computer_control.is_some() {
+                prompt.push_str(
+                    "For supported device/app automation, call `android_use.status` and then \
+                     `android_use.open_app`/UI actions in a user-started authorized Computer \
+                     Use session. If that session is inactive, ask the user to enable/start \
+                     it; never fall back to host commands or hide permission errors with \
+                     `|| true`/`2>/dev/null`.\n\n",
+                );
+            } else {
+                prompt.push_str(
+                    "Host-level device/app automation is unavailable in this build; ask the \
+                     user to complete those operations manually. Never retry with host \
+                     commands or hide permission errors with `|| true`/`2>/dev/null`.\n\n",
+                );
+            }
         }
         if bundled {
             prompt.push_str(&format!(
@@ -544,6 +568,25 @@ mod tests {
         (ctx, sandbox, calls)
     }
 
+    fn mobile_linux_ctx(
+        out: ProcessOutput,
+    ) -> (BuiltinToolContext, Arc<RecordingSandbox>, Arc<AtomicUsize>) {
+        let sandbox = Arc::new(RecordingSandbox::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = shell_test_ctx(ok_output(""));
+        ctx.sandbox = sandbox.clone();
+        ctx.process = Arc::new(RecordingRunner {
+            out,
+            calls: calls.clone(),
+        });
+        ctx.android_shell = Some(AndroidShellToolCtx::mobile_linux_guest(
+            true,
+            vec!["sh".into(), "apk".into(), "git".into()],
+            Some("BusyBox v1.37.0".into()),
+        ));
+        (ctx, sandbox, calls)
+    }
+
     #[test]
     fn name_is_shell_and_schema_has_command() {
         let (ctx, _, _) = enabled_ctx(ok_output(""));
@@ -572,6 +615,22 @@ mod tests {
         assert_eq!(res.data["stdout"], "hi\n");
         assert_eq!(res.data["exit_code"], 0);
         assert_eq!(res.data["is_error"], false);
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_guest_uses_allowed_network_policy_and_runs() {
+        let (ctx, sandbox, calls) = mobile_linux_ctx(ok_output("ok\n"));
+        let tool = ShellMobileTool::new(ctx);
+        let res = tool
+            .call(json!({"command": "apk add git"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("mobile linux command should succeed after outer permission gate");
+        assert_eq!(
+            *sandbox.last_network.lock().unwrap(),
+            Some(NetworkPolicy::Allowed)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(res.data["stdout"], "ok\n");
     }
 
     #[tokio::test]
@@ -655,8 +714,10 @@ mod tests {
             "non-bundled prompt should say system mksh: {prompt}"
         );
         assert!(
-            prompt.contains("unavailable in this build") && prompt.contains("/sdcard"),
-            "prompt should route Android host work away from Shell: {prompt}"
+            prompt.contains("Host-level device/app automation is unavailable")
+                && prompt.contains("/sdcard")
+                && !prompt.contains("Android Computer Use is unavailable"),
+            "prompt should route host-device work away from Shell without Android-only wording: {prompt}"
         );
     }
 
@@ -687,6 +748,37 @@ mod tests {
         assert!(
             !prompt.contains("/system/bin/sh"),
             "bundled prompt must not point at system sh: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_prompt_mentions_permission_gate_and_no_android_host_copy() {
+        let (ctx, _, _) = mobile_linux_ctx(ok_output(""));
+        let tool = ShellMobileTool::new(ctx);
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: None,
+                model_profile: None,
+            })
+            .await;
+        assert!(
+            prompt.contains("basic development environment"),
+            "prompt should describe the default capability shape: {prompt}"
+        );
+        assert!(
+            prompt.contains("one-time, session,") && prompt.contains("permanent approval"),
+            "prompt should describe the approval gate: {prompt}"
+        );
+        assert!(
+            prompt.contains("iSH/OpenMinis cannot provide a true") && prompt.contains("advisory"),
+            "prompt should state iSH deny-net limitations: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Android Computer Use is unavailable")
+                && !prompt.contains("adb/system")
+                && !prompt.contains("iOS host"),
+            "mobile-linux prompt should avoid platform-specific host wording: {prompt}"
         );
     }
 }

@@ -94,7 +94,15 @@ if [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
     log "Reusing complete staged iSH ARM64 + Alpine Linux runtime…"
   else
     log "Building iSH ARM64 + Alpine Linux runtime…"
-    "${LINUX_RUNTIME_BUILD}"
+    # Propagate the runtime mode. Calling the helper bare rebuilds the LEGACY
+    # bare minirootfs and overwrites whatever is staged, so an xcframework build
+    # run after a local-app rootfs build silently reverted the app to a rootfs
+    # with no Node in it.
+    if [[ "${LINGXI_LOCAL_APP_RUNTIME:-0}" == "1" ]]; then
+      "${LINUX_RUNTIME_BUILD}" --local-app-runtime
+    else
+      "${LINUX_RUNTIME_BUILD}"
+    fi
   fi
 fi
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"

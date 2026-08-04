@@ -7,7 +7,6 @@ import os
 import pathlib
 import shutil
 import stat
-import sys
 import tempfile
 
 _VERIFY_SOURCE = pathlib.Path(__file__).with_name("verify-local-app-supply-chain.py")
@@ -49,7 +48,22 @@ def validate_symlinks(root: pathlib.Path) -> None:
             fail(f"node_modules symlink escapes or is broken: {path}: {exc}")
 
 
-def validate_node_modules(root: pathlib.Path) -> None:
+def expected_swcs_for(platform: str) -> dict[str, str]:
+    """SWC packages a staged runtime must carry, and may carry only those.
+
+    iOS ships a single arm64/musl slice: devices are arm64 and the simulator on
+    Apple Silicon is too, so anything else is dead weight the build strips. One
+    Android asset tree serves every ABI in the APK, so it keeps the full pinned
+    set. Scoping this by platform rather than hardcoding arm64 keeps the iOS
+    slice from rejecting the x86_64 binding Android still requires.
+    """
+    if platform == "ios":
+        name = "@next/swc-linux-arm64-musl"
+        return {name: EXPECTED_SWCS[name]}
+    return dict(EXPECTED_SWCS)
+
+
+def validate_node_modules(root: pathlib.Path, allowed_swcs: dict[str, str]) -> None:
     if not root.is_dir() or root.is_symlink():
         fail(f"node_modules input is missing or unsafe: {root}")
     validate_symlinks(root)
@@ -61,7 +75,12 @@ def validate_node_modules(root: pathlib.Path) -> None:
         package = load_json(root / name / "package.json")
         if package.get("version") != version:
             fail(f"runtime node_modules did not resolve {name}@{version}")
-    for name, version in EXPECTED_SWCS.items():
+    allowed_swc_dirs = {name.removeprefix("@next/") for name in allowed_swcs}
+    swc_roots = [path for path in (root / "@next").iterdir()] if (root / "@next").is_dir() else []
+    for path in swc_roots:
+        if path.name.startswith("swc-") and path.name not in allowed_swc_dirs:
+            fail(f"runtime node_modules resolved an unexpected SWC package: @next/{path.name}")
+    for name, version in allowed_swcs.items():
         package_root = root / pathlib.PurePosixPath(name)
         package = load_json(package_root / "package.json")
         if package.get("version") != version:
@@ -165,7 +184,8 @@ def main() -> None:
     validate_source_policy(template)
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
-    validate_node_modules(node_modules)
+    allowed_swcs = expected_swcs_for(args.platform)
+    validate_node_modules(node_modules, allowed_swcs)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -203,6 +223,7 @@ def main() -> None:
             "variant": args.variant,
             "read_only": True,
             "package_lock_sha256": sha256(template / "package-lock.json"),
+            "resolved_swc": sorted(allowed_swcs),
             "files": inventory(temporary),
         }
         (temporary / "runtime-manifest.json").write_text(

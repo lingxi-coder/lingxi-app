@@ -14,46 +14,52 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-FIXED_PRIMARY_PACKAGES = [
-    "apk-tools",
-    "busybox",
-    "git",
-    "nodejs",
-    "openssh-client",
-    "python3",
-    "ca-certificates",
-]
+# Versions come from the pins, never from a second copy here. Holding the Node
+# and Alpine versions in three files independently is what let the template
+# advance to 24.18.1 while the gates still asserted 22.23.0.
+_PINS_PATH = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "docs"
+    / "mobile-linux"
+    / "local-app-runtime-pins.json"
+)
+_PINS = json.loads(_PINS_PATH.read_text(encoding="utf-8"))
+_ALPINE = _PINS["alpine"]
 
-FIXED_PACKAGE_VERSIONS = {
-    "git": "2.47.3-r0",
-    "nodejs": "22.23.0-r0",
-}
+# Packages the minirootfs already provides, plus everything the pins install.
+# `openssh-client` is not a real Alpine package — the client split is shipped as
+# `openssh-client-default`, so the old entry could never have matched.
+FIXED_PRIMARY_PACKAGES = sorted(
+    {"apk-tools", "busybox", *_PINS["runtime_packages"]}
+)
 
+FIXED_PACKAGE_VERSIONS = dict(_PINS["runtime_packages"])
+
+# npm, npx and pip3 are now part of the shipped developer environment, so they
+# are no longer contraband; only the alternative package managers are. Keeping
+# them listed here would have made a correctly-built rootfs fail verification.
 FORBIDDEN_PACKAGE_MANAGER_PATHS = [
-    "/usr/bin/pip",
-    "/usr/bin/pip3",
-    "/usr/bin/npm",
-    "/usr/bin/npx",
     "/usr/bin/corepack",
     "/usr/bin/pnpm",
     "/usr/bin/yarn",
 ]
 
-FORBIDDEN_PACKAGE_NAMES = {
-    "corepack",
-    "nodejs-npm",
-    "npm",
-    "pnpm",
-    "py3-pip",
-    "yarn",
-}
+# Read from the pins so this cannot drift from the closure policy. npm and
+# py3-pip used to be listed here while also being required packages, which no
+# correctly-built rootfs could ever satisfy.
+FORBIDDEN_PACKAGE_NAMES = set(_PINS["forbidden_packages"])
 
 REQUIRED_INTERACTIVE_PACKAGE_MANAGER_PATHS = [
     "/sbin/apk",
     "/etc/apk/repositories",
 ]
 
-BINARY_SYMLINK_FORBIDDEN_PREFIXES = [
+# Directories whose symlinks get the extra scrutiny below. A link here is what
+# an agent actually executes, so it must be provably safe -- but it may not be
+# banned outright: Alpine ships npm, npx and git's helper commands
+# (git-receive-pack, git-upload-pack, git-upload-archive) as relative symlinks,
+# so a blanket ban cannot describe any real Alpine rootfs.
+BINARY_SYMLINK_SCRUTINY_PREFIXES = [
     "/bin/",
     "/sbin/",
     "/usr/bin/",
@@ -63,7 +69,7 @@ BINARY_SYMLINK_FORBIDDEN_PREFIXES = [
 WORLD_WRITABLE_ALLOWED = {"/tmp", "/var/tmp"}
 WRITABLE_ROOTS = {"/root", "/tmp", "/var/tmp", "/workspace"}
 DEFAULT_SOURCE_DATE_EPOCH = 0
-EXPECTED_ALPINE_RELEASE = "3.21.3"
+EXPECTED_ALPINE_RELEASE = _ALPINE["version"]
 
 
 @dataclass
@@ -114,6 +120,30 @@ def resolve_symlink_target(member_name: str, linkname: str) -> pathlib.PurePosix
     if not normalized_parts:
         fail(f"archive link resolves to root: {member_name} -> {linkname}")
     return pathlib.PurePosixPath(*normalized_parts)
+
+
+def validate_binary_symlink(
+    root: pathlib.Path,
+    rel: str,
+    target: str,
+    resolved: pathlib.PurePosixPath,
+) -> None:
+    """Extra checks for a symlink living in an executable directory.
+
+    `resolve_symlink_target` has already rejected absolute targets and any that
+    climb out of the rootfs. What remains is the property that only matters for
+    something the guest will execute: it must actually resolve to a real file
+    inside this rootfs. npm, npx and git's helper commands are legitimate
+    relative symlinks, so they are allowed -- a dangling one is not, because it
+    is a command that exists in PATH and fails at exec time.
+    """
+    if not any(rel.startswith(prefix) for prefix in BINARY_SYMLINK_SCRUTINY_PREFIXES):
+        return
+    destination = root / resolved
+    if not destination.exists():
+        fail(f"symlink in a binary directory is dangling: {rel} -> {target}")
+    if destination.is_dir():
+        fail(f"symlink in a binary directory must resolve to a file: {rel} -> {target}")
 
 
 def normalize_hardlink_target(member_name: str, linkname: str) -> pathlib.PurePosixPath:
@@ -269,10 +299,19 @@ def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
         fail("rootfs must contain a real /bin/busybox file")
     if not sh_path.exists():
         fail("rootfs must contain /bin/sh")
+    # /bin/sh must BE busybox, by either link kind.
+    #
+    # Symlinks are what Alpine ships (busybox-binsh) and what we keep, because
+    # fakefsify does not preserve hardlinks: it materialises each one as a full
+    # copy, so hardlinking ~305 applets to a 919KB busybox added ~280MB to the
+    # shipped rootfs for no benefit. Safety comes from validate_binary_symlink
+    # above -- relative, inside the rootfs, non-dangling.
     if sh_path.is_symlink():
-        fail("BusyBox applets must use hardlinks, not symlinks: /bin/sh is a symlink")
-    if os.stat(busybox).st_ino != os.stat(sh_path).st_ino:
-        fail("/bin/sh must be a hardlink to /bin/busybox")
+        resolved = resolve_symlink_target("bin/sh", os.readlink(sh_path))
+        if (root / resolved).resolve() != busybox.resolve():
+            fail("/bin/sh must resolve to /bin/busybox")
+    elif os.stat(busybox).st_ino != os.stat(sh_path).st_ino:
+        fail("/bin/sh must be a hardlink or a symlink to /bin/busybox")
 
     for forbidden in FORBIDDEN_PACKAGE_MANAGER_PATHS:
         candidate = root / forbidden.lstrip("/")
@@ -293,10 +332,9 @@ def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
             rel = root_rel(path, root)
             mode = os.lstat(path).st_mode
             if stat.S_ISLNK(mode):
-                if any(rel.startswith(prefix) for prefix in BINARY_SYMLINK_FORBIDDEN_PREFIXES):
-                    fail(f"symlinks are forbidden in binary directories: {rel}")
                 target = os.readlink(path)
-                resolve_symlink_target(rel.lstrip("/"), target)
+                resolved = resolve_symlink_target(rel.lstrip("/"), target)
+                validate_binary_symlink(root, rel, target, resolved)
                 dirnames.remove(dirname)
                 continue
             if stat.S_ISSOCK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode) or stat.S_ISFIFO(mode):
@@ -311,10 +349,9 @@ def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
             rel = root_rel(path, root)
             mode = os.lstat(path).st_mode
             if stat.S_ISLNK(mode):
-                if any(rel.startswith(prefix) for prefix in BINARY_SYMLINK_FORBIDDEN_PREFIXES):
-                    fail(f"symlinks are forbidden in binary directories: {rel}")
                 target = os.readlink(path)
-                resolve_symlink_target(rel.lstrip("/"), target)
+                resolved = resolve_symlink_target(rel.lstrip("/"), target)
+                validate_binary_symlink(root, rel, target, resolved)
                 continue
             if not stat.S_ISREG(mode):
                 fail(f"non-regular rootfs file is forbidden: {rel}")
@@ -515,16 +552,13 @@ def generate_lock(args: argparse.Namespace) -> None:
     lock = {
         "schema_version": 1,
         "alpine": {
-            "version": "3.21.3",
-            "branch": "v3.21",
-            "repositories": [
-                "https://dl-cdn.alpinelinux.org/alpine/v3.21/main",
-                "https://dl-cdn.alpinelinux.org/alpine/v3.21/community",
-            ],
+            "version": _ALPINE["version"],
+            "branch": _ALPINE["branch"],
+            "repositories": list(_ALPINE["repositories"]),
         },
         "policy": {
             "archive_format": "tar.gz",
-            "busybox_applet_strategy": "hardlink",
+            "busybox_applet_strategy": "symlink",
             "apk_disabled": False,
             "interactive_package_install_allowed": True,
             "forbidden_package_manager_paths": FORBIDDEN_PACKAGE_MANAGER_PATHS,
@@ -570,15 +604,20 @@ def validate_lock(args: argparse.Namespace) -> None:
     alpine = lock.get("alpine")
     if not isinstance(alpine, dict):
         fail("rootfs lock missing alpine block")
-    if alpine.get("version") != "3.21.3" or alpine.get("branch") != "v3.21":
-        fail("rootfs lock must pin Alpine 3.21.3 / v3.21")
+    if (
+        alpine.get("version") != _ALPINE["version"]
+        or alpine.get("branch") != _ALPINE["branch"]
+    ):
+        fail(
+            f"rootfs lock must pin Alpine {_ALPINE['version']} / {_ALPINE['branch']}"
+        )
     policy = lock.get("policy")
     if not isinstance(policy, dict):
         fail("rootfs lock missing policy block")
     if policy.get("archive_format") != "tar.gz":
         fail("rootfs lock must pin tar.gz archive format")
-    if policy.get("busybox_applet_strategy") != "hardlink":
-        fail("rootfs lock must require hardlink BusyBox applets")
+    if policy.get("busybox_applet_strategy") != "symlink":
+        fail("rootfs lock must record symlink BusyBox applets")
     if policy.get("apk_disabled") is not False:
         fail("rootfs lock must require apk_disabled=false")
     if policy.get("interactive_package_install_allowed") is not True:
@@ -677,6 +716,7 @@ def verify_archive(args: argparse.Namespace) -> None:
         fail(f"archive not found or unsafe: {archive}")
     seen_paths: set[str] = set()
     hardlinks: List[Tuple[str, str]] = []
+    symlinks: List[Tuple[str, str]] = []
     with open_tar_archive(archive) as tar:
         members = tar.getmembers()
         for member in members:
@@ -694,9 +734,9 @@ def verify_archive(args: argparse.Namespace) -> None:
             if rel in FORBIDDEN_PACKAGE_MANAGER_PATHS:
                 fail(f"forbidden package-manager artifact present in archive: {rel}")
             if member.issym():
-                if any(rel.startswith(prefix) for prefix in BINARY_SYMLINK_FORBIDDEN_PREFIXES):
-                    fail(f"symlinks are forbidden in binary directories: {rel}")
-                resolve_symlink_target(path, member.linkname)
+                if member.linkname.startswith("/"):
+                    fail(f"archive symlink target must be relative: {rel} -> {member.linkname}")
+                symlinks.append((path, resolve_symlink_target(path, member.linkname).as_posix()))
             elif member.islnk():
                 normalized_target = normalize_hardlink_target(path, member.linkname).as_posix()
                 hardlinks.append((path, normalized_target))
@@ -718,9 +758,20 @@ def verify_archive(args: argparse.Namespace) -> None:
     if "etc/apk/repositories" not in seen_paths:
         fail("archive missing /etc/apk/repositories")
 
+    # A symlink in a binary directory that points at nothing is a broken command
+    # on device, so resolve every one against the archive's own member set.
+    for source, resolved in symlinks:
+        if f"/{source}" .startswith(tuple(BINARY_SYMLINK_SCRUTINY_PREFIXES)) and resolved not in seen_paths:
+            fail(f"archive symlink is dangling: /{source} -> {resolved}")
+
+    # /bin/sh may reach busybox as either link kind; see validate_rootfs_tree.
     hardlink_pairs = {frozenset((path, link)) for path, link in hardlinks}
-    if frozenset(("bin/sh", "bin/busybox")) not in hardlink_pairs:
-        fail("/bin/sh and /bin/busybox must be recorded as hardlinked archive entries")
+    symlink_targets = dict(symlinks)
+    if (
+        frozenset(("bin/sh", "bin/busybox")) not in hardlink_pairs
+        and symlink_targets.get("bin/sh") != "bin/busybox"
+    ):
+        fail("/bin/sh must be recorded as a hardlink or symlink to /bin/busybox")
 
     print(f"archive verified: {archive}")
 

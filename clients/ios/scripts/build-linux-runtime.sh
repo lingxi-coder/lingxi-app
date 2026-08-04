@@ -37,6 +37,8 @@ STAGE_RESOURCES="${STAGE_ROOT}/resources"
 STAGE_XCODE="${STAGE_ROOT}/xcode"
 
 BUILD_TYPE="release"
+# Default branch for the legacy (non-local-app) path only. The local-app rootfs
+# takes its exact Alpine release from the pins, via build-local-app-rootfs.sh.
 ALPINE_VERSION="3.21"
 CLEAN=0
 LOCAL_APP_RUNTIME=0
@@ -95,14 +97,47 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+LOCAL_APP_ROOTFS_DIR="${IOS_DIR}/build/local-app-rootfs"
+LOCAL_APP_TARBALL=""
+
+# Refuse to silently replace a staged local-app runtime (Node/npm/git/python)
+# with the legacy bare minirootfs. The two write to the same staging directory,
+# so whichever ran last used to win -- and a plain `build-xcframework.sh` run
+# after a local-app build shipped an app whose rootfs had no toolchain at all,
+# with nothing in the log to say so.
+STAGED_MANIFEST="${STAGE_ROOT}/manifest.json"
+if [[ "${LOCAL_APP_RUNTIME}" != "1" && -f "${STAGED_MANIFEST}" ]]; then
+  if grep -q '"local_app_runtime": true' "${STAGED_MANIFEST}" 2>/dev/null; then
+    echo "error: a local-app runtime is already staged at ${STAGE_ROOT}." >&2
+    echo "       Re-run with --local-app-runtime, or pass --clean to replace it" >&2
+    echo "       with the legacy bare minirootfs on purpose." >&2
+    exit 1
+  fi
+fi
+
 if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
-  [[ -d "${APK_DIR}" ]] || {
-    echo "--local-app-runtime requires --apk-dir <recursive-apk-closure>" >&2
+  # Build the rootfs first: build-local-app-rootfs.sh resolves the recursive APK
+  # closure, checks every artifact against the pins, and installs the closure
+  # OFFLINE into a digest-verified minirootfs. `--apk-dir` used to be the only
+  # input here, and it was passed to the verifier alone -- nothing ever
+  # installed those packages, which is why the shipped rootfs had no Node.
+  echo "[build-linux-runtime] Building local-app Alpine rootfs (aarch64)"
+  bash "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/build-local-app-rootfs.sh" \
+    --arch aarch64 \
+    --output "${LOCAL_APP_ROOTFS_DIR}"
+  LOCAL_APP_TARBALL="${LOCAL_APP_ROOTFS_DIR}/aarch64/rootfs.tar.gz"
+  [[ -f "${LOCAL_APP_TARBALL}" ]] || {
+    echo "local-app rootfs build produced no tarball: ${LOCAL_APP_TARBALL}" >&2
     exit 1
   }
-  bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh" \
-    --release \
-    --apk-dir "${APK_DIR}"
+  # `--apk-dir` stays supported for verifying a closure produced elsewhere;
+  # otherwise the one just built is used.
+  [[ -n "${APK_DIR}" ]] || APK_DIR="${LOCAL_APP_ROOTFS_DIR}/apk-closure"
+  # Deliberately NOT --release: that gate demands every supported ABI be
+  # release-ready, and iOS ships arm64 only. The arm64 closure is already
+  # verified artifact-by-artifact against the pins by the builder above.
+  # `package-rootfs-release.sh` remains the step that requires --release.
+  bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh"
 else
   bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh"
 fi
@@ -123,13 +158,47 @@ mkdir -p "${STAGE_INCLUDE}" "${STAGE_LIBS}" "${STAGE_RESOURCES}" "${STAGE_XCODE}
 echo "[build-linux-runtime] Building pinned OpenMinis iSH (${BUILD_TYPE})"
 bash "${BUILD_ISH}" "${BUILD_TYPE}"
 
-echo "[build-linux-runtime] Preparing pinned Alpine rootfs (${ALPINE_VERSION})"
-bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
+FAKEFSIFY="${DEPS_DIR}/ish/build-native/tools/fakefsify"
+ROOTFS_SOURCE_DIR="${DEPS_DIR}/resources/alpine-rootfs"
 
 if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
+  # The vendored prepare script only ever extracts a bare minirootfs and
+  # fakefsifies it -- it installs nothing. Reuse only its fakefsify build, and
+  # convert the rootfs we assembled instead. Running it at all is just how
+  # fakefsify gets built without editing the pinned snapshot.
+  if [[ ! -x "${FAKEFSIFY}" ]]; then
+    echo "[build-linux-runtime] Building fakefsify via the pinned OpenMinis helper"
+    bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
+  fi
+  [[ -x "${FAKEFSIFY}" ]] || {
+    echo "fakefsify was not built: ${FAKEFSIFY}" >&2
+    exit 1
+  }
+
+  ROOTFS_SOURCE_DIR="${LOCAL_APP_ROOTFS_DIR}/alpine-rootfs"
+  echo "[build-linux-runtime] Converting the local-app rootfs to fakefs"
+  rm -rf "${ROOTFS_SOURCE_DIR}"
+  "${FAKEFSIFY}" "${LOCAL_APP_TARBALL}" "${ROOTFS_SOURCE_DIR}"
+  [[ -d "${ROOTFS_SOURCE_DIR}/data" && -f "${ROOTFS_SOURCE_DIR}/meta.db" ]] || {
+    echo "fakefsify produced no usable rootfs at ${ROOTFS_SOURCE_DIR}" >&2
+    exit 1
+  }
+
+  # verify-tree reads host filesystem semantics -- symlink vs hardlink, modes,
+  # inode identity. A fakefsified `data/` directory cannot answer those: fakefs
+  # stores a symlink as a regular file whose contents are the target, and keeps
+  # the real mode in meta.db. Verifying the tree as it exists BEFORE conversion
+  # is what actually checks the rootfs; pointing this at `data/` (as it used to)
+  # inspects fakefs's on-disk encoding instead of the filesystem it encodes.
   echo "[build-linux-runtime] Verifying exact local-app runtime packages"
+  VERIFY_TREE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lingxi-rootfs-verify.XXXXXX")"
+  trap 'chmod -R u+w "${VERIFY_TREE_DIR}" 2>/dev/null || true; rm -rf "${VERIFY_TREE_DIR}"' EXIT
+  tar -xzf "${LOCAL_APP_TARBALL}" -C "${VERIFY_TREE_DIR}"
   python3 "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/rootfs_tool.py" verify-tree \
-    --root "${DEPS_DIR}/resources/alpine-rootfs/data"
+    --root "${VERIFY_TREE_DIR}"
+else
+  echo "[build-linux-runtime] Preparing pinned Alpine rootfs (${ALPINE_VERSION})"
+  bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
 fi
 
 echo "[build-linux-runtime] Staging headers, static libs, and resources"
@@ -164,8 +233,8 @@ mkdir -p "${STAGE_RESOURCES}/default_mount"
 if [[ -f "${DEPS_DIR}/resources/libvdso.so.elf" ]]; then
   cp "${DEPS_DIR}/resources/libvdso.so.elf" "${STAGE_RESOURCES}/libvdso.so.elf"
 fi
-if [[ -d "${DEPS_DIR}/resources/alpine-rootfs" ]]; then
-  rsync -a --delete "${DEPS_DIR}/resources/alpine-rootfs/" "${STAGE_RESOURCES}/alpine-rootfs/"
+if [[ -d "${ROOTFS_SOURCE_DIR}" ]]; then
+  rsync -a --delete "${ROOTFS_SOURCE_DIR}/" "${STAGE_RESOURCES}/alpine-rootfs/"
   rm -f "${STAGE_RESOURCES}/alpine-rootfs.zip"
   (
     cd "${STAGE_RESOURCES}"
@@ -177,6 +246,14 @@ if [[ -d "${OPENMINIS_ROOT}/src/ios/default_mount" ]]; then
 fi
 
 MANIFEST="${STAGE_ROOT}/manifest.json"
+# The manifest must report the release actually shipped. For the local-app path
+# that is the exact pinned release (e.g. 3.24.1), not the branch default the
+# legacy path passes to the vendored helper.
+if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
+  ALPINE_VERSION="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["alpine"]["version"])' \
+    "${REPO_ROOT}/docs/mobile-linux/local-app-runtime-pins.json")"
+fi
+if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then LOCAL_APP_RUNTIME_JSON=true; else LOCAL_APP_RUNTIME_JSON=false; fi
 ROOTFS_SHA=""
 if [[ -f "${STAGE_RESOURCES}/alpine-rootfs.zip" ]]; then
   ROOTFS_SHA="$(shasum -a 256 "${STAGE_RESOURCES}/alpine-rootfs.zip" | awk '{print $1}')"
@@ -196,6 +273,7 @@ cat > "${MANIFEST}" <<EOF
   "source_root": "${OPENMINIS_ROOT}",
   "build_type": "${BUILD_TYPE}",
   "alpine_version": "${ALPINE_VERSION}",
+  "local_app_runtime": ${LOCAL_APP_RUNTIME_JSON},
   "stage_root": "${STAGE_ROOT}",
   "rootfs_zip_sha256": "${ROOTFS_SHA}",
   "link_xcconfig": "${STAGE_XCODE}/openminis-ish.xcconfig",

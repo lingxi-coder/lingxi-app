@@ -7,6 +7,7 @@ schema_path="${repo_root}/docs/mobile-linux/rootfs/rootfs-manifest.schema.json"
 sample_path="${repo_root}/docs/mobile-linux/rootfs/rootfs-manifest.sample.json"
 target_path="${1:-${sample_path}}"
 tool_path="${repo_root}/lingxi-code/scripts/mobile-linux/rootfs_tool.py"
+pins_path="${repo_root}/docs/mobile-linux/local-app-runtime-pins.json"
 enabled="${LINGXI_MOBILE_LINUX_ENABLED:-0}"
 
 if [[ ! -f "${schema_path}" ]]; then
@@ -19,7 +20,7 @@ if [[ ! -f "${target_path}" ]]; then
   exit 1
 fi
 
-SCHEMA_PATH="${schema_path}" TARGET_PATH="${target_path}" python3 - <<'PY'
+SCHEMA_PATH="${schema_path}" TARGET_PATH="${target_path}" PINS_PATH="${pins_path}" python3 - <<'PY'
 import json
 import os
 import pathlib
@@ -28,10 +29,15 @@ import sys
 
 schema_path = pathlib.Path(os.environ["SCHEMA_PATH"])
 target_path = pathlib.Path(os.environ["TARGET_PATH"])
+pins_path = pathlib.Path(os.environ["PINS_PATH"])
 
 try:
     schema = json.loads(schema_path.read_text())
     data = json.loads(target_path.read_text())
+    # Package identities and the package-manager policy are read from the pins
+    # rather than restated here; a second copy is what let this gate assert
+    # Node 22.23.0 after the product had moved to 24.18.1.
+    _pins = json.loads(pins_path.read_text())
 except Exception as exc:
     print(f"failed to parse rootfs manifest input: {exc}", file=sys.stderr)
     sys.exit(1)
@@ -135,17 +141,21 @@ for package in packages:
         sys.exit(1)
     package_names.add(package["name"])
 
-required_packages = {"apk-tools", "busybox", "git", "nodejs", "openssh-client", "python3", "ca-certificates"}
+# `openssh-client` was never a real Alpine package (the client split ships as
+# `openssh-client-default`), so this set could not have matched a real rootfs.
+required_packages = {"apk-tools", "busybox", *_pins["runtime_packages"]}
 missing_packages = required_packages - package_names
 if missing_packages:
     print(f"fixed toolset packages missing: {sorted(missing_packages)}", file=sys.stderr)
     sys.exit(1)
-forbidden_packages = {"corepack", "nodejs-npm", "npm", "pnpm", "py3-pip", "yarn"} & package_names
+# npm and py3-pip are shipped packages now; only the alternative managers
+# stay out. Read the policy from the pins so it cannot drift.
+forbidden_packages = set(_pins["forbidden_packages"]) & package_names
 if forbidden_packages:
     print(f"forbidden package-manager packages present: {sorted(forbidden_packages)}", file=sys.stderr)
     sys.exit(1)
 package_versions = {package["name"]: package["version"] for package in packages}
-fixed_versions = {"git": "2.47.3-r0", "nodejs": "22.23.0-r0"}
+fixed_versions = dict(_pins["runtime_packages"])
 version_drift = {
     name: {"expected": expected, "actual": package_versions.get(name)}
     for name, expected in fixed_versions.items()

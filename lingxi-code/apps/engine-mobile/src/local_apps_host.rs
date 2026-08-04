@@ -873,8 +873,12 @@ impl LocalAppsHostBroker {
         let bound = {
             let app_id = app_id.to_string();
             let assigned = current.port;
+            // Read on THIS runtime, before the hop: the derivation has to know
+            // which ports stopped siblings own permanently, which no bind probe
+            // on the worker runtime can discover.
+            let sibling_pins = sibling_pinned_ports(&service, &app_id).await;
             crate::local_apps_profile::worker_runtime()
-                .spawn(async move { bind_stable_loopback(&app_id, assigned).await })
+                .spawn(async move { bind_stable_loopback(&app_id, assigned, &sibling_pins).await })
                 .await
                 .map_err(|error| format!("bind stable app port: {error}"))?
         };
@@ -943,6 +947,8 @@ impl LocalAppsHostBroker {
             })?;
             let layout = self.layout(app_id)?;
             let workspace = layout.root().join(layout.build_rel(true));
+            let workspace_guest =
+                format!("/var/lingxi/local-app-build/{app_id}/full");
             let request = LinuxCommandRequest {
                 command: "/usr/bin/node".into(),
                 args: vec![
@@ -953,7 +959,7 @@ impl LocalAppsHostBroker {
                     "--port".into(),
                     port.to_string(),
                 ],
-                cwd: Some("/workspace".into()),
+                cwd: Some(workspace_guest.clone()),
                 env: [
                     ("LINGXI_APP_OUTPUT".into(), "server".into()),
                     (
@@ -975,9 +981,9 @@ impl LocalAppsHostBroker {
                 mounts: vec![
                     MountSpec {
                         host_path: workspace,
-                        guest_path: "/workspace".into(),
+                        guest_path: workspace_guest,
                         read_only: false,
-                        purpose: MountPurpose::Workspace,
+                        purpose: MountPurpose::LocalAppBuild,
                     },
                     runtime_mount.expect("full runtime mount was preflighted"),
                 ],
@@ -1758,27 +1764,88 @@ fn normalize_mutations(input: &Value) -> Result<Vec<DataMutation>, String> {
 /// ephemeral range across 86% of its span and inside iOS's across its top 848
 /// ports, which made the OS itself the likeliest squatter of a port that, by
 /// design, the app can never give up.
+///
+/// WHY a sibling app's pin also excludes a candidate.  The window slot is a
+/// hash of the app id, so two ids in ONE profile can derive the same slot —
+/// `6b4cb242` and `c3baea9e` both derive 30809, and the birthday rate over
+/// 12000 slots is ~1.3% at 20 apps.  A bind probe cannot see that collision:
+/// a pin outlives the runtime that made it (`stop_runtime` re-passes
+/// `runtime.port`), so a STOPPED sibling's permanent port probes free and
+/// would be pinned a second time.  After that neither app can start while the
+/// other runs — `set_runtime` refuses to move either — and on Android the two
+/// share one `http://127.0.0.1:<port>` origin, hence one `localStorage` /
+/// `IndexedDB` store, because the Android WebView is built on the default
+/// profile with no per-app data store (iOS partitions by app id and is not
+/// exposed to that half).  `sibling_pinned_ports` is therefore consulted
+/// alongside the probe.  It PREVENTS new collisions only: a pair that already
+/// collided is permanent on both sides, so the `assigned` branch can do
+/// nothing but name the sibling instead of reporting a bare bind failure.
 async fn bind_stable_loopback(
     app_id: &str,
     assigned: Option<u16>,
+    sibling_pins: &[(String, u16)],
 ) -> Result<(TcpListener, u16), String> {
     if let Some(port) = assigned {
-        return TcpListener::bind(("127.0.0.1", port))
-            .await
-            .map(|listener| (listener, port))
-            .map_err(|error| format!("stable app port {port} is unavailable: {error}"));
+        return match TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => Ok((listener, port)),
+            Err(error) => Err(
+                match sibling_pins.iter().find(|(_, pinned)| *pinned == port) {
+                    Some((sibling, _)) => format!(
+                        "stable app port {port} is unavailable: app {sibling} is pinned to the same port and is holding it. \
+                         A pinned port can never be reassigned, so only one of the two apps can run; \
+                         recreate one of them to mint a fresh port ({error})"
+                    ),
+                    None => format!("stable app port {port} is unavailable: {error}"),
+                },
+            ),
+        };
     }
-    let hash = app_id.bytes().fold(0u32, |hash, byte| {
-        hash.wrapping_mul(16_777_619) ^ u32::from(byte)
-    });
-    let first = u16::try_from(hash % u32::from(APP_PORT_WINDOW_LEN)).unwrap_or(0);
+    let first = derived_window_slot(app_id);
     for offset in 0..256u16 {
         let port = APP_PORT_WINDOW_FIRST + (first + offset) % APP_PORT_WINDOW_LEN;
+        // A sibling's pin outlives its runtime, so a candidate that binds
+        // cleanly can still be owned forever by an app that is merely stopped.
+        if sibling_pins.iter().any(|(_, pinned)| *pinned == port) {
+            continue;
+        }
         if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
             return Ok((listener, port));
         }
     }
     Err("no stable loopback port is available for the app".into())
+}
+
+/// Offset into the derived window an app's FIRST port candidate sits at.
+///
+/// Extracted so the collision regression probe uses the production derivation
+/// rather than a copy of it — a copy would keep asserting itself after the
+/// real derivation moved.
+fn derived_window_slot(app_id: &str) -> u16 {
+    let hash = app_id.bytes().fold(0u32, |hash, byte| {
+        hash.wrapping_mul(16_777_619) ^ u32::from(byte)
+    });
+    u16::try_from(hash % u32::from(APP_PORT_WINDOW_LEN)).unwrap_or(0)
+}
+
+/// Ports every OTHER app in this profile has already pinned, each paired with
+/// its owner.
+///
+/// Read once per start rather than kept as a registry: the records ARE the
+/// registry, and a cached copy would be one more thing to invalidate on
+/// create/delete.  One in-memory lock per app in the profile.
+async fn sibling_pinned_ports(service: &AppService, app_id: &str) -> Vec<(String, u16)> {
+    let mut pinned = Vec::new();
+    for record in service.records().await {
+        if record.id == app_id {
+            continue;
+        }
+        if let Ok(runtime) = service.runtime_record(&record.id).await {
+            if let Some(port) = runtime.port {
+                pinned.push((record.id, port));
+            }
+        }
+    }
+    pinned
 }
 
 async fn wait_for_loopback(port: u16) -> Result<(), String> {
@@ -2748,7 +2815,7 @@ mod tests {
             "0f3a91cc", "a71b04de", "5c92f8b1", "deadbeef", "00000000", "ffffffff", "9a1c7e40",
             "3b6d20af", "7e0091cd", "c4f5a3b2",
         ] {
-            let (listener, port) = bind_stable_loopback(app_id, None)
+            let (listener, port) = bind_stable_loopback(app_id, None, &[])
                 .await
                 .expect("derive a port");
             assert!(
@@ -2804,6 +2871,129 @@ mod tests {
             "{error}"
         );
         drop(squatter);
+    }
+
+    /// Two well-formed ids can derive the SAME window slot — `6b4cb242` and
+    /// `c3baea9e` both land on 30809 — and a pin outlives the runtime that made
+    /// it.  With the first app merely STOPPED its permanent port probes free,
+    /// so a bind-only check pins it to the second app as well; from then on
+    /// neither can start while the other runs (neither port can be moved) and
+    /// on Android both apps share one WebView origin's `localStorage` /
+    /// `IndexedDB`.
+    #[tokio::test]
+    async fn a_derived_port_skips_a_slot_a_stopped_sibling_app_has_pinned() {
+        let (first_id, second_id) = ("6b4cb242", "c3baea9e");
+        assert_eq!(
+            derived_window_slot(first_id),
+            derived_window_slot(second_id),
+            "the fixture pair no longer collides, so this probe would pass vacuously"
+        );
+
+        let (listener, first_port) = bind_stable_loopback(first_id, None, &[])
+            .await
+            .expect("the first app derives a port");
+        // The first app is stopped: nothing holds the port, only the pin
+        // survives — precisely the state a bind probe cannot distinguish.
+        drop(listener);
+
+        let (second_listener, second_port) =
+            bind_stable_loopback(second_id, None, &[(first_id.to_string(), first_port)])
+                .await
+                .expect("the second app derives a port");
+        assert_ne!(
+            second_port, first_port,
+            "app {second_id} was pinned to {second_port}, which app {first_id} owns forever"
+        );
+        assert_eq!(
+            second_listener.local_addr().expect("local addr").port(),
+            second_port
+        );
+    }
+
+    /// A pair that has ALREADY collided cannot be repaired at bind time — both
+    /// records are permanent — so the only thing left is to say WHICH app is
+    /// holding the port.  The negative half carries equal weight: a foreign
+    /// squatter must not be reported as a sibling app, and the un-actionable
+    /// "recreate one of them" advice must not appear when nothing collided.
+    #[tokio::test]
+    async fn a_pinned_port_held_by_a_sibling_app_names_the_sibling() {
+        let holder = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = holder.local_addr().expect("local addr").port();
+
+        let named = bind_stable_loopback("starter", Some(port), &[("sibling-app".into(), port)])
+            .await
+            .expect_err("a held pinned port fails the start");
+        assert!(
+            named.contains(&format!("stable app port {port} is unavailable")),
+            "{named}"
+        );
+        assert!(named.contains("sibling-app"), "{named}");
+        assert!(named.contains("can never be reassigned"), "{named}");
+
+        let foreign = bind_stable_loopback(
+            "starter",
+            Some(port),
+            &[("other-app".into(), port.wrapping_add(1))],
+        )
+        .await
+        .expect_err("a squatted pinned port still fails");
+        assert!(
+            foreign.contains(&format!("stable app port {port} is unavailable")),
+            "{foreign}"
+        );
+        assert!(!foreign.contains("other-app"), "{foreign}");
+        assert!(!foreign.contains("can never be reassigned"), "{foreign}");
+        drop(holder);
+    }
+
+    /// The production half of the same defect: `start_reserved_runtime` has to
+    /// COLLECT the sibling pins, or the exclusion above is never reached by a
+    /// real start.  The sibling is parked stopped, so its permanent port probes
+    /// free at bind time.
+    #[tokio::test]
+    async fn a_first_start_skips_a_port_a_stopped_sibling_app_already_owns() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let sibling = create_app_fixture(&root, &service, "Sibling").await;
+        let starter = create_app_fixture(&root, &service, "Starter").await;
+        let contested = APP_PORT_WINDOW_FIRST + derived_window_slot(&starter);
+        // Nothing may HOLD the contested port, or the assertion below would
+        // pass for the wrong reason.
+        drop(
+            TcpListener::bind(("127.0.0.1", contested))
+                .await
+                .expect("the contested port is free in this environment"),
+        );
+        for (state, port) in [
+            (AppRuntimeState::Starting, Some(contested)),
+            (AppRuntimeState::Running, None),
+            (AppRuntimeState::Stopping, None),
+            (AppRuntimeState::Stopped, None),
+        ] {
+            service
+                .update_runtime_record(&sibling, state, port, None, None)
+                .await
+                .expect("pin the contested port on the sibling, then park it stopped");
+        }
+
+        broker
+            .manage_runtime_value(json!({"app_id": starter, "action": "start"}))
+            .await
+            .expect("the start succeeds on a port the sibling does not own");
+
+        let pinned = service
+            .runtime_record(&starter)
+            .await
+            .expect("runtime record")
+            .port
+            .expect("the start pinned a port");
+        assert_ne!(
+            pinned, contested,
+            "app {starter} was pinned to {contested}, which app {sibling} owns forever"
+        );
+        assert!(
+            (APP_PORT_WINDOW_FIRST..APP_PORT_WINDOW_FIRST + APP_PORT_WINDOW_LEN).contains(&pinned),
+            "app {starter} port {pinned} is outside the derived window"
+        );
     }
 
     /// The invariant `bind_stable_loopback`'s "no fallback" reasoning rests on,
@@ -3003,7 +3193,10 @@ mod tests {
             broker.manage_runtime_value(json!({"app_id": app_id, "action": "stop"})),
         );
 
-        assert_eq!(start.expect("the start still completes")["state"], "running");
+        assert_eq!(
+            start.expect("the start still completes")["state"],
+            "running"
+        );
         let stop_error = stop.expect_err("a stop during a start is refused");
         assert!(stop_error.contains("still starting"), "{stop_error}");
         assert_eq!(broker.runtimes.lock().await.len(), 1);
@@ -3028,7 +3221,10 @@ mod tests {
         .await
         .expect("the refusal returns without waiting on an approval")
         .expect_err("a non-ready app cannot be restored");
-        assert!(refusal.contains("only available once it is ready"), "{refusal}");
+        assert!(
+            refusal.contains("only available once it is ready"),
+            "{refusal}"
+        );
         assert!(
             sink.is_empty().await,
             "no capability prompt is raised for a restore that will be refused"
@@ -3134,11 +3330,9 @@ mod tests {
                 .expect("the accept loop gives up instead of spinning at 20 Hz forever")
                 .expect("the static server task did not panic")
         });
-        assert!(
-            outcome
-                .expect("a listener that can never accept is a fatal exit, not a clean shutdown")
-                .contains("stopped accepting connections"),
-        );
+        assert!(outcome
+            .expect("a listener that can never accept is a fatal exit, not a clean shutdown")
+            .contains("stopped accepting connections"),);
     }
 
     #[test]
@@ -3172,8 +3366,7 @@ mod tests {
                     generation,
                 },
             );
-            let layout =
-                AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+            let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
             broker.spawn_static_server(
                 service.clone(),
                 app_id.clone(),

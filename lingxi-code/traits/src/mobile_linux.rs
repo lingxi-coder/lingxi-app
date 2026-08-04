@@ -152,6 +152,7 @@ pub struct MountSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MountPurpose {
     Workspace,
+    LocalAppBuild,
     Memory,
     Skills,
     Shared,

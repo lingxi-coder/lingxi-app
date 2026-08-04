@@ -369,6 +369,7 @@ pub struct MobileLinuxStatusFfi {
 #[derive(Debug, Clone, Copy)]
 pub enum MobileLinuxMountPurposeFfi {
     Workspace,
+    LocalAppBuild,
     Memory,
     Skills,
     Shared,
@@ -751,6 +752,7 @@ fn status_to_ffi(status: traits::RootfsStatus) -> MobileLinuxStatusFfi {
 fn mount_purpose_to_traits(value: MobileLinuxMountPurposeFfi) -> traits::MountPurpose {
     match value {
         MobileLinuxMountPurposeFfi::Workspace => traits::MountPurpose::Workspace,
+        MobileLinuxMountPurposeFfi::LocalAppBuild => traits::MountPurpose::LocalAppBuild,
         MobileLinuxMountPurposeFfi::Memory => traits::MountPurpose::Memory,
         MobileLinuxMountPurposeFfi::Skills => traits::MountPurpose::Skills,
         MobileLinuxMountPurposeFfi::Shared => traits::MountPurpose::Shared,

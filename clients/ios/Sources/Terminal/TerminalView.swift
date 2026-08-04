@@ -33,11 +33,15 @@ struct TerminalView: View {
 
     var body: some View {
         let content = VStack(spacing: 0) {
-            header
-            Divider()
+            // A terminal is its transcript. Chrome appears only when the shell
+            // cannot run — otherwise the screen is the shell, as on a desktop.
+            if model.availability.message != nil {
+                header
+                Divider()
+            }
             transcript
             Divider()
-            toolbar
+            controlKeys
             composer
         }
         .background(Color.black.opacity(0.96))
@@ -53,11 +57,6 @@ struct TerminalView: View {
                 .navigationTitle("终端")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("关闭") {
-                            onDismiss?()
-                        }
-                    }
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         actionToolbar
                     }
@@ -78,53 +77,46 @@ struct TerminalView: View {
         #endif
     }
 
+    /// Shown only when the shell cannot run. Everything that used to live
+    /// here — project name, workspace path, requested and actual cwd, initial
+    /// command — is diagnostic detail a working terminal does not need on
+    /// screen; the shell's own prompt reports the directory.
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(model.descriptor.workspace.displayName)
-                .font(.headline)
-                .foregroundStyle(.white)
-            Text(model.descriptor.workspace.guestPath)
-                .font(.caption.monospaced())
-                .foregroundStyle(.white.opacity(0.75))
-            if let requestedCwd = model.descriptor.requestedCwdDisplay {
-                Text("请求 cwd · \(requestedCwd)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.white.opacity(0.75))
-            }
-            Text("实际 cwd · \(model.descriptor.launchCwd.flatMap { $0.isEmpty ? nil : $0 } ?? "未解析")")
-                .font(.caption.monospaced())
-                .foregroundStyle(.white.opacity(0.75))
-            if let initialCommand = model.descriptor.initialCommand {
-                Text("初始命令 · \(initialCommand)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(2)
-            }
-            if let availabilityMessage = model.availability.message {
-                Text(availabilityMessage)
+            Label(recovery.title, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.orange)
+            if let message = model.availability.message {
+                Text(message)
                     .font(.caption)
-                    .foregroundStyle(.orange)
-                repairActions
-            } else if let exit = model.lastExitStatus {
-                Text(exit.timedOut ? "会话已超时结束" : "会话已结束 · exit \(exit.code ?? 0)")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.white.opacity(0.9))
             }
+            if let cwd = model.descriptor.launchCwd, !cwd.isEmpty {
+                Text(cwd)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            repairActions
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
     }
 
+    private var recovery: TerminalRecovery {
+        TerminalRecovery.forState(model.availability)
+    }
+
     @ViewBuilder
     private var repairActions: some View {
-        switch model.availability {
-        case .unavailable, .workspaceUnavailable:
+        switch recovery {
+        case .workspaceNotMounted, .runtimeUnavailable:
             if let onOpenRuntimeSettings {
                 Button("打开运行时设置") { onOpenRuntimeSettings() }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
+                    .accessibilityIdentifier("terminal.repair.runtimeSettings")
             }
-        case .integrityFailure:
+        case .repairRuntime:
             HStack(spacing: 10) {
                 if let onRepairRuntime {
                     Button("尝试修复") { onRepairRuntime() }
@@ -136,7 +128,7 @@ struct TerminalView: View {
                         .buttonStyle(.bordered)
                 }
             }
-        default:
+        case .none:
             EmptyView()
         }
     }
@@ -166,7 +158,9 @@ struct TerminalView: View {
         }
     }
 
-    private var toolbar: some View {
+    /// Ctrl-C/D/Z and Esc have no keys on an iOS keyboard, so these stay —
+    /// they are the shell's own controls, not extra UI.
+    private var controlKeys: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 12) {
                 ForEach(TerminalControlKey.allCases) { key in
@@ -175,19 +169,6 @@ struct TerminalView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(.white)
-                }
-
-                ForEach(model.tasks) { task in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(task.title)
-                            .font(.caption.weight(.semibold))
-                        Text(task.detail ?? statusLabel(task.state))
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                 }
             }
             .padding(.horizontal)
@@ -240,18 +221,5 @@ struct TerminalView: View {
     @ViewBuilder
     private var actionToolbar: some View {
         Button("复制") { model.copyTranscript() }
-        Button("刷新任务") {
-            Task { await model.refreshTasks() }
-        }
-    }
-
-    private func statusLabel(_ state: TerminalTaskState) -> String {
-        switch state {
-        case .running: return "运行中"
-        case .completed: return "完成"
-        case .failed: return "失败"
-        case .cancelled: return "已取消"
-        case .unavailable: return "不可用"
-        }
     }
 }

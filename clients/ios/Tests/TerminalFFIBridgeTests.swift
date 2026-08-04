@@ -72,7 +72,7 @@ final class TerminalFFIBridgeTests: XCTestCase {
         )
 
         XCTAssertNil(descriptor.launchCwd)
-        XCTAssertEqual(descriptor.invalidRequestedCwdMessage, "请求的 cwd 超出当前项目 workspace：/tmp")
+        XCTAssertEqual(descriptor.invalidRequestedCwdMessage, "请求的 cwd 超出 workspace：/tmp")
     }
 
     func testDescriptorMakeFallsBackToLinuxRuntimeDraftCommand() {

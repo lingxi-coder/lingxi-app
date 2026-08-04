@@ -6,6 +6,47 @@ import UIKit
 import AppKit
 #endif
 
+/// What the terminal offers the user when it cannot run.
+///
+/// Extracted from the view because it is a decision, not a layout: the states
+/// `unavailable` and `workspaceUnavailable` previously shared one button, so a
+/// terminal opened without a project offered "打开运行时设置" — a screen that
+/// cannot create a project. Naming the cause and the remedy in one place makes
+/// that class of mismatch testable.
+enum TerminalRecovery: Equatable {
+    /// The guest workspace/cwd is not mounted. Not a missing project — a shell
+    /// no longer needs one — so the remedy is to inspect the runtime's mounts.
+    case workspaceNotMounted
+    /// The Linux runtime itself is not usable.
+    case runtimeUnavailable
+    /// The rootfs is present but damaged.
+    case repairRuntime
+    /// Nothing the user can act on from here.
+    case none
+
+    /// Headline naming the CAUSE. Two causes may share a button while still
+    /// needing different words: "运行时不可用" and "工作目录不可用" are both
+    /// fixed from the runtime page, but confusing them wastes the reader's time.
+    var title: String {
+        switch self {
+        case .workspaceNotMounted: "工作目录不可用"
+        case .runtimeUnavailable: "Linux 运行时不可用"
+        case .repairRuntime: "运行时文件损坏"
+        case .none: "终端不可用"
+        }
+    }
+
+    static func forState(_ state: TerminalAvailabilityState) -> TerminalRecovery {
+        switch state {
+        case .workspaceUnavailable: .workspaceNotMounted
+        case .unavailable: .runtimeUnavailable
+        case .integrityFailure: .repairRuntime
+        case .invalidRequest, .failed: .none
+        case .idle, .opening, .ready, .closed: .none
+        }
+    }
+}
+
 enum TerminalAvailabilityState: Equatable, Sendable {
     case idle
     case opening
@@ -308,8 +349,10 @@ final class TerminalSessionModel {
         if let invalidRequestedCwdMessage = descriptor.invalidRequestedCwdMessage {
             return .invalidRequest(invalidRequestedCwdMessage)
         }
+        // Reachable only if the descriptor was built without the runtime's own
+        // home fallback; a shell no longer requires a project to have a cwd.
         if descriptor.workspace.guestPath.isEmpty {
-            return .workspaceUnavailable("当前项目 guest workspace 不可用")
+            return .workspaceUnavailable("guest workspace 不可用")
         }
         if !capability.available {
             return .unavailable(capability.reason ?? "运行环境不可用")
@@ -331,7 +374,7 @@ final class TerminalSessionModel {
             workspacePath == candidate || workspacePath.hasPrefix(candidate + "/")
         }
         guard matches else {
-            return .workspaceUnavailable("当前项目 workspace 未挂载到 guest，已拒绝回退到错误工作区")
+            return .workspaceUnavailable("工作目录未挂载到 guest，已拒绝回退到错误目录")
         }
         return .ready
     }

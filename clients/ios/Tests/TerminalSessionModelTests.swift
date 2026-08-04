@@ -42,7 +42,7 @@ final class TerminalSessionModelTests: XCTestCase {
 
         await model.startIfNeeded()
 
-        XCTAssertEqual(model.availability, .workspaceUnavailable("当前项目 workspace 未挂载到 guest，已拒绝回退到错误工作区"))
+        XCTAssertEqual(model.availability, .workspaceUnavailable("工作目录未挂载到 guest，已拒绝回退到错误目录"))
         XCTAssertNil(model.activeSessionID)
         let openRequestCount = await client.recordedOpenRequestCount()
         XCTAssertEqual(openRequestCount, 0)
@@ -311,14 +311,77 @@ final class TerminalSessionModelTests: XCTestCase {
             config: nil,
             workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/workspace/project", displayName: "Project"),
             launchCwd: nil,
-            invalidRequestedCwdMessage: "请求的 cwd 超出当前项目 workspace：/tmp"
+            invalidRequestedCwdMessage: "请求的 cwd 超出 workspace：/tmp"
         )
         let model = TerminalSessionModel(descriptor: descriptor, client: client)
 
         await model.startIfNeeded()
 
-        XCTAssertEqual(model.availability, .invalidRequest("请求的 cwd 超出当前项目 workspace：/tmp"))
+        XCTAssertEqual(model.availability, .invalidRequest("请求的 cwd 超出 workspace：/tmp"))
         let openRequestCount = await client.recordedOpenRequestCount()
         XCTAssertEqual(openRequestCount, 0)
+    }
+
+    // MARK: - Recovery mapping
+
+    /// Two causes may share a button, but never a headline: reading
+    /// "Linux 运行时不可用" when the runtime is fine and only the mount failed
+    /// sends the reader looking in the wrong place.
+    func testEachUnavailableCauseMapsToItsOwnRemedy() {
+        XCTAssertEqual(TerminalRecovery.forState(.workspaceUnavailable("x")), .workspaceNotMounted)
+        XCTAssertEqual(TerminalRecovery.forState(.unavailable("x")), .runtimeUnavailable)
+        XCTAssertEqual(TerminalRecovery.forState(.integrityFailure("x")), .repairRuntime)
+
+        // Distinctness is the property that broke; assert it directly rather
+        // than trusting three equality checks to stay different.
+        let titles = Set([
+            TerminalRecovery.forState(.workspaceUnavailable("x")).title,
+            TerminalRecovery.forState(.unavailable("x")).title,
+            TerminalRecovery.forState(.integrityFailure("x")).title,
+        ])
+        XCTAssertEqual(titles.count, 3, "each cause needs a distinct headline")
+    }
+
+    /// A shell is not a property of a project. With no project open the
+    /// terminal must still start, in the runtime's own persistent home.
+    func testTerminalOpensWithoutAProject() {
+        let descriptor = TerminalRuntimeDescriptor.make(
+            appSandboxRoot: NSTemporaryDirectory(),
+            project: nil,
+            linuxRuntime: LinuxRuntimeState()
+        )
+        XCTAssertNotNil(
+            descriptor.config,
+            "a project-less terminal still needs a runtime config, or no shell can start"
+        )
+        XCTAssertEqual(descriptor.workspace.guestPath, LXISHDefaultWorkspace.guestHome)
+        XCTAssertEqual(descriptor.launchCwd, LXISHDefaultWorkspace.guestHome)
+        XCTAssertNil(descriptor.invalidRequestedCwdMessage)
+    }
+
+    /// The fallback workspace must be stable — a fresh UUID per launch would
+    /// mint a throwaway workspace every time the terminal opened.
+    func testProjectlessWorkspaceIsStableAcrossCalls() {
+        let a = TerminalRuntimeDescriptor.make(
+            appSandboxRoot: NSTemporaryDirectory(), project: nil, linuxRuntime: LinuxRuntimeState()
+        )
+        let b = TerminalRuntimeDescriptor.make(
+            appSandboxRoot: NSTemporaryDirectory(), project: nil, linuxRuntime: LinuxRuntimeState()
+        )
+        XCTAssertEqual(a.config?.stableWorkspaceId, b.config?.stableWorkspaceId)
+        XCTAssertFalse(a.config?.stableWorkspaceId.isEmpty ?? true)
+    }
+
+    func testHealthyAndUnrecoverableStatesOfferNoRepair() {
+        let states: [TerminalAvailabilityState] = [
+            .idle, .opening, .ready, .closed,
+            .invalidRequest("bad cwd"), .failed("boom"),
+        ]
+        for state in states {
+            XCTAssertEqual(
+                TerminalRecovery.forState(state), TerminalRecovery.none,
+                "\(state) must not offer a repair button"
+            )
+        }
     }
 }

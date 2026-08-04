@@ -27,6 +27,46 @@ struct LXISHRootfsStatus: Codable {
     var lastError: String?
 }
 
+/// The guest workspace that exists whether or not a project is open.
+///
+/// A terminal is a shell on the Linux runtime; it is not a property of a
+/// project. The Settings page has always opened one this way — a persisted
+/// workspace id under Application Support — while the terminal insisted on a
+/// project and refused to start without one. Both now resolve the same
+/// workspace, so they are the same machine rather than two.
+enum LXISHDefaultWorkspace {
+    static let defaultsKey = "lingxi.mobile-linux.workspace.default.id"
+
+    /// `/root` is mounted by the runtime unconditionally (the persistent home
+    /// layer) and is always writable, so it is a valid cwd even with no project.
+    static let guestHome = "/root"
+
+    static func stableID(defaults: UserDefaults = .standard) -> String {
+        if let persisted = defaults.string(forKey: defaultsKey),
+           UUID(uuidString: persisted) != nil
+        {
+            return persisted.lowercased()
+        }
+        let generated = UUID().uuidString.lowercased()
+        defaults.set(generated, forKey: defaultsKey)
+        return generated
+    }
+
+    static func hostPath(id: String? = nil) -> String {
+        let workspaceID = id ?? stableID()
+        guard let support = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        else {
+            return ""
+        }
+        let url = support
+            .appendingPathComponent("workspaces", isDirectory: true)
+            .appendingPathComponent(workspaceID, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url.path
+    }
+}
+
 struct LXISHNativeConfig: Codable, Hashable {
     var managedRoot: String
     var workspaceHostPath: String

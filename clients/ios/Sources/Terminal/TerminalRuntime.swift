@@ -102,9 +102,15 @@ extension TerminalRuntimeDescriptor {
         requestedCwd: TerminalRouteCwd? = nil
     ) -> TerminalRuntimeDescriptor {
         let manifest = LXISHRuntimeBundleMetadata.current()
-        let projectId = project?.record.id ?? UUID().uuidString.lowercased()
-        let workspaceHostPath = project?.workspace.hostURL.path ?? ""
-        let workspaceGuestPath = project?.workspace.guestPath ?? ""
+        // A shell does not belong to a project. With no project open the
+        // terminal falls back to the runtime's own persistent workspace — the
+        // same one Settings uses — instead of refusing to start. A fresh UUID
+        // here would have minted a throwaway workspace on every launch.
+        let projectId = project?.record.id ?? LXISHDefaultWorkspace.stableID()
+        let workspaceHostPath = project?.workspace.hostURL.path
+            ?? LXISHDefaultWorkspace.hostPath(id: projectId)
+        let workspaceGuestPath = project?.workspace.guestPath
+            ?? LXISHDefaultWorkspace.guestHome
         let managedRoot =
             linuxRuntime.managedRoot
             ?? URL(fileURLWithPath: appSandboxRoot, isDirectory: true)
@@ -128,11 +134,11 @@ extension TerminalRuntimeDescriptor {
         )
 
         return TerminalRuntimeDescriptor(
-            config: workspaceHostPath.isEmpty ? nil : config,
+            config: workspaceHostPath.isEmpty ? nil : config,  // only if the container itself is unavailable
             workspace: TerminalWorkspaceDescriptor(
-                hostPath: project?.workspace.hostURL.path,
+                hostPath: project?.workspace.hostURL.path ?? workspaceHostPath,
                 guestPath: workspaceGuestPath,
-                displayName: project?.record.name ?? "当前项目"
+                displayName: project?.record.name ?? "Linux"
             ),
             initialCommand: resolvedInitialCommand(
                 explicit: initialCommand,
@@ -188,17 +194,22 @@ extension TerminalRuntimeDescriptor {
         workspaceGuestPath: String
     ) -> (cwd: String?, errorMessage: String?) {
         guard let requestedCwd else {
-            return (workspaceGuestPath.isEmpty ? nil : workspaceGuestPath, nil)
+            return (
+                workspaceGuestPath.isEmpty ? LXISHDefaultWorkspace.guestHome : workspaceGuestPath,
+                nil
+            )
         }
+        // Only a cwd the CALLER asked for can be unsatisfiable. "No project" is
+        // no longer a failure — it just means the shell opens in its own home.
         guard !workspaceGuestPath.isEmpty else {
-            return (nil, "当前项目 guest workspace 不可用")
+            return (nil, "请求的 cwd 需要一个已打开的项目：\(requestedCwd.displayValue)")
         }
 
         switch requestedCwd {
         case let .guestPath(path):
             let normalized = normalizeGuestPath(path)
             guard isWithinWorkspace(normalized, workspaceGuestPath: workspaceGuestPath) else {
-                return (nil, "请求的 cwd 超出当前项目 workspace：\(path)")
+                return (nil, "请求的 cwd 超出 workspace：\(path)")
             }
             return (normalized, nil)
         case let .workspaceRelative(path):
@@ -209,7 +220,7 @@ extension TerminalRuntimeDescriptor {
                 workspaceGuestPath + (normalizedRelative.isEmpty ? "" : "/\(normalizedRelative)")
             )
             guard isWithinWorkspace(combined, workspaceGuestPath: workspaceGuestPath) else {
-                return (nil, "请求的 cwd 超出当前项目 workspace：\(path)")
+                return (nil, "请求的 cwd 超出 workspace：\(path)")
             }
             return (combined, nil)
         }

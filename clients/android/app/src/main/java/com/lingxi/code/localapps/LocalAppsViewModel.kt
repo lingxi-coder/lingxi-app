@@ -17,6 +17,7 @@ import com.lingxi.code.bindings.AppDesignFieldTypeDto
 import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.bindings.AppGenerationJobDto
+import com.lingxi.code.bindings.AppGenerationJobStateDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeModeDto
@@ -65,17 +66,32 @@ class LocalAppsViewModel(
     private var draftEditInFlight: InFlightDraftEdit? = null
 
     /**
-     * How long a sent draft patch may hold the single in-flight slot before it is
-     * assumed lost and re-queued. Far longer than a healthy ack, so it normally
-     * only fires on a failure the event stream could not attribute — but it is a
-     * heuristic, not a guarantee: a slow engine or a wall-clock step can trip it
-     * early. That is tolerable only because the aged-out edit is RE-SENT rather
-     * than dropped, so an early trip costs one idempotent set-op. Settable so a
-     * test can reach the path without waiting out the production budget.
+     * How long a draft-queue gate may wait on an engine answer that may never
+     * come. It bounds both gates in [pumpDraftEditQueue]: the single in-flight
+     * slot ([draftEditInFlight]) and the post-conflict details refresh
+     * ([draftConflictRefresh]). Far longer than a healthy round trip, so it
+     * normally only fires on a failure the event stream could not attribute —
+     * but it is a heuristic, not a guarantee: a slow engine or a wall-clock step
+     * can trip it early. That is tolerable only because neither gate LOSES
+     * anything when it ages out: the in-flight edit is RE-SENT rather than
+     * dropped, and the refresh gate holds no edit at all. Settable so a test can
+     * reach the path without waiting out the production budget.
      */
     internal var inFlightEditBudgetMs: Long = 15_000
 
-    private var draftConflictRefreshAppId: String? = null
+    /**
+     * The app whose authoritative snapshot a design conflict is waiting on, with
+     * the wall clock at which it was asked for. Timestamped for the same reason
+     * [draftEditInFlight] is, and more urgently: [reduceDetails] is the only
+     * ANSWER that clears this, and it runs only for a *successful*
+     * `GetAppDetails` for that app. A refresh answered with `AppOperationFailed`
+     * (the app was deleted from another surface, the store is corrupt) or whose
+     * answer is dropped (an engine rebind or project switch cancels the event
+     * collector) would otherwise hold the gate for the life of the ViewModel —
+     * and this gate, unlike the in-flight slot, blocks the queue for EVERY app,
+     * not just this one.
+     */
+    private var draftConflictRefresh: PendingConflictRefresh? = null
     private var draftEditSequence = 0L
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
@@ -94,6 +110,11 @@ class LocalAppsViewModel(
     private data class InFlightDraftEdit(
         val edit: QueuedDraftEdit,
         val expectedRevision: ULong,
+        val sentAtMs: Long = System.currentTimeMillis(),
+    )
+
+    private data class PendingConflictRefresh(
+        val appId: String,
         val sentAtMs: Long = System.currentTimeMillis(),
     )
 
@@ -302,11 +323,41 @@ class LocalAppsViewModel(
                 draftEditInFlight = null
             }
         }
-        if (draftEditInFlight != null || draftConflictRefreshAppId != null) return
+        // The second gate needs the same bound, and needs it more: it is cleared
+        // only by a SUCCESSFUL details snapshot, and it is process-global rather
+        // than app-scoped, so a refresh that never lands wedges every later edit
+        // for every app. Aging it out loses nothing — `reduceDraftConflict` put
+        // the rejected patch back on the queue before raising the gate, so the
+        // worst case of resuming against the locally known revision is one more
+        // AppDesignConflict, which re-queues and re-asks. That is the same state
+        // we are in now, not a lost answer, which is why this may be dropped on
+        // a wall clock while the in-flight edit may only be re-sent.
+        draftConflictRefresh?.let { pending ->
+            if (System.currentTimeMillis() - pending.sentAtMs >= inFlightEditBudgetMs) {
+                releaseConflictRefreshUnanswered()
+            }
+        }
+        if (draftEditInFlight != null || draftConflictRefresh != null) return
         val designer = _uiState.value.designer ?: return
-        val next = draftEditQueue.firstOrNull() ?: return
-        if (!next.ready || next.appId != designer.appId) return
-        draftEditQueue.removeAt(0)
+        // Take the first SENDABLE edit, not merely the head. This queue is
+        // process-global while the designer is one app, so a head that cannot be
+        // sent — its app is not the one on screen, because the user moved to
+        // another designer or because its app was deleted — used to block every
+        // later edit for EVERY app, permanently: the only removal from the queue
+        // is right here, and it was gated on that same head matching. iOS never
+        // had the failure mode because its queue is keyed by app id and
+        // `flushNextEdit(appID:)` already selects "the first READY edit for THIS
+        // app" (LocalAppsStore.swift); this is that selector over a flat list.
+        //
+        // Skipping a not-yet-ready edit for the same app is order-safe too:
+        // `editField` keeps at most one entry per (appId, fieldId), so any two
+        // queued entries are different fields and their set-ops commute.
+        // Skipped entries are kept, not dropped — the user's typed answer for an
+        // app whose designer is closed is still owed to that app, and resumes
+        // the next time its designer is open and anything pumps.
+        val nextIndex = draftEditQueue.indexOfFirst { it.ready && it.appId == designer.appId }
+        if (nextIndex < 0) return
+        val next = draftEditQueue.removeAt(nextIndex)
         val inFlight = InFlightDraftEdit(next, designer.revision)
         draftEditInFlight = inFlight
         submit(
@@ -319,6 +370,31 @@ class LocalAppsViewModel(
                 ),
             ),
         )
+    }
+
+    /**
+     * Give up on the authoritative snapshot the post-conflict gate is waiting
+     * for, and take the designer's conflict banner down with it.
+     *
+     * `designer.conflictRevision` is the sole input to
+     * "设计已在其他位置更新到版本 N，已重新加载，请检查后继续。"
+     * (`LocalAppsScreen`), and 已重新加载 is a claim only [reduceDetails] can make
+     * true — it is the one place that replaces `values` with the engine's. Both
+     * callers below release the gate precisely because that snapshot is not
+     * coming, so leaving the field set would assert a reload that provably did
+     * not happen, over the pre-conflict local values, and invite the user to
+     * keep editing on top of them.
+     */
+    private fun releaseConflictRefreshUnanswered() {
+        val appId = draftConflictRefresh?.appId ?: return
+        draftConflictRefresh = null
+        _uiState.update { state ->
+            if (state.designer?.appId != appId || state.designer.conflictRevision == null) {
+                state
+            } else {
+                state.copy(designer = state.designer.copy(conflictRevision = null))
+            }
+        }
     }
 
     private fun pendingDraftValues(appId: String): Map<String, LocalAppDesignValue> = buildMap {
@@ -359,7 +435,7 @@ class LocalAppsViewModel(
                 draftEditQueue.add(0, inFlight.edit.copy(ready = true))
             }
         }
-        draftConflictRefreshAppId = event.appId
+        draftConflictRefresh = PendingConflictRefresh(event.appId)
         _uiState.update { state ->
             if (state.designer?.appId != event.appId) state else state.copy(
                 designer = state.designer.copy(conflictRevision = event.actualRevision),
@@ -616,7 +692,25 @@ class LocalAppsViewModel(
             }
             is ClientEvent.AppOperationFailed -> {
                 val recoveringConflict = event.code == AppErrorCodeDto.REVISION_CONFLICT &&
-                    event.appId == draftConflictRefreshAppId
+                    event.appId == draftConflictRefresh?.appId
+                // The details refresh a conflict is waiting on can fail outright —
+                // the app was deleted from another surface, or its store is
+                // corrupt — and a failure never reaches `reduceDetails`, the one
+                // place that clears the gate. Release it here so the deterministic
+                // case recovers at once instead of waiting out the budget above.
+                // A non-conflict failure carrying that app id is the strongest
+                // signal available: `AppOperationFailed` has no correlation id, so
+                // this cannot be narrowed to the GetAppDetails that failed. Being
+                // wrong is cheap and cannot lose an answer — the rejected patch is
+                // already back on the queue, so an early release at worst resends
+                // against the local revision and earns one more AppDesignConflict,
+                // which re-raises this gate with a fresh deadline. REVISION_CONFLICT
+                // is excluded because that is the failure that ACCOMPANIES the
+                // conflict which raised the gate, not the refresh answering.
+                val failedConflictRefresh = event.appId != null &&
+                    event.appId == draftConflictRefresh?.appId &&
+                    event.code != AppErrorCodeDto.REVISION_CONFLICT
+                if (failedConflictRefresh) releaseConflictRefreshUnanswered()
                 // A rejected patch must not wedge the single-slot draft queue:
                 // `draftEditInFlight` is otherwise only cleared by an ack or a
                 // conflict, so a patch the engine refuses outright leaves
@@ -642,10 +736,8 @@ class LocalAppsViewModel(
                         event.code == AppErrorCodeDto.INVALID_REQUEST ||
                             event.code == AppErrorCodeDto.WORKFLOW_STATE_INVALID
                         )
-                if (rejectedDraftPatch) {
-                    draftEditInFlight = null
-                    pumpDraftEditQueue()
-                }
+                if (rejectedDraftPatch) draftEditInFlight = null
+                if (rejectedDraftPatch || failedConflictRefresh) pumpDraftEditQueue()
                 if (!recoveringConflict) error(event.message)
             }
             else -> Unit
@@ -784,14 +876,26 @@ class LocalAppsViewModel(
             val template = current.templates.firstOrNull { it.kind == app.templateKind }
             current.copy(
                 apps = apps.sortedByDescending { it.updatedAtMs },
-                designer = if (currentDesigner?.appId == app.id && template != null) {
-                    currentDesigner.copy(
+                designer = when {
+                    currentDesigner?.appId != app.id -> currentDesigner
+                    // The gate this snapshot answers goes down unconditionally
+                    // below, so the banner it raised must go down with it —
+                    // `conflictRevision` is the sole input to
+                    // "…已重新加载，请检查后继续。" and only [reduceDetails] can make
+                    // 已重新加载 true. Without a template the `values` below cannot
+                    // be replaced with the engine's, so leaving the banner up
+                    // would assert a reload that provably did not happen, over
+                    // the pre-conflict local values — exactly the state
+                    // [releaseConflictRefreshUnanswered] exists to prevent, and
+                    // the one exit that did not route through it.
+                    template == null -> currentDesigner.copy(conflictRevision = null)
+                    else -> currentDesigner.copy(
                         template = template,
                         revision = details.designRevision,
                         values = details.designFields.associate { it.fieldId to it.value.toUiValue() } + pendingValues,
                         conflictRevision = null,
                     )
-                } else currentDesigner,
+                },
                 generation = details.generationJob?.let { job ->
                     current.generation + (app.id to job.toUiGeneration())
                 } ?: current.generation,
@@ -821,8 +925,8 @@ class LocalAppsViewModel(
                 ),
             )
         }
-        if (draftConflictRefreshAppId == app.id) {
-            draftConflictRefreshAppId = null
+        if (draftConflictRefresh?.appId == app.id) {
+            draftConflictRefresh = null
             pumpDraftEditQueue()
         }
     }
@@ -844,15 +948,85 @@ class LocalAppsViewModel(
             record.toUiApp(templates.mapValues { it.value.name }, fallbackRuntime = prior?.runtime)
         }.sortedByDescending { it.updatedAtMs }
         val liveIds = apps.mapTo(hashSetOf()) { it.id }
-        _uiState.update {
-            it.copy(
+        // Release the draft machinery for apps that left the record set. Nothing
+        // else does, and every path back INTO such an app already refuses it —
+        // `openApp` and `reduceDesignerRequested` both return early for an id
+        // absent from `state.apps`. Left in place, a designer still pinned to a
+        // deleted app keeps sending patches the engine can only answer NOT_FOUND,
+        // a code neither the ack arm nor `rejectedDraftPatch` may attribute, so
+        // the in-flight watchdog re-queues them and the pump re-sends them for
+        // the life of the ViewModel.
+        //
+        // `AppsChanged` is authoritative enough to prune on: the protocol defines
+        // it as the FULL record set (`ClientEvent::AppsChanged.apps`), and every
+        // emission goes through `AppService::announce_apps`, which snapshots
+        // every record under the emission-order lock. There is no partial
+        // snapshot to mistake for a deletion — this reducer already replaces
+        // `apps` wholesale and filters details/generation/previews on the same
+        // set, so pruning here is no more trusting than what it already does.
+        //
+        // Discarding those edits is deliberate, and is NOT the "an edit that
+        // leaves the in-flight slot must be re-queued" rule the watchdog and the
+        // conflict arm obey. That rule exists so a confirm cannot ship a spec the
+        // engine never received; here the designer whose `values` would keep the
+        // confirm gate satisfied is torn down in the same breath, so
+        // `confirmDesign` returns at its own `designer ?: return` and `drained`
+        // is never reached for the dead app.
+        //
+        // What the user is LOOKING at decides whether a deletion is news —
+        // never the mere existence of a `designer` object. Nothing but this
+        // reducer clears `state.designer`: `navigateBack` and `openApp` move
+        // only `destination`, so after the first designer of a session it stays
+        // non-null and pinned for the rest of it. Keying a notice off it fired
+        // the modal 应用操作失败 dialog on every ordinary library delete — and
+        // the library card's ⋮ menu is the only delete surface there is, so
+        // that was EVERY delete the user can perform — announcing a failure for
+        // an operation that did exactly what was asked, and telling them they
+        // had been 已返回应用列表 while they had never left it.
+        val displacedFrom = _uiState.value.destination.appIdOnScreen()?.takeIf { it !in liveIds }
+        // The one thing a deletion takes that the user cannot get back: answers
+        // typed into the designer that the engine never received. The prune
+        // below discards them deliberately (see above), so sample first.
+        val strandedEdits = displacedFrom != null && (
+            draftEditInFlight?.edit?.appId == displacedFrom ||
+                draftEditQueue.any { it.appId == displacedFrom }
+            )
+        val queuePruned = draftEditQueue.removeAll { it.appId !in liveIds }
+        val flightPruned = draftEditInFlight?.let { it.edit.appId !in liveIds } == true
+        val gatePruned = draftConflictRefresh?.let { it.appId !in liveIds } == true
+        if (flightPruned) draftEditInFlight = null
+        if (gatePruned) draftConflictRefresh = null
+        _uiState.update { state ->
+            val destination = state.destination
+            state.copy(
                 apps = apps,
-                details = it.details.filterKeys(liveIds::contains),
-                generation = it.generation.filterKeys(liveIds::contains),
-                previews = it.previews.filterKeys(liveIds::contains),
+                details = state.details.filterKeys(liveIds::contains),
+                generation = state.generation.filterKeys(liveIds::contains),
+                previews = state.previews.filterKeys(liveIds::contains),
+                designer = state.designer?.takeIf { it.appId in liveIds },
+                // Pruned on the same set as everything above it, and for the
+                // same reason: `SelectDetailsTab` and both generation reducers
+                // steer off this id, so a stale one rebuilds a Details/Preview
+                // destination for an app that no longer exists.
+                selectedAppId = state.selectedAppId?.takeIf { it in liveIds },
+                // Every per-app screen for a deleted app is now an empty shell
+                // with no way forward — the designer above is null, and
+                // `details`/`generation`/`previews` were just filtered out from
+                // under Details and Preview. Leave the screen we emptied,
+                // whichever of the three it was.
+                destination = if (destination.appIdOnScreen()?.let { it !in liveIds } == true) {
+                    LocalAppsDestination.Library
+                } else {
+                    destination
+                },
                 loading = false,
             )
         }
+        // Navigation is not a failure, so the rescue above is silent. Losing an
+        // answer the user typed is, and it is the only part of a deletion they
+        // could not have predicted.
+        if (strandedEdits) error("该应用已被删除，尚未保存的设计修改已丢失，已返回应用列表。")
+        if (queuePruned || flightPruned || gatePruned) pumpDraftEditQueue()
 
         val pending = pendingCreate ?: return
         val created = apps.firstOrNull { it.id !in oldIds && it.name == pending.first && it.templateKind == pending.second } ?: return
@@ -941,6 +1115,20 @@ class LocalAppsViewModel(
                     LocalAppsViewModel(sourceFlow) as T
             }
     }
+}
+
+/**
+ * The app a destination is showing, or null on the two app-independent screens.
+ * `reduceApps` needs it twice — once to decide whether the user is standing on a
+ * screen a deletion just emptied, and once to move them off it — and an
+ * exhaustive `when` is what makes a fourth per-app destination a compile error
+ * rather than a screen the prune silently forgets.
+ */
+private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
+    LocalAppsDestination.Library, LocalAppsDestination.Templates -> null
+    is LocalAppsDestination.Designer -> appId
+    is LocalAppsDestination.Preview -> appId
+    is LocalAppsDestination.Details -> appId
 }
 
 private fun AppTemplateKindDto.toUiTemplateKind(): String = when (this) {
@@ -1051,7 +1239,15 @@ private fun AppGenerationJobDto.toUiGeneration(): LocalAppGeneration = LocalAppG
     jobId = id,
     state = state.name.lowercase().replace('_', ' '),
     percent = percent?.toInt(),
-    detail = detail,
+    // A cold-launch staging timeout leaves this process with no local-app
+    // runtime and no way to acquire one (see LocalAppRuntimeAssets), so every
+    // generation fails at Building with an engine message that reads like a
+    // build-time instruction. Say which state the runtime is actually in, on
+    // the preview screen a failed job already routes the user to.
+    detail = LocalAppRuntimeAssets.generationDetail(
+        detail = detail,
+        failed = state == AppGenerationJobStateDto.FAILED,
+    ),
 )
 
 private fun AppCapabilityKindDto.authorizationTitle(): String = when (this) {

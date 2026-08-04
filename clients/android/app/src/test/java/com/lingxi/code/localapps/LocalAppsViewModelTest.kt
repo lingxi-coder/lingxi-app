@@ -374,6 +374,492 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /**
+     * The post-conflict gate is cleared in exactly one place — `reduceDetails`,
+     * which runs only for a SUCCESSFUL `GetAppDetails` for that app. An engine
+     * rebind or project switch re-binds `ConversationSource` and cancels the
+     * in-flight event collector, so the snapshot is simply never delivered and no
+     * failure event arrives either. Unlike the in-flight slot this gate is
+     * process-global, so without a bound it wedges later edits for EVERY app for
+     * the life of the activity-scoped ViewModel.
+     */
+    @Test
+    fun `a design conflict whose details refresh never answers stops blocking later edits`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("first"), debounce = false),
+            )
+            runCurrent()
+            assertEquals(1, source.updateCommands().size)
+
+            source.emit(ClientEvent.AppDesignConflict(APP_ID, expectedRevision = 0u, actualRevision = 2u))
+            runCurrent()
+            assertTrue(source.commands.any { it == ClientCommand.GetAppDetails(APP_ID) })
+
+            // Inside the budget the gate must still do what it exists to do: hold
+            // the retry back until the authoritative snapshot lands. Removing the
+            // gate is not the fix.
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("second"), debounce = false),
+            )
+            runCurrent()
+            assertEquals(
+                "inside the budget the retry still waits for the authoritative snapshot",
+                1,
+                source.updateCommands().size,
+            )
+
+            // The snapshot never arrives, and no failure event arrives either.
+            viewModel.inFlightEditBudgetMs = 0
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("third"), debounce = false),
+            )
+            runCurrent()
+
+            assertEquals(
+                "an unanswered refresh must not wedge the queue forever",
+                2,
+                source.updateCommands().size,
+            )
+            assertUpdate(source.updateCommands().last(), expectedRevision = 0u, value = "third")
+            assertEquals(
+                "the typed answer must still be the one that goes out",
+                LocalAppDesignValue.Text("third"),
+                viewModel.uiState.value.designer?.values?.get("purpose"),
+            )
+            // The gate aged out because the snapshot never came, so the designer
+            // must not go on rendering "…已重新加载，请检查后继续。" over values
+            // nothing ever reloaded.
+            assertNull(
+                "an aged-out gate must not claim the designer reloaded",
+                viewModel.uiState.value.designer?.conflictRevision,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The refresh a conflict asks for can be answered with a failure instead of a
+     * snapshot — the app was deleted from another surface, or its store is
+     * corrupt. `reduceDetails` then never runs for that app again (no later
+     * openApp can reach a deleted id), so nothing else would clear the gate.
+     */
+    @Test
+    fun `a details refresh that fails outright releases the conflict gate at once`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("first"), debounce = false),
+            )
+            runCurrent()
+            assertEquals(1, source.updateCommands().size)
+
+            source.emit(ClientEvent.AppDesignConflict(APP_ID, expectedRevision = 0u, actualRevision = 2u))
+            runCurrent()
+            assertTrue(source.commands.any { it == ClientCommand.GetAppDetails(APP_ID) })
+            assertEquals("the retry waits for the snapshot", 1, source.updateCommands().size)
+
+            // The GetAppDetails the conflict submitted is what failed.
+            source.emit(ClientEvent.AppOperationFailed(APP_ID, AppErrorCodeDto.NOT_FOUND, "应用不存在"))
+            runCurrent()
+
+            // No clock involved: the budget is still the production 15 s.
+            assertEquals(
+                "a failed refresh must release the gate without waiting out the budget",
+                2,
+                source.updateCommands().size,
+            )
+            assertUpdate(source.updateCommands().last(), expectedRevision = 0u, value = "first")
+            assertEquals("应用不存在", viewModel.uiState.value.error)
+            // The gate was released precisely BECAUSE the authoritative snapshot
+            // is not coming, so the designer must not keep asserting one landed:
+            // `conflictRevision` renders "…已重新加载，请检查后继续。" over the
+            // pre-conflict local values.
+            assertNull(
+                "a gate released without its snapshot must not claim the designer reloaded",
+                viewModel.uiState.value.designer?.conflictRevision,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The ledger chain. A conflict re-queues the rejected patch and raises the
+     * refresh gate; the app was deleted from another surface, so the refresh
+     * fails, and the resend the release triggers earns NOT_FOUND — a code
+     * neither `rejectedDraftPatch` nor the ack arm may attribute, so it holds
+     * the process-global in-flight slot. Nothing released that slot, and nothing
+     * released the designer pinned to the deleted app, so every later edit for
+     * every OTHER app was queued and never sent.
+     */
+    @Test
+    fun `a deleted app releases the draft slot instead of wedging every other designer`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("first"), debounce = false),
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppDesignConflict(APP_ID, expectedRevision = 0u, actualRevision = 2u))
+            runCurrent()
+            assertEquals(2uL, viewModel.uiState.value.designer?.conflictRevision)
+
+            // The refresh the conflict asked for comes back NOT_FOUND, the gate
+            // is released, and the re-queued patch goes out again…
+            source.emit(ClientEvent.AppOperationFailed(APP_ID, AppErrorCodeDto.NOT_FOUND, "应用不存在"))
+            runCurrent()
+            assertEquals(2, source.updateCommands().size)
+            // …to be answered NOT_FOUND a second time, which no arm may attribute,
+            // so the resend keeps the single slot.
+            source.emit(ClientEvent.AppOperationFailed(APP_ID, AppErrorCodeDto.NOT_FOUND, "应用不存在"))
+            runCurrent()
+            assertEquals("the resend stays stuck in the single slot", 2, source.updateCommands().size)
+
+            // The delete's own snapshot lands. `AppsChanged` is the FULL record
+            // set, so an app missing from it is deleted, not elided.
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(OTHER_APP_ID, "订单"))))
+            runCurrent()
+
+            assertNull("a designer for a deleted app can never be reached again", viewModel.uiState.value.designer)
+            assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
+
+            // `drained()` must not be able to answer for an app whose queued
+            // edits were discarded: the confirm gate goes with the designer, so
+            // no ConfirmAppDesign can ship a spec the engine never received.
+            viewModel.onAction(LocalAppsAction.ConfirmDesign)
+            advanceUntilIdle()
+            assertTrue(
+                "a deleted app must never confirm",
+                source.commands.none { it is ClientCommand.ConfirmAppDesign },
+            )
+
+            // The surviving app's designer opens and its edits reach the engine
+            // on the production 15 s budget — no watchdog, no clock manipulation.
+            source.emit(ClientEvent.AppDesignerRequested(OTHER_APP_ID, interactionId = "designer-2", revision = 0u))
+            runCurrent()
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("b-typed"), debounce = false),
+            )
+            runCurrent()
+
+            assertEquals("the deleted app must not wedge the surviving one", 3, source.updateCommands().size)
+            val sent = source.updateCommands().last()
+            assertEquals(OTHER_APP_ID, sent.appId)
+            assertEquals(DesignValueDto.ShortText("b-typed"), sent.sentValue())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The delete affordance is the library card's ⋮ menu and nothing else, so a
+     * user-initiated delete always arrives with the user standing on the library.
+     * `state.designer` is still pinned to the last app they opened — nothing but
+     * `reduceApps` ever clears it — so a teardown keyed off it announced a
+     * FAILURE for the operation the user had just asked for, and claimed to have
+     * returned them to a list they had never left.
+     */
+    @Test
+    fun `deleting an app the user already navigated away from is not a failure`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(), appRecord(OTHER_APP_ID, "订单"))))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.Back)
+            runCurrent()
+            assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
+            assertEquals(
+                "navigation leaves the designer pinned, which is what made this reachable",
+                APP_ID,
+                viewModel.uiState.value.designer?.appId,
+            )
+
+            viewModel.onAction(LocalAppsAction.DeleteApp(APP_ID))
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(OTHER_APP_ID, "订单"))))
+            runCurrent()
+
+            assertNull(
+                "a delete the user asked for must not raise the 应用操作失败 dialog",
+                viewModel.uiState.value.error,
+            )
+            assertNull("the teardown itself must still happen", viewModel.uiState.value.designer)
+            assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The case that IS worth a dialog: the app went away underneath a designer
+     * the user was standing on, and took an answer they typed with it. The prune
+     * discards that patch deliberately, so this is the only place the loss can be
+     * reported.
+     */
+    @Test
+    fun `an app deleted under an open designer says what the deletion took`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+            assertEquals(LocalAppsDestination.Designer(APP_ID), viewModel.uiState.value.destination)
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("typed"), debounce = false),
+            )
+            runCurrent()
+            assertEquals("the answer is in flight and never acked", 1, source.updateCommands().size)
+
+            // Deleted from another surface while that designer is on screen.
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(OTHER_APP_ID, "订单"))))
+            runCurrent()
+
+            assertEquals(
+                "该应用已被删除，尚未保存的设计修改已丢失，已返回应用列表。",
+                viewModel.uiState.value.error,
+            )
+            assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `designer` was the only per-app state the teardown rescued the destination
+     * for, so a user standing on a deleted app's Details or Preview screen kept it
+     * while `details`/`previews` were filtered out from under them — and
+     * `selectedAppId`, which `SelectDetailsTab` and both generation reducers steer
+     * off, went on naming the dead app.
+     */
+    @Test
+    fun `a deleted app cannot leave the user on its details or preview screen`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(workflow = AppWorkflowStateDto.READY),
+                        appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.READY),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenApp(APP_ID))
+            runCurrent()
+            assertEquals(LocalAppsDestination.Details(APP_ID), viewModel.uiState.value.destination)
+            assertEquals(APP_ID, viewModel.uiState.value.selectedAppId)
+
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.READY))))
+            runCurrent()
+
+            assertEquals(
+                "a details screen for a deleted app has nothing left to render",
+                LocalAppsDestination.Library,
+                viewModel.uiState.value.destination,
+            )
+            assertNull(
+                "the selection the details tab steers off must not name a deleted app",
+                viewModel.uiState.value.selectedAppId,
+            )
+            assertNull("nothing was lost, so nothing to report", viewModel.uiState.value.error)
+
+            source.emit(
+                ClientEvent.AppPreviewReady(
+                    appId = OTHER_APP_ID,
+                    interactionId = "preview-1",
+                    revision = 1u,
+                    url = null,
+                ),
+            )
+            runCurrent()
+            assertEquals(LocalAppsDestination.Preview(OTHER_APP_ID), viewModel.uiState.value.destination)
+
+            source.emit(ClientEvent.AppsChanged(emptyList()))
+            runCurrent()
+            assertEquals(
+                "a preview screen for a deleted app has nothing left to render",
+                LocalAppsDestination.Library,
+                viewModel.uiState.value.destination,
+            )
+            assertNull(viewModel.uiState.value.selectedAppId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The gate is released by a details snapshot whether or not that snapshot can
+     * reload the designer, so the banner it raised has to come down on both exits.
+     * `conflictRevision` renders "…已重新加载，请检查后继续。"; a template list that
+     * no longer carries this app's kind leaves `values` exactly as they were, so a
+     * surviving banner asserts a reload that did not happen.
+     */
+    @Test
+    fun `a details snapshot with no matching template still takes the conflict banner down`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("first"), debounce = false),
+            )
+            runCurrent()
+            assertEquals(1, source.updateCommands().size)
+
+            source.emit(ClientEvent.AppDesignConflict(APP_ID, expectedRevision = 0u, actualRevision = 2u))
+            runCurrent()
+            assertEquals(2uL, viewModel.uiState.value.designer?.conflictRevision)
+
+            // The template catalogue is replaced by one that no longer carries
+            // CRUD_TRACKER, so the snapshot below cannot replace `values`.
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppTemplatesChanged(emptyList())))
+            runCurrent()
+
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppDetailsChanged(appDetails(designRevision = 2u))))
+            runCurrent()
+
+            assertNull(
+                "the gate came down, so the banner it raised must not survive it",
+                viewModel.uiState.value.designer?.conflictRevision,
+            )
+            assertEquals(
+                "the gate really did come down: the re-queued patch went out",
+                2,
+                source.updateCommands().size,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * Head-of-line blocking needs no deleted app at all: the queue is
+     * process-global while the designer is one app, so an edit left behind by a
+     * designer the user closed sits at the head, and the only removal from the
+     * queue used to be gated on that head matching the designer on screen.
+     */
+    @Test
+    fun `an edit left behind by another designer does not block the one on screen`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            seedDesigner(source)
+            // Both apps stay live for the whole test.
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(), appRecord(OTHER_APP_ID, "订单"))))
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("a-typed"), debounce = true),
+            )
+            runCurrent()
+
+            // The user leaves app A's designer for app B's before the 400 ms
+            // debounce fires.
+            source.emit(ClientEvent.AppDesignerRequested(OTHER_APP_ID, interactionId = "designer-2", revision = 0u))
+            runCurrent()
+            assertEquals(OTHER_APP_ID, viewModel.uiState.value.designer?.appId)
+
+            advanceTimeBy(400)
+            runCurrent()
+            assertEquals("A's designer is closed, so nothing may go out for A", 0, source.updateCommands().size)
+
+            viewModel.onAction(
+                LocalAppsAction.EditField("purpose", LocalAppDesignValue.Text("b-typed"), debounce = false),
+            )
+            runCurrent()
+
+            val sent = source.updateCommands().single()
+            assertEquals("the designer on screen must not queue behind another app", OTHER_APP_ID, sent.appId)
+            assertEquals(DesignValueDto.ShortText("b-typed"), sent.sentValue())
+
+            source.emit(
+                ClientEvent.AppDesignDraftChanged(
+                    appId = OTHER_APP_ID,
+                    revision = 1u,
+                    fields = mapOf("purpose" to DesignValueDto.ShortText("b-typed")),
+                ),
+            )
+            runCurrent()
+            assertEquals("nothing else is sendable while B's designer is open", 1, source.updateCommands().size)
+
+            // A's edit was skipped, not dropped: it is still owed to A and goes
+            // out as soon as A's designer is the one on screen again.
+            source.emit(ClientEvent.AppDesignerRequested(APP_ID, interactionId = "designer-1", revision = 0u))
+            runCurrent()
+            viewModel.onAction(LocalAppsAction.ConfirmDesign)
+            advanceUntilIdle()
+
+            val resumed = source.updateCommands().last()
+            assertEquals(APP_ID, resumed.appId)
+            assertEquals(DesignValueDto.ShortText("a-typed"), resumed.sentValue())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun `concurrent capability requests queue instead of clobbering`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -800,18 +1286,43 @@ class LocalAppsViewModelTest {
         assertEquals(DesignValueDto.ShortText(value), operation.value)
     }
 
-    private fun appRecord() = AppRecordDto(
-        id = APP_ID,
-        name = "客户跟进",
+    private fun appRecord(
+        id: String = APP_ID,
+        name: String = "客户跟进",
+        workflow: AppWorkflowStateDto = AppWorkflowStateDto.COLLECTING_SPEC,
+    ) = AppRecordDto(
+        id = id,
+        name = name,
         template = AppTemplateKindDto.CRUD_TRACKER,
         createdAtMs = 1u,
         updatedAtMs = 2u,
-        workflowState = AppWorkflowStateDto.COLLECTING_SPEC,
+        workflowState = workflow,
         conversationId = null,
-        workspaceRel = "apps/$APP_ID/workspace",
+        workspaceRel = "apps/$id/workspace",
     )
+
+    private fun appDetails(designRevision: ULong) = AppDetailsDto(
+        app = appRecord(),
+        designRevision = designRevision,
+        designFields = listOf(AppDesignFieldValueDto("purpose", DesignValueDto.ShortText("external"))),
+        manifest = null,
+        runtime = AppRuntimeDetailsDto(
+            state = AppRuntimeStateDto.STOPPED,
+            mode = null,
+            loopbackUrl = null,
+            suspensionReason = null,
+            recoveryState = null,
+            lastError = null,
+        ),
+        generationJob = null,
+        checkpoints = emptyList(),
+    )
+
+    private fun ClientCommand.UpdateAppDesignDraft.sentValue(): DesignValueDto =
+        (patch.ops.single() as AppDesignPatchOpDto.Set).value
 
     private companion object {
         const val APP_ID = "tracker"
+        const val OTHER_APP_ID = "orders"
     }
 }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Lingxi</string>
+    <string name="local_apps_title">Apps</string>
+    <string name="local_apps_create">Create App</string>
+    <string name="local_apps_refresh">Refresh Apps</string>
+    <string name="local_apps_search">Search Apps</string>
+    <string name="local_apps_empty">No local apps yet</string>
+    <string name="local_apps_empty_detail">Start from a template — the agent will generate your app once you confirm the design.</string>
+    <string name="local_apps_templates_title">Choose a Template</string>
+    <string name="local_apps_designer_title">App Designer</string>
+    <string name="local_apps_confirm_generate">Confirm &amp; Generate</string>
+    <string name="local_apps_allow_once">Allow Once</string>
+    <string name="local_apps_allow_session">Allow for This Session</string>
+    <string name="local_apps_allow_always">Always Allow</string>
+    <string name="local_apps_deny">Deny</string>
+</resources>

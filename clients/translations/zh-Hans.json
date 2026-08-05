@@ -1,5 +1,18 @@
 {
   "app_name": "灵犀",
+  "local_apps_title": "应用",
+  "local_apps_create": "创建应用",
+  "local_apps_refresh": "刷新应用",
+  "local_apps_search": "搜索应用",
+  "local_apps_empty": "还没有本地应用",
+  "local_apps_empty_detail": "从模板开始，Agent 会在确认设计后生成应用。",
+  "local_apps_templates_title": "选择模板",
+  "local_apps_designer_title": "应用设计",
+  "local_apps_confirm_generate": "确认并生成",
+  "local_apps_allow_once": "允许一次",
+  "local_apps_allow_session": "本次会话允许",
+  "local_apps_allow_always": "始终允许",
+  "local_apps_deny": "拒绝",
   "__info_plist__": {
     "CFBundleDisplayName": "灵犀",
     "NSCameraUsageDescription": "灵犀使用相机拍摄照片供模型分析。",

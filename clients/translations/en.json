@@ -1,1 +1,23 @@
-{}
+{
+  "app_name": "Lingxi",
+  "local_apps_title": "Apps",
+  "local_apps_create": "Create App",
+  "local_apps_refresh": "Refresh Apps",
+  "local_apps_search": "Search Apps",
+  "local_apps_empty": "No local apps yet",
+  "local_apps_empty_detail": "Start from a template — the agent will generate your app once you confirm the design.",
+  "local_apps_templates_title": "Choose a Template",
+  "local_apps_designer_title": "App Designer",
+  "local_apps_confirm_generate": "Confirm & Generate",
+  "local_apps_allow_once": "Allow Once",
+  "local_apps_allow_session": "Allow for This Session",
+  "local_apps_allow_always": "Always Allow",
+  "local_apps_deny": "Deny",
+  "__info_plist__": {
+    "CFBundleDisplayName": "灵犀",
+    "NSCameraUsageDescription": "灵犀使用相机拍摄照片供模型分析。",
+    "NSMicrophoneUsageDescription": "灵犀使用麦克风进行语音心流输入。",
+    "NSPhotoLibraryUsageDescription": "灵犀访问相册以选择图片供模型分析。",
+    "NSSpeechRecognitionUsageDescription": "灵犀使用语音识别将你的语音转写为文本。"
+  }
+}

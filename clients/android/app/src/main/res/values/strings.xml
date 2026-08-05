@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">LingXi Code</string>
+    <string name="app_name">灵犀</string>
     <string name="local_apps_title">应用</string>
     <string name="local_apps_create">创建应用</string>
     <string name="local_apps_refresh">刷新应用</string>

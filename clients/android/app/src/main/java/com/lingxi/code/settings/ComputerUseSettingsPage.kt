@@ -31,10 +31,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.lingxi.code.R
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.computeruse.ComputerUseCaptureMode
 import com.lingxi.code.computeruse.ComputerUseConfiguration
@@ -88,10 +90,10 @@ fun ComputerUseSettingsPage(
                 projectionResultCode = result.resultCode,
                 projectionData = result.data,
             ).onFailure { error ->
-                startFeedback = error.message ?: "启动 Computer Use 失败"
+                startFeedback = error.message ?: context.getString(R.string.settings_cu_start_failed)
             }
         } else {
-            startFeedback = "已取消屏幕捕获授权，无法启动 Computer Use"
+            startFeedback = context.getString(R.string.settings_cu_capture_cancelled)
         }
     }
     val notificationLauncher = rememberLauncherForActivityResult(
@@ -101,7 +103,7 @@ fun ComputerUseSettingsPage(
         if (!granted || grants == null) {
             pendingStart = null
             if (!granted) {
-                startFeedback = "需要通知权限才能启动不可静默关闭的控制会话"
+                startFeedback = context.getString(R.string.settings_cu_notification_required)
             }
         } else {
             val projection = feature.mediaProjectionRequest(context)
@@ -114,7 +116,7 @@ fun ComputerUseSettingsPage(
                     grants = grants,
                     includeSystemUi = grants.any { it.systemUi },
                 ).onFailure { error ->
-                    startFeedback = error.message ?: "启动 Computer Use 失败"
+                    startFeedback = error.message ?: context.getString(R.string.settings_cu_start_failed)
                 }
             }
         }
@@ -161,25 +163,25 @@ fun ComputerUseSettingsPage(
                 .background(t.surface, RoundedCornerShape(14.dp))
                 .padding(16.dp),
         ) {
-            Text("Direct 版 Computer Use", color = t.text, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.settings_cu_direct_title), color = t.text, fontWeight = FontWeight.SemiBold)
             Text(
-                "仅在用户主动启动的会话中控制所选应用；活动会话期间，前台对话和后台定时任务都可使用本次授权。锁屏、服务断开、30 分钟无操作或 2 小时上限都会立即停止。",
+                stringResource(R.string.settings_cu_direct_desc),
                 color = t.text3,
                 fontSize = 13.sp,
             )
             Text(
-                if (state.serviceEnabled) "无障碍服务：已连接" else "无障碍服务：未启用",
+                if (state.serviceEnabled) stringResource(R.string.settings_cu_a11y_connected) else stringResource(R.string.settings_cu_a11y_not_enabled),
                 color = if (state.serviceEnabled) t.ok else t.statusTesting,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                "会话：${state.sessionState.label()} · 截图：${state.captureMode.label()}",
+                stringResource(R.string.settings_cu_session_status_fmt, state.sessionState.label(), state.captureMode.label()),
                 color = t.text2,
                 fontSize = 13.sp,
             )
             state.activePackage?.let {
-                Text("当前应用：$it", color = t.text3, fontSize = 12.sp)
+                Text(stringResource(R.string.settings_cu_current_app_fmt, it), color = t.text3, fontSize = 12.sp)
             }
             state.lastError?.let {
                 Text(it, color = t.danger, fontSize = 12.sp)
@@ -191,20 +193,20 @@ fun ComputerUseSettingsPage(
                 onClick = { feature.openAccessibilitySettings(context) },
                 modifier = Modifier.sizeIn(minHeight = 48.dp),
             ) {
-                Text(if (state.serviceEnabled) "检查系统服务设置" else "启用无障碍服务")
+                Text(if (state.serviceEnabled) stringResource(R.string.settings_cu_check_service) else stringResource(R.string.settings_cu_enable_a11y))
             }
         }
 
         SettingsSection(
-            label = "音频能力",
-            footer = "音频只在用户已启动的 Computer Use 会话中可用。听写文本和播报内容不会写入审计记录；临时听写结果也不会进入会话历史。",
+            label = stringResource(R.string.settings_cu_section_audio),
+            footer = stringResource(R.string.settings_cu_audio_footer),
         ) {
             SettingsRow(
-                label = "允许 Agent 听取语音",
+                label = stringResource(R.string.settings_cu_allow_listen),
                 sub = if (microphoneGranted) {
-                    "android_use.listen · 麦克风已授权"
+                    stringResource(R.string.settings_cu_mic_granted)
                 } else {
-                    "启用后仍需用户授予系统麦克风权限"
+                    stringResource(R.string.settings_cu_mic_needed)
                 },
                 chevron = false,
             ) {
@@ -232,14 +234,14 @@ fun ComputerUseSettingsPage(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        "最长单次听取",
+                        stringResource(R.string.settings_cu_max_listen),
                         color = t.text,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
-                        "${configuration.maxListenSeconds} 秒",
+                        stringResource(R.string.settings_cu_seconds_fmt, configuration.maxListenSeconds),
                         color = t.text3,
                         fontSize = 13.sp,
                     )
@@ -265,8 +267,8 @@ fun ComputerUseSettingsPage(
                 }
             }
             SettingsRow(
-                label = "允许 Agent 语音播报",
-                sub = "android_use.speak · Android 系统 TTS",
+                label = stringResource(R.string.settings_cu_allow_speak),
+                sub = stringResource(R.string.settings_cu_speak_sub),
                 chevron = false,
             ) {
                 LXToggle(
@@ -281,39 +283,39 @@ fun ComputerUseSettingsPage(
                 )
             }
             SettingsRow(
-                label = "听写与播报设置",
+                label = stringResource(R.string.settings_cu_audio_settings),
                 sub = "${voiceLanguageLabel(voice.inputLanguage)} · ${voice.speed}x · ${voice.voiceId.ifBlank { "default" }}",
-                value = "打开",
+                value = stringResource(R.string.common_open),
                 isLast = true,
                 onTap = onOpenAudioSettings,
             )
         }
 
         SettingsSection(
-            label = "执行边界",
-            footer = "后台能力不会绕过会话授权：停止会话、锁屏、服务断开或超时会取消排队动作和正在进行的音频。",
+            label = stringResource(R.string.settings_linux_execution_boundary),
+            footer = stringResource(R.string.settings_cu_boundary_footer),
         ) {
             SettingsRow(
-                label = "Agent 工具",
+                label = stringResource(R.string.settings_cu_agent_tools),
                 value = "android_use",
                 chevron = false,
             )
             SettingsRow(
-                label = "后台执行",
-                sub = "仅活动会话内；Cron/WorkManager 不会自行创建授权",
-                value = "允许",
+                label = stringResource(R.string.settings_cu_background_exec),
+                sub = stringResource(R.string.settings_cu_background_exec_sub),
+                value = stringResource(R.string.permission_allow),
                 chevron = false,
             )
             SettingsRow(
-                label = "会话限制",
-                sub = "30 分钟无操作停止",
-                value = "最长 2 小时",
+                label = stringResource(R.string.settings_cu_session_limit),
+                sub = stringResource(R.string.settings_cu_session_limit_sub),
+                value = stringResource(R.string.settings_cu_session_limit_value),
                 chevron = false,
             )
             SettingsRow(
-                label = "高风险操作",
-                sub = "发送、发布、拨号、删除等每次确认",
-                value = "强制",
+                label = stringResource(R.string.settings_cu_high_risk),
+                sub = stringResource(R.string.settings_cu_high_risk_sub),
+                value = stringResource(R.string.settings_cu_enforced),
                 chevron = false,
                 isLast = true,
             )
@@ -323,12 +325,12 @@ fun ComputerUseSettingsPage(
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
-                label = { Text("搜索可启动应用") },
+                label = { Text(stringResource(R.string.settings_cu_search_apps)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "选择会被保留，但权限仅在你主动启动的控制会话内生效",
+                stringResource(R.string.settings_cu_selection_note),
                 color = t.text2,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -357,7 +359,7 @@ fun ComputerUseSettingsPage(
                             Text(app.packageName, color = t.text4, fontSize = 11.sp)
                         }
                         Text(
-                            if (selected.containsKey(app.packageName)) "已选择" else "未选择",
+                            if (selected.containsKey(app.packageName)) stringResource(R.string.settings_cu_selected) else stringResource(R.string.settings_cu_not_selected),
                             color = if (selected.containsKey(app.packageName)) t.accent else t.text4,
                             fontSize = 12.sp,
                         )
@@ -386,7 +388,7 @@ fun ComputerUseSettingsPage(
                 onClick = { feature.stop(context) },
                 modifier = Modifier.fillMaxWidth().sizeIn(minHeight = 52.dp),
             ) {
-                Text("立即停止 Computer Use")
+                Text(stringResource(R.string.settings_cu_stop_now))
             }
         } else {
             Button(
@@ -424,18 +426,18 @@ fun ComputerUseSettingsPage(
                             grants,
                             includeSystemUi = grants.any { it.systemUi },
                         ).onFailure { error ->
-                            startFeedback = error.message ?: "启动 Computer Use 失败"
+                            startFeedback = error.message ?: context.getString(R.string.settings_cu_start_failed)
                         }
                     }
                 },
                 modifier = Modifier.fillMaxWidth().sizeIn(minHeight = 52.dp),
             ) {
-                Text("启动控制会话")
+                Text(stringResource(R.string.settings_cu_start_session))
             }
         }
 
         Text(
-            "禁止控制密码、OTP、生物识别、支付/转账确认、系统授权、设备管理、VPN、安装/卸载和 FLAG_SECURE 窗口。高风险提交、发送、拨号和删除动作每次都需要确认。",
+            stringResource(R.string.settings_cu_forbidden_note),
             color = t.text4,
             fontSize = 12.sp,
             modifier = Modifier.padding(bottom = 8.dp),
@@ -444,7 +446,7 @@ fun ComputerUseSettingsPage(
             onClick = { feature.clearAudit(context) },
             modifier = Modifier.sizeIn(minHeight = 48.dp),
         ) {
-            Text("清除本地 Computer Use 审计记录")
+            Text(stringResource(R.string.settings_cu_clear_audit))
         }
     }
 }
@@ -468,29 +470,33 @@ private fun persistComputerUseAppSelections(
     )
 }
 
+@Composable
 private fun voiceLanguageLabel(language: String): String = when (language) {
-    "zh-CN" -> "中文"
-    "en-US" -> "English"
-    "ja-JP" -> "日本語"
-    else -> "自动识别"
+    "zh-CN" -> stringResource(R.string.onboarding_voice_language_zh)
+    "en-US" -> stringResource(R.string.onboarding_voice_language_en)
+    "ja-JP" -> stringResource(R.string.onboarding_voice_language_ja)
+    else -> stringResource(R.string.settings_cu_lang_auto_detect)
 }
 
+@Composable
 private fun ComputerUseTier.label(): String = when (this) {
-    ComputerUseTier.Read -> "只读"
-    ComputerUseTier.Click -> "点击"
-    ComputerUseTier.Full -> "完整"
+    ComputerUseTier.Read -> stringResource(R.string.settings_linux_read_only)
+    ComputerUseTier.Click -> stringResource(R.string.local_apps_ui_action_click)
+    ComputerUseTier.Full -> stringResource(R.string.settings_cu_tier_full)
 }
 
+@Composable
 private fun ComputerUseSessionState.label(): String = when (this) {
-    ComputerUseSessionState.Inactive -> "未启动"
-    ComputerUseSessionState.Starting -> "启动中"
-    ComputerUseSessionState.Active -> "活动"
-    ComputerUseSessionState.AwaitingApproval -> "等待确认"
-    ComputerUseSessionState.Stopping -> "停止中"
+    ComputerUseSessionState.Inactive -> stringResource(R.string.settings_cu_state_inactive)
+    ComputerUseSessionState.Starting -> stringResource(R.string.settings_cu_state_starting)
+    ComputerUseSessionState.Active -> stringResource(R.string.settings_cu_state_active)
+    ComputerUseSessionState.AwaitingApproval -> stringResource(R.string.settings_cu_state_awaiting)
+    ComputerUseSessionState.Stopping -> stringResource(R.string.settings_cu_state_stopping)
 }
 
+@Composable
 private fun ComputerUseCaptureMode.label(): String = when (this) {
-    ComputerUseCaptureMode.None -> "不可用"
+    ComputerUseCaptureMode.None -> stringResource(R.string.settings_linux_task_unavailable)
     ComputerUseCaptureMode.Accessibility -> "Accessibility"
     ComputerUseCaptureMode.MediaProjection -> "MediaProjection"
 }

@@ -22,6 +22,10 @@ ANDROID_VALUES_DIRS = {
 # Android format placeholder: %[<arg>$][flags][width][.precision]<conversion>
 _ANDROID_PLACEHOLDER = re.compile(r"%(\d+\$)?[-+#0,]*\d*(\.\d+)?[a-zA-Z]")
 
+# Valid Android resource names (iOS-style interpolation keys like
+# "settings_provider_default %@" are iOS-only and skipped for Android).
+_ANDROID_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\Z")
+
 
 def _mkdir(path: Path) -> None:
     try:
@@ -172,7 +176,7 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
     out_dir = Path(out_dir)
     _mkdir(out_dir)
     base = locales.get(BASE_LOCALE, {})
-    keys = [k for k in base if k != "__info_plist__"]
+    keys = [k for k in base if k != "__info_plist__" and _ANDROID_NAME.match(k)]
     for locale in LOCALES:
         source = locales.get(locale, {})
         values = {}

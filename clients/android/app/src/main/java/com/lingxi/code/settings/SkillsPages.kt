@@ -18,9 +18,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
@@ -55,10 +57,7 @@ fun SkillsPage(
     val t = LingXiTheme.palette
 
     Column(Modifier.fillMaxWidth()) {
-        Blurb(
-            "Skills 是可复用的 AI 行为包，封装了系统提示词、工具调用与触发条件。" +
-                "启用后会出现在对应触发器或斜杠菜单。",
-        )
+        Blurb(stringResource(R.string.skills_description_blurb))
 
         AuthorOrder.forEach { author ->
             val arr = state.skills.filter { it.author == author }
@@ -85,7 +84,7 @@ fun SkillsPage(
             }
         }
 
-        DashedAddButton(title = "浏览 Skills 商店", modifier = Modifier.padding(bottom = 8.dp))
+        DashedAddButton(title = stringResource(R.string.skills_browse_store), modifier = Modifier.padding(bottom = 8.dp))
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -99,7 +98,7 @@ fun SkillsPage(
                 .padding(13.dp),
         ) {
             LXIcon(name = LXIconName.Edit, size = 14.dp, color = t.text2, stroke = 1.8f)
-            Text("创建自定义 Skill", color = t.text2, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.skills_create_custom), color = t.text2, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -171,7 +170,7 @@ fun SkillDetailPage(
         )
 
         // Triggers ------------------------------------------------------------
-        SettingsSection(label = "触发") {
+        SettingsSection(label = stringResource(R.string.skills_section_triggers)) {
             s.triggers.forEachIndexed { i, tr ->
                 SettingsRow(
                     label = tr,
@@ -183,15 +182,15 @@ fun SkillDetailPage(
         }
 
         // Required permissions ------------------------------------------------
-        SettingsSection(label = "所需权限") {
-            SettingsRow(label = "调用 LLM", chevron = false)
-            SettingsRow(label = "访问 MCP · GitHub", chevron = false, isLast = true)
+        SettingsSection(label = stringResource(R.string.skills_section_required_permissions)) {
+            SettingsRow(label = stringResource(R.string.skills_perm_call_llm), chevron = false)
+            SettingsRow(label = stringResource(R.string.skills_perm_access_mcp_github), chevron = false, isLast = true)
         }
 
         // Controls ------------------------------------------------------------
         SettingsSection {
             SettingsRow(
-                label = "启用此 Skill",
+                label = stringResource(R.string.skills_enable_this),
                 chevron = false,
                 trailing = {
                     LXToggle(
@@ -201,16 +200,16 @@ fun SkillDetailPage(
                 },
             )
             SettingsRow(
-                label = "自动建议",
-                sub = "检测到匹配场景时主动提示",
+                label = stringResource(R.string.skills_auto_suggest),
+                sub = stringResource(R.string.skills_auto_suggest_sub),
                 chevron = false,
                 trailing = { LocalToggle(seed = true) },
             )
-            SettingsRow(label = "编辑提示词", onTap = {})
+            SettingsRow(label = stringResource(R.string.skills_edit_prompt), onTap = {})
             SettingsRow(
                 icon = LXIconName.X,
                 iconColor = if (s.builtin) t.text3 else t.danger,
-                label = if (s.builtin) "此 Skill 由官方维护" else "删除此 Skill",
+                label = if (s.builtin) stringResource(R.string.skills_official_maintained) else stringResource(R.string.skills_delete),
                 chevron = false,
                 danger = !s.builtin,
                 isLast = true,

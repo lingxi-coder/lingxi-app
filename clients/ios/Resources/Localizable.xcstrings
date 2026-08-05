@@ -1282,6 +1282,22 @@
         }
       }
     },
+    "common_lang_zh_hans": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "简体中文"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "简体中文"
+          }
+        }
+      }
+    },
     "common_no": {
       "localizations": {
         "zh-Hans": {
@@ -1310,6 +1326,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "无"
+          }
+        }
+      }
+    },
+    "common_not_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不支持"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不支持"
           }
         }
       }
@@ -5074,6 +5106,22 @@
         }
       }
     },
+    "mcp_edit_status_tools_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d 工具可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d 工具可用"
+          }
+        }
+      }
+    },
     "mcp_enable_server": {
       "localizations": {
         "zh-Hans": {
@@ -5170,6 +5218,22 @@
         }
       }
     },
+    "mcp_section_servers_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务器 · %1$d"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务器 · %1$d"
+          }
+        }
+      }
+    },
     "mcp_section_tool_permissions": {
       "localizations": {
         "zh-Hans": {
@@ -5214,6 +5278,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ · %lld 工具 · %@"
+          }
+        }
+      }
+    },
+    "mcp_server_status_tools_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d 工具 · %3$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d 工具 · %3$s"
           }
         }
       }
@@ -5890,6 +5970,22 @@
         }
       }
     },
+    "provider_add_kind_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加%1$s"
+          }
+        }
+      }
+    },
     "provider_fetch_blurb": {
       "localizations": {
         "zh-Hans": {
@@ -6434,6 +6530,22 @@
         }
       }
     },
+    "settings_computer_use_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 屏幕观察与受控操作"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 屏幕观察与受控操作"
+          }
+        }
+      }
+    },
     "settings_contribute_training": {
       "localizations": {
         "zh-Hans": {
@@ -6510,6 +6622,758 @@
           "stringUnit": {
             "state": "translated",
             "value": "崩溃报告"
+          }
+        }
+      }
+    },
+    "settings_cron_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按 Cron 计划后台执行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按 Cron 计划后台执行"
+          }
+        }
+      }
+    },
+    "settings_cu_a11y_connected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无障碍服务：已连接"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无障碍服务：已连接"
+          }
+        }
+      }
+    },
+    "settings_cu_a11y_not_enabled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无障碍服务：未启用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无障碍服务：未启用"
+          }
+        }
+      }
+    },
+    "settings_cu_agent_tools": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 工具"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 工具"
+          }
+        }
+      }
+    },
+    "settings_cu_allow_listen": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许 Agent 听取语音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许 Agent 听取语音"
+          }
+        }
+      }
+    },
+    "settings_cu_allow_speak": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许 Agent 语音播报"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许 Agent 语音播报"
+          }
+        }
+      }
+    },
+    "settings_cu_audio_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音频只在用户已启动的 Computer Use 会话中可用。听写文本和播报内容不会写入审计记录；临时听写结果也不会进入会话历史。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音频只在用户已启动的 Computer Use 会话中可用。听写文本和播报内容不会写入审计记录；临时听写结果也不会进入会话历史。"
+          }
+        }
+      }
+    },
+    "settings_cu_audio_settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "听写与播报设置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "听写与播报设置"
+          }
+        }
+      }
+    },
+    "settings_cu_background_exec": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台执行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台执行"
+          }
+        }
+      }
+    },
+    "settings_cu_background_exec_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅活动会话内；Cron/WorkManager 不会自行创建授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅活动会话内；Cron/WorkManager 不会自行创建授权"
+          }
+        }
+      }
+    },
+    "settings_cu_boundary_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台能力不会绕过会话授权：停止会话、锁屏、服务断开或超时会取消排队动作和正在进行的音频。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台能力不会绕过会话授权：停止会话、锁屏、服务断开或超时会取消排队动作和正在进行的音频。"
+          }
+        }
+      }
+    },
+    "settings_cu_capture_cancelled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消屏幕捕获授权，无法启动 Computer Use"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消屏幕捕获授权，无法启动 Computer Use"
+          }
+        }
+      }
+    },
+    "settings_cu_check_service": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检查系统服务设置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检查系统服务设置"
+          }
+        }
+      }
+    },
+    "settings_cu_clear_audit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除本地 Computer Use 审计记录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除本地 Computer Use 审计记录"
+          }
+        }
+      }
+    },
+    "settings_cu_current_app_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前应用：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前应用：%1$s"
+          }
+        }
+      }
+    },
+    "settings_cu_direct_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在用户主动启动的会话中控制所选应用；活动会话期间，前台对话和后台定时任务都可使用本次授权。锁屏、服务断开、30 分钟无操作或 2 小时上限都会立即停止。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在用户主动启动的会话中控制所选应用；活动会话期间，前台对话和后台定时任务都可使用本次授权。锁屏、服务断开、30 分钟无操作或 2 小时上限都会立即停止。"
+          }
+        }
+      }
+    },
+    "settings_cu_direct_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct 版 Computer Use"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct 版 Computer Use"
+          }
+        }
+      }
+    },
+    "settings_cu_enable_a11y": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用无障碍服务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用无障碍服务"
+          }
+        }
+      }
+    },
+    "settings_cu_enforced": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "强制"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "强制"
+          }
+        }
+      }
+    },
+    "settings_cu_forbidden_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "禁止控制密码、OTP、生物识别、支付/转账确认、系统授权、设备管理、VPN、安装/卸载和 FLAG_SECURE 窗口。高风险提交、发送、拨号和删除动作每次都需要确认。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "禁止控制密码、OTP、生物识别、支付/转账确认、系统授权、设备管理、VPN、安装/卸载和 FLAG_SECURE 窗口。高风险提交、发送、拨号和删除动作每次都需要确认。"
+          }
+        }
+      }
+    },
+    "settings_cu_high_risk": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高风险操作"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高风险操作"
+          }
+        }
+      }
+    },
+    "settings_cu_high_risk_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送、发布、拨号、删除等每次确认"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送、发布、拨号、删除等每次确认"
+          }
+        }
+      }
+    },
+    "settings_cu_lang_auto_detect": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动识别"
+          }
+        }
+      }
+    },
+    "settings_cu_max_listen": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最长单次听取"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最长单次听取"
+          }
+        }
+      }
+    },
+    "settings_cu_mic_granted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "android_use.listen · 麦克风已授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "android_use.listen · 麦克风已授权"
+          }
+        }
+      }
+    },
+    "settings_cu_mic_needed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用后仍需用户授予系统麦克风权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用后仍需用户授予系统麦克风权限"
+          }
+        }
+      }
+    },
+    "settings_cu_not_selected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未选择"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未选择"
+          }
+        }
+      }
+    },
+    "settings_cu_notification_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要通知权限才能启动不可静默关闭的控制会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要通知权限才能启动不可静默关闭的控制会话"
+          }
+        }
+      }
+    },
+    "settings_cu_search_apps": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索可启动应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索可启动应用"
+          }
+        }
+      }
+    },
+    "settings_cu_seconds_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 秒"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 秒"
+          }
+        }
+      }
+    },
+    "settings_cu_section_audio": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音频能力"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音频能力"
+          }
+        }
+      }
+    },
+    "settings_cu_selected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已选择"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已选择"
+          }
+        }
+      }
+    },
+    "settings_cu_selection_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择会被保留，但权限仅在你主动启动的控制会话内生效"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择会被保留，但权限仅在你主动启动的控制会话内生效"
+          }
+        }
+      }
+    },
+    "settings_cu_session_limit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话限制"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话限制"
+          }
+        }
+      }
+    },
+    "settings_cu_session_limit_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "30 分钟无操作停止"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "30 分钟无操作停止"
+          }
+        }
+      }
+    },
+    "settings_cu_session_limit_value": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最长 2 小时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最长 2 小时"
+          }
+        }
+      }
+    },
+    "settings_cu_session_status_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话：%1$s · 截图：%2$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话：%1$s · 截图：%2$s"
+          }
+        }
+      }
+    },
+    "settings_cu_speak_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "android_use.speak · Android 系统 TTS"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "android_use.speak · Android 系统 TTS"
+          }
+        }
+      }
+    },
+    "settings_cu_start_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动 Computer Use 失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动 Computer Use 失败"
+          }
+        }
+      }
+    },
+    "settings_cu_start_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动控制会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动控制会话"
+          }
+        }
+      }
+    },
+    "settings_cu_state_active": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "活动"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "活动"
+          }
+        }
+      }
+    },
+    "settings_cu_state_awaiting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待确认"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待确认"
+          }
+        }
+      }
+    },
+    "settings_cu_state_inactive": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未启动"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未启动"
+          }
+        }
+      }
+    },
+    "settings_cu_state_starting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动中"
+          }
+        }
+      }
+    },
+    "settings_cu_state_stopping": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止中"
+          }
+        }
+      }
+    },
+    "settings_cu_stop_now": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "立即停止 Computer Use"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "立即停止 Computer Use"
+          }
+        }
+      }
+    },
+    "settings_cu_tier_full": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完整"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完整"
           }
         }
       }
@@ -8258,6 +9122,22 @@
         }
       }
     },
+    "settings_mcp_connections_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 连接"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 连接"
+          }
+        }
+      }
+    },
     "settings_mcp_servers": {
       "localizations": {
         "zh-Hans": {
@@ -8610,6 +9490,22 @@
         }
       }
     },
+    "settings_notifs_enabled_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项开启"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项开启"
+          }
+        }
+      }
+    },
     "settings_open_shortcuts": {
       "localizations": {
         "zh-Hans": {
@@ -8706,6 +9602,54 @@
         }
       }
     },
+    "settings_provider_added_count_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已添加 · %1$d"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已添加 · %1$d"
+          }
+        }
+      }
+    },
+    "settings_provider_advanced_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前移动引擎尚未提供这两项可配置能力；设置页不会保存无效开关。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前移动引擎尚未提供这两项可配置能力；设置页不会保存无效开关。"
+          }
+        }
+      }
+    },
+    "settings_provider_applied": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用"
+          }
+        }
+      }
+    },
     "settings_provider_applied_reconnect": {
       "localizations": {
         "zh-Hans": {
@@ -8718,6 +9662,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "已应用配置并请求重连。"
+          }
+        }
+      }
+    },
+    "settings_provider_apply": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用"
+          }
+        }
+      }
+    },
+    "settings_provider_apply_config_reconnect": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用配置并重连"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用配置并重连"
+          }
+        }
+      }
+    },
+    "settings_provider_apply_config_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一次性应用 URL、模型与启用状态"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一次性应用 URL、模型与启用状态"
+          }
+        }
+      }
+    },
+    "settings_provider_apply_footer_applied": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前引擎已使用这份提供商配置。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前引擎已使用这份提供商配置。"
+          }
+        }
+      }
+    },
+    "settings_provider_apply_footer_pending": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置已保存但尚未用于当前引擎。点击应用后会重建引擎，新请求将使用最新配置。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置已保存但尚未用于当前引擎。点击应用后会重建引擎，新请求将使用最新配置。"
           }
         }
       }
@@ -8754,6 +9778,22 @@
         }
       }
     },
+    "settings_provider_applying": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用中…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用中…"
+          }
+        }
+      }
+    },
     "settings_provider_backoff_ms": {
       "localizations": {
         "zh-Hans": {
@@ -8786,6 +9826,54 @@
         }
       }
     },
+    "settings_provider_clear_credential": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除已保存凭据"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除已保存凭据"
+          }
+        }
+      }
+    },
+    "settings_provider_clear_credential_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除共享安全存储中的 provider key"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除共享安全存储中的 provider key"
+          }
+        }
+      }
+    },
+    "settings_provider_clear_failed_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除失败：%1$s"
+          }
+        }
+      }
+    },
     "settings_provider_clear_key": {
       "localizations": {
         "zh-Hans": {
@@ -8798,6 +9886,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "清除"
+          }
+        }
+      }
+    },
+    "settings_provider_config_changed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提供商配置有更改"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提供商配置有更改"
+          }
+        }
+      }
+    },
+    "settings_provider_connecting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在连接 Provider 并校验模型…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在连接 Provider 并校验模型…"
           }
         }
       }
@@ -8818,6 +9938,22 @@
         }
       }
     },
+    "settings_provider_credential_cleared": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共享安全存储中的凭据已清除"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共享安全存储中的凭据已清除"
+          }
+        }
+      }
+    },
     "settings_provider_credential_legacy_migrated": {
       "localizations": {
         "zh-Hans": {
@@ -8830,6 +9966,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "旧版密钥已迁移到本页"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_llm_only": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前页面仅对 LLM provider 接入真实 credential 存储。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前页面仅对 LLM provider 接入真实 credential 存储。"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_not_saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未保存凭据"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未保存凭据"
           }
         }
       }
@@ -8882,6 +10050,38 @@
         }
       }
     },
+    "settings_provider_credential_saved_secure": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据已保存到引擎共享安全存储"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据已保存到引擎共享安全存储"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_saved_unverified": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据已在本机安全区配置；尚未执行网络连通性验证"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据已在本机安全区配置；尚未执行网络连通性验证"
+          }
+        }
+      }
+    },
     "settings_provider_credential_will_clear": {
       "localizations": {
         "zh-Hans": {
@@ -8930,6 +10130,22 @@
         }
       }
     },
+    "settings_provider_cx_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 Google Programmable Search 创建并粘贴搜索引擎 ID"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 Google Programmable Search 创建并粘贴搜索引擎 ID"
+          }
+        }
+      }
+    },
     "settings_provider_default %@": {
       "localizations": {
         "zh-Hans": {
@@ -8942,6 +10158,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "默认: %@"
+          }
+        }
+      }
+    },
+    "settings_provider_default_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认: %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认: %1$s"
           }
         }
       }
@@ -9138,6 +10370,70 @@
         }
       }
     },
+    "settings_provider_hint_local_only": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索/抓取 provider 仍是本地配置页；当前未接入真实 engine credential 协议。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索/抓取 provider 仍是本地配置页；当前未接入真实 engine credential 协议。"
+          }
+        }
+      }
+    },
+    "settings_provider_hint_not_in_catalog": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该预设当前不在 Android 内建 provider catalog 中；需后续 bridge/profile 扩展。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该预设当前不在 Android 内建 provider catalog 中；需后续 bridge/profile 扩展。"
+          }
+        }
+      }
+    },
+    "settings_provider_hint_overwrite": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储不会回传明文；输入新 Key 可覆盖当前凭据。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储不会回传明文；输入新 Key 可覆盖当前凭据。"
+          }
+        }
+      }
+    },
+    "settings_provider_hint_secure_store": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据保存到引擎共享安全存储；Anthropic 还会镜像到当前启动兼容 key 槽。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据保存到引擎共享安全存储；Anthropic 还会镜像到当前启动兼容 key 槽。"
+          }
+        }
+      }
+    },
     "settings_provider_keep_key": {
       "localizations": {
         "zh-Hans": {
@@ -9150,6 +10446,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "保留"
+          }
+        }
+      }
+    },
+    "settings_provider_key_changed_retest": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API Key 已变化，请重新测试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API Key 已变化，请重新测试"
           }
         }
       }
@@ -9170,6 +10482,22 @@
         }
       }
     },
+    "settings_provider_key_saved_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "••••••••••••（已安全保存）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "••••••••••••（已安全保存）"
+          }
+        }
+      }
+    },
     "settings_provider_key_stored_securely": {
       "localizations": {
         "zh-Hans": {
@@ -9182,6 +10510,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "已保存于安全存储"
+          }
+        }
+      }
+    },
+    "settings_provider_key_unsaved_suffix": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · 当前 Key 尚未保存"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · 当前 Key 尚未保存"
           }
         }
       }
@@ -9282,6 +10626,54 @@
         }
       }
     },
+    "settings_provider_models_count_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · %1$d 模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · %1$d 模型"
+          }
+        }
+      }
+    },
+    "settings_provider_no_saved_credential": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有已保存凭据"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有已保存凭据"
+          }
+        }
+      }
+    },
+    "settings_provider_not_configurable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不可配置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不可配置"
+          }
+        }
+      }
+    },
     "settings_provider_not_connected": {
       "localizations": {
         "zh-Hans": {
@@ -9294,6 +10686,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "尚未接入真实配置仓储"
+          }
+        }
+      }
+    },
+    "settings_provider_not_wired_mobile": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未接入移动引擎"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未接入移动引擎"
+          }
+        }
+      }
+    },
+    "settings_provider_pending_count_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项待应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项待应用"
+          }
+        }
+      }
+    },
+    "settings_provider_pending_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL、模型、启用状态或默认提供商已写入本机配置；重连后才会用于新请求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL、模型、启用状态或默认提供商已写入本机配置；重连后才会用于新请求。"
           }
         }
       }
@@ -9346,6 +10786,22 @@
         }
       }
     },
+    "settings_provider_preset_not_in_catalog": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前预设未接入 Android 内建 provider catalog"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前预设未接入 Android 内建 provider catalog"
+          }
+        }
+      }
+    },
     "settings_provider_remove": {
       "localizations": {
         "zh-Hans": {
@@ -9358,6 +10814,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "移除此提供商"
+          }
+        }
+      }
+    },
+    "settings_provider_removing_credential": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在删除凭据…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在删除凭据…"
           }
         }
       }
@@ -9426,6 +10898,54 @@
         }
       }
     },
+    "settings_provider_save_and_apply": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存并应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存并应用"
+          }
+        }
+      }
+    },
+    "settings_provider_save_credential": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存凭据"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存凭据"
+          }
+        }
+      }
+    },
+    "settings_provider_save_failed_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存失败：%1$s"
+          }
+        }
+      }
+    },
     "settings_provider_saved": {
       "localizations": {
         "zh-Hans": {
@@ -9438,6 +10958,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "已保存配置。"
+          }
+        }
+      }
+    },
+    "settings_provider_saved_applied": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据已安全保存，配置已应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据已安全保存，配置已应用"
+          }
+        }
+      }
+    },
+    "settings_provider_saving_applying": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在保存凭据并应用配置…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在保存凭据并应用配置…"
           }
         }
       }
@@ -9618,6 +11170,22 @@
         }
       }
     },
+    "settings_provider_smart_routing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "智能路由"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "智能路由"
+          }
+        }
+      }
+    },
     "settings_provider_status_configured": {
       "localizations": {
         "zh-Hans": {
@@ -9698,6 +11266,38 @@
         }
       }
     },
+    "settings_provider_streaming_policy": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认流式策略"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认流式策略"
+          }
+        }
+      }
+    },
+    "settings_provider_streaming_policy_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前由移动引擎固定管理"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前由移动引擎固定管理"
+          }
+        }
+      }
+    },
     "settings_provider_test_callback_unavailable": {
       "localizations": {
         "zh-Hans": {
@@ -9742,6 +11342,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "连接测试成功。"
+          }
+        }
+      }
+    },
+    "settings_provider_testing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "测试中…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "测试中…"
           }
         }
       }
@@ -9810,6 +11426,38 @@
         }
       }
     },
+    "settings_provider_url_hint_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认 `%1$s` · 可填代理 / 镜像"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认 `%1$s` · 可填代理 / 镜像"
+          }
+        }
+      }
+    },
+    "settings_provider_write_secure_store": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写入引擎共享安全存储"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写入引擎共享安全存储"
+          }
+        }
+      }
+    },
     "settings_providers_enabled_count %lld": {
       "localizations": {
         "zh-Hans": {
@@ -9822,6 +11470,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%lld 个启用"
+          }
+        }
+      }
+    },
+    "settings_providers_enabled_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 个启用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 个启用"
           }
         }
       }
@@ -9938,6 +11602,22 @@
         }
       }
     },
+    "settings_section_advanced": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高级"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高级"
+          }
+        }
+      }
+    },
     "settings_section_ai_reply_language": {
       "localizations": {
         "zh-Hans": {
@@ -10030,6 +11710,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skills 是可复用的 AI 行为包；MCP 是接入外部工具的标准协议；Dream 让灵犀在你休息时主动整理与规划。"
+          }
+        }
+      }
+    },
+    "settings_section_credentials": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凭据"
           }
         }
       }
@@ -10386,6 +12082,22 @@
         }
       }
     },
+    "settings_skills_enabled_fraction_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d / %2$d 启用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d / %2$d 启用"
+          }
+        }
+      }
+    },
     "settings_skills_sub": {
       "localizations": {
         "zh-Hans": {
@@ -10674,6 +12386,38 @@
         }
       }
     },
+    "settings_title_computer_use": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Computer Use"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Computer Use"
+          }
+        }
+      }
+    },
+    "settings_title_cron": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务"
+          }
+        }
+      }
+    },
     "settings_title_edit": {
       "localizations": {
         "zh-Hans": {
@@ -10702,6 +12446,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "设置"
+          }
+        }
+      }
+    },
+    "settings_title_open_source": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开源许可与对应源码"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开源许可与对应源码"
+          }
+        }
+      }
+    },
+    "settings_title_skills": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skills"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skills"
           }
         }
       }
@@ -10754,6 +12530,54 @@
         }
       }
     },
+    "settings_voice_android_system": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 系统语音识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 系统语音识别"
+          }
+        }
+      }
+    },
+    "settings_voice_android_system_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用设备当前的识别服务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用设备当前的识别服务"
+          }
+        }
+      }
+    },
+    "settings_voice_audio": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音与音频"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音与音频"
+          }
+        }
+      }
+    },
     "settings_voice_default_ios": {
       "localizations": {
         "zh-Hans": {
@@ -10766,6 +12590,150 @@
           "stringUnit": {
             "state": "translated",
             "value": "iOS 系统语音"
+          }
+        }
+      }
+    },
+    "settings_voice_dictation_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统听写 · %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统听写 · %1$s"
+          }
+        }
+      }
+    },
+    "settings_voice_id_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统 voice id（default）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统 voice id（default）"
+          }
+        }
+      }
+    },
+    "settings_voice_listen_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "聊天麦克风和 Computer Use 的 listen 动作共用此设置。麦克风权限只可由用户在前台授予。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "聊天麦克风和 Computer Use 的 listen 动作共用此设置。麦克风权限只可由用户在前台授予。"
+          }
+        }
+      }
+    },
+    "settings_voice_listen_section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "听 · 语音识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "听 · 语音识别"
+          }
+        }
+      }
+    },
+    "settings_voice_playback_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动播放：AI 回复完成后立即朗读。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动播放：AI 回复完成后立即朗读。"
+          }
+        }
+      }
+    },
+    "settings_voice_playback_options": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "播放选项"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "播放选项"
+          }
+        }
+      }
+    },
+    "settings_voice_speak_footer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 回复自动播放和 Computer Use 的 speak 动作共用输出声音与语速。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 回复自动播放和 Computer Use 的 speak 动作共用输出声音与语速。"
+          }
+        }
+      }
+    },
+    "settings_voice_speak_section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "说 · 语音合成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "说 · 语音合成"
+          }
+        }
+      }
+    },
+    "settings_voice_system": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统语音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统语音"
           }
         }
       }

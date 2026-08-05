@@ -33,9 +33,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.components.tint
@@ -77,7 +79,7 @@ fun AccountPage() {
             Text("Yuxin Yang", color = t.text, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp))
             Text("yuxin@axielix.com", color = t.text4, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
             Text(
-                "Pro · 续费日 2026-09-30",
+                stringResource(R.string.settings_account_pro_renewal),
                 color = t.accent,
                 fontSize = 11.5f.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -89,15 +91,15 @@ fun AccountPage() {
             )
         }
 
-        SettingsSection(label = "本月用量") {
-            SettingsRow(label = "对话次数", value = "247 / 1000", chevron = false)
-            SettingsRow(label = "推理时长", value = "5.5 / 8 小时", chevron = false)
-            SettingsRow(label = "存储", value = "1.2 / 10 GB", chevron = false, isLast = true)
+        SettingsSection(label = stringResource(R.string.settings_section_monthly_usage)) {
+            SettingsRow(label = stringResource(R.string.settings_conversation_count), value = "247 / 1000", chevron = false)
+            SettingsRow(label = stringResource(R.string.settings_inference_duration), value = stringResource(R.string.settings_inference_duration_value), chevron = false)
+            SettingsRow(label = stringResource(R.string.settings_storage), value = "1.2 / 10 GB", chevron = false, isLast = true)
         }
         SettingsSection {
-            SettingsRow(icon = LXIconName.Brain, label = "管理订阅", onTap = {})
-            SettingsRow(icon = LXIconName.Link, label = "同步设备", sub = "3 台设备已连接", onTap = {})
-            SettingsRow(icon = LXIconName.X, label = "退出登录", danger = true, isLast = true, onTap = {})
+            SettingsRow(icon = LXIconName.Brain, label = stringResource(R.string.settings_manage_subscription), onTap = {})
+            SettingsRow(icon = LXIconName.Link, label = stringResource(R.string.settings_sync_devices), sub = stringResource(R.string.settings_sync_devices_sub), onTap = {})
+            SettingsRow(icon = LXIconName.X, label = stringResource(R.string.settings_logout), danger = true, isLast = true, onTap = {})
         }
     }
 }
@@ -106,19 +108,19 @@ fun AccountPage() {
 @Composable
 fun NotificationsPage(notifs: NotifConfig, onChange: (NotifConfig) -> Unit) {
     SettingsSection(
-        label = "通知类型",
-        footer = "所有通知通过系统通知中心，灵犀不会单独打扰你。",
+        label = stringResource(R.string.settings_section_notification_type),
+        footer = stringResource(R.string.settings_notifications_footer),
     ) {
-        SettingsRow(label = "工作流完成", sub = "AI 跑完多步任务时", chevron = false) {
+        SettingsRow(label = stringResource(R.string.settings_notif_workflow_complete), sub = stringResource(R.string.settings_notif_workflow_complete_sub), chevron = false) {
             LXToggle(checked = notifs.workflows, onCheckedChange = { onChange(notifs.copy(workflows = it)) })
         }
-        SettingsRow(label = "我被 @", sub = "会话内有人提到你", chevron = false) {
+        SettingsRow(label = stringResource(R.string.settings_notif_mention), sub = stringResource(R.string.settings_notif_mention_sub), chevron = false) {
             LXToggle(checked = notifs.mentions, onCheckedChange = { onChange(notifs.copy(mentions = it)) })
         }
-        SettingsRow(label = "定时任务报告", sub = "cron 触发执行后", chevron = false) {
+        SettingsRow(label = stringResource(R.string.settings_notif_cron_report), sub = stringResource(R.string.settings_notif_cron_report_sub), chevron = false) {
             LXToggle(checked = notifs.crons, onCheckedChange = { onChange(notifs.copy(crons = it)) })
         }
-        SettingsRow(label = "产品更新", sub = "新功能与重要变更", chevron = false, isLast = true) {
+        SettingsRow(label = stringResource(R.string.settings_notif_product_update), sub = stringResource(R.string.settings_notif_product_update_sub), chevron = false, isLast = true) {
             LXToggle(checked = notifs.marketing, onCheckedChange = { onChange(notifs.copy(marketing = it)) })
         }
     }
@@ -130,9 +132,9 @@ fun InputPage() {
     var smartSugg by remember { mutableStateOf(true) }
     var fromHistory by remember { mutableStateOf(true) }
     Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = "候选词") {
-            SettingsRow(label = "启用智能候选", chevron = false) { LXToggle(checked = smartSugg, onCheckedChange = { smartSugg = it }) }
-            SettingsRow(label = "基于历史会话", chevron = false, isLast = true) { LXToggle(checked = fromHistory, onCheckedChange = { fromHistory = it }) }
+        SettingsSection(label = stringResource(R.string.settings_section_suggestions)) {
+            SettingsRow(label = stringResource(R.string.settings_smart_suggestions), chevron = false) { LXToggle(checked = smartSugg, onCheckedChange = { smartSugg = it }) }
+            SettingsRow(label = stringResource(R.string.settings_suggestions_history), chevron = false, isLast = true) { LXToggle(checked = fromHistory, onCheckedChange = { fromHistory = it }) }
         }
     }
 }
@@ -143,16 +145,16 @@ fun PrivacyPage() {
     var contribute by remember { mutableStateOf(false) }
     var crash by remember { mutableStateOf(true) }
     Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = "数据") {
-            SettingsRow(icon = LXIconName.Brain, label = "导出我的所有数据", onTap = {})
-            SettingsRow(icon = LXIconName.X, label = "删除账号与数据", danger = true, isLast = true, onTap = {})
+        SettingsSection(label = stringResource(R.string.settings_section_data)) {
+            SettingsRow(icon = LXIconName.Brain, label = stringResource(R.string.settings_export_data), onTap = {})
+            SettingsRow(icon = LXIconName.X, label = stringResource(R.string.settings_delete_account), danger = true, isLast = true, onTap = {})
         }
         SettingsSection(
-            label = "可见性",
-            footer = "灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。",
+            label = stringResource(R.string.settings_section_visibility),
+            footer = stringResource(R.string.settings_privacy_footer),
         ) {
-            SettingsRow(label = "使用数据贡献训练", chevron = false) { LXToggle(checked = contribute, onCheckedChange = { contribute = it }) }
-            SettingsRow(label = "崩溃报告", chevron = false, isLast = true) { LXToggle(checked = crash, onCheckedChange = { crash = it }) }
+            SettingsRow(label = stringResource(R.string.settings_contribute_training), chevron = false) { LXToggle(checked = contribute, onCheckedChange = { contribute = it }) }
+            SettingsRow(label = stringResource(R.string.settings_crash_report), chevron = false, isLast = true) { LXToggle(checked = crash, onCheckedChange = { crash = it }) }
         }
     }
 }
@@ -170,8 +172,8 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
     val activity = context.findComponentActivity()
     Column(Modifier.fillMaxWidth()) {
         SettingsSection(
-            label = "语言",
-            footer = "切换语言后将重新加载界面。AI 对话语言独立配置。",
+            label = stringResource(R.string.settings_language_title),
+            footer = stringResource(R.string.settings_language_footer),
         ) {
             RadioList(
                 options = AppLanguage.SUPPORTED.map { (code, label) -> RadioOption(code, label) },
@@ -184,11 +186,11 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
                 },
             )
         }
-        SettingsSection(label = "区域") {
-            SettingsRow(label = "日期格式", value = "2026/5/14", isLast = true, onTap = {})
+        SettingsSection(label = stringResource(R.string.settings_section_region)) {
+            SettingsRow(label = stringResource(R.string.settings_date_format), value = "2026/5/14", isLast = true, onTap = {})
         }
-        SettingsSection(label = "AI 回复语言") {
-            SettingsRow(label = "跟随界面", sub = "灵犀根据你的输入语言自动判断", chevron = false, isLast = true) {
+        SettingsSection(label = stringResource(R.string.settings_section_ai_reply_language)) {
+            SettingsRow(label = stringResource(R.string.settings_follow_interface), sub = stringResource(R.string.settings_follow_interface_sub), chevron = false, isLast = true) {
                 LXToggle(checked = follow, onCheckedChange = { follow = it })
             }
         }
@@ -218,12 +220,12 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
 
     Column(Modifier.fillMaxWidth()) {
         SettingsSection(
-            label = "听 · 语音识别",
-            footer = "聊天麦克风和 Computer Use 的 listen 动作共用此设置。麦克风权限只可由用户在前台授予。",
+            label = stringResource(R.string.settings_voice_listen_section),
+            footer = stringResource(R.string.settings_voice_listen_footer),
         ) {
             RadioList(
                 options = listOf(
-                    RadioOption("system", "Android 系统语音识别", "使用设备当前的识别服务"),
+                    RadioOption("system", stringResource(R.string.settings_voice_android_system), stringResource(R.string.settings_voice_android_system_sub)),
                 ),
                 selected = voice.inputProvider,
                 onSelect = { onChange(voice.copy(inputProvider = it)) },
@@ -237,7 +239,7 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        "识别语言",
+                        stringResource(R.string.voice_recognition_language),
                         color = t.text,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
@@ -278,8 +280,8 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
         }
 
         SettingsSection(
-            label = "说 · 语音合成",
-            footer = "AI 回复自动播放和 Computer Use 的 speak 动作共用输出声音与语速。",
+            label = stringResource(R.string.settings_voice_speak_section),
+            footer = stringResource(R.string.settings_voice_speak_footer),
         ) {
             RadioList(
                 options = Presets.voice
@@ -293,15 +295,15 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
                     SettingsField(
                         value = voice.voiceId,
                         onValueChange = { onChange(voice.copy(voiceId = it)) },
-                        placeholder = "系统 voice id（default）",
+                        placeholder = stringResource(R.string.settings_voice_id_placeholder),
                     )
                 }
             }
         }
 
-        SettingsSection(label = "播放选项", footer = "自动播放：AI 回复完成后立即朗读。") {
+        SettingsSection(label = stringResource(R.string.settings_voice_playback_options), footer = stringResource(R.string.settings_voice_playback_footer)) {
             SettingsRow(
-                label = "语速",
+                label = stringResource(R.string.voice_speech_rate),
                 value = String.format("%.1fx", voice.speed),
                 chevron = false,
             ) {
@@ -321,7 +323,7 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
                     modifier = Modifier.width(120.dp),
                 )
             }
-            SettingsRow(label = "自动播放回复", chevron = false, isLast = true) {
+            SettingsRow(label = stringResource(R.string.voice_auto_play), chevron = false, isLast = true) {
                 LXToggle(
                     checked = voice.autoPlay,
                     onCheckedChange = { onChange(voice.copy(autoPlay = it)) },
@@ -339,18 +341,20 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
 fun snapVoiceSpeed(raw: Float): Float =
     (Math.round(raw * 10f) / 10f).coerceIn(0.5f, 2.0f)
 
+@Composable
 private fun voiceLanguageLabel(language: String): String = when (language) {
-    "zh-CN" -> "简体中文"
-    "en-US" -> "English"
-    "ja-JP" -> "日本語"
-    else -> "自动"
+    "zh-CN" -> stringResource(R.string.common_lang_zh_hans)
+    "en-US" -> stringResource(R.string.onboarding_voice_language_en)
+    "ja-JP" -> stringResource(R.string.onboarding_voice_language_ja)
+    else -> stringResource(R.string.settings_auto)
 }
 
+@Composable
 private fun voiceLanguageShortLabel(language: String): String = when (language) {
-    "zh-CN" -> "中文"
+    "zh-CN" -> stringResource(R.string.onboarding_voice_language_zh)
     "en-US" -> "EN"
-    "ja-JP" -> "日本語"
-    else -> "自动"
+    "ja-JP" -> stringResource(R.string.onboarding_voice_language_ja)
+    else -> stringResource(R.string.settings_auto)
 }
 
 // MARK: - Placeholder (A7/A8 seam) ------------------------------------------

@@ -119,7 +119,7 @@ class ProviderSettingsSemanticsTest {
 
         assertTrue(state.enabled)
         assertTrue(state.saveCredential)
-        assertEquals("保存并应用", state.label)
+        assertEquals(com.lingxi.code.R.string.settings_provider_save_and_apply, state.labelRes)
     }
 
     @Test

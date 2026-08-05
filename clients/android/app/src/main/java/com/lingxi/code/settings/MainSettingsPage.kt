@@ -23,11 +23,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
@@ -57,32 +59,35 @@ fun MainSettingsPage(
         AccountCard(onAccount = { navController.navigate(SettingsRoutes.ACCOUNT) })
 
         // 智能 ----------------------------------------------------------------
-        SettingsSection(label = "智能") {
+        SettingsSection(label = stringResource(R.string.settings_section_intelligence)) {
             val dl = state.llmProviders.firstOrNull { it.isDefault } ?: state.llmProviders.firstOrNull()
             val ds = state.searchProviders.firstOrNull { it.isDefault } ?: state.searchProviders.firstOrNull()
             val df = state.fetchProviders.firstOrNull { it.isDefault } ?: state.fetchProviders.firstOrNull()
             SettingsRow(
                 icon = LXIconName.Sparkle, iconColor = Accents.color(forId = "oklch(70% 0.18 268)"),
-                label = "LLM 提供商", sub = "默认: ${dl?.name ?: "未配置"}",
-                value = "${state.llmProviders.count { it.enabled }} 个启用",
+                label = stringResource(R.string.settings_llm_providers),
+                sub = stringResource(R.string.settings_provider_default_fmt, dl?.name ?: stringResource(R.string.settings_provider_unconfigured)),
+                value = stringResource(R.string.settings_providers_enabled_fmt, state.llmProviders.count { it.enabled }),
                 onTap = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Llm.name)) },
             )
             SettingsRow(
                 icon = LXIconName.Search, iconColor = Color(red = 0f, green = 0.7151f, blue = 0.7672f),
-                label = "联网搜索", sub = if (ds != null) "默认: ${ds.name}" else "未配置",
-                value = "${state.searchProviders.count { it.enabled }} 个启用",
+                label = stringResource(R.string.settings_web_search),
+                sub = if (ds != null) stringResource(R.string.settings_provider_default_fmt, ds.name) else stringResource(R.string.settings_provider_unconfigured),
+                value = stringResource(R.string.settings_providers_enabled_fmt, state.searchProviders.count { it.enabled }),
                 onTap = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Search.name)) },
             )
             SettingsRow(
                 icon = LXIconName.Link, iconColor = Color(red = 0.8713f, green = 0.58f, blue = 0f),
-                label = "网页抓取", sub = if (df != null) "默认: ${df.name}" else "未配置",
-                value = "${state.fetchProviders.count { it.enabled }} 个启用",
+                label = stringResource(R.string.settings_web_fetch),
+                sub = if (df != null) stringResource(R.string.settings_provider_default_fmt, df.name) else stringResource(R.string.settings_provider_unconfigured),
+                value = stringResource(R.string.settings_providers_enabled_fmt, state.fetchProviders.count { it.enabled }),
                 onTap = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Fetch.name)) },
             )
             SettingsRow(
                 icon = LXIconName.Mic, iconColor = Color(red = 0.8018f, green = 0.4038f, blue = 0.8909f),
-                label = "语音与音频",
-                sub = "系统听写 · ${Presets.voice.firstOrNull { it.id == state.voice.preset }?.name ?: "系统语音"}",
+                label = stringResource(R.string.settings_voice_audio),
+                sub = stringResource(R.string.settings_voice_dictation_fmt, Presets.voice.firstOrNull { it.id == state.voice.preset }?.name ?: stringResource(R.string.settings_voice_system)),
                 value = voiceLanguageSummary(state.voice.inputLanguage),
                 isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.VOICE) },
@@ -91,24 +96,24 @@ fun MainSettingsPage(
 
         // 能力扩展 ------------------------------------------------------------
         SettingsSection(
-            label = "能力扩展",
-            footer = "Skills 是可复用的 AI 行为包；MCP 是接入外部工具的标准协议；Dream 让灵犀在你休息时主动整理与规划。",
+            label = stringResource(R.string.settings_section_capabilities),
+            footer = stringResource(R.string.settings_section_capabilities_footer),
         ) {
             SettingsRow(
                 icon = LXIconName.Skill, iconColor = Color(red = 0f, green = 0.7601f, blue = 0.7664f),
-                label = "Skills", sub = "技能包 · 提示词 · 操作流",
-                value = "${state.skills.count { it.enabled }} / ${state.skills.size} 启用",
+                label = stringResource(R.string.settings_title_skills), sub = stringResource(R.string.settings_skills_sub),
+                value = stringResource(R.string.settings_skills_enabled_fraction_fmt, state.skills.count { it.enabled }, state.skills.size),
                 onTap = { navController.navigate(SettingsRoutes.SKILLS) },
             )
             SettingsRow(
                 icon = LXIconName.Plug, iconColor = Color(red = 0f, green = 0.78f, blue = 0.55f),
-                label = "MCP 服务器", sub = "Model Context Protocol",
-                value = "${state.mcpServers.count { it.enabled }} 连接",
+                label = stringResource(R.string.settings_mcp_servers), sub = "Model Context Protocol",
+                value = stringResource(R.string.settings_mcp_connections_fmt, state.mcpServers.count { it.enabled }),
                 onTap = { navController.navigate(SettingsRoutes.MCP_LIST) },
             )
             SettingsRow(
                 icon = LXIconName.Workflow, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
-                label = "Linux 运行时",
+                label = stringResource(R.string.settings_linux_runtime),
                 sub = state.linuxRuntime.summary,
                 value = state.linuxRuntime.badge,
                 onTap = { navController.navigate(SettingsRoutes.LINUX_RUNTIME) },
@@ -118,77 +123,77 @@ fun MainSettingsPage(
                     icon = LXIconName.Sparkle,
                     iconColor = Color(red = 0.62f, green = 0.48f, blue = 0.96f),
                     label = "Computer Use",
-                    sub = "Android 屏幕观察与受控操作",
+                    sub = stringResource(R.string.settings_computer_use_sub),
                     value = "Direct",
                     onTap = { navController.navigate(SettingsRoutes.COMPUTER_USE) },
                 )
             }
             SettingsRow(
                 icon = LXIconName.Dream, iconColor = Color(red = 0.809f, green = 0.4552f, blue = 0.8891f),
-                label = "Dream 模式", sub = "后台离线思考与整理",
-                value = if (state.dream.enabled) "开启" else "关闭",
+                label = stringResource(R.string.settings_dream_mode), sub = stringResource(R.string.settings_dream_sub),
+                value = if (state.dream.enabled) stringResource(R.string.settings_status_on) else stringResource(R.string.settings_status_off),
                 onTap = { navController.navigate(SettingsRoutes.DREAM) },
             )
             SettingsRow(
                 icon = LXIconName.Clock, iconColor = Color(red = 0.95f, green = 0.6f, blue = 0.2f),
-                label = "定时任务", sub = "按 Cron 计划后台执行",
+                label = stringResource(R.string.settings_title_cron), sub = stringResource(R.string.settings_cron_sub),
                 isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.CRON) },
             )
         }
 
         // 应用 ----------------------------------------------------------------
-        SettingsSection(label = "应用") {
+        SettingsSection(label = stringResource(R.string.settings_section_app)) {
             SettingsRow(
                 icon = LXIconName.Sun, iconColor = Color(red = 0.896f, green = 0.6013f, blue = 0f),
-                label = "外观", value = if (isDark) "深色" else "浅色",
+                label = stringResource(R.string.settings_appearance), value = if (isDark) stringResource(R.string.settings_appearance_dark) else stringResource(R.string.settings_appearance_light),
                 onTap = { navController.navigate(SettingsRoutes.APPEARANCE) },
             )
             SettingsRow(
                 icon = LXIconName.Message, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
-                label = "语言", value = AppLanguage.label(state.language),
+                label = stringResource(R.string.settings_language_title), value = AppLanguage.label(state.language),
                 onTap = { navController.navigate(SettingsRoutes.LANGUAGE) },
             )
             SettingsRow(
                 icon = LXIconName.Cog, iconColor = t.text3,
-                label = "通知", value = "${state.notifs.enabledCount} 项开启",
+                label = stringResource(R.string.settings_notifications), value = stringResource(R.string.settings_notifs_enabled_fmt, state.notifs.enabledCount),
                 onTap = { navController.navigate(SettingsRoutes.NOTIFICATIONS) },
             )
             SettingsRow(
                 icon = LXIconName.Paperclip, iconColor = Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f),
-                label = "键盘与输入", sub = "语音输入 · 候选词", isLast = true,
+                label = stringResource(R.string.settings_keyboard_input), sub = stringResource(R.string.settings_keyboard_input_sub), isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.INPUT) },
             )
         }
 
         // 隐私与安全 ----------------------------------------------------------
-        SettingsSection(label = "隐私与安全") {
-            PrivacyToggleRow(LXIconName.Pin, t.ok, "生物识别锁", state.bioLock) {}
+        SettingsSection(label = stringResource(R.string.settings_section_privacy_security)) {
+            PrivacyToggleRow(LXIconName.Pin, t.ok, stringResource(R.string.settings_bio_lock), state.bioLock) {}
             SettingsRow(
                 icon = LXIconName.Brain, iconColor = t.text3,
-                label = "数据与隐私", sub = "导出 · 删除 · 透明度报告",
+                label = stringResource(R.string.settings_data_privacy), sub = stringResource(R.string.settings_data_privacy_sub),
                 onTap = { navController.navigate(SettingsRoutes.PRIVACY) },
             )
-            PrivacyToggleRow(LXIconName.Sparkle, t.text3, "使用诊断", state.telemetry) {}
-            PrivacyToggleRow(LXIconName.Check, t.text3, "自动更新", state.autoUpdate, isLast = true) {}
+            PrivacyToggleRow(LXIconName.Sparkle, t.text3, stringResource(R.string.settings_usage_diagnostics), state.telemetry) {}
+            PrivacyToggleRow(LXIconName.Check, t.text3, stringResource(R.string.settings_auto_update), state.autoUpdate, isLast = true) {}
         }
 
         // 关于 ----------------------------------------------------------------
-        SettingsSection(label = "关于") {
-            SettingsRow(icon = LXIconName.Sparkle, label = "灵犀", value = "2.4.1 (build 8721)", chevron = false)
-            SettingsRow(icon = LXIconName.Play, label = "重新观看引导", sub = "再过一遍首次设置向导", onTap = onReplayOnboarding)
-            SettingsRow(icon = LXIconName.Book, label = "帮助中心", onTap = {})
-            SettingsRow(icon = LXIconName.Message, label = "反馈与建议", onTap = {})
+        SettingsSection(label = stringResource(R.string.settings_section_about)) {
+            SettingsRow(icon = LXIconName.Sparkle, label = stringResource(R.string.app_name), value = "2.4.1 (build 8721)", chevron = false)
+            SettingsRow(icon = LXIconName.Play, label = stringResource(R.string.settings_rewatch_onboarding), sub = stringResource(R.string.settings_rewatch_onboarding_sub), onTap = onReplayOnboarding)
+            SettingsRow(icon = LXIconName.Book, label = stringResource(R.string.settings_help_center), onTap = {})
+            SettingsRow(icon = LXIconName.Message, label = stringResource(R.string.settings_feedback), onTap = {})
             SettingsRow(
                 icon = LXIconName.Link,
-                label = "开源许可",
+                label = stringResource(R.string.settings_open_source),
                 isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.OPEN_SOURCE) },
             )
         }
 
         Text(
-            text = "© 2026 灵犀 AI · 用户偏好仅在本地",
+            text = stringResource(R.string.settings_copyright),
             color = t.text4,
             fontSize = 11.sp,
             lineHeight = 16.sp,
@@ -198,11 +203,12 @@ fun MainSettingsPage(
     }
 }
 
+@Composable
 private fun voiceLanguageSummary(language: String): String = when (language) {
-    "zh-CN" -> "中文"
-    "en-US" -> "English"
-    "ja-JP" -> "日本語"
-    else -> "自动"
+    "zh-CN" -> stringResource(R.string.onboarding_voice_language_zh)
+    "en-US" -> stringResource(R.string.onboarding_voice_language_en)
+    "ja-JP" -> stringResource(R.string.onboarding_voice_language_ja)
+    else -> stringResource(R.string.settings_auto)
 }
 
 /**
@@ -256,7 +262,7 @@ private fun AccountCard(onAccount: () -> Unit) {
             Text("yuxin@axielix.com · Pro", color = t.text4, fontSize = 12.sp)
         }
         Text(
-            "账户",
+            stringResource(R.string.settings_account),
             color = t.text2,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,

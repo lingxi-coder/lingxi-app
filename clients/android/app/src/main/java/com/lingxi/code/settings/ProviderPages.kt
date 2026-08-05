@@ -32,6 +32,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -39,6 +41,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.mix
@@ -62,10 +65,11 @@ import com.lingxi.code.theme.LingXiTheme
  * list) maps to a Navigation-Compose navigate-with-popUpTo: see [pickPreset].
  */
 
+@Composable
 private fun ProviderKind.blurb(): String = when (this) {
-    ProviderKind.Llm -> "灵犀本身不调用云端 LLM — 由你添加的提供商完成推理。密钥仅本机加密。"
-    ProviderKind.Search -> "让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用\"联网\"模式。"
-    ProviderKind.Fetch -> "抓取网页正文用于阅读、摘要、引用 — 推荐 Jina Reader（免费）。"
+    ProviderKind.Llm -> stringResource(R.string.provider_llm_blurb)
+    ProviderKind.Search -> stringResource(R.string.provider_search_blurb)
+    ProviderKind.Fetch -> stringResource(R.string.provider_fetch_blurb)
 }
 
 /** Resolve the preset backing a provider (custom is the fallback for LLM). */
@@ -73,7 +77,7 @@ private fun ProviderKind.preset(of: GenericProvider): ProviderPreset =
     presets.firstOrNull { it.id == of.preset } ?: presets.last()
 
 internal data class ProviderApplyUiState(
-    val label: String,
+    val labelRes: Int,
     val enabled: Boolean,
     val saveCredential: Boolean,
 )
@@ -83,11 +87,11 @@ internal fun providerApplyUiState(
     hasCredentialDraft: Boolean,
     busy: Boolean,
 ): ProviderApplyUiState = ProviderApplyUiState(
-    label = when {
-        busy -> "应用中…"
-        hasCredentialDraft -> "保存并应用"
-        hasPendingConfiguration -> "应用"
-        else -> "已应用"
+    labelRes = when {
+        busy -> R.string.settings_provider_applying
+        hasCredentialDraft -> R.string.settings_provider_save_and_apply
+        hasPendingConfiguration -> R.string.settings_provider_apply
+        else -> R.string.settings_provider_applied
     },
     enabled = !busy && (hasCredentialDraft || hasPendingConfiguration),
     saveCredential = hasCredentialDraft,
@@ -116,10 +120,10 @@ fun ProviderListPage(
     Column(Modifier.fillMaxWidth()) {
         Blurb(kind.blurb())
 
-        SettingsSection(label = "已添加 · ${arr.size}") {
+        SettingsSection(label = stringResource(R.string.settings_provider_added_count_fmt, arr.size)) {
             if (arr.isEmpty()) {
                 Text(
-                    "尚未添加任何提供商",
+                    stringResource(R.string.provider_no_providers_added),
                     color = t.text4,
                     fontSize = 13.sp,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
@@ -137,25 +141,25 @@ fun ProviderListPage(
             }
         }
 
-        DashedAddButton(title = "添加${kind.title}", onClick = onAdd)
+        DashedAddButton(title = stringResource(R.string.provider_add_kind_fmt, kind.title), onClick = onAdd)
 
         if (kind == ProviderKind.Llm) {
             if (state.pendingLlmProviderChanges.isNotEmpty()) {
                 Column(Modifier.padding(top = 22.dp)) {
                     SettingsSection(
-                        label = "待应用",
-                        footer = "URL、模型、启用状态或默认提供商已写入本机配置；重连后才会用于新请求。",
+                        label = stringResource(R.string.settings_provider_status_pending_apply),
+                        footer = stringResource(R.string.settings_provider_pending_footer),
                     ) {
                         SettingsRow(
                             icon = LXIconName.Workflow,
                             iconColor = t.accent,
-                            label = "提供商配置有更改",
-                            sub = "${state.pendingLlmProviderChanges.size} 项待应用",
+                            label = stringResource(R.string.settings_provider_config_changed),
+                            sub = stringResource(R.string.settings_provider_pending_count_fmt, state.pendingLlmProviderChanges.size),
                             chevron = false,
                             isLast = true,
                             trailing = {
                                 ProviderTextAction(
-                                    label = "应用并重连",
+                                    label = stringResource(R.string.settings_provider_apply_reconnect),
                                     enabled = true,
                                     onClick = {
                                         onReconnectEngine()
@@ -169,24 +173,24 @@ fun ProviderListPage(
             }
             Column(Modifier.padding(top = 22.dp)) {
                 SettingsSection(
-                    label = "高级",
-                    footer = "当前移动引擎尚未提供这两项可配置能力；设置页不会保存无效开关。",
+                    label = stringResource(R.string.settings_section_advanced),
+                    footer = stringResource(R.string.settings_provider_advanced_footer),
                 ) {
                     SettingsRow(
                         icon = LXIconName.Sparkle, iconColor = t.accent,
-                        label = "智能路由", sub = "尚未接入移动引擎", chevron = false,
+                        label = stringResource(R.string.settings_provider_smart_routing), sub = stringResource(R.string.settings_provider_not_wired_mobile), chevron = false,
                         trailing = {
-                            Text("不可用", color = t.text4, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_linux_task_unavailable), color = t.text4, fontSize = 12.sp)
                         },
                     )
                     SettingsRow(
-                        label = "默认流式策略",
-                        sub = "当前由移动引擎固定管理",
+                        label = stringResource(R.string.settings_provider_streaming_policy),
+                        sub = stringResource(R.string.settings_provider_streaming_policy_sub),
                         icon = LXIconName.Workflow,
                         chevron = false,
                         isLast = true,
                         trailing = {
-                            Text("不可配置", color = t.text4, fontSize = 12.sp)
+                            Text(stringResource(R.string.settings_provider_not_configurable), color = t.text4, fontSize = 12.sp)
                         },
                     )
                 }
@@ -223,8 +227,8 @@ private fun ProviderRow(
                         provider.name, color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
-                    if (provider.isDefault) Badge("默认", t.accent, strong = true)
-                    if (!provider.enabled) Badge("停用", t.text4)
+                    if (provider.isDefault) Badge(stringResource(R.string.settings_badge_default), t.accent, strong = true)
+                    if (!provider.enabled) Badge(stringResource(R.string.settings_badge_disabled), t.text4)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(provider.status.dot(t)))
@@ -256,7 +260,7 @@ fun ProviderPickerPage(
 ) {
     val t = LingXiTheme.palette
     Column(Modifier.fillMaxWidth()) {
-        Blurb("选择一个预设 — 灵犀会自动预填 API 地址、Key 前缀和可用模型。")
+        Blurb(stringResource(R.string.settings_provider_picker_intro))
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -278,7 +282,7 @@ fun ProviderPickerPage(
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(p.name, color = t.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                             Text(
-                                p.sub + if (p.models.isEmpty()) "" else " · ${p.models.size} 模型",
+                                p.sub + if (p.models.isEmpty()) "" else stringResource(R.string.settings_provider_models_count_fmt, p.models.size),
                                 color = t.text4, fontSize = 11.5f.sp,
                             )
                         }
@@ -327,14 +331,15 @@ fun ProviderEditPage(
     var credentialBusy by remember(providerId) { mutableStateOf(false) }
     var connectionBusy by remember(providerId) { mutableStateOf(false) }
     var connectionMessage by remember(providerId) { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
     var credentialMessage by remember(providerId, editing.credentialConfigured) {
         mutableStateOf(
             when {
-                kind != ProviderKind.Llm -> "当前页面仅对 LLM provider 接入真实 credential 存储。"
+                kind != ProviderKind.Llm -> context.getString(R.string.settings_provider_credential_llm_only)
                 !store.state.value.providers(kind).any { it.id == providerId } -> ""
                 !store.state.value.providers(kind).first { it.id == providerId }.credentialConfigured ->
-                    "尚未保存凭据"
-                else -> "凭据已在本机安全区配置；尚未执行网络连通性验证"
+                    context.getString(R.string.settings_provider_credential_not_saved)
+                else -> context.getString(R.string.settings_provider_credential_saved_unverified)
             },
         )
     }
@@ -349,7 +354,7 @@ fun ProviderEditPage(
         StatusBanner(
             status = editing.status,
             message = connectionMessage,
-            actionLabel = if (kind == ProviderKind.Llm) "测试连接" else "暂不支持",
+            actionLabel = if (kind == ProviderKind.Llm) stringResource(R.string.settings_provider_test_connection) else stringResource(R.string.common_not_supported),
             enabled = kind == ProviderKind.Llm &&
                 builtInSupported &&
                 !connectionBusy &&
@@ -358,23 +363,23 @@ fun ProviderEditPage(
         ) {
             val testedDraft = keyDraft.trim()
             connectionBusy = true
-            connectionMessage = "正在连接 Provider 并校验模型…"
+            connectionMessage = context.getString(R.string.settings_provider_connecting)
             store.testProviderConnection(kind, providerId, testedDraft.takeIf { it.isNotEmpty() }) { result ->
                 if (keyDraft.trim() == testedDraft) {
                     connectionMessage = result.message + if (result.connected && !result.usedStoredCredential) {
-                        " · 当前 Key 尚未保存"
+                        context.getString(R.string.settings_provider_key_unsaved_suffix)
                     } else {
                         ""
                     }
                 } else {
                     store.markProviderConnectionUnverified(kind, providerId)
-                    connectionMessage = "API Key 已变化，请重新测试"
+                    connectionMessage = context.getString(R.string.settings_provider_key_changed_retest)
                 }
                 connectionBusy = false
             }
         }
 
-        FieldLabel("显示名称")
+        FieldLabel(stringResource(R.string.settings_display_name))
         SettingsField(
             value = editing.name,
             onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(name = v) } },
@@ -382,7 +387,7 @@ fun ProviderEditPage(
             modifier = Modifier.padding(bottom = 14.dp),
         )
 
-        FieldLabel("API 地址")
+        FieldLabel(stringResource(R.string.settings_api_url))
         SettingsField(
             value = editing.url,
             onValueChange = { v ->
@@ -392,13 +397,13 @@ fun ProviderEditPage(
             },
             placeholder = preset.defaultUrl,
         )
-        FieldHint("默认 `${preset.defaultUrl.ifEmpty { "—" }}` · 可填代理 / 镜像")
+        FieldHint(stringResource(R.string.settings_provider_url_hint_fmt, preset.defaultUrl.ifEmpty { "—" }))
 
         FieldLabel("API Key")
         KeyField(
             value = keyDraft,
             placeholder = if (editing.credentialConfigured) {
-                preset.keyPrefix + "••••••••••••（已安全保存）"
+                preset.keyPrefix + stringResource(R.string.settings_provider_key_saved_placeholder)
             } else {
                 preset.keyPrefix + "..."
             },
@@ -414,10 +419,10 @@ fun ProviderEditPage(
         )
         FieldHint(
             when {
-                kind != ProviderKind.Llm -> "搜索/抓取 provider 仍是本地配置页；当前未接入真实 engine credential 协议。"
-                !builtInSupported -> "该预设当前不在 Android 内建 provider catalog 中；需后续 bridge/profile 扩展。"
-                editing.credentialConfigured -> "安全存储不会回传明文；输入新 Key 可覆盖当前凭据。"
-                else -> "凭据保存到引擎共享安全存储；Anthropic 还会镜像到当前启动兼容 key 槽。"
+                kind != ProviderKind.Llm -> stringResource(R.string.settings_provider_hint_local_only)
+                !builtInSupported -> stringResource(R.string.settings_provider_hint_not_in_catalog)
+                editing.credentialConfigured -> stringResource(R.string.settings_provider_hint_overwrite)
+                else -> stringResource(R.string.settings_provider_hint_secure_store)
             },
         )
 
@@ -428,7 +433,7 @@ fun ProviderEditPage(
                 onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(cx = v) } },
                 placeholder = "0123456789abcdef:ghi",
             )
-            FieldHint("在 Google Programmable Search 创建并粘贴搜索引擎 ID")
+            FieldHint(stringResource(R.string.settings_provider_cx_hint))
         }
 
         if (kind == ProviderKind.Llm) {
@@ -444,7 +449,7 @@ fun ProviderEditPage(
                     },
                 )
             } else {
-                FieldLabel("模型 ID")
+                FieldLabel(stringResource(R.string.settings_provider_model_id))
                 SettingsField(
                     value = editing.model,
                     onValueChange = { v ->
@@ -460,33 +465,33 @@ fun ProviderEditPage(
 
         if (kind == ProviderKind.Llm) {
             SettingsSection(
-                label = "应用",
+                label = stringResource(R.string.settings_provider_apply),
                 footer = if (providerId in state.pendingLlmProviderChanges) {
-                    "配置已保存但尚未用于当前引擎。点击应用后会重建引擎，新请求将使用最新配置。"
+                    stringResource(R.string.settings_provider_apply_footer_pending)
                 } else {
-                    "当前引擎已使用这份提供商配置。"
+                    stringResource(R.string.settings_provider_apply_footer_applied)
                 },
             ) {
                 SettingsRow(
-                    label = "应用配置并重连",
-                    sub = "一次性应用 URL、模型与启用状态",
+                    label = stringResource(R.string.settings_provider_apply_config_reconnect),
+                    sub = stringResource(R.string.settings_provider_apply_config_sub),
                     chevron = false,
                     isLast = true,
                     trailing = {
                         ProviderTextAction(
-                            label = applyState.label,
+                            label = stringResource(applyState.labelRes),
                             enabled = applyState.enabled,
                             onClick = {
                                 applying = true
                                 if (applyState.saveCredential) {
-                                    credentialMessage = "正在保存凭据并应用配置…"
+                                    credentialMessage = context.getString(R.string.settings_provider_saving_applying)
                                     store.saveProviderCredential(kind, providerId, keyDraft) { error ->
                                         if (error != null) {
-                                            credentialMessage = "保存失败：$error"
+                                            credentialMessage = context.getString(R.string.settings_provider_save_failed_fmt, error)
                                             applying = false
                                         } else {
                                             keyDraft = ""
-                                            credentialMessage = "凭据已安全保存，配置已应用"
+                                            credentialMessage = context.getString(R.string.settings_provider_saved_applied)
                                             onReconnectEngine()
                                             store.markLlmConfigurationApplied()
                                             applying = false
@@ -504,16 +509,16 @@ fun ProviderEditPage(
             }
 
             SettingsSection(
-                label = "凭据",
+                label = stringResource(R.string.settings_section_credentials),
                 footer = credentialMessage,
             ) {
                 SettingsRow(
-                    label = "保存凭据",
-                    sub = if (builtInSupported) "写入引擎共享安全存储" else "当前预设未接入 Android 内建 provider catalog",
+                    label = stringResource(R.string.settings_provider_save_credential),
+                    sub = if (builtInSupported) stringResource(R.string.settings_provider_write_secure_store) else stringResource(R.string.settings_provider_preset_not_in_catalog),
                     chevron = false,
                     trailing = {
                         Text(
-                            "保存",
+                            stringResource(R.string.voice_save_button),
                             color = if (builtInSupported) t.accent else t.text4,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
@@ -529,7 +534,7 @@ fun ProviderEditPage(
                                     credentialBusy = true
                                     store.saveProviderCredential(kind, providerId, keyDraft) { error ->
                                         credentialMessage =
-                                            error?.let { "保存失败：$it" } ?: "凭据已保存到引擎共享安全存储"
+                                            error?.let { context.getString(R.string.settings_provider_save_failed_fmt, it) } ?: context.getString(R.string.settings_provider_credential_saved_secure)
                                         if (error == null) {
                                             keyDraft = ""
                                             onReconnectEngine()
@@ -543,13 +548,13 @@ fun ProviderEditPage(
                     },
                 )
                 SettingsRow(
-                    label = "清除已保存凭据",
-                    sub = if (editing.credentialConfigured) "删除共享安全存储中的 provider key" else "当前没有已保存凭据",
+                    label = stringResource(R.string.settings_provider_clear_credential),
+                    sub = if (editing.credentialConfigured) stringResource(R.string.settings_provider_clear_credential_sub) else stringResource(R.string.settings_provider_no_saved_credential),
                     chevron = false,
                     isLast = true,
                     trailing = {
                         Text(
-                            "清除",
+                            stringResource(R.string.settings_provider_clear_key),
                             color = if (editing.credentialConfigured && builtInSupported) t.danger else t.text4,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
@@ -565,7 +570,7 @@ fun ProviderEditPage(
                                     credentialBusy = true
                                     store.clearProviderCredential(kind, providerId) { error ->
                                         credentialMessage =
-                                            error?.let { "清除失败：$it" } ?: "共享安全存储中的凭据已清除"
+                                            error?.let { context.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: context.getString(R.string.settings_provider_credential_cleared)
                                         if (error == null) {
                                             onReconnectEngine()
                                             store.markLlmConfigurationApplied()
@@ -582,7 +587,7 @@ fun ProviderEditPage(
 
         SettingsSection {
             SettingsRow(
-                label = "启用", chevron = false,
+                label = stringResource(R.string.settings_provider_enable), chevron = false,
                 trailing = {
                     com.lingxi.code.components.LXToggle(
                         checked = editing.enabled,
@@ -591,7 +596,7 @@ fun ProviderEditPage(
                 },
             )
             SettingsRow(
-                label = "设为默认", chevron = false, isLast = true,
+                label = stringResource(R.string.settings_provider_set_default), chevron = false, isLast = true,
                 onTap = {
                     store.setDefaultProvider(kind, providerId)
                     if (kind == ProviderKind.Llm) {
@@ -603,7 +608,7 @@ fun ProviderEditPage(
                     if (editing.isDefault) {
                         LXIcon(name = LXIconName.Check, size = 16.dp, color = t.accent, stroke = 2.2f)
                     } else {
-                        Text("未启用", color = t.text4, fontSize = 12.sp)
+                        Text(stringResource(R.string.settings_status_not_enabled), color = t.text4, fontSize = 12.sp)
                     }
                 },
             )
@@ -635,7 +640,7 @@ fun ProviderEditPage(
                 .padding(12.dp),
         ) {
             Text(
-                if (removing) "正在删除凭据…" else "移除此提供商",
+                if (removing) stringResource(R.string.settings_provider_removing_credential) else stringResource(R.string.settings_provider_remove),
                 color = if (removing) t.text4 else t.danger,
                 fontSize = 13.5f.sp,
                 fontWeight = FontWeight.Medium,
@@ -735,7 +740,7 @@ private fun StatusBanner(
             }
         }
         Text(
-            if (testing) "测试中…" else actionLabel,
+            if (testing) stringResource(R.string.settings_provider_testing) else actionLabel,
             color = if (enabled && !testing) t.text2 else t.text4,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
@@ -838,7 +843,7 @@ private fun KeyField(
                 )
             }
             Text(
-                if (show) "隐藏" else "显示",
+                if (show) stringResource(R.string.settings_provider_hide_key) else stringResource(R.string.settings_provider_show_key),
                 color = t.text3, fontSize = 11.sp, fontWeight = FontWeight.Medium,
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
@@ -867,7 +872,7 @@ private fun ModelPicker(
 ) {
     val t = LingXiTheme.palette
     Column(Modifier.fillMaxWidth()) {
-        FieldLabel("默认模型")
+        FieldLabel(stringResource(R.string.settings_provider_default_model))
         Column(
             modifier = Modifier
                 .fillMaxWidth()

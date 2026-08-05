@@ -49,13 +49,13 @@ struct ConversationError: Identifiable, Equatable {
         /// A short, user-facing label (Chinese, matching the app's copy).
         var label: String {
             switch self {
-            case .transport: return "网络错误"
-            case .protocol: return "协议错误"
-            case .server: return "服务端错误"
-            case .maxTurns: return "已达最大轮数"
-            case .rejected: return "操作被拒绝"
-            case .internal: return "内部错误"
-            case .host: return "引擎错误"
+            case .transport: return String(localized: "chat_error_transport")
+            case .protocol: return String(localized: "chat_error_protocol")
+            case .server: return String(localized: "chat_error_server")
+            case .maxTurns: return String(localized: "chat_error_max_turns")
+            case .rejected: return String(localized: "chat_error_rejected")
+            case .internal: return String(localized: "chat_error_internal")
+            case .host: return String(localized: "chat_error_host")
             }
         }
     }
@@ -75,8 +75,8 @@ enum TurnNotice: Equatable {
 
     var text: String {
         switch self {
-        case .maxTurns: return "已达最大轮数，对话已停止。"
-        case .cancelled: return "已取消本轮。"
+        case .maxTurns: return String(localized: "chat_notice_max_turns")
+        case .cancelled: return String(localized: "chat_notice_cancelled")
         }
     }
 }
@@ -393,7 +393,7 @@ extension ConversationSource {
             profile: ProviderLaunchProfile,
             credentialOverride: String?
         ) async throws -> ProviderConnectionTestResult {
-            .failure(message: "当前预览环境没有可用的 Provider 引擎。")
+            .failure(message: String(localized: "chat_provider_engine_unavailable"))
         }
         func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {}
     }
@@ -870,7 +870,7 @@ final class MockConversationSource: ConversationSource {
             submitSessionTransition(
                 cancelling: turnIdToCancel,
                 submission: .command(.newSession(cwd: nil, model: nil)),
-                failurePrefix: "新建会话失败",
+                failurePrefix: String(localized: "chat_new_session_failed"),
                 transitionOperationID: transitionOperationID,
                 isNew: true
             )
@@ -892,7 +892,7 @@ final class MockConversationSource: ConversationSource {
             }
             _ = operationForCancelling(turnId: turnId)
             model.isCancelling = true
-            model.statusLine = "正在停止…"
+            model.statusLine = String(localized: "chat_stopping")
             model.pendingPermissions = []
         }
 
@@ -927,7 +927,7 @@ final class MockConversationSource: ConversationSource {
                         if self.model.error == nil {
                             self.model.error = ConversationError(
                                 kind: .host,
-                                message: "取消旧会话失败：\(error)"
+                                message: String(localized: "chat_cancel_old_session_failed \(error)")
                             )
                         }
                         return
@@ -994,10 +994,10 @@ final class MockConversationSource: ConversationSource {
             resetTranscriptForSessionSwitch(isNew: true)
             do {
                 try await submitCommand(.newSession(cwd: nil, model: nil))
-                model.statusLine = "原会话已不存在，已创建新对话"
+                model.statusLine = String(localized: "chat_session_replaced")
             } catch {
                 setPendingSessionTransition(nil)
-                fail(.host, "原会话已不存在，且新建会话失败：\(error)")
+                fail(.host, String(localized: "chat_session_replaced_failed \(error)"))
             }
         }
 
@@ -1055,7 +1055,7 @@ final class MockConversationSource: ConversationSource {
                     if self.model.error == nil {
                         self.model.error = ConversationError(
                             kind: .host,
-                            message: "取消旧会话失败：\(error)"
+                            message: String(localized: "chat_cancel_old_session_failed \(error)")
                         )
                     }
                 }
@@ -1359,8 +1359,8 @@ final class MockConversationSource: ConversationSource {
                     if model.pendingPermissions.isEmpty {
                         model.pendingPermissions = operation.pendingPermissions
                     }
-                    model.error = ConversationError(kind: .host, message: "取消失败：\(error)")
-                } else if model.statusLine == "正在停止…" {
+                    model.error = ConversationError(kind: .host, message: String(localized: "chat_cancel_failed \(error)"))
+                } else if model.statusLine == String(localized: "chat_stopping") {
                     model.statusLine = nil
                 }
                 Self.turnLog.error(
@@ -1379,7 +1379,7 @@ final class MockConversationSource: ConversationSource {
                 finishActiveRun(.cancelled)
                 publishActiveTurnCompletion(.cancelled)
                 clearTurnPointers(keepEpoch: false)
-            } else if model.statusLine == "正在停止…" {
+            } else if model.statusLine == String(localized: "chat_stopping") {
                 model.statusLine = nil
             }
             requestSessionCatalogRefreshAfterSettledTurn()
@@ -1478,7 +1478,7 @@ final class MockConversationSource: ConversationSource {
                 "cancel requested turn=\(operation.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
             )
             model.isCancelling = true
-            model.statusLine = "正在停止…"
+            model.statusLine = String(localized: "chat_stopping")
             model.pendingPermissions = []
             do {
                 try await operation.task.value
@@ -1689,7 +1689,7 @@ final class MockConversationSource: ConversationSource {
                 updateActiveRun { run in
                     run.reasoning += thinking
                     if signature != nil && run.notices.contains(where: { $0.id == "thinking-signature" }) == false {
-                        run.notices.append(.init(id: "thinking-signature", kind: .info, text: "推理签名已附加"))
+                        run.notices.append(.init(id: "thinking-signature", kind: .info, text: String(localized: "chat_thinking_signature")))
                     }
                 }
 
@@ -1729,7 +1729,7 @@ final class MockConversationSource: ConversationSource {
                         trace.status = .running
                         trace.inputSummary = started.command
                     }
-                    model.statusLine = "Shell 运行中…"
+                    model.statusLine = String(localized: "chat_shell_running")
                 } else {
                     let summary = ConversationExecutionParsing.summarizeToolInput(inputJson)
                     upsertTool(id: id, tool: tool, fallbackSummary: summary) { trace in
@@ -1737,7 +1737,7 @@ final class MockConversationSource: ConversationSource {
                         trace.status = .running
                         trace.inputSummary = summary
                     }
-                    model.statusLine = "调用工具 \(tool)…"
+                    model.statusLine = String(localized: "chat_tool_calling \(tool)")
                 }
 
             case let .toolHeartbeat(id, tool, elapsedMs):
@@ -1762,14 +1762,14 @@ final class MockConversationSource: ConversationSource {
                         trace.status = .running
                         trace.elapsedMs = elapsedMs
                     }
-                    model.statusLine = "Shell 运行中…"
+                    model.statusLine = String(localized: "chat_shell_running")
                 } else {
                     upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
                         trace.tool = tool
                         trace.status = .running
                         trace.elapsedMs = elapsedMs
                     }
-                    model.statusLine = "工具 \(tool) 运行中…"
+                    model.statusLine = String(localized: "chat_tool_running \(tool)")
                 }
 
             case let .toolUseResult(id, tool, resultJson, isError):
@@ -1821,8 +1821,8 @@ final class MockConversationSource: ConversationSource {
                         )
                     }
                     model.statusLine = wasCancelled
-                        ? "工具 \(tool) 已取消"
-                        : (isError ? "工具 \(tool) 失败" : "工具 \(tool) 完成")
+                        ? String(localized: "chat_tool_cancelled \(tool)")
+                        : (isError ? String(localized: "chat_tool_failed \(tool)") : String(localized: "chat_tool_completed \(tool)"))
                 }
 
             case let .usageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
@@ -1846,7 +1846,7 @@ final class MockConversationSource: ConversationSource {
                         delayMs: delayMs
                     )
                 }
-                model.statusLine = "重试中（\(attempt)/\(maxRetries)）…"
+                model.statusLine = String(localized: "chat_retrying \(attempt) \(maxRetries)")
 
             case let .costUpdate(_, _, _, _, _, formatted):
                 guard acceptTurnEvent(event) else { return }
@@ -2085,7 +2085,7 @@ final class MockConversationSource: ConversationSource {
         func cancelForTesting() {
             guard model.streaming, currentTurnId != nil else { return }
             model.isCancelling = true
-            model.statusLine = "正在停止…"
+            model.statusLine = String(localized: "chat_stopping")
             model.pendingPermissions = []
         }
 
@@ -2208,13 +2208,13 @@ final class MockConversationSource: ConversationSource {
                 case let .thinking(text, _):
                     return text
                 case .redactedThinking:
-                    return "[已折叠的思考]"
+                    return String(localized: "chat_redacted_thinking")
                 case .compactBoundary:
-                    return "对话已压缩"
+                    return String(localized: "chat_compacted_label")
                 case let .toolUse(_, tool, _, _):
-                    return "调用工具 \(tool)…"
+                    return String(localized: "chat_tool_calling \(tool)")
                 case let .toolResult(_, _, isError, summary, _, _, _, _):
-                    return isError ? summary : "工具结果：\(summary)"
+                    return isError ? summary : String(localized: "chat_tool_result_summary \(summary)")
                 }
             }
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -2282,7 +2282,7 @@ final class MockConversationSource: ConversationSource {
                     let handle = try await self.ensureHandle()
                     try await handle.submit(command: .setModel(model: id))
                 } catch {
-                    self.fail(.host, "切换模型失败：\(error)")
+                    self.fail(.host, String(localized: "chat_switch_model_failed \(error)"))
                 }
             }
         }
@@ -2326,7 +2326,7 @@ final class MockConversationSource: ConversationSource {
             submitSessionTransition(
                 cancelling: turnIdToCancel,
                 submission: submission,
-                failurePrefix: "恢复会话失败",
+                failurePrefix: String(localized: "chat_resume_session_failed"),
                 transitionOperationID: transitionOperationID,
                 resumeTargetID: uuid,
                 allowsMissingSessionReplacement: emptySessionTitle == nil,
@@ -2379,7 +2379,7 @@ final class MockConversationSource: ConversationSource {
                     let handle = try await self.ensureHandle()
                     try await handle.submit(command: command)
                 } catch {
-                    self.fail(.host, "权限响应失败：\(error)")
+                    self.fail(.host, String(localized: "chat_permission_response_failed \(error)"))
                 }
             }
         }

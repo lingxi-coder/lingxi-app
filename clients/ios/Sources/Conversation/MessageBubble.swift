@@ -60,7 +60,7 @@ struct MessageBubble: View, Equatable {
                             .contentShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("分享回复")
+                    .accessibilityLabel("chat_share_reply")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Spacer(minLength: 0)
@@ -87,17 +87,17 @@ private struct StructuredAIBlocks: View {
                     AIText(markdown: text)
                         .equatable()
                 case let .thinking(text, _):
-                    panel(title: "思考", body: text, icon: .brain)
+                    panel(title: String(localized: "chat_thinking"), body: text, icon: .brain)
                 case .redactedThinking:
-                    panel(title: "思考", body: "[已折叠的思考]", icon: .brain)
+                    panel(title: String(localized: "chat_thinking"), body: String(localized: "chat_redacted_thinking"), icon: .brain)
                 case let .compactBoundary(messagesBefore, messagesAfter, _):
                     compactBoundary(before: messagesBefore, after: messagesAfter)
                 case let .toolUse(_, tool, inputSummary, _):
-                    panel(title: "调用工具 \(tool)", body: inputSummary, icon: .workflow)
+                    panel(title: String(localized: "chat_tool_call_title \(tool)"), body: inputSummary, icon: .workflow)
                 case let .toolResult(_, tool, isError, summary, _, oldString, newString, filePath):
                     VStack(alignment: .leading, spacing: 6) {
                         panel(
-                            title: isError ? "工具 \(tool) 失败" : "工具 \(tool) 返回",
+                            title: isError ? String(localized: "chat_tool_failed \(tool)") : String(localized: "chat_tool_returned \(tool)"),
                             body: summary,
                             icon: isError ? .warning : .check
                         )
@@ -139,7 +139,7 @@ private struct StructuredAIBlocks: View {
     private func compactBoundary(before: Int, after: Int) -> some View {
         HStack(spacing: 8) {
             LXIcon(name: .workflow, size: 12, color: t.text3, stroke: 1.7)
-            Text("对话已压缩 \(before) → \(after)")
+            Text(String(localized: "chat_compacted \(before) \(after)"))
                 .font(.system(size: 12))
                 .foregroundColor(t.text3)
         }

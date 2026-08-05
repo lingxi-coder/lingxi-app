@@ -9,7 +9,7 @@ struct ConversationExecutionRunCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 LXIcon(name: .workflow, size: 14, color: t.accent, stroke: 1.8)
-                Text("Agent 运行")
+                Text("chat_agent_run")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(t.text)
                 StatusChip(text: run.status.label, accent: statusColor)
@@ -22,7 +22,7 @@ struct ConversationExecutionRunCard: View {
             }
 
             if !run.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                blockPanel(icon: .brain, title: "思考", body: run.reasoning)
+                blockPanel(icon: .brain, title: String(localized: "chat_thinking"), body: run.reasoning)
             }
 
             if !run.notices.isEmpty {
@@ -45,7 +45,7 @@ struct ConversationExecutionRunCard: View {
             if let retry = run.retry {
                 HStack(spacing: 8) {
                     LXIcon(name: .clock, size: 12, color: t.text3, stroke: 1.6)
-                    Text("\(retry.message) · 第 \(retry.attempt) / \(retry.maxRetries) 次，\(retry.delayMs)ms 后重试")
+                    Text(String(localized: "chat_retry_attempt \(retry.message) \(retry.attempt) \(retry.maxRetries) \(retry.delayMs)"))
                         .font(.system(size: 12.5))
                         .foregroundColor(t.text2)
                 }
@@ -98,13 +98,13 @@ struct ConversationExecutionRunCard: View {
 
             if let usage = run.usage {
                 HStack(spacing: 10) {
-                    UsageChip(label: "输入", value: "\(usage.inputTokens)")
-                    UsageChip(label: "输出", value: "\(usage.outputTokens)")
+                    UsageChip(label: String(localized: "chat_usage_input"), value: "\(usage.inputTokens)")
+                    UsageChip(label: String(localized: "chat_usage_output"), value: "\(usage.outputTokens)")
                     if usage.cacheReadTokens > 0 {
-                        UsageChip(label: "缓存命中", value: "\(usage.cacheReadTokens)")
+                        UsageChip(label: String(localized: "chat_usage_cache_read"), value: "\(usage.cacheReadTokens)")
                     }
                     if usage.cacheCreationTokens > 0 {
-                        UsageChip(label: "缓存写入", value: "\(usage.cacheCreationTokens)")
+                        UsageChip(label: String(localized: "chat_usage_cache_write"), value: "\(usage.cacheCreationTokens)")
                     }
                 }
             }
@@ -112,7 +112,7 @@ struct ConversationExecutionRunCard: View {
             if !run.compactions.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(run.compactions) { item in
-                        Text("上下文压缩：\(item.messagesBefore) → \(item.messagesAfter)，释放 \(item.bytesSaved) B")
+                        Text(String(localized: "chat_compaction \(item.messagesBefore) \(item.messagesAfter) \(item.bytesSaved)"))
                             .font(.system(size: 12))
                             .foregroundColor(t.text3)
                     }
@@ -121,7 +121,7 @@ struct ConversationExecutionRunCard: View {
 
             if run.activeWorkers > 0 || !run.workers.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(run.coordinatorTeam.map { "\($0) · \(run.activeWorkers) 个活跃 Agent" } ?? "\(run.activeWorkers) 个活跃 Agent")
+                    Text(run.coordinatorTeam.map { String(localized: "chat_team_active_agents \($0) \(run.activeWorkers)") } ?? String(localized: "chat_active_agents \(run.activeWorkers)"))
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundColor(t.text2)
                     ForEach(run.workers) { worker in
@@ -230,7 +230,7 @@ private struct ConversationShellCardView: View {
                     .foregroundColor(t.text4)
             }
             if let onOpenInTerminal, !card.command.isEmpty {
-                Button("在终端打开") {
+                Button("chat_open_in_terminal") {
                     onOpenInTerminal(
                         ConversationShellLaunchRequest(
                             taskId: card.taskId,
@@ -251,7 +251,7 @@ private struct ConversationShellCardView: View {
                 labeledOutput("stderr", card.stderr)
             }
             if card.truncated {
-                Text("输出已截断")
+                Text("chat_output_truncated")
                     .font(.system(size: 11.5))
                     .foregroundColor(t.text3)
             }

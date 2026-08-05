@@ -113,13 +113,13 @@ import SwiftUI
         /// and response mapping. Allow-once is the accent (primary) action.
         private func actionRow(requestId: UInt64) -> some View {
             HStack(spacing: 8) {
-                promptButton("拒绝", tint: t.danger, filled: false) {
+                promptButton(String(localized: "permission_deny"), tint: t.danger, filled: false) {
                     onDeny(requestId)
                 }
-                promptButton("始终允许", tint: t.text2, filled: false) {
+                promptButton(String(localized: "permission_allow_always"), tint: t.text2, filled: false) {
                     onApprove(requestId, .allowAlways)
                 }
-                promptButton("允许", tint: .white, filled: true) {
+                promptButton(String(localized: "permission_allow"), tint: .white, filled: true) {
                     onApprove(requestId, .allowOnce)
                 }
             }
@@ -151,13 +151,13 @@ import SwiftUI
         static func describe(_ kind: PermissionKindDto) -> (title: String, detail: String) {
             switch kind {
             case let .toolUseConfirm(toolName, toolInputJson, _):
-                return ("允许 \(toolName)？", previewToolInput(toolInputJson))
+                return (String(localized: "permission_allow_tool \(toolName)"), previewToolInput(toolInputJson))
             case let .exitPlanMode(plan):
-                return ("退出计划模式并继续？", plan)
+                return (String(localized: "permission_exit_plan_mode"), plan)
             case .bypassPermissionsMode:
-                return ("启用免确认模式？", "智能体将不再就后续操作征求确认。")
+                return (String(localized: "permission_bypass_confirmation_title"), String(localized: "permission_bypass_confirmation_detail"))
             @unknown default:
-                return ("请求权限", "")
+                return (String(localized: "permission_request_title"), "")
             }
         }
 

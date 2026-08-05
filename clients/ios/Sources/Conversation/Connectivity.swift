@@ -62,10 +62,10 @@ struct OfflineBanner: View {
                 .frame(width: 20, height: 20)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("当前离线")
+                Text("chat_offline")
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(t.text)
-                Text("网络不可用，新消息将无法送达。")
+                Text("chat_offline_detail")
                     .font(.caption)
                     .foregroundColor(t.text2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -73,7 +73,7 @@ struct OfflineBanner: View {
             Spacer(minLength: 8)
             if let onRetry {
                 Button(action: onRetry) {
-                    Text("重试")
+                    Text("common_retry")
                         .font(.caption.weight(.semibold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12).padding(.vertical, 6)
@@ -81,7 +81,7 @@ struct OfflineBanner: View {
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("重试连接")
+                .accessibilityLabel("chat_retry_connection")
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)

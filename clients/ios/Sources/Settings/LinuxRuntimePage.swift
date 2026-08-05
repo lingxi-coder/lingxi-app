@@ -237,7 +237,7 @@ private enum LinuxRuntimeBridge {
         do {
             let handle = try await cache.handle(for: cfg)
             let tasks = try await handle.listTasks().map(mapTask)
-            let message = tasks.isEmpty ? "当前没有 guest 后台任务" : "已刷新 \(tasks.count) 个 guest 任务"
+            let message = tasks.isEmpty ? String(localized: "settings_linux_no_guest_tasks") : String(localized: "settings_linux_refresh_tasks")
             return .success(LinuxRuntimeTaskOperationResult(tasks: tasks, message: message))
         } catch {
             return .failure(LinuxRuntimeTaskOperationFailure(message: String(describing: error)))
@@ -401,7 +401,7 @@ struct LinuxRuntimePage: View {
     }
 
     private var blurb: some View {
-        Text("真机内置 iSH ARM64 与 Alpine Linux，可运行 shell、Python、包管理器和项目文件；Simulator 继续使用明确的 unavailable stub。")
+        Text("settings_linux_blurb")
             .font(.system(size: 11.5))
             .foregroundStyle(t.text3)
             .lineSpacing(4)
@@ -409,11 +409,13 @@ struct LinuxRuntimePage: View {
     }
 
     private var modeSection: some View {
-        SettingsSection(label: "后端选择") {
+        SettingsSection(label: String(localized: "settings_linux_section_backend")) {
             RadioList(
                 options: [
-                    .init(value: LinuxRuntimeMode.mobileLinux.rawValue, label: "Mobile Linux", sub: "iSH ARM64 + fakefs + Alpine（真机）"),
-                    .init(value: LinuxRuntimeMode.legacy.rawValue, label: "Legacy", sub: "禁用 Linux 后端并保留 unavailable shell stub"),
+                    .init(value: LinuxRuntimeMode.mobileLinux.rawValue, label: "Mobile Linux",
+                          sub: String(localized: "settings_linux_mobile_linux_sub")),
+                    .init(value: LinuxRuntimeMode.legacy.rawValue, label: "Legacy",
+                          sub: String(localized: "settings_linux_legacy_sub")),
                 ],
                 value: Binding(
                     get: { store.linuxRuntime.selectedMode.rawValue },
@@ -429,73 +431,88 @@ struct LinuxRuntimePage: View {
     }
 
     private var statusSection: some View {
-        SettingsSection(label: "状态") {
-            SettingsRow(icon: .workflow, iconColor: Color(srgb: 0.3503,0.6649,0.9741), label: "当前后端",
+        SettingsSection(label: String(localized: "settings_linux_section_status")) {
+            SettingsRow(icon: .workflow, iconColor: Color(srgb: 0.3503,0.6649,0.9741),
+                        label: String(localized: "settings_linux_current_backend"),
                         value: store.linuxRuntime.backend, chevron: false)
             SettingsRow(label: "Rootfs", sub: store.linuxRuntime.detail,
                         value: store.linuxRuntime.rootfsState.label, chevron: false)
-            SettingsRow(label: "版本", value: store.linuxRuntime.version ?? "未安装", chevron: false)
-            SettingsRow(label: "体积", value: store.linuxRuntime.installedSizeBytes.map(formatBytes) ?? "—", chevron: false)
-            SettingsRow(label: "托管目录", sub: store.linuxRuntime.managedRoot ?? "未创建",
+            SettingsRow(label: String(localized: "settings_linux_version"),
+                        value: store.linuxRuntime.version ?? String(localized: "settings_linux_not_installed"),
+                        chevron: false)
+            SettingsRow(label: String(localized: "settings_linux_size"),
+                        value: store.linuxRuntime.installedSizeBytes.map(formatBytes) ?? "—", chevron: false)
+            SettingsRow(label: String(localized: "settings_linux_managed_dir"),
+                        sub: store.linuxRuntime.managedRoot ?? String(localized: "settings_linux_not_installed"),
                         value: store.linuxRuntime.badge, chevron: false, isLast: true)
         }
     }
 
     private var maintenanceSection: some View {
         SettingsSection(
-            label: "维护",
-            footer: "校验会检查 fakefs 元数据与基础命令；修复会从应用内置归档恢复缺失文件；重置只重建托管 rootfs，不会删除项目、会话或密钥。"
+            label: String(localized: "settings_linux_section_maintenance"),
+            footer: String(localized: "settings_linux_maintenance_footer")
         ) {
-            actionRow("刷新状态", action: .refresh, enabled: store.linuxRuntime.busyAction == nil)
-            actionRow("校验 rootfs", action: .verify,
+            actionRow(String(localized: "settings_linux_action_refresh"), action: .refresh,
+                      enabled: store.linuxRuntime.busyAction == nil)
+            actionRow(String(localized: "settings_linux_action_verify"), action: .verify,
                       enabled: store.linuxRuntime.verifyAllowed && store.linuxRuntime.busyAction == nil)
-            actionRow("修复 rootfs", action: .repair,
+            actionRow(String(localized: "settings_linux_action_repair"), action: .repair,
                       enabled: store.linuxRuntime.repairAllowed && store.linuxRuntime.busyAction == nil)
-            actionRow("重置 rootfs", action: .reset,
+            actionRow(String(localized: "settings_linux_action_reset"), action: .reset,
                       enabled: store.linuxRuntime.resetAllowed && store.linuxRuntime.busyAction == nil,
                       isLast: true)
         }
     }
 
     private var workspaceSection: some View {
-        SettingsSection(label: "工作区与终端") {
-            SettingsRow(label: "终端入口",
-                        sub: store.linuxRuntime.canOpenTerminal ? "可创建 PTY 终端会话" : "当前构建未提供可用 PTY 运行时",
-                        value: store.linuxRuntime.canOpenTerminal ? "可用" : "已禁用",
+        SettingsSection(label: String(localized: "settings_linux_section_workspace")) {
+            SettingsRow(label: String(localized: "settings_linux_terminal_entry"),
+                        sub: store.linuxRuntime.canOpenTerminal
+                            ? String(localized: "settings_linux_pty_available")
+                            : String(localized: "settings_linux_pty_unavailable"),
+                        value: store.linuxRuntime.canOpenTerminal
+                            ? String(localized: "settings_status_available")
+                            : String(localized: "settings_status_disabled"),
                         chevron: false)
-            SettingsRow(label: "外部目录挂载",
+            SettingsRow(label: String(localized: "settings_linux_external_mounts"),
                         sub: store.linuxRuntime.writableGuestPaths.isEmpty
-                            ? "当前无额外挂载；未来仅按目录授权开放"
+                            ? String(localized: "settings_linux_no_mounts")
                             : store.linuxRuntime.writableGuestPaths.prefix(2).joined(separator: " · "),
-                        value: "\(store.linuxRuntime.writableGuestPaths.count) 项",
+                        value: String(localized: "settings_count_items \(store.linuxRuntime.writableGuestPaths.count)"),
                         chevron: false)
-            SettingsRow(label: "执行任务",
-                        sub: store.linuxRuntime.lastActionMessage ?? "当前没有可停止的 Mobile Linux 任务",
-                        value: store.linuxRuntime.lastAction?.label ?? "空闲",
+            SettingsRow(label: String(localized: "settings_linux_task_execution"),
+                        sub: store.linuxRuntime.lastActionMessage ?? String(localized: "settings_linux_no_guest_tasks"),
+                        value: store.linuxRuntime.lastAction?.label ?? String(localized: "settings_linux_idle"),
                         chevron: false, isLast: true)
         }
     }
 
     private var terminalSection: some View {
-        SettingsSection(label: "终端", footer: "终端使用当前项目的 guest workspace；运行时或 PTY 不可用时会显示修复入口，不会回退到其他目录。") {
-            FieldLabel(text: "初始命令")
+        SettingsSection(label: String(localized: "settings_linux_section_terminal"),
+                        footer: String(localized: "settings_linux_terminal_footer")) {
+            FieldLabel(text: String(localized: "settings_linux_initial_command"))
             SettingsField(text: Binding(
                 get: { store.linuxRuntime.terminal.draftCommand },
                 set: { store.linuxRuntime.terminal.draftCommand = $0 }
-            ), placeholder: "例如：python3 --version")
+            ), placeholder: String(localized: "settings_linux_command_placeholder"))
                 .padding(.bottom, 14)
             SettingsRow(
-                label: "命令预览",
-                sub: normalizedDraftCommand ?? "未设置；打开后进入交互 shell",
-                value: normalizedDraftCommand == nil ? "交互 shell" : "将自动执行",
+                label: String(localized: "settings_linux_command_preview"),
+                sub: normalizedDraftCommand ?? String(localized: "settings_linux_no_command_set"),
+                value: normalizedDraftCommand == nil
+                    ? String(localized: "settings_linux_interactive_shell")
+                    : String(localized: "settings_linux_will_auto_run"),
                 chevron: false
             )
             SettingsRow(
-                label: "打开全屏终端",
+                label: String(localized: "settings_linux_open_fullscreen_terminal"),
                 sub: store.linuxRuntime.canOpenTerminal
-                    ? "使用当前项目工作区"
-                    : "仍可打开并查看不可用原因与修复入口",
-                value: store.linuxRuntime.canOpenTerminal ? "可用" : "诊断",
+                    ? String(localized: "settings_linux_use_project_workspace")
+                    : String(localized: "settings_linux_open_despite_unavailable"),
+                value: store.linuxRuntime.canOpenTerminal
+                    ? String(localized: "settings_status_available")
+                    : String(localized: "settings_linux_diagnose"),
                 chevron: true,
                 isLast: true,
                 onTap: onOpenTerminal
@@ -504,10 +521,10 @@ struct LinuxRuntimePage: View {
     }
 
     private var tasksSection: some View {
-        SettingsSection(label: "任务") {
+        SettingsSection(label: String(localized: "settings_linux_section_tasks")) {
             actionButtonRow(
-                label: "刷新任务列表",
-                buttonTitle: "刷新",
+                label: String(localized: "settings_linux_refresh_tasks"),
+                buttonTitle: String(localized: "settings_linux_refresh_button"),
                 enabled: store.linuxRuntime.available && !taskOperations.isBusy,
                 busy: taskOperations.busyOperation == .refreshTasks,
                 isLast: store.linuxRuntime.tasks.isEmpty
@@ -515,7 +532,8 @@ struct LinuxRuntimePage: View {
                 Task { await refreshTasks() }
             }
             if store.linuxRuntime.tasks.isEmpty {
-                SettingsRow(label: "当前任务", sub: "当前没有 guest 后台任务",
+                SettingsRow(label: String(localized: "settings_linux_task_current"),
+                            sub: String(localized: "settings_linux_no_guest_tasks"),
                             value: "0", chevron: false, isLast: true)
             } else {
                 ForEach(Array(store.linuxRuntime.tasks.enumerated()), id: \.element.id) { index, task in
@@ -530,7 +548,7 @@ struct LinuxRuntimePage: View {
                             if taskOperations.isStopping(task.id) {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Button("停止") {
+                                Button(String(localized: "settings_linux_stop_task")) {
                                     Task { await stopTask(taskID: task.id) }
                                 }
                                 .font(.system(size: 12, weight: .medium))
@@ -545,15 +563,18 @@ struct LinuxRuntimePage: View {
     }
 
     private var mountsSection: some View {
-        SettingsSection(label: "挂载骨架") {
+        SettingsSection(label: String(localized: "settings_linux_section_mounts")) {
             if store.linuxRuntime.mounts.isEmpty {
-                SettingsRow(label: "挂载目录", sub: "当前无挂载；真实 runtime 接入后这里展示 workspace / memory / skills / shared",
+                SettingsRow(label: String(localized: "settings_linux_mounts_label"),
+                            sub: String(localized: "settings_linux_no_mounts_detail"),
                             value: "0", chevron: false, isLast: true)
             } else {
                 ForEach(Array(store.linuxRuntime.mounts.enumerated()), id: \.element.id) { index, mount in
                     SettingsRow(label: mount.guestPath,
                                 sub: mount.hostPath,
-                                value: mount.readOnly ? "只读" : "可写",
+                                value: mount.readOnly
+                                    ? String(localized: "settings_linux_read_only")
+                                    : String(localized: "settings_linux_writable"),
                                 chevron: false,
                                 isLast: index == store.linuxRuntime.mounts.count - 1)
                 }
@@ -562,15 +583,17 @@ struct LinuxRuntimePage: View {
     }
 
     private var safetySection: some View {
-        SettingsSection(label: "安全说明") {
-            SettingsRow(icon: .pin, label: "执行边界",
-                        sub: "iSH / fakefs 不是安全边界；真实边界仍是 iOS App 沙箱与宿主策略",
+        SettingsSection(label: String(localized: "settings_linux_section_safety")) {
+            SettingsRow(icon: .pin, label: String(localized: "settings_linux_execution_boundary"),
+                        sub: String(localized: "settings_linux_execution_boundary_sub"),
                         chevron: false)
-            SettingsRow(icon: .stop, label: "停止当前任务",
+            SettingsRow(icon: .stop, label: String(localized: "settings_linux_stop_current_task"),
                         sub: store.linuxRuntime.backgroundTasksSupported
-                            ? "仅停止 runtime 当前报告的 guest 进程组；不会影响 iOS App 内其他任务"
-                            : "当前原生桥未提供可靠的后台进程终止能力",
-                        value: store.linuxRuntime.backgroundTasksSupported ? "可用" : "未支持",
+                            ? String(localized: "settings_linux_stop_task_sub_available")
+                            : String(localized: "settings_linux_stop_task_sub_unavailable"),
+                        value: store.linuxRuntime.backgroundTasksSupported
+                            ? String(localized: "settings_status_available")
+                            : String(localized: "settings_status_not_supported"),
                         chevron: false, isLast: true)
         }
     }
@@ -586,7 +609,7 @@ struct LinuxRuntimePage: View {
     ) -> some View {
         SettingsRow(
             label: label,
-            sub: busy ? "执行中…" : (enabled ? buttonTitle : "当前不可用"),
+            sub: busy ? String(localized: "settings_linux_running") : (enabled ? buttonTitle : String(localized: "settings_linux_unavailable")),
             chevron: false,
             isLast: isLast
         ) {
@@ -596,7 +619,7 @@ struct LinuxRuntimePage: View {
                 Button(buttonTitle, action: action)
                     .font(.system(size: 12, weight: .medium))
             } else {
-                Text("未启用")
+                Text("settings_status_not_enabled")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(t.text4)
             }
@@ -612,7 +635,9 @@ struct LinuxRuntimePage: View {
     ) -> some View {
         SettingsRow(
             label: title,
-            sub: store.linuxRuntime.busyAction == action ? "执行中…" : (enabled ? action.label : "当前构建未开放该操作"),
+            sub: store.linuxRuntime.busyAction == action
+                ? String(localized: "settings_linux_running")
+                : (enabled ? action.label : String(localized: "settings_linux_action_unavailable")),
             chevron: false,
             isLast: isLast
         ) {
@@ -624,7 +649,7 @@ struct LinuxRuntimePage: View {
                 }
                 .font(.system(size: 12, weight: .medium))
             } else {
-                Text("未启用").font(.system(size: 12, weight: .medium)).foregroundStyle(t.text4)
+                Text("settings_status_not_enabled").font(.system(size: 12, weight: .medium)).foregroundStyle(t.text4)
             }
         }
     }

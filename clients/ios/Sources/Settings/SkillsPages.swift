@@ -10,7 +10,7 @@ struct SkillsPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("Skills 是可复用的 AI 行为包，封装了系统提示词、工具调用与触发条件。启用后会出现在对应触发器或斜杠菜单。")
+            Text("skills_description_blurb")
                 .font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
 
@@ -32,11 +32,11 @@ struct SkillsPage: View {
                 }
             }
 
-            DashedAddButton(title: "浏览 Skills 商店").padding(.bottom, 8)
+            DashedAddButton(title: String(localized: "skills_browse_store")).padding(.bottom, 8)
             Button {} label: {
                 HStack(spacing: 8) {
                     LXIcon(name: .edit, size: 14, color: t.text2, stroke: 1.8)
-                    Text("创建自定义 Skill").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.text2)
+                    Text("skills_create_custom").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.text2)
                 }
                 .frame(maxWidth: .infinity).padding(13)
                 .background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12))
@@ -84,29 +84,31 @@ struct SkillDetailPage: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
                 .padding(.bottom, 14)
 
-            SettingsSection(label: "触发") {
+            SettingsSection(label: String(localized: "skills_section_triggers")) {
                 ForEach(Array(s.triggers.enumerated()), id: \.offset) { i, tr in
                     SettingsRow(label: tr, chevron: false, isLast: i == s.triggers.count - 1) {
                         LXIcon(name: .check, size: 15, color: t.ok, stroke: 2.4)
                     }
                 }
             }
-            SettingsSection(label: "所需权限") {
-                SettingsRow(label: "读取知识库", chevron: false)
-                SettingsRow(label: "调用 LLM", chevron: false)
-                SettingsRow(label: "访问 MCP · GitHub", chevron: false, isLast: true)
+            SettingsSection(label: String(localized: "skills_section_required_permissions")) {
+                SettingsRow(label: String(localized: "skills_perm_read_knowledge"), chevron: false)
+                SettingsRow(label: String(localized: "skills_perm_call_llm"), chevron: false)
+                SettingsRow(label: String(localized: "skills_perm_access_mcp_github"), chevron: false, isLast: true)
             }
             SettingsSection {
-                SettingsRow(label: "启用此 Skill", chevron: false) {
+                SettingsRow(label: String(localized: "skills_enable_this"), chevron: false) {
                     LXToggle(isOn: Binding(
                         get: { store.skills.first(where: { $0.id == skillId })?.enabled ?? false },
                         set: { v in if let i = store.skills.firstIndex(where: { $0.id == skillId }) { store.skills[i].enabled = v } }))
                 }
-                SettingsRow(label: "自动建议", sub: "检测到匹配场景时主动提示", chevron: false) {
+                SettingsRow(label: String(localized: "skills_auto_suggest"),
+                            sub: String(localized: "skills_auto_suggest_sub"), chevron: false) {
                     LXToggle(isOn: .constant(true))
                 }
-                SettingsRow(label: "编辑提示词", onTap: {})
-                SettingsRow(icon: .x, label: s.builtin ? "此 Skill 由官方维护" : "删除此 Skill",
+                SettingsRow(label: String(localized: "skills_edit_prompt"), onTap: {})
+                SettingsRow(icon: .x,
+                            label: s.builtin ? String(localized: "skills_official_maintained") : String(localized: "skills_delete"),
                             chevron: false, danger: !s.builtin, isLast: true)
             }
         })

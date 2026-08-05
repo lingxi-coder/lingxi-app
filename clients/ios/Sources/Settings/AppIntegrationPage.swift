@@ -7,53 +7,53 @@ struct AppIntegrationPage: View {
     var body: some View {
         VStack(spacing: 0) {
             SettingsSection(
-                label: "系统接入",
-                footer: "这些动作由 iOS App Intents 提供，可在 Siri、快捷指令和个人自动化中直接使用。"
+                label: String(localized: "settings_section_system_integration"),
+                footer: String(localized: "settings_app_integration_system_footer")
             ) {
                 capabilityRow(
                     icon: .sparkle,
-                    title: "打开灵犀",
-                    detail: "回到当前项目与会话"
+                    title: String(localized: "settings_app_open_app"),
+                    detail: String(localized: "settings_app_open_app_detail")
                 )
                 capabilityRow(
                     icon: .edit,
-                    title: "新建对话",
-                    detail: "在当前项目创建空白对话"
+                    title: String(localized: "settings_app_new_conversation"),
+                    detail: String(localized: "settings_app_new_conversation_detail")
                 )
                 capabilityRow(
                     icon: .message,
-                    title: "向灵犀提问",
-                    detail: "接收 Siri 或其他 App 传入的文本"
+                    title: String(localized: "settings_app_ask_question"),
+                    detail: String(localized: "settings_app_ask_question_detail")
                 )
                 capabilityRow(
                     icon: .workflow,
-                    title: "打开终端",
-                    detail: "支持快捷指令与 lingxi://open_terminal 深链",
+                    title: String(localized: "settings_app_open_terminal"),
+                    detail: String(localized: "settings_app_open_terminal_detail"),
                     isLast: true
                 )
             }
 
             SettingsSection(
-                label: "快捷指令",
-                footer: "可在系统快捷指令中组合分享表单、剪贴板、文件或其他 App 的输出，再交给灵犀。"
+                label: String(localized: "settings_section_shortcuts"),
+                footer: String(localized: "settings_shortcuts_footer")
             ) {
                 SettingsRow(
                     icon: .workflow,
                     iconColor: t.accent,
-                    label: "打开快捷指令",
-                    sub: "查看灵犀提供的动作",
-                    value: "4 个动作",
+                    label: String(localized: "settings_open_shortcuts"),
+                    sub: String(localized: "settings_shortcuts_sub"),
+                    value: String(localized: "settings_shortcuts_actions_count"),
                     isLast: true,
                     onTap: openShortcuts
                 )
                 .accessibilityIdentifier("settings.appIntegration.openShortcuts")
             }
 
-            SettingsSection(label: "平台边界") {
+            SettingsSection(label: String(localized: "settings_section_platform_boundary")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("使用 iOS 公共 API，动作会由系统展示和授权。", systemImage: "checkmark.shield")
-                    Label("不会读取、点击或控制其他 App 的界面。", systemImage: "hand.raised")
-                    Label("跨 App 数据通过快捷指令输入或系统分享完成。", systemImage: "square.and.arrow.up")
+                    Label("settings_platform_note_1", systemImage: "checkmark.shield")
+                    Label("settings_platform_note_2", systemImage: "hand.raised")
+                    Label("settings_platform_note_3", systemImage: "square.and.arrow.up")
                 }
                 .font(.system(size: 12.5))
                 .foregroundStyle(t.text2)
@@ -74,7 +74,7 @@ struct AppIntegrationPage: View {
             iconColor: t.accent,
             label: title,
             sub: detail,
-            value: "可用",
+            value: String(localized: "settings_status_available"),
             valueColor: t.ok,
             chevron: false,
             isLast: isLast

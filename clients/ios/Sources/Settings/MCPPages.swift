@@ -10,24 +10,24 @@ struct MCPListPage: View {
         let connectedCount = store.mcpServers.filter { $0.status == .connected }.count
         let totalTools = store.mcpServers.filter { $0.enabled && $0.status == .connected }.reduce(0) { $0 + $1.tools }
         VStack(spacing: 0) {
-            Text("MCP (Model Context Protocol) 是连接外部工具的开放协议。已连接的服务器会向 AI 暴露工具调用能力。")
+            Text("mcp_description_blurb")
                 .font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
 
             HStack(spacing: 8) {
-                statCard("已连接", connectedCount)
-                statCard("可用工具", totalTools)
+                statCard(String(localized: "mcp_stat_connected"), connectedCount)
+                statCard(String(localized: "mcp_stat_available_tools"), totalTools)
             }
             .padding(.bottom, 18)
 
-            SettingsSection(label: "服务器 · \(store.mcpServers.count)") {
+            SettingsSection(label: String(localized: "mcp_section_servers_count \(store.mcpServers.count)")) {
                 ForEach(Array(store.mcpServers.enumerated()), id: \.element.id) { i, s in
                     let iconColor: Color = s.status == .connected ? Color(srgb: 0,0.78,0.55)
                         : s.status == .error ? t.statusError : t.text4
                     SettingsRow(icon: .plug, iconColor: iconColor, label: s.name,
                                 subView: AnyView(HStack(spacing: 5) {
                                     Circle().fill(s.status.dot(t)).frame(width: 6, height: 6)
-                                    Text("\(s.status.label) · \(s.tools) 工具 · \(s.transport)")
+                                    Text("mcp_server_status_tools_detail \(s.status.label) \(s.tools) \(s.transport)")
                                         .font(.system(size: 11.5, design: .monospaced)).foregroundColor(t.text4)
                                 }),
                                 chevron: false, isLast: i == store.mcpServers.count - 1,
@@ -37,8 +37,8 @@ struct MCPListPage: View {
                 }
             }
 
-            DashedAddButton(title: "添加 MCP 服务器")
-            (Text("支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。\n浏览公开服务器目录：")
+            DashedAddButton(title: String(localized: "mcp_add_server"))
+            (Text("mcp_transport_description_prefix")
                 + Text("mcp.directory").foregroundColor(t.accent))
                 .font(.system(size: 11)).foregroundColor(t.text4).lineSpacing(5)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 14)
@@ -81,14 +81,14 @@ struct MCPEditPage: View {
             HStack(spacing: 8) {
                 Circle().fill(dot).frame(width: 8, height: 8)
                     .overlay(Circle().stroke(dot.tint(0.22), lineWidth: 3).scaleEffect(1.75))
-                Text("\(s.status.label) · \(s.tools) 工具可用")
+                Text("mcp_edit_status_tools_available \(s.status.label) \(s.tools)")
                     .font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
                 Spacer()
                 Button {
                     update { $0.status = .testing }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { update { $0.status = .connected } }
                 } label: {
-                    Text("重新连接").font(.system(size: 12, weight: .medium)).foregroundColor(t.text2)
+                    Text("mcp_reconnect").font(.system(size: 12, weight: .medium)).foregroundColor(t.text2)
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 7))
                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(t.border, lineWidth: 0.5))
@@ -100,32 +100,36 @@ struct MCPEditPage: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(dot.tint(0.24), lineWidth: 0.5))
             .padding(.bottom, 18)
 
-            FieldLabel(text: "显示名称")
+            FieldLabel(text: String(localized: "settings_display_name"))
             SettingsField(text: bind(\.name), mono: false).padding(.bottom, 14)
-            FieldLabel(text: "端点")
+            FieldLabel(text: String(localized: "mcp_endpoint"))
             SettingsField(text: bind(\.url))
-            FieldHint("支持 `stdio://`、`https://`、`sse://`")
+            FieldHint(String(localized: "mcp_endpoint_hint"))
 
-            SettingsSection(label: "传输与鉴权") {
-                SettingsRow(label: "传输方式", value: s.transport, onTap: {})
-                SettingsRow(label: "鉴权", value: s.auth ?? "无", isLast: true, onTap: {})
+            SettingsSection(label: String(localized: "mcp_section_transport_auth")) {
+                SettingsRow(label: String(localized: "mcp_transport_mode"), value: s.transport, onTap: {})
+                SettingsRow(label: String(localized: "mcp_auth"),
+                            value: s.auth ?? String(localized: "common_none"), isLast: true, onTap: {})
             }
-            SettingsSection(label: "工具权限", footer: "灵犀只会调用你允许的工具。每次首次调用会请求确认。") {
+            SettingsSection(label: String(localized: "mcp_section_tool_permissions"),
+                            footer: String(localized: "mcp_tool_permissions_footer")) {
                 let tools = Array(toolNames.prefix(min(6, s.tools)))
                 ForEach(Array(tools.enumerated()), id: \.element) { i, tn in
-                    SettingsRow(label: tn, sub: i % 2 == 0 ? "只读" : "可写", chevron: false, isLast: i == tools.count - 1) {
+                    SettingsRow(label: tn,
+                                sub: i % 2 == 0 ? String(localized: "mcp_tool_readonly") : String(localized: "mcp_tool_writable"),
+                                chevron: false, isLast: i == tools.count - 1) {
                         LXToggle(isOn: .constant(i < 4))
                     }
                 }
             }
             SettingsSection {
-                SettingsRow(label: "启用服务器", chevron: false) {
+                SettingsRow(label: String(localized: "mcp_enable_server"), chevron: false) {
                     LXToggle(isOn: Binding(get: { s.enabled }, set: { v in update { $0.enabled = v } }))
                 }
-                SettingsRow(label: "自动启动", chevron: false, isLast: true) { LXToggle(isOn: .constant(true)) }
+                SettingsRow(label: String(localized: "mcp_auto_start"), chevron: false, isLast: true) { LXToggle(isOn: .constant(true)) }
             }
             Button { store.mcpServers.removeAll { $0.id == mcpId }; host.pop() } label: {
-                Text("移除此服务器").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.danger)
+                Text("mcp_remove_server").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.danger)
                     .frame(maxWidth: .infinity).padding(12)
                     .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
             }

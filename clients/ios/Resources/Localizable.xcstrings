@@ -1442,22 +1442,6 @@
         }
       }
     },
-    "settings_account_usage_hours": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "5.5 / 8 小时"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "5.5 / 8 小时"
-          }
-        }
-      }
-    },
     "settings_api_url": {
       "localizations": {
         "zh-Hans": {
@@ -2674,22 +2658,6 @@
         }
       }
     },
-    "settings_linux_dir_not_created": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未创建"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未创建"
-          }
-        }
-      }
-    },
     "settings_linux_execution_boundary": {
       "localizations": {
         "zh-Hans": {
@@ -2958,22 +2926,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "(无输出)"
-          }
-        }
-      }
-    },
-    "settings_linux_no_stoppable_tasks": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前没有可停止的 Mobile Linux 任务"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前没有可停止的 Mobile Linux 任务"
           }
         }
       }
@@ -4462,22 +4414,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "默认模型"
-          }
-        }
-      }
-    },
-    "settings_provider_default_model_not_set": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未配置默认模型"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未配置默认模型"
           }
         }
       }

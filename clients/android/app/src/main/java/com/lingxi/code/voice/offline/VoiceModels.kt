@@ -8,6 +8,12 @@ package com.lingxi.code.voice.offline
 
 enum class ModelKind { Stt, Tts }
 
+/**
+ * [displayName] is provably dead: neither [OfflineModelEntry.voices] nor any
+ * [TtsVoiceEntry] is read anywhere outside this file (no voice picker UI
+ * consumes it), so its zh-Hans-literal fields (e.g. "Melo 中英女声") are never
+ * rendered and are left untranslated.
+ */
 data class TtsVoiceEntry(val id: String, val displayName: String, val language: String)
 
 sealed interface SherpaRuntimeParams {
@@ -21,6 +27,16 @@ sealed interface SherpaRuntimeParams {
     }
 }
 
+/**
+ * [displayName]'s "zh" bucket (e.g. "Zipformer 中文 14M") stays the literal
+ * zh-Hans copy: this file is a plain, engine-agnostic catalog with no
+ * Android/Compose dependency (kept that way so
+ * [com.lingxi.code.voice.offline.VoiceModelDownloaderTest] stays pure JVM).
+ * The two call sites (both hardcode `language = "zh"`, in
+ * `onboarding/SetupWizardOverlay.kt`'s `VoicePackRow`) resolve the real
+ * localized text via an `id`-keyed `stringResource` lookup
+ * (`voiceModelZhLabel`) defined there instead of here.
+ */
 data class OfflineModelEntry(
     val id: String,
     val kind: ModelKind,
@@ -134,7 +150,16 @@ object OfflineModelCatalog {
     }
 }
 
-/** One language pack the wizard offers. */
+/**
+ * One language pack the wizard offers.
+ *
+ * The "zh" pack's [title]/[subtitle] stay the literal zh-Hans copy for the
+ * same reason as [OfflineModelEntry.displayName] (this file has no
+ * Android/Compose dependency); `SetupWizardOverlay.kt`'s `VoicePackRow`
+ * resolves the real localized text via `VoicePack.localizedTitle()`/
+ * `.localizedSubtitle()`, defined there. The "en" pack's copy has no Han
+ * literal, so it renders as-is either way.
+ */
 data class VoicePack(val language: String, val title: String, val subtitle: String) {
     val models: List<OfflineModelEntry> get() = OfflineModelCatalog.packFor(language)
     val totalBytes: Long get() = models.sumOf { it.approxSizeBytes }

@@ -135,13 +135,14 @@ fun ProviderListPage(
                 ProviderRow(
                     provider = p,
                     preset = preset,
+                    kind = kind,
                     isLast = i == arr.size - 1,
                     onTap = { onEdit(p.id) },
                 )
             }
         }
 
-        DashedAddButton(title = stringResource(R.string.provider_add_kind_fmt, kind.title), onClick = onAdd)
+        DashedAddButton(title = stringResource(R.string.provider_add_kind_fmt, stringResource(kind.titleRes)), onClick = onAdd)
 
         if (kind == ProviderKind.Llm) {
             if (state.pendingLlmProviderChanges.isNotEmpty()) {
@@ -204,6 +205,7 @@ fun ProviderListPage(
 private fun ProviderRow(
     provider: GenericProvider,
     preset: ProviderPreset,
+    kind: ProviderKind,
     isLast: Boolean,
     onTap: () -> Unit,
 ) {
@@ -217,7 +219,7 @@ private fun ProviderRow(
                 .clickable(onClick = onTap)
                 .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
-            PresetTile(preset = preset, size = 28.dp, fontSize = 13.sp)
+            PresetTile(preset = preset, kind = kind, size = 28.dp, fontSize = 13.sp)
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -233,7 +235,7 @@ private fun ProviderRow(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(provider.status.dot(t)))
                     Text(
-                        "${provider.status.label} · ${provider.model.ifEmpty { "—" }}",
+                        "${provider.status.localizedLabel()} · ${provider.model.ifEmpty { "—" }}",
                         color = t.text4, fontSize = 11.5f.sp, fontFamily = LXFont.mono,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
@@ -278,11 +280,11 @@ fun ProviderPickerPage(
                             .clickable { onPicked(store.addProvider(kind, p.id)) }
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                     ) {
-                        PresetTile(preset = p, size = 32.dp, fontSize = 14.sp)
+                        PresetTile(preset = p, kind = kind, size = 32.dp, fontSize = 14.sp)
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(p.name, color = t.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(p.localizedName(kind), color = t.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                             Text(
-                                p.sub + if (p.models.isEmpty()) "" else stringResource(R.string.settings_provider_models_count_fmt, p.models.size),
+                                p.localizedSub(kind) + if (p.models.isEmpty()) "" else stringResource(R.string.settings_provider_models_count_fmt, p.models.size),
                                 color = t.text4, fontSize = 11.5f.sp,
                             )
                         }
@@ -661,7 +663,7 @@ fun ProviderEditPage(
 
 /** A preset's square brand tile: first character on a faint tint of its color. */
 @Composable
-private fun PresetTile(preset: ProviderPreset, size: androidx.compose.ui.unit.Dp, fontSize: androidx.compose.ui.unit.TextUnit) {
+private fun PresetTile(preset: ProviderPreset, kind: ProviderKind, size: androidx.compose.ui.unit.Dp, fontSize: androidx.compose.ui.unit.TextUnit) {
     val t = LingXiTheme.palette
     Box(
         contentAlignment = Alignment.Center,
@@ -672,12 +674,57 @@ private fun PresetTile(preset: ProviderPreset, size: androidx.compose.ui.unit.Dp
             .border(0.5.dp, preset.color.tint(0.28f), RoundedCornerShape(if (size > 28.dp) 8.dp else 7.dp)),
     ) {
         Text(
-            preset.name.take(1),
+            preset.localizedName(kind).take(1),
             color = preset.color,
             fontSize = fontSize,
             fontWeight = FontWeight.Bold,
         )
     }
+}
+
+/**
+ * [ProviderPreset.name]/[.sub] stay the literal zh-Hans copy on the model
+ * (see the doc on [com.lingxi.code.model.Presets]); these `id`-keyed lookups
+ * resolve the real localized text at render time, reusing the existing
+ * `settings_provider_preset_*` catalog keys. Keyed by (kind, id) — not just
+ * id — because "google" names both an LLM (Gemini) and a Search preset with
+ * different, independently-Han-or-not sub copy.
+ */
+@Composable
+private fun ProviderPreset.localizedName(kind: ProviderKind): String = when (kind to id) {
+    ProviderKind.Llm to "qwen" -> stringResource(R.string.settings_provider_preset_qwen_name)
+    ProviderKind.Llm to "custom" -> stringResource(R.string.settings_provider_preset_custom_name)
+    else -> name
+}
+
+@Composable
+private fun ProviderPreset.localizedSub(kind: ProviderKind): String = when (kind to id) {
+    ProviderKind.Llm to "kimi-code" -> stringResource(R.string.settings_provider_preset_kimi_code_sub)
+    ProviderKind.Llm to "custom" -> stringResource(R.string.settings_provider_preset_custom_sub)
+    ProviderKind.Llm to "openrouter" -> stringResource(R.string.settings_provider_preset_openrouter_sub)
+    ProviderKind.Search to "google" -> stringResource(R.string.settings_provider_preset_search_google_sub)
+    ProviderKind.Search to "brave" -> stringResource(R.string.settings_provider_preset_brave_sub)
+    ProviderKind.Search to "tavily" -> stringResource(R.string.settings_provider_preset_tavily_sub)
+    ProviderKind.Search to "serper" -> stringResource(R.string.settings_provider_preset_serper_sub)
+    ProviderKind.Fetch to "jina" -> stringResource(R.string.settings_provider_preset_jina_sub)
+    ProviderKind.Fetch to "firecrawl" -> stringResource(R.string.settings_provider_preset_firecrawl_sub)
+    ProviderKind.Fetch to "scrapingbee" -> stringResource(R.string.settings_provider_preset_scrapingbee_sub)
+    else -> sub
+}
+
+/**
+ * [ConnStatus.label] stays the literal zh-Hans copy on the model (pinned by
+ * `SettingsMockTest`, a pure-JVM test); this resolves the real localized
+ * text at the two render sites in this file, reusing the existing
+ * `settings_provider_status_*` catalog keys.
+ */
+@Composable
+private fun ConnStatus.localizedLabel(): String = when (this) {
+    ConnStatus.Configured -> stringResource(R.string.settings_provider_status_configured)
+    ConnStatus.Connected -> stringResource(R.string.settings_provider_status_connected)
+    ConnStatus.Idle -> stringResource(R.string.settings_provider_status_idle)
+    ConnStatus.Testing -> stringResource(R.string.settings_provider_status_testing)
+    ConnStatus.Error -> stringResource(R.string.settings_provider_status_failed)
 }
 
 /** A small status / default / disabled badge. */
@@ -724,7 +771,7 @@ private fun StatusBanner(
                 .weight(1f),
         ) {
             Text(
-                status.label,
+                status.localizedLabel(),
                 color = t.text2,
                 fontSize = 12.5f.sp,
                 fontWeight = FontWeight.Medium,

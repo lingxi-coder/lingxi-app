@@ -295,13 +295,13 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.CRON_TASK,
         SettingsRoutes.CRON_RUN,
         -> stringResource(SettingsTitles.CRON)
-        SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).title
+        SettingsRoutes.PROVIDER_LIST -> stringResource(providerKindArg(entry).titleRes)
         SettingsRoutes.PROVIDER_PICKER ->
-            stringResource(R.string.provider_add_kind_fmt, providerKindArg(entry).title)
+            stringResource(R.string.provider_add_kind_fmt, stringResource(providerKindArg(entry).titleRes))
         SettingsRoutes.PROVIDER_EDIT -> {
             val kind = providerKindArg(entry)
             val id = entry.arguments?.getString("id")
-            state.providers(kind).firstOrNull { it.id == id }?.name ?: kind.title
+            state.providers(kind).firstOrNull { it.id == id }?.name ?: stringResource(kind.titleRes)
         }
         SettingsRoutes.SKILL_DETAIL -> {
             val id = entry.arguments?.getString("id")

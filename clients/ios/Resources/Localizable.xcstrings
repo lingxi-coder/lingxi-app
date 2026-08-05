@@ -3026,6 +3026,102 @@
         }
       }
     },
+    "computeruse_approval_allow_once": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅允许这一次"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow just this once"
+          }
+        }
+      }
+    },
+    "computeruse_approval_body_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目标应用：%1$s\n动作：%2$s\n\n此确认只对当前这一次操作有效，60 秒后自动拒绝。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Target app: %1$s\nAction: %2$s\n\nThis confirmation applies only to this one action and will auto-deny after 60 seconds."
+          }
+        }
+      }
+    },
+    "computeruse_approval_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确认高风险操作"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm High-Risk Action"
+          }
+        }
+      }
+    },
+    "connectivity_offline_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网络连接不可用，部分功能可能受影响。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No network connection available. Some features may be affected."
+          }
+        }
+      }
+    },
+    "connectivity_offline_dismiss_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭离线提示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dismiss offline notice"
+          }
+        }
+      }
+    },
+    "connectivity_offline_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已离线"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Offline"
+          }
+        }
+      }
+    },
     "cron_active_queue_summary_fmt": {
       "localizations": {
         "zh-Hans": {
@@ -3426,6 +3522,22 @@
         }
       }
     },
+    "cron_exact_alarm_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精确闹钟"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exact alarm"
+          }
+        }
+      }
+    },
     "cron_execution_cancelled": {
       "localizations": {
         "zh-Hans": {
@@ -3566,6 +3678,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "15-minute patrol mode"
+          }
+        }
+      }
+    },
+    "cron_fifteen_minute_patrol_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟巡检"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15-min patrol"
           }
         }
       }
@@ -3886,6 +4014,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "No active runs currently"
+          }
+        }
+      }
+    },
+    "cron_no_next_fire": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无后续触发"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No upcoming run"
           }
         }
       }
@@ -4834,6 +4978,54 @@
         }
       }
     },
+    "cron_status_recent_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recently failed"
+          }
+        }
+      }
+    },
+    "cron_status_recent_succeeded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近成功"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recently succeeded"
+          }
+        }
+      }
+    },
+    "cron_status_recent_timed_out": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recently timed out"
+          }
+        }
+      }
+    },
     "cron_status_skipped": {
       "localizations": {
         "zh-Hans": {
@@ -5134,6 +5326,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Triggered At"
+          }
+        }
+      }
+    },
+    "cron_unsupported_period_fallback": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 不支持此周期"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android does not support this schedule"
           }
         }
       }
@@ -12562,6 +12770,22 @@
         }
       }
     },
+    "project_sync_in_progress_notice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "项目正在同步，请等待同步完成。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The project is syncing. Please wait for it to finish."
+          }
+        }
+      }
+    },
     "project_sync_state_auth_lost": {
       "localizations": {
         "zh-Hans": {
@@ -12674,6 +12898,22 @@
         }
       }
     },
+    "project_sync_stop_task_first_notice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先停止当前任务，再同步项目。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop the current task before syncing the project."
+          }
+        }
+      }
+    },
     "provider_add_kind %@": {
       "localizations": {
         "zh-Hans": {
@@ -12766,6 +13006,134 @@
           "stringUnit": {
             "state": "translated",
             "value": "让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用\"联网\"模式。"
+          }
+        }
+      }
+    },
+    "session_index_save_failed_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话索引保存失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to save session index: %1$s"
+          }
+        }
+      }
+    },
+    "session_index_save_new_failed_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新会话索引保存失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to save new session index: %1$s"
+          }
+        }
+      }
+    },
+    "session_relative_days_ago_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 天前"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d days ago"
+          }
+        }
+      }
+    },
+    "session_relative_hours_ago_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 小时前"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d hr ago"
+          }
+        }
+      }
+    },
+    "session_relative_minutes_ago_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 分钟前"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d min ago"
+          }
+        }
+      }
+    },
+    "session_relative_month_day_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d月%2$d日"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d/%2$d"
+          }
+        }
+      }
+    },
+    "session_relative_yesterday": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "昨天"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yesterday"
+          }
+        }
+      }
+    },
+    "session_untitled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未命名会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untitled Session"
           }
         }
       }
@@ -18562,6 +18930,22 @@
         }
       }
     },
+    "settings_provider_preset_brave_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "独立索引 · 隐私优先"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Independent index · privacy-first"
+          }
+        }
+      }
+    },
     "settings_provider_preset_custom_name": {
       "localizations": {
         "zh-Hans": {
@@ -18590,6 +18974,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "OpenAI-compatible endpoint"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_elevenlabs_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高质量 · 多语种"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "High quality · multilingual"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_firecrawl_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "渲染 JS · 结构化"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Renders JS · structured"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_jina_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "免费 · 推荐"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Free · recommended"
           }
         }
       }
@@ -18626,6 +19058,22 @@
         }
       }
     },
+    "settings_provider_preset_openai_tts_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "低延迟"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Low latency"
+          }
+        }
+      }
+    },
     "settings_provider_preset_openrouter_sub": {
       "localizations": {
         "zh-Hans": {
@@ -18654,6 +19102,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "Qwen"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_scrapingbee_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "反爬代理"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anti-bot proxy"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_search_google_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "官方 Custom Search"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Official Custom Search"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_serper_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google 代理"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google proxy"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_system_voice_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备本地 · 免费"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-device · free"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_tavily_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 优化搜索"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI-optimized search"
           }
         }
       }
@@ -22354,6 +22882,246 @@
         }
       }
     },
+    "voice_download_activate_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法激活语音模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not activate the voice model"
+          }
+        }
+      }
+    },
+    "voice_download_checksum_mismatch": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "校验失败 (sha256 不匹配)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verification failed (SHA-256 mismatch)"
+          }
+        }
+      }
+    },
+    "voice_download_dns_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法解析下载地址"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not resolve download address"
+          }
+        }
+      }
+    },
+    "voice_download_extracted_files_missing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解压后文件缺失"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Files missing after extraction"
+          }
+        }
+      }
+    },
+    "voice_download_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download failed"
+          }
+        }
+      }
+    },
+    "voice_download_http_status_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载服务器返回 HTTP %1$d"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download server returned HTTP %1$d"
+          }
+        }
+      }
+    },
+    "voice_download_network_interrupted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网络中断"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Network interrupted"
+          }
+        }
+      }
+    },
+    "voice_download_path_traversal": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音模型归档路径越界"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The voice model archive path is out of bounds"
+          }
+        }
+      }
+    },
+    "voice_download_replace_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法替换旧语音模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not replace the old voice model"
+          }
+        }
+      }
+    },
+    "voice_download_resumable_suffix": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "，已保留进度"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": ", progress preserved"
+          }
+        }
+      }
+    },
+    "voice_download_resume_mismatch": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "续传位置不匹配"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume position mismatch"
+          }
+        }
+      }
+    },
+    "voice_download_resume_rejected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务器拒绝续传"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server rejected resume"
+          }
+        }
+      }
+    },
+    "voice_download_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection timed out"
+          }
+        }
+      }
+    },
+    "voice_download_truncated": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载连接提前结束"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download connection ended early"
+          }
+        }
+      }
+    },
+    "voice_download_unsupported_entry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音模型包含不支持的归档条目"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The voice model archive contains an unsupported entry"
+          }
+        }
+      }
+    },
     "voice_effective_language": {
       "localizations": {
         "zh-Hans": {
@@ -23106,6 +23874,70 @@
         }
       }
     },
+    "voice_model_name_kitten_nano_en": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kitten Nano 英文"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kitten Nano (English)"
+          }
+        }
+      }
+    },
+    "voice_model_name_melo_zh_en": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MeloTTS 中英双语"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MeloTTS Chinese + English"
+          }
+        }
+      }
+    },
+    "voice_model_name_moonshine_tiny_en": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moonshine 英文 Tiny"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moonshine Tiny (English)"
+          }
+        }
+      }
+    },
+    "voice_model_name_zipformer_zh_14m": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zipformer 中文 14M"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zipformer Chinese 14M"
+          }
+        }
+      }
+    },
     "voice_needs_permission_setup": {
       "localizations": {
         "zh-Hans": {
@@ -23262,6 +24094,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "System Online Fallback"
+          }
+        }
+      }
+    },
+    "voice_pack_subtitle_zh": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zipformer 14M 流式识别 + MeloTTS"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zipformer 14M streaming ASR + MeloTTS"
+          }
+        }
+      }
+    },
+    "voice_pack_title_zh": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中文（普通话）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chinese (Mandarin)"
           }
         }
       }

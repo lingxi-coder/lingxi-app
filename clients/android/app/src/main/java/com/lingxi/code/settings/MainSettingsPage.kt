@@ -93,7 +93,13 @@ fun MainSettingsPage(
             SettingsRow(
                 icon = LXIconName.Mic, iconColor = Color(red = 0.8018f, green = 0.4038f, blue = 0.8909f),
                 label = stringResource(R.string.settings_voice_audio),
-                sub = stringResource(R.string.settings_voice_dictation_fmt, Presets.voice.firstOrNull { it.id == state.voice.preset }?.name ?: stringResource(R.string.settings_voice_system)),
+                sub = stringResource(
+                    R.string.settings_voice_dictation_fmt,
+                    Presets.voice.firstOrNull { it.id == state.voice.preset }
+                        ?.takeIf { it.id != "system" }
+                        ?.name
+                        ?: stringResource(R.string.settings_voice_system),
+                ),
                 value = voiceLanguageSummary(state.voice.inputLanguage),
                 isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.VOICE) },

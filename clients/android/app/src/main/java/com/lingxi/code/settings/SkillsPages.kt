@@ -46,7 +46,13 @@ private val SkillSky = Color(red = 0f, green = 0.7601f, blue = 0.7664f)   // okl
 private val SkillAmber = Color(red = 0.896f, green = 0.6013f, blue = 0f)  // oklch(75% 0.17 75)
 
 // The order authors appear in (matches the iOS `authorOrder`). These are raw
-// data constants; UI rendering maps them through [authorLabel].
+// data constants; UI rendering maps them through [authorLabel]. They stay
+// Chinese literals on purpose: they're match-keys compared by `==` against
+// [com.lingxi.code.model.Skill.author] (itself a match-key for the same
+// reason — see SettingsModels.kt/SettingsMock.skills), not display text —
+// localizing one side would break the comparison. The i18n extraction pass
+// confirmed this is the ONLY consumer of these 4 literals; nothing here is
+// an unextracted gap.
 private val AuthorOrder = listOf("官方", "我", "社区 · @arxiv-fan", "社区 · @lin")
 
 private const val CommunityAuthorPrefix = "社区 · "

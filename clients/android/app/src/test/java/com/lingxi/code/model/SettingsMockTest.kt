@@ -44,7 +44,7 @@ class SettingsMockTest {
 
     @Test
     fun skills_count_ids_enabledAndBuiltinSplit() {
-        val skills = SettingsMock.skills
+        val skills = SettingsMock.skills()
         assertEquals(6, skills.size)
         assertEquals(listOf("sk1", "sk2", "sk3", "sk4", "sk5", "sk6"), skills.map { it.id })
         // 4 enabled (sk1, sk2, sk3, sk6); 2 disabled (sk4, sk5).
@@ -58,7 +58,7 @@ class SettingsMockTest {
 
     @Test
     fun mcpServers_count_ids_connectionsAndStatuses() {
-        val mcp = SettingsMock.mcpServers
+        val mcp = SettingsMock.mcpServers()
         assertEquals(5, mcp.size)
         assertEquals(listOf("mcp1", "mcp2", "mcp3", "mcp4", "mcp5"), mcp.map { it.id })
         // 4 enabled ("连接" count on the main list); 1 disabled (Notion).

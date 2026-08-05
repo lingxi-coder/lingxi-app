@@ -19,8 +19,11 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
+import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.SessionCatalog
+import com.lingxi.code.model.SessionCatalogStrings
 import com.lingxi.code.model.canonicalSessionId
+import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.project.ProjectWorkspace
@@ -392,6 +395,7 @@ fun reduceSessionEvent(
     prev: EngineSessionState,
     event: ClientEvent,
     nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
+    strings: SessionCatalogStrings = DefaultSessionCatalogStrings,
 ): EngineSessionState =
     when (event) {
         is ClientEvent.SessionList -> EngineSessionState.ready(
@@ -402,6 +406,7 @@ fun reduceSessionEvent(
                     messageCount = dto.messageCount.toInt(),
                     modifiedRfc3339 = dto.modifiedRfc3339,
                     nowEpochSeconds = nowEpochSeconds,
+                    strings = strings,
                 )
             },
         )
@@ -1095,7 +1100,7 @@ class EngineConversationSource private constructor(
                     // (lifecycle events like SessionStarted ride the per-turn
                     // stream; the ViewModel acts on them there).
                     models.value = reduceModelEvent(models.value, event)
-                    sessions.value = reduceSessionEvent(sessions.value, event)
+                    sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
                     sessionActivationFrom(event, strings)?.let { activeSession.value = it }
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }

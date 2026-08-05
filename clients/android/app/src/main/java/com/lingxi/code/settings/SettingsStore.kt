@@ -39,8 +39,8 @@ data class SettingsUiState(
     val fetchProviders: List<GenericProvider> = emptyList(),
     val voice: VoiceConfig = VoiceConfig(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
-    val skills: List<Skill> = SettingsMock.skills,
-    val mcpServers: List<MCPServer> = SettingsMock.mcpServers,
+    val skills: List<Skill> = SettingsMock.skills(),
+    val mcpServers: List<MCPServer> = SettingsMock.mcpServers(),
     val dream: DreamConfig = DreamConfig(),
     val language: String = "zh-CN",
     val notifs: NotifConfig = NotifConfig(),
@@ -80,6 +80,16 @@ class SettingsStore(
      */
     private val resolveString: (Int) -> String = { _ -> "" },
 ) : ViewModel() {
+    /**
+     * Adapts [resolveString] (empty-string in tests, real `Context.getString`
+     * in production — see the factory below) to [SettingsMock.skills]/
+     * [SettingsMock.mcpServers]'s (id, fallback) shape: falls back to the
+     * literal zh-Hans copy whenever [resolveString] has nothing (i.e. every
+     * JVM test that constructs [SettingsStore] with no [Context] at all).
+     */
+    private fun resolveWithFallback(id: Int, fallback: String): String =
+        resolveString(id).ifEmpty { fallback }
+
     private val _state = MutableStateFlow(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
             SettingsUiState(
@@ -87,8 +97,26 @@ class SettingsStore(
                 searchProviders = search,
                 fetchProviders = fetch,
                 voice = voiceRepo?.load() ?: VoiceConfig(),
+                skills = SettingsMock.skills(::resolveWithFallback),
+                mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
+                dream = DreamConfig(
+                    lastRun = resolveWithFallback(
+                        R.string.settings_dream_last_run_seed,
+                        "今早 03:24 · 整理 7 条记忆 / 草拟今日计划",
+                    ),
+                ),
             )
-        } ?: SettingsUiState(voice = voiceRepo?.load() ?: VoiceConfig())
+        } ?: SettingsUiState(
+            voice = voiceRepo?.load() ?: VoiceConfig(),
+            skills = SettingsMock.skills(::resolveWithFallback),
+            mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
+            dream = DreamConfig(
+                lastRun = resolveWithFallback(
+                    R.string.settings_dream_last_run_seed,
+                    "今早 03:24 · 整理 7 条记忆 / 草拟今日计划",
+                ),
+            ),
+        )
     )
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 

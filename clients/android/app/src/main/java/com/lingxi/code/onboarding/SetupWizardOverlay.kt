@@ -37,6 +37,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.clip
 import com.lingxi.code.voice.offline.ModelState
+import com.lingxi.code.voice.offline.OfflineModelEntry
 import com.lingxi.code.voice.offline.VOICE_PACKS
 import com.lingxi.code.voice.offline.VoicePack
 import com.lingxi.code.voice.offline.VoicePackProgress
@@ -439,7 +440,7 @@ private fun VoicePackRow(
     val sizeText = formatDownloadSize(pack.totalBytes)
     val agg = progress.state
     val activeModel = progress.activeModel
-    val activeLabel = activeModel?.localizedDisplayName("zh").orEmpty()
+    val activeLabel = activeModel?.let { voiceModelZhLabel(it) }.orEmpty()
     val activePosition = if (activeModel != null && progress.activeModelIndex >= 0) {
         "（${progress.activeModelIndex + 1}/${pack.models.size}）"
     } else {
@@ -455,8 +456,8 @@ private fun VoicePackRow(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(pack.title, color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-                Text("${pack.subtitle} · $sizeText", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+                Text(pack.localizedTitle(), color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                Text("${pack.localizedSubtitle()} · $sizeText", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
             }
             RadioDot(selected)
         }
@@ -478,7 +479,7 @@ private fun VoicePackRow(
                 status = stringResource(R.string.onboarding_voice_pack_verifying, activeModelLabel),
             )
             is ModelState.Extracting -> {
-                val next = progress.nextModel?.localizedDisplayName("zh")
+                val next = progress.nextModel?.let { voiceModelZhLabel(it) }
                 val extracting = stringResource(R.string.onboarding_voice_pack_extracting, activeModelLabel)
                 val extractingNext = next?.let { stringResource(R.string.onboarding_voice_pack_extracting_next, it) }
                 VoicePackProgressStatus(
@@ -510,6 +511,34 @@ private fun VoicePackRow(
         }
     }
 }
+
+/**
+ * [OfflineModelEntry.displayName] and [VoicePack.title]/[.subtitle] stay the
+ * literal zh-Hans copy on the model (`voice/offline/VoiceModels.kt` is a
+ * plain, engine-agnostic catalog with no Android/Compose dependency — kept
+ * that way so [com.lingxi.code.voice.offline.VoiceModelDownloaderTest] stays
+ * pure JVM). Both call sites here always resolve the "zh" bucket regardless
+ * of the app's own language (a model like "Zipformer 中文 14M" describes the
+ * model in a fixed script, unlike [com.lingxi.code.theme.AppLanguageStore]'s
+ * self-referential language-picker names), so these `id`-keyed lookups
+ * resolve the real localized text at render time.
+ */
+@Composable
+private fun voiceModelZhLabel(entry: OfflineModelEntry): String = when (entry.id) {
+    "sherpa.zipformer-zh-14m-mobile" -> stringResource(R.string.voice_model_name_zipformer_zh_14m)
+    "sherpa.moonshine-tiny-en" -> stringResource(R.string.voice_model_name_moonshine_tiny_en)
+    "sherpa.melo-zh-en" -> stringResource(R.string.voice_model_name_melo_zh_en)
+    "sherpa.kitten-nano-en" -> stringResource(R.string.voice_model_name_kitten_nano_en)
+    else -> entry.localizedDisplayName("zh")
+}
+
+@Composable
+private fun VoicePack.localizedTitle(): String =
+    if (language == "zh") stringResource(R.string.voice_pack_title_zh) else title
+
+@Composable
+private fun VoicePack.localizedSubtitle(): String =
+    if (language == "zh") stringResource(R.string.voice_pack_subtitle_zh) else subtitle
 
 @Composable
 private fun VoicePackProgressStatus(

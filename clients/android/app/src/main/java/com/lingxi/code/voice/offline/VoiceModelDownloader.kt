@@ -1,6 +1,7 @@
 package com.lingxi.code.voice.offline
 
 import android.content.Context
+import com.lingxi.code.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -75,6 +76,12 @@ private fun openDownloadConnection(url: URL): HttpURLConnection =
  * Download [sourceUrl] into [destination], preserving partial bytes across
  * transient failures and process-local retries. Servers that ignore Range are
  * handled safely by truncating and restarting the file.
+ *
+ * [context] is optional (and stays `null` in [VoiceModelDownloaderTest], a
+ * pure-JVM suite with no `Context` at all) so the failure messages this
+ * throws stay the literal zh-Hans copy when absent, and resolve to the real
+ * localized text when the production caller ([VoiceModelDownloader.runDownload])
+ * passes its `appContext`.
  */
 internal suspend fun downloadArchiveWithResume(
     sourceUrl: String,
@@ -85,6 +92,7 @@ internal suspend fun downloadArchiveWithResume(
     retryDelay: suspend (attempt: Int) -> Unit = { attempt ->
         delay((1_000L shl attempt.coerceAtMost(3)))
     },
+    context: Context? = null,
     onProgress: (bytes: Long, total: Long) -> Unit,
 ) {
     require(maxAttempts > 0)
@@ -99,6 +107,7 @@ internal suspend fun downloadArchiveWithResume(
                 destination = destination,
                 fallbackTotal = fallbackTotal,
                 connectionFactory = connectionFactory,
+                context = context,
                 onProgress = onProgress,
             )
             return
@@ -112,6 +121,10 @@ internal suspend fun downloadArchiveWithResume(
         if (attempt < maxAttempts - 1) retryDelay(attempt)
     }
 
+    // Unreachable: every failed attempt above sets `lastFailure` (the only
+    // path that doesn't is a non-retryable DownloadHttpException, which is
+    // re-thrown immediately, never falling through to here). Kept as a
+    // defensive fallback for the compiler's non-null `throw`.
     throw lastFailure ?: IOException("下载失败")
 }
 
@@ -120,6 +133,7 @@ private suspend fun downloadAttempt(
     destination: File,
     fallbackTotal: Long,
     connectionFactory: (URL) -> HttpURLConnection,
+    context: Context?,
     onProgress: (bytes: Long, total: Long) -> Unit,
 ) {
     var existingBytes = destination.takeIf { it.isFile }?.length() ?: 0L
@@ -138,17 +152,30 @@ private suspend fun downloadAttempt(
                 return
             }
             destination.delete()
-            throw DownloadHttpException(status, retryable = true, message = "服务器拒绝续传")
+            throw DownloadHttpException(
+                status,
+                retryable = true,
+                message = context?.getString(R.string.voice_download_resume_rejected) ?: "服务器拒绝续传",
+            )
         }
         if (status !in 200..299) {
             val retryable = status == 408 || status == 429 || status in 500..599
-            throw DownloadHttpException(status, retryable, "下载服务器返回 HTTP $status")
+            throw DownloadHttpException(
+                status,
+                retryable,
+                context?.getString(R.string.voice_download_http_status_fmt, status)
+                    ?: "下载服务器返回 HTTP $status",
+            )
         }
 
         val append = status == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0L
         if (status == HttpURLConnection.HTTP_PARTIAL && contentRange?.start != existingBytes) {
             destination.delete()
-            throw DownloadHttpException(status, retryable = true, message = "续传位置不匹配")
+            throw DownloadHttpException(
+                status,
+                retryable = true,
+                message = context?.getString(R.string.voice_download_resume_mismatch) ?: "续传位置不匹配",
+            )
         }
         if (!append) existingBytes = 0L
 
@@ -176,7 +203,7 @@ private suspend fun downloadAttempt(
         }
 
         if (responseBytes > 0L && completedBytes < existingBytes + responseBytes) {
-            throw EOFException("下载连接提前结束")
+            throw EOFException(context?.getString(R.string.voice_download_truncated) ?: "下载连接提前结束")
         }
     } finally {
         connection.disconnect()
@@ -282,6 +309,10 @@ object VoiceModelDownloader {
             else -> {}
         }
         if (appContext == null) {
+            // No Context to localize with by definition (this branch only runs
+            // when [attach] hasn't been called yet — never in practice, since
+            // MainActivity.onCreate always attaches before any UI can reach
+            // `start()`). Kept as the literal zh-Hans copy.
             set(entry.id, ModelState.Failed("下载器尚未初始化"))
             return
         }
@@ -329,18 +360,24 @@ object VoiceModelDownloader {
                 sourceUrl = entry.sourceUrl,
                 destination = tmp,
                 fallbackTotal = entry.approxSizeBytes,
+                context = ctx,
             ) { bytes, total ->
                 set(entry.id, ModelState.Downloading(bytes, total))
             }
             set(entry.id, ModelState.Verifying)
             val hex = sha256(tmp)
             if (!hex.equals(entry.sha256, ignoreCase = true)) {
-                tmp.delete(); set(entry.id, ModelState.Failed("校验失败 (sha256 不匹配)")); return
+                tmp.delete()
+                set(entry.id, ModelState.Failed(ctx.getString(R.string.voice_download_checksum_mismatch)))
+                return
             }
             set(entry.id, ModelState.Extracting)
             install(tmp, entry, modelDir(entry.id))
             tmp.delete()
-            set(entry.id, if (isReady(entry)) ModelState.Ready else ModelState.Failed("解压后文件缺失"))
+            set(
+                entry.id,
+                if (isReady(entry)) ModelState.Ready else ModelState.Failed(ctx.getString(R.string.voice_download_extracted_files_missing)),
+            )
         } catch (ce: CancellationException) {
             set(entry.id, ModelState.NotInstalled)
             throw ce
@@ -364,17 +401,30 @@ object VoiceModelDownloader {
     }
 
     private fun failureMessage(error: Throwable, partialBytes: Long): String {
-        val resumable = if (partialBytes > 0L) "，已保留进度" else ""
+        // `DownloadHttpException`/the `EOFException` thrown by `downloadAttempt`
+        // above already carry pre-localized `.message` text (it was resolved
+        // via `context?.getString` at the throw site, using this same
+        // `appContext`) — only the exception TYPES this function can't
+        // localize at their own throw site (JDK-thrown SocketTimeoutException /
+        // UnknownHostException, plus the generic IOException/else fallback)
+        // need to resolve their copy here.
+        val ctx = appContext
+        val resumable = if (partialBytes > 0L) {
+            ctx?.getString(R.string.voice_download_resumable_suffix) ?: "，已保留进度"
+        } else {
+            ""
+        }
         return when (error) {
-            is SocketTimeoutException -> "连接超时$resumable"
-            is UnknownHostException -> "无法解析下载地址$resumable"
+            is SocketTimeoutException -> (ctx?.getString(R.string.voice_download_timeout) ?: "连接超时") + resumable
+            is UnknownHostException -> (ctx?.getString(R.string.voice_download_dns_failed) ?: "无法解析下载地址") + resumable
             is DownloadHttpException -> "${error.message}$resumable"
-            is IOException -> "${error.message ?: "网络中断"}$resumable"
-            else -> error.message ?: "下载失败"
+            is IOException -> "${error.message ?: (ctx?.getString(R.string.voice_download_network_interrupted) ?: "网络中断")}$resumable"
+            else -> error.message ?: (ctx?.getString(R.string.voice_download_failed) ?: "下载失败")
         }
     }
 
     private fun install(archive: File, entry: OfflineModelEntry, destDir: File) {
+        val ctx = appContext
         val staging = File(destDir.parentFile, ".${entry.id}.installing")
         staging.deleteRecursively()
         extract(archive, entry, staging)
@@ -383,15 +433,15 @@ object VoiceModelDownloader {
             !entry.requiredDirectories.all { File(staging, it).isDirectory }
         ) {
             staging.deleteRecursively()
-            throw IOException("解压后文件缺失")
+            throw IOException(ctx?.getString(R.string.voice_download_extracted_files_missing) ?: "解压后文件缺失")
         }
         if (destDir.exists() && !destDir.deleteRecursively()) {
             staging.deleteRecursively()
-            throw IOException("无法替换旧语音模型")
+            throw IOException(ctx?.getString(R.string.voice_download_replace_failed) ?: "无法替换旧语音模型")
         }
         if (!staging.renameTo(destDir)) {
             staging.deleteRecursively()
-            throw IOException("无法激活语音模型")
+            throw IOException(ctx?.getString(R.string.voice_download_activate_failed) ?: "无法激活语音模型")
         }
     }
 
@@ -401,6 +451,7 @@ object VoiceModelDownloader {
      * intentionally left out to avoid doubling the installed size.
      */
     private fun extract(archive: File, entry: OfflineModelEntry, destDir: File) {
+        val ctx = appContext
         val root = destDir.canonicalFile
         root.mkdirs()
         val rootPrefix = root.path + File.separator
@@ -426,11 +477,13 @@ object VoiceModelDownloader {
                                 out.outputStream().use { tar.copyTo(it) }
                             }
                             !e.isDirectory && !e.isFile -> {
-                                throw IOException("语音模型包含不支持的归档条目")
+                                throw IOException(
+                                    ctx?.getString(R.string.voice_download_unsupported_entry) ?: "语音模型包含不支持的归档条目",
+                                )
                             }
                         }
                     } else if (rel.isNotBlank()) {
-                        throw IOException("语音模型归档路径越界")
+                        throw IOException(ctx?.getString(R.string.voice_download_path_traversal) ?: "语音模型归档路径越界")
                     }
                     e = tar.nextEntry
                 }

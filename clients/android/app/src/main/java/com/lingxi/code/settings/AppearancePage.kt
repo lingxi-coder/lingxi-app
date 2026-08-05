@@ -202,7 +202,7 @@ private fun AccentGrid(
                     )
                 }
                 Text(
-                    a.name,
+                    a.localizedName(),
                     color = t.text3,
                     fontSize = 11.sp,
                     maxLines = 1,
@@ -211,4 +211,20 @@ private fun AccentGrid(
             }
         }
     }
+}
+
+/**
+ * [Accents.all]'s [com.lingxi.code.theme.AccentOption.name] stays the literal
+ * zh-Hans copy on the model (see its doc); this `id`-keyed lookup resolves
+ * the real localized text, reusing the existing `settings_accent_*` keys.
+ */
+@Composable
+private fun com.lingxi.code.theme.AccentOption.localizedName(): String = when (id) {
+    "oklch(70% 0.18 268)" -> stringResource(R.string.settings_accent_indigo)
+    "oklch(70% 0.18 320)" -> stringResource(R.string.settings_accent_rose)
+    "oklch(72% 0.16 195)" -> stringResource(R.string.settings_accent_cyan)
+    "oklch(72% 0.16 155)" -> stringResource(R.string.settings_accent_teal)
+    "oklch(74% 0.16 75)" -> stringResource(R.string.settings_accent_amber)
+    "oklch(70% 0.20 30)" -> stringResource(R.string.settings_accent_brick)
+    else -> name
 }

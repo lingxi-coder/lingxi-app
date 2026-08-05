@@ -24,9 +24,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
@@ -85,13 +87,13 @@ fun OfflineBanner(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "已离线",
+                    text = stringResource(R.string.connectivity_offline_title),
                     color = t.statusError,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "网络连接不可用，部分功能可能受影响。",
+                    text = stringResource(R.string.connectivity_offline_body),
                     color = t.text2,
                     fontSize = 12.5f.sp,
                     lineHeight = (12.5f * 1.4f).sp,
@@ -99,7 +101,7 @@ fun OfflineBanner(
             }
             if (onRetry != null) {
                 Text(
-                    text = "重试",
+                    text = stringResource(R.string.common_retry),
                     color = t.accent,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -118,7 +120,7 @@ fun OfflineBanner(
                     .testTag(UiTags.OFFLINE_DISMISS),
                 contentAlignment = Alignment.Center,
             ) {
-                LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f, contentDescription = "关闭离线提示")
+                LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f, contentDescription = stringResource(R.string.connectivity_offline_dismiss_description))
             }
         }
     }

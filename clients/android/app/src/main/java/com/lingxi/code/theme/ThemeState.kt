@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.lingxi.code.R
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -51,7 +52,13 @@ data class AppearancePrefs(
     val fontSize: Float = 15f,
     // First-run profile + onboarding (the prototype's `lx_settings` blob +
     // `lx_setup_done` flag). The SetupWizard writes these once; the FlowMode orb
-    // + drawer + settings read them back.
+    // + drawer + settings read them back. This literal `"灵犀"` default stays:
+    // it's a plain data class with no `Context`, and the DURABLE value flows
+    // through `AppearanceStore.prefs` below, which resolves the real
+    // localized `app_name` string. This field default is reachable only as
+    // the transient `collectAsState(initial = AppearancePrefs())` seed
+    // (MainActivity.kt / AppearancePage.kt) for the single frame before the
+    // DataStore flow first emits.
     val assistantName: String = "灵犀", // wake-word name
     val userName: String = "",          // how the assistant addresses the user
     val voiceprint: Boolean = false,    // voiceprint enrolled in onboarding
@@ -92,7 +99,7 @@ class AppearanceStore(private val context: Context) {
             accentId = p[PrefKeys.ACCENT] ?: Accents.DEFAULT_ID,
             density = Density.from(p[PrefKeys.DENSITY]),
             fontSize = (p[PrefKeys.FONT_SIZE] ?: 15.0).toFloat(),
-            assistantName = p[PrefKeys.ASSISTANT_NAME] ?: "灵犀",
+            assistantName = p[PrefKeys.ASSISTANT_NAME] ?: context.getString(R.string.app_name),
             userName = p[PrefKeys.USER_NAME] ?: "",
             voiceprint = p[PrefKeys.VOICEPRINT] ?: false,
             defaultModelId = p[PrefKeys.DEFAULT_MODEL] ?: "lx-72b",

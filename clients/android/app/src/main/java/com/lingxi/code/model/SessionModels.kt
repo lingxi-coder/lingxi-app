@@ -1,5 +1,8 @@
 package com.lingxi.code.model
 
+import android.content.Context
+import com.lingxi.code.R
+
 /**
  * The engine's REAL resumable-session catalog — the SEPARATE, out-of-band
  * session-state path, the exact sibling of [EngineModelState] for the model
@@ -17,6 +20,30 @@ enum class SessionCatalogPhase {
     Ready,
     Error,
 }
+
+/**
+ * Resolves a string resource id to its localized text for [SessionCatalog].
+ * [fallback] is always the exact zh-Hans base-locale copy for [id], passed in
+ * at the call site right next to the resource id. [DefaultSessionCatalogStrings]
+ * (the parameter default everywhere this is threaded through) returns
+ * [fallback] verbatim — formatted with [args] when present — which is why
+ * [SessionCatalogTest] (a pure-JVM test with no Android `Context` at all) keeps
+ * asserting the same literal Chinese relative-time copy without being touched.
+ * The production implementation ([sessionCatalogStrings]) ignores [fallback]
+ * and resolves the REAL localized text through [Context.getString].
+ */
+fun interface SessionCatalogStrings {
+    fun resolve(id: Int, fallback: String, vararg args: Any): String
+}
+
+/** Test/no-Context fallback: the literal zh-Hans copy, `String.format`-ed. */
+val DefaultSessionCatalogStrings = SessionCatalogStrings { _, fallback, args ->
+    if (args.isEmpty()) fallback else String.format(java.util.Locale.getDefault(), fallback, *args)
+}
+
+/** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
+fun sessionCatalogStrings(context: Context): SessionCatalogStrings =
+    SessionCatalogStrings { id, _, args -> context.getString(id, *args) }
 
 private val BARE_SESSION_UUID =
     Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -123,11 +150,12 @@ object SessionCatalog {
         messageCount: Int,
         modifiedRfc3339: String,
         nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
+        strings: SessionCatalogStrings = DefaultSessionCatalogStrings,
     ): SessionRow = SessionRow(
         uuid = canonicalSessionId(uuid),
-        title = title.ifBlank { "未命名会话" },
+        title = title.ifBlank { strings.resolve(R.string.session_untitled, "未命名会话") },
         messageCount = messageCount,
-        relativeTime = relativeTime(modifiedRfc3339, nowEpochSeconds),
+        relativeTime = relativeTime(modifiedRfc3339, nowEpochSeconds, strings),
     )
 
     /**
@@ -142,17 +170,23 @@ object SessionCatalog {
      * `YYYY-MM-DDТHH:MM:SS[.fff]Z`) with a tiny hand-rolled scan so this needs
      * no `java.time` (kept off the desugaring path) and stays pure JVM.
      */
-    fun relativeTime(modifiedRfc3339: String, nowEpochSeconds: Long): String {
-        val thenEpoch = parseRfc3339ToEpochSeconds(modifiedRfc3339) ?: return "刚刚"
+    fun relativeTime(
+        modifiedRfc3339: String,
+        nowEpochSeconds: Long,
+        strings: SessionCatalogStrings = DefaultSessionCatalogStrings,
+    ): String {
+        val justNow = { strings.resolve(R.string.project_relative_time_just_now, "刚刚") }
+        val thenEpoch = parseRfc3339ToEpochSeconds(modifiedRfc3339) ?: return justNow()
         val delta = nowEpochSeconds - thenEpoch
         return when {
-            delta < 0L -> "刚刚" // clock skew / future stamp
-            delta < 60L -> "刚刚"
-            delta < 3600L -> "${delta / 60L} 分钟前"
-            delta < 86_400L -> "${delta / 3600L} 小时前"
-            delta < 172_800L -> "昨天"
-            delta < 604_800L -> "${delta / 86_400L} 天前"
-            else -> monthDay(modifiedRfc3339) ?: "${delta / 86_400L} 天前"
+            delta < 0L -> justNow() // clock skew / future stamp
+            delta < 60L -> justNow()
+            delta < 3600L -> strings.resolve(R.string.session_relative_minutes_ago_fmt, "%1\$d 分钟前", delta / 60L)
+            delta < 86_400L -> strings.resolve(R.string.session_relative_hours_ago_fmt, "%1\$d 小时前", delta / 3600L)
+            delta < 172_800L -> strings.resolve(R.string.session_relative_yesterday, "昨天")
+            delta < 604_800L -> strings.resolve(R.string.session_relative_days_ago_fmt, "%1\$d 天前", delta / 86_400L)
+            else -> monthDay(modifiedRfc3339, strings)
+                ?: strings.resolve(R.string.session_relative_days_ago_fmt, "%1\$d 天前", delta / 86_400L)
         }
     }
 
@@ -183,12 +217,12 @@ object SessionCatalog {
     }
 
     /** "M月D日" for the timestamp, or `null` if it can't be parsed. */
-    private fun monthDay(s: String): String? {
+    private fun monthDay(s: String, strings: SessionCatalogStrings): String? {
         if (s.length < 10) return null
         val month = s.substring(5, 7).toIntOrNull() ?: return null
         val day = s.substring(8, 10).toIntOrNull() ?: return null
         if (month !in 1..12 || day !in 1..31) return null
-        return "${month}月${day}日"
+        return strings.resolve(R.string.session_relative_month_day_fmt, "%1\$d月%2\$d日", month, day)
     }
 
     /**

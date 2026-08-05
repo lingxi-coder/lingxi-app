@@ -284,7 +284,13 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
             RadioList(
                 options = Presets.voice
                     .filter { it.id == "system" }
-                    .map { RadioOption(it.id, it.name, it.sub) },
+                    .map {
+                        RadioOption(
+                            it.id,
+                            stringResource(R.string.settings_voice_system),
+                            stringResource(R.string.settings_provider_preset_system_voice_sub),
+                        )
+                    },
                 selected = voice.preset,
                 onSelect = { onChange(voice.copy(preset = it)) },
             )

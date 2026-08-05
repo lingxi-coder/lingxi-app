@@ -181,8 +181,7 @@
     <string name="mcp_stat_connected">已连接</string>
     <string name="mcp_stat_available_tools">可用工具</string>
     <string name="mcp_add_server">添加 MCP 服务器</string>
-    <string name="mcp_transport_description_prefix">支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。
-浏览公开服务器目录：</string>
+    <string name="mcp_transport_description_prefix">支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。\n浏览公开服务器目录：</string>
     <string name="mcp_reconnect">重新连接</string>
     <string name="settings_display_name">显示名称</string>
     <string name="mcp_endpoint">端点</string>
@@ -224,8 +223,7 @@
     <string name="settings_density_spacious_sub">更大间距，更易读</string>
     <string name="settings_section_font_size">字号</string>
     <string name="settings_font_size_preview">\"灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。\"</string>
-    <string name="dream_description_blurb">当设备闲置时，灵犀在后台运行
-整理、规划、润色 — 醒来即可看到结果</string>
+    <string name="dream_description_blurb">当设备闲置时，灵犀在后台运行\n整理、规划、润色 — 醒来即可看到结果</string>
     <string name="dream_enable">开启 Dream 模式</string>
     <string name="dream_section_time_window">时间窗</string>
     <string name="dream_window_night">夜间 (00:00–06:00)</string>
@@ -1085,8 +1083,7 @@
     <string name="local_apps_browser_error_source_absolute">已拒绝绝对源码路径。</string>
     <string name="local_apps_browser_error_workspace_absolute">已拒绝绝对工作区路径。</string>
     <string name="local_apps_browser_error_workspace_invalid">已拒绝无效工作区路径。</string>
-    <string name="local_apps_capability_domain_suffix">
-域名：%1$s</string>
+    <string name="local_apps_capability_domain_suffix">\n域名：%1$s</string>
     <string name="local_apps_capability_section_detail">首次修改数据、控制 UI 或访问声明域名时，系统会提供允许一次、本次会话或始终允许。未授权请求默认拒绝。</string>
     <string name="local_apps_capability_section_title">能力授权</string>
     <string name="local_apps_card_menu_a11y">应用操作</string>
@@ -1115,8 +1112,7 @@
     <string name="local_apps_field_enabled">已启用</string>
     <string name="local_apps_filter_all">全部</string>
     <string name="local_apps_history_notice">恢复只回退 Git 管理的源码，SQLite 数据不会回滚。恢复前会自动创建 pre_restore 检查点。</string>
-    <string name="local_apps_leave_app_detail">此链接将交给系统浏览器打开：
-%1$s</string>
+    <string name="local_apps_leave_app_detail">此链接将交给系统浏览器打开：\n%1$s</string>
     <string name="local_apps_leave_app_title">离开本地应用？</string>
     <string name="local_apps_loading_data_detail">应用详情返回后会显示受控 SQLite 集合。</string>
     <string name="local_apps_loading_data_title">正在加载数据结构</string>

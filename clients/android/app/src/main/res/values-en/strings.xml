@@ -181,8 +181,7 @@
     <string name="mcp_stat_connected">已连接</string>
     <string name="mcp_stat_available_tools">可用工具</string>
     <string name="mcp_add_server">添加 MCP 服务器</string>
-    <string name="mcp_transport_description_prefix">支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。
-浏览公开服务器目录：</string>
+    <string name="mcp_transport_description_prefix">支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。\n浏览公开服务器目录：</string>
     <string name="mcp_reconnect">重新连接</string>
     <string name="settings_display_name">显示名称</string>
     <string name="mcp_endpoint">端点</string>
@@ -224,8 +223,7 @@
     <string name="settings_density_spacious_sub">更大间距，更易读</string>
     <string name="settings_section_font_size">字号</string>
     <string name="settings_font_size_preview">\"灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。\"</string>
-    <string name="dream_description_blurb">当设备闲置时，灵犀在后台运行
-整理、规划、润色 — 醒来即可看到结果</string>
+    <string name="dream_description_blurb">当设备闲置时，灵犀在后台运行\n整理、规划、润色 — 醒来即可看到结果</string>
     <string name="dream_enable">开启 Dream 模式</string>
     <string name="dream_section_time_window">时间窗</string>
     <string name="dream_window_night">夜间 (00:00–06:00)</string>
@@ -1085,8 +1083,7 @@
     <string name="local_apps_browser_error_source_absolute">Absolute source paths are rejected.</string>
     <string name="local_apps_browser_error_workspace_absolute">Absolute workspace paths are rejected.</string>
     <string name="local_apps_browser_error_workspace_invalid">Invalid workspace paths are rejected.</string>
-    <string name="local_apps_capability_domain_suffix">
-Domain: %1$s</string>
+    <string name="local_apps_capability_domain_suffix">\nDomain: %1$s</string>
     <string name="local_apps_capability_section_detail">The first time the app modifies data, controls the UI, or accesses a declared domain, you\'ll be offered allow once, allow this session, or always allow. Unauthorized requests are denied by default.</string>
     <string name="local_apps_capability_section_title">Capability authorization</string>
     <string name="local_apps_card_menu_a11y">App actions</string>
@@ -1115,8 +1112,7 @@ Domain: %1$s</string>
     <string name="local_apps_field_enabled">Enabled</string>
     <string name="local_apps_filter_all">All</string>
     <string name="local_apps_history_notice">Restoring only rolls back Git-managed source code; SQLite data is not rolled back. A pre_restore checkpoint is created automatically before restoring.</string>
-    <string name="local_apps_leave_app_detail">This link will be opened in the system browser:
-%1$s</string>
+    <string name="local_apps_leave_app_detail">This link will be opened in the system browser:\n%1$s</string>
     <string name="local_apps_leave_app_title">Leave the local app?</string>
     <string name="local_apps_loading_data_detail">Managed SQLite collections will show once the app details return.</string>
     <string name="local_apps_loading_data_title">Loading data structure</string>

@@ -148,6 +148,13 @@ def _xml_escape_text(s: str) -> str:
         .replace("'", "\\'")
         .replace('"', '\\"')
         .replace("%", "%%")
+        # A literal newline in the XML text node is legal XML but not what
+        # Android's string-resource format expects: the two-character escape
+        # `\n` is required for it to render as a line break rather than
+        # collapsing per XML whitespace rules. Source JSON values use real
+        # newline characters (e.g. mcp_transport_description_prefix), so they
+        # must be re-encoded here rather than passed through.
+        .replace("\n", "\\n")
     )
 
 

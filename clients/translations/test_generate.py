@@ -61,8 +61,9 @@ def test_android_escaping(tmp_path):
             "q": 'a "b"',
             "a": "a <b> & c",
             "p": "100%x",
+            "nl": "line one\nline two",
         },
-        "en": {"k": "x", "n": "y", "q": "z", "a": "w", "p": "v"},
+        "en": {"k": "x", "n": "y", "q": "z", "a": "w", "p": "v", "nl": "u"},
     }
     write_android(locales, tmp_path)
     xml = open(tmp_path / "values" / "strings.xml").read()
@@ -71,6 +72,11 @@ def test_android_escaping(tmp_path):
     assert '<string name="q">a \\"b\\"</string>' in xml
     assert '<string name="a">a &lt;b&gt; &amp; c</string>' in xml
     assert '<string name="p">100%x</string>' in xml
+    # A literal newline in the source value must become the two-character
+    # `\n` escape, not a raw line break in the XML text node — Android's
+    # resource format requires the escape to render it as a line break.
+    assert '<string name="nl">line one\\nline two</string>' in xml
+    assert "line one\nline two" not in xml
 
 def _gate_sandbox(tmp_path):
     """Write canonical locales into a tmp dir and return (locales, ios_out, android_out)."""

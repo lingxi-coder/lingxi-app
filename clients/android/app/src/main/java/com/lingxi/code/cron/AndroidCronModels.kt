@@ -1,6 +1,7 @@
 package com.lingxi.code.cron
 
 import android.content.Context
+import com.lingxi.code.R
 import com.lingxi.code.bindings.CronTaskDto
 
 const val GLOBAL_CRON_SCOPE_ID = "global"
@@ -20,7 +21,7 @@ data class CronScope(
         fun global(context: Context): CronScope = CronScope(
             scopeId = GLOBAL_CRON_SCOPE_ID,
             projectId = null,
-            projectName = "全局",
+            projectName = context.applicationContext.getString(R.string.common_global),
             workspacePath = context.applicationContext.filesDir.canonicalPath,
             guestPath = "/workspace/global",
         )

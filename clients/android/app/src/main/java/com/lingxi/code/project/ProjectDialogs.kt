@@ -14,8 +14,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.lingxi.code.R
 
 @Composable
 fun CreateProjectDialog(
@@ -29,14 +31,14 @@ fun CreateProjectDialog(
     val valid = name.trim().isNotEmpty()
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建项目") },
+        title = { Text(stringResource(R.string.project_dialog_create_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("项目使用稳定 UUID 保存；名称不会成为文件夹路径。")
+                Text(stringResource(R.string.project_dialog_create_body))
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(120) },
-                    label = { Text("项目名称") },
+                    label = { Text(stringResource(R.string.drawer_project_name_placeholder)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -47,15 +49,15 @@ fun CreateProjectDialog(
                 TextButton(
                     enabled = valid,
                     onClick = { onChooseExternal(name.trim()) },
-                ) { Text("导入外部目录") }
+                ) { Text(stringResource(R.string.project_dialog_import_external_button)) }
                 TextButton(
                     enabled = valid,
                     onClick = { onCreateInternal(name.trim()) },
-                ) { Text("创建本机项目") }
+                ) { Text(stringResource(R.string.project_dialog_create_internal_button)) }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -71,10 +73,12 @@ fun ProjectConflictDialog(
     val projectId = conflicts.first().projectId
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("发现 ${conflicts.size} 个同步冲突") },
+        title = {
+            Text(stringResource(R.string.project_conflict_dialog_title_fmt, conflicts.size))
+        },
         text = {
             Column {
-                Text("默认已跳过冲突文件。请选择全部保留本机版本或外部目录版本。")
+                Text(stringResource(R.string.project_conflict_dialog_body))
                 conflicts.take(8).forEach { conflict ->
                     Text(
                         text = conflict.relativePath,
@@ -82,17 +86,30 @@ fun ProjectConflictDialog(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (conflicts.size > 8) Text("还有 ${conflicts.size - 8} 个文件…")
+                if (conflicts.size > 8) {
+                    Text(
+                        stringResource(
+                            R.string.project_conflict_dialog_more_files_fmt,
+                            conflicts.size - 8,
+                        ),
+                    )
+                }
             }
         },
         confirmButton = {
             Row {
-                TextButton(onClick = onKeepExternal) { Text("保留外部") }
-                TextButton(onClick = onKeepInternal) { Text("保留本机") }
+                TextButton(onClick = onKeepExternal) {
+                    Text(stringResource(R.string.project_conflict_keep_external_button))
+                }
+                TextButton(onClick = onKeepInternal) {
+                    Text(stringResource(R.string.project_conflict_keep_internal_button))
+                }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("稍后处理") }
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.project_conflict_defer_button))
+            }
         },
     )
 }
@@ -105,10 +122,10 @@ fun ProjectErrorDialog(
     if (message == null) return
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("项目操作失败") },
+        title = { Text(stringResource(R.string.project_error_dialog_title)) },
         text = { Text(message) },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("知道了") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_got_it)) }
         },
     )
 }

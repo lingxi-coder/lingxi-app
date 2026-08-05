@@ -2866,6 +2866,22 @@
         }
       }
     },
+    "cron_active_queue_summary_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行队列 %1$d · %2$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Execution queue %1$d · %2$s"
+          }
+        }
+      }
+    },
     "cron_active_runs_label": {
       "localizations": {
         "zh-Hans": {
@@ -2910,6 +2926,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Active Scope"
+          }
+        }
+      }
+    },
+    "cron_advanced_expression_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高级五段 Cron（分 时 日 月 周）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Advanced 5-field cron (minute hour day month weekday)"
+          }
+        }
+      }
+    },
+    "cron_cancel_edit_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消编辑"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel Editing"
           }
         }
       }
@@ -2994,6 +3042,22 @@
         }
       }
     },
+    "cron_edit_task_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑定时任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit Cron Task"
+          }
+        }
+      }
+    },
     "cron_edit_task_title": {
       "localizations": {
         "zh-Hans": {
@@ -3006,6 +3070,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Edit Task"
+          }
+        }
+      }
+    },
+    "cron_engine_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移动端引擎不可用或未正确配置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The mobile engine is unavailable or not configured correctly"
           }
         }
       }
@@ -3138,6 +3218,54 @@
         }
       }
     },
+    "cron_exact_alarm_banner_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未授予“闹钟和提醒”权限。任务仍会创建，但由 WorkManager 每 15 分钟巡检，触发时间可能延迟。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“Alarms & reminders” permission wasn't granted. Tasks are still created, but WorkManager checks every 15 minutes, so trigger times may be delayed."
+          }
+        }
+      }
+    },
+    "cron_exact_alarm_granted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精确闹钟已授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exact alarm authorized"
+          }
+        }
+      }
+    },
+    "cron_exact_alarm_mode": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精确闹钟模式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exact alarm mode"
+          }
+        }
+      }
+    },
     "cron_execution_cancelled": {
       "localizations": {
         "zh-Hans": {
@@ -3166,6 +3294,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Execution failed"
+          }
+        }
+      }
+    },
+    "cron_execution_failed_default_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务执行失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled task execution failed"
+          }
+        }
+      }
+    },
+    "cron_execution_interrupted_retry_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统中断，等待重新调度"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Interrupted by the system, waiting to be rescheduled"
+          }
+        }
+      }
+    },
+    "cron_execution_timeout_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行超过 3 分钟"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Execution exceeded 3 minutes"
           }
         }
       }
@@ -3202,6 +3378,38 @@
         }
       }
     },
+    "cron_fallback_mode_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟级非精确模式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15-minute inexact mode"
+          }
+        }
+      }
+    },
+    "cron_fifteen_minute_patrol_mode": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟巡检模式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15-minute patrol mode"
+          }
+        }
+      }
+    },
     "cron_finished_at_label": {
       "localizations": {
         "zh-Hans": {
@@ -3214,6 +3422,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Finished At"
+          }
+        }
+      }
+    },
+    "cron_force_stop_notice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统限制：用户 Force Stop 后，Alarm 和 WorkManager 都会暂停，直到再次打开应用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System limitation: after a user force-stops the app, both Alarm and WorkManager pause until the app is opened again."
+          }
+        }
+      }
+    },
+    "cron_form_validation_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提示词和 Cron 表达式都不能为空"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prompt and cron expression cannot be empty"
           }
         }
       }
@@ -3298,6 +3538,38 @@
         }
       }
     },
+    "cron_last_run_status_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last: %1$s"
+          }
+        }
+      }
+    },
+    "cron_load_failed_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务读取失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to load scheduled tasks"
+          }
+        }
+      }
+    },
     "cron_missing_task %@": {
       "localizations": {
         "zh-Hans": {
@@ -3326,6 +3598,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mode"
+          }
+        }
+      }
+    },
+    "cron_network_connected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网络已连接"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Network connected"
+          }
+        }
+      }
+    },
+    "cron_network_waiting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待网络"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for network"
           }
         }
       }
@@ -3378,6 +3682,38 @@
         }
       }
     },
+    "cron_next_fire_suffix_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · 下次 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · Next %1$s"
+          }
+        }
+      }
+    },
+    "cron_next_wake_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一次唤醒：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next wake: %1$s"
+          }
+        }
+      }
+    },
     "cron_no_active_runs": {
       "localizations": {
         "zh-Hans": {
@@ -3394,6 +3730,22 @@
         }
       }
     },
+    "cron_no_output": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有输出"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No output"
+          }
+        }
+      }
+    },
     "cron_no_run_history": {
       "localizations": {
         "zh-Hans": {
@@ -3406,6 +3758,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "No runs yet. System scheduling isn't a precise alarm, but you can always run it immediately."
+          }
+        }
+      }
+    },
+    "cron_no_run_history_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无运行记录。结果不会写入普通聊天 Session。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No run history yet. Results are not written to a regular chat session."
+          }
+        }
+      }
+    },
+    "cron_no_schedulable_tasks": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可调度的任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No schedulable tasks right now"
+          }
+        }
+      }
+    },
+    "cron_no_tasks_yet": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还没有定时任务。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No scheduled tasks yet."
           }
         }
       }
@@ -3458,6 +3858,22 @@
         }
       }
     },
+    "cron_notification_channel_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务结果"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled Task Results"
+          }
+        }
+      }
+    },
     "cron_notification_completed %@": {
       "localizations": {
         "zh-Hans": {
@@ -3486,6 +3902,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ scheduled task failed"
+          }
+        }
+      }
+    },
+    "cron_notification_run_result_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通知对应的运行结果"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run result for this notification"
           }
         }
       }
@@ -3554,6 +3986,38 @@
         }
       }
     },
+    "cron_one_time_datetime_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "单次日期时间"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One-Time Date & Time"
+          }
+        }
+      }
+    },
+    "cron_open_alarm_settings_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开“闹钟和提醒”"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open “Alarms & Reminders”"
+          }
+        }
+      }
+    },
     "cron_pending": {
       "localizations": {
         "zh-Hans": {
@@ -3566,6 +4030,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Pending"
+          }
+        }
+      }
+    },
+    "cron_preset_every_hour": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每小时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hourly"
+          }
+        }
+      }
+    },
+    "cron_preset_every_monday_9am": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周一 09:00"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mondays at 09:00"
           }
         }
       }
@@ -3666,6 +4162,22 @@
         }
       }
     },
+    "cron_recurring_interval_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重复执行（最小间隔 15 分钟）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Repeats (minimum interval 15 minutes)"
+          }
+        }
+      }
+    },
     "cron_recurring_toggle": {
       "localizations": {
         "zh-Hans": {
@@ -3698,6 +4210,22 @@
         }
       }
     },
+    "cron_result_title_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled Task"
+          }
+        }
+      }
+    },
     "cron_result_unknown": {
       "localizations": {
         "zh-Hans": {
@@ -3710,6 +4238,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Unknown Issue"
+          }
+        }
+      }
+    },
+    "cron_retries_exhausted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试次数已耗尽"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry attempts exhausted"
           }
         }
       }
@@ -3794,6 +4338,22 @@
         }
       }
     },
+    "cron_run_once_toggle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅执行一次"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run once only"
+          }
+        }
+      }
+    },
     "cron_run_project_label": {
       "localizations": {
         "zh-Hans": {
@@ -3822,6 +4382,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ · Next %@"
+          }
+        }
+      }
+    },
+    "cron_run_summary_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$s · 尝试 %3$d"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$s · Attempt %3$d"
           }
         }
       }
@@ -3986,6 +4562,22 @@
         }
       }
     },
+    "cron_scope_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务在所选 Project 的 workspace 中运行；全局用于兼容旧任务。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The task runs in the selected project's workspace; Global is for compatibility with legacy tasks."
+          }
+        }
+      }
+    },
     "cron_scope_id_label": {
       "localizations": {
         "zh-Hans": {
@@ -4130,6 +4722,22 @@
         }
       }
     },
+    "cron_task_count_header_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务（%1$d）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks (%1$d)"
+          }
+        }
+      }
+    },
     "cron_task_count_label": {
       "localizations": {
         "zh-Hans": {
@@ -4158,6 +4766,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Scheduled task created"
+          }
+        }
+      }
+    },
+    "cron_task_delete_failed_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务不存在或已经删除"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The task doesn't exist or has already been deleted"
           }
         }
       }
@@ -4242,6 +4866,22 @@
         }
       }
     },
+    "cron_task_removed_or_claimed_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务已删除、尚未到期或已由同作用域批次领取"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The task was deleted, isn't due yet, or was already claimed by another batch in the same scope"
+          }
+        }
+      }
+    },
     "cron_task_unavailable": {
       "localizations": {
         "zh-Hans": {
@@ -4258,6 +4898,22 @@
         }
       }
     },
+    "cron_task_unsupported_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 不支持此任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android doesn't support this task"
+          }
+        }
+      }
+    },
     "cron_task_updated": {
       "localizations": {
         "zh-Hans": {
@@ -4270,6 +4926,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Scheduled task updated"
+          }
+        }
+      }
+    },
+    "cron_temporary_network_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "临时网络或服务错误"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporary network or service error"
           }
         }
       }
@@ -11374,6 +12046,326 @@
           "stringUnit": {
             "state": "translated",
             "value": "请求权限"
+          }
+        }
+      }
+    },
+    "project_conflict_defer_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "稍后处理"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Decide Later"
+          }
+        }
+      }
+    },
+    "project_conflict_dialog_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认已跳过冲突文件。请选择全部保留本机版本或外部目录版本。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conflicting files were skipped by default. Choose to keep all local versions or all external versions."
+          }
+        }
+      }
+    },
+    "project_conflict_dialog_more_files_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还有 %1$d 个文件…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d more files…"
+          }
+        }
+      }
+    },
+    "project_conflict_dialog_title_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发现 %1$d 个同步冲突"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %1$d sync conflicts"
+          }
+        }
+      }
+    },
+    "project_conflict_keep_external_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留外部"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep External"
+          }
+        }
+      }
+    },
+    "project_conflict_keep_internal_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留本机"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Local"
+          }
+        }
+      }
+    },
+    "project_corrupt_projects_message_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 个项目数据损坏或路径异常，已隔离；其他项目仍可使用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d project(s) had corrupted data or an invalid path and were quarantined; other projects remain usable."
+          }
+        }
+      }
+    },
+    "project_creating_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在创建项目…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Creating project…"
+          }
+        }
+      }
+    },
+    "project_dialog_create_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "项目使用稳定 UUID 保存；名称不会成为文件夹路径。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Projects are saved with a stable UUID; the name never becomes the folder path."
+          }
+        }
+      }
+    },
+    "project_dialog_create_internal_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建本机项目"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create Local Project"
+          }
+        }
+      }
+    },
+    "project_dialog_create_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建项目"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Project"
+          }
+        }
+      }
+    },
+    "project_dialog_import_external_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导入外部目录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import External Directory"
+          }
+        }
+      }
+    },
+    "project_error_dialog_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "项目操作失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Project Operation Failed"
+          }
+        }
+      }
+    },
+    "project_exporting_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在同步回外部目录…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Syncing back to external directory…"
+          }
+        }
+      }
+    },
+    "project_importing_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在导入外部目录…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importing external directory…"
+          }
+        }
+      }
+    },
+    "project_loading_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在读取项目…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading projects…"
+          }
+        }
+      }
+    },
+    "project_reauthorizing_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在重新授权并导入…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reauthorizing and importing…"
+          }
+        }
+      }
+    },
+    "project_reimporting_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在从外部目录重新导入…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-importing from external directory…"
+          }
+        }
+      }
+    },
+    "project_relative_time_just_now": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刚刚"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Just now"
+          }
+        }
+      }
+    },
+    "project_resolving_conflicts_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在解决同步冲突…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resolving sync conflicts…"
           }
         }
       }

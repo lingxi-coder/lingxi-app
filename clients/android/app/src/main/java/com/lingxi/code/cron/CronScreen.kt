@@ -45,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,6 +55,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.lingxi.code.R
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -61,12 +63,13 @@ import java.util.Calendar
 
 private data class SchedulePreset(val label: String, val cron: String)
 
-private val SCHEDULE_PRESETS = listOf(
-    SchedulePreset("每 15 分钟", "*/15 * * * *"),
-    SchedulePreset("每小时", "0 * * * *"),
-    SchedulePreset("每天 09:00", "0 9 * * *"),
-    SchedulePreset("工作日 09:00", "0 9 * * 1-5"),
-    SchedulePreset("每周一 09:00", "0 9 * * 1"),
+@Composable
+private fun schedulePresets(): List<SchedulePreset> = listOf(
+    SchedulePreset(stringResource(R.string.cron_every_15_minutes), "*/15 * * * *"),
+    SchedulePreset(stringResource(R.string.cron_preset_every_hour), "0 * * * *"),
+    SchedulePreset(stringResource(R.string.cron_daily_9am), "0 9 * * *"),
+    SchedulePreset(stringResource(R.string.cron_weekdays_9am), "0 9 * * 1-5"),
+    SchedulePreset(stringResource(R.string.cron_preset_every_monday_9am), "0 9 * * 1"),
 )
 
 /**
@@ -140,10 +143,15 @@ fun CronScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
+        val validationErrorMessage = stringResource(R.string.cron_form_validation_error)
+
         SchedulingSummary(state)
         initialRunId?.let { runId ->
             state.history.firstOrNull { it.runId == runId }?.let { run ->
-                Text("通知对应的运行结果", fontWeight = FontWeight.SemiBold)
+                Text(
+                    stringResource(R.string.cron_notification_run_result_label),
+                    fontWeight = FontWeight.SemiBold,
+                )
                 RunHistoryCard(run = run, expanded = true, onClick = {})
             }
         }
@@ -155,11 +163,15 @@ fun CronScreen(
         }
 
         Text(
-            if (editingTaskId == null) "新建定时任务" else "编辑定时任务",
+            if (editingTaskId == null) {
+                stringResource(R.string.cron_new_task_button)
+            } else {
+                stringResource(R.string.cron_edit_task_button)
+            },
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            "任务在所选 Project 的 workspace 中运行；全局用于兼容旧任务。",
+            stringResource(R.string.cron_scope_hint),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp,
         )
@@ -179,7 +191,7 @@ fun CronScreen(
         OutlinedTextField(
             value = prompt,
             onValueChange = { prompt = it },
-            label = { Text("提示词 / 任务") },
+            label = { Text(stringResource(R.string.cron_prompt_field_label)) },
             minLines = 2,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -187,7 +199,7 @@ fun CronScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         ) {
-            SCHEDULE_PRESETS.forEach { preset ->
+            schedulePresets().forEach { preset ->
                 AssistChip(
                     onClick = {
                         cronExpr = preset.cron
@@ -203,13 +215,13 @@ fun CronScreen(
                         recurring = false
                     }
                 },
-                label = { Text("单次日期时间") },
+                label = { Text(stringResource(R.string.cron_one_time_datetime_button)) },
             )
         }
         OutlinedTextField(
             value = cronExpr,
             onValueChange = { cronExpr = it },
-            label = { Text("高级五段 Cron（分 时 日 月 周）") },
+            label = { Text(stringResource(R.string.cron_advanced_expression_label)) },
             placeholder = { Text("0 9 * * *") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
@@ -217,7 +229,11 @@ fun CronScreen(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(checked = recurring, onCheckedChange = { recurring = it })
             Text(
-                if (recurring) "重复执行（最小间隔 15 分钟）" else "仅执行一次",
+                if (recurring) {
+                    stringResource(R.string.cron_recurring_interval_note)
+                } else {
+                    stringResource(R.string.cron_run_once_toggle)
+                },
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
@@ -229,7 +245,7 @@ fun CronScreen(
                 onClick = {
                     formError = null
                     if (prompt.isBlank() || cronExpr.isBlank()) {
-                        formError = "提示词和 Cron 表达式都不能为空"
+                        formError = validationErrorMessage
                         return@Button
                     }
                     submitting = true
@@ -252,15 +268,26 @@ fun CronScreen(
                 },
                 enabled = !submitting && state.scopes.any { it.scopeId == selectedScopeId },
             ) {
-                Text(if (editingTaskId == null) "创建并调度" else "保存")
+                Text(
+                    if (editingTaskId == null) {
+                        stringResource(R.string.cron_create_and_schedule_button)
+                    } else {
+                        stringResource(R.string.voice_save_button)
+                    },
+                )
             }
             if (editingTaskId != null) {
-                OutlinedButton(onClick = ::resetForm) { Text("取消编辑") }
+                OutlinedButton(onClick = ::resetForm) {
+                    Text(stringResource(R.string.cron_cancel_edit_button))
+                }
             }
         }
 
         HorizontalDivider()
-        Text("任务（${state.tasks.size}）", fontWeight = FontWeight.SemiBold)
+        Text(
+            stringResource(R.string.cron_task_count_header_fmt, state.tasks.size),
+            fontWeight = FontWeight.SemiBold,
+        )
         if (state.loading) {
             CircularProgressIndicator()
         }
@@ -292,14 +319,14 @@ fun CronScreen(
         }
         if (!state.loading && state.tasks.isEmpty()) {
             Text(
-                "还没有定时任务。",
+                stringResource(R.string.cron_no_tasks_yet),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
         }
 
         HorizontalDivider()
-        Text("运行历史", fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.cron_run_history_section), fontWeight = FontWeight.SemiBold)
         state.history.take(50).forEach { run ->
             RunHistoryCard(
                 run = run,
@@ -311,13 +338,13 @@ fun CronScreen(
         }
         if (!state.loading && state.history.isEmpty()) {
             Text(
-                "暂无运行记录。结果不会写入普通聊天 Session。",
+                stringResource(R.string.cron_no_run_history_android),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
         }
         Text(
-            "系统限制：用户 Force Stop 后，Alarm 和 WorkManager 都会暂停，直到再次打开应用。",
+            stringResource(R.string.cron_force_stop_notice),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp,
         )
@@ -332,18 +359,30 @@ private fun SchedulingSummary(state: AndroidCronRepositoryState) {
             verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             Text(
-                if (state.exactAlarmAllowed) "精确闹钟已授权" else "15 分钟级非精确模式",
+                if (state.exactAlarmAllowed) {
+                    stringResource(R.string.cron_exact_alarm_granted)
+                } else {
+                    stringResource(R.string.cron_fallback_mode_label)
+                },
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                state.nextScheduledAtMs?.let { "下一次唤醒：${formatEpochMs(it)}" }
-                    ?: "当前没有可调度的任务",
+                state.nextScheduledAtMs?.let {
+                    stringResource(R.string.cron_next_wake_fmt, formatEpochMs(it))
+                } ?: stringResource(R.string.cron_no_schedulable_tasks),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             Text(
-                "执行队列 ${state.activeWorkCount} · " +
-                    if (state.networkAvailable) "网络已连接" else "等待网络",
+                stringResource(
+                    R.string.cron_active_queue_summary_fmt,
+                    state.activeWorkCount,
+                    if (state.networkAvailable) {
+                        stringResource(R.string.cron_network_connected)
+                    } else {
+                        stringResource(R.string.cron_network_waiting)
+                    },
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
@@ -377,17 +416,30 @@ private fun CronTaskCard(
                     modifier = Modifier.weight(1f),
                 )
                 IconButton(onClick = onRunNow, enabled = task.activeRun == null) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "立即运行")
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = stringResource(R.string.cron_run_now_button),
+                    )
                 }
                 IconButton(onClick = onEdit, enabled = task.activeRun == null) {
-                    Icon(Icons.Default.Edit, contentDescription = "编辑")
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = stringResource(R.string.settings_title_edit),
+                    )
                 }
                 IconButton(onClick = onDelete, enabled = task.activeRun == null) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除")
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = stringResource(R.string.common_delete),
+                    )
                 }
             }
             Text(
-                task.task.human + if (task.task.recurring) "" else " · 仅一次",
+                task.task.human + if (task.task.recurring) {
+                    ""
+                } else {
+                    " · " + stringResource(R.string.cron_once_only)
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
@@ -399,19 +451,19 @@ private fun CronTaskCard(
             )
             val stateText = when {
                 task.schedulingMode == CronSchedulingMode.Unsupported ->
-                    task.unsupportedReason ?: "Android 不支持此任务"
+                    task.unsupportedReason ?: stringResource(R.string.cron_task_unsupported_default)
                 task.activeRun != null -> runStatusLabel(task.activeRun.status)
-                task.lastRun != null -> "最近：${runStatusLabel(task.lastRun.status)}"
+                task.lastRun != null ->
+                    stringResource(R.string.cron_last_run_status_fmt, runStatusLabel(task.lastRun.status))
                 task.schedulingMode == CronSchedulingMode.FifteenMinuteFallback ->
-                    "15 分钟巡检模式"
-                else -> "精确闹钟模式"
+                    stringResource(R.string.cron_fifteen_minute_patrol_mode)
+                else -> stringResource(R.string.cron_exact_alarm_mode)
             }
             Text(
                 buildString {
                     append(stateText)
                     task.task.nextFireMs?.toLong()?.let {
-                        append(" · 下次 ")
-                        append(formatEpochMs(it))
+                        append(stringResource(R.string.cron_next_fire_suffix_fmt, formatEpochMs(it)))
                     }
                 },
                 color = if (task.schedulingMode == CronSchedulingMode.Unsupported) {
@@ -443,14 +495,19 @@ private fun RunHistoryCard(
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                "${runStatusLabel(run.status)} · ${formatEpochMs(run.scheduledAtMs)} · 尝试 ${maxOf(1, run.attempt)}",
+                stringResource(
+                    R.string.cron_run_summary_fmt,
+                    runStatusLabel(run.status),
+                    formatEpochMs(run.scheduledAtMs),
+                    maxOf(1, run.attempt),
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 11.sp,
             )
             if (expanded) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    run.resultText ?: run.errorMessage ?: "没有输出",
+                    run.resultText ?: run.errorMessage ?: stringResource(R.string.cron_no_output),
                     color = if (run.errorMessage != null) {
                         MaterialTheme.colorScheme.error
                     } else {
@@ -478,7 +535,7 @@ private fun ExactAlarmBanner() {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "未授予“闹钟和提醒”权限。任务仍会创建，但由 WorkManager 每 15 分钟巡检，触发时间可能延迟。",
+                stringResource(R.string.cron_exact_alarm_banner_body),
                 fontSize = 13.sp,
             )
             Button(
@@ -486,7 +543,7 @@ private fun ExactAlarmBanner() {
                     openExactAlarmSettings(context)
                 },
             ) {
-                Text("打开“闹钟和提醒”")
+                Text(stringResource(R.string.cron_open_alarm_settings_button))
             }
         }
     }
@@ -547,12 +604,13 @@ private fun formatEpochMs(ms: Long): String =
         .atZone(ZoneId.systemDefault())
         .format(CRON_TIME_FORMATTER)
 
+@Composable
 private fun runStatusLabel(status: CronRunStatus): String = when (status) {
-    CronRunStatus.Queued -> "已排队"
-    CronRunStatus.Running -> "运行中"
-    CronRunStatus.Succeeded -> "成功"
-    CronRunStatus.Failed -> "失败"
-    CronRunStatus.TimedOut -> "超时"
-    CronRunStatus.Cancelled -> "已取消"
-    CronRunStatus.Skipped -> "已跳过"
+    CronRunStatus.Queued -> stringResource(R.string.cron_status_queued)
+    CronRunStatus.Running -> stringResource(R.string.chat_status_running)
+    CronRunStatus.Succeeded -> stringResource(R.string.cron_status_succeeded)
+    CronRunStatus.Failed -> stringResource(R.string.chat_status_failed)
+    CronRunStatus.TimedOut -> stringResource(R.string.chat_status_timed_out)
+    CronRunStatus.Cancelled -> stringResource(R.string.chat_status_cancelled)
+    CronRunStatus.Skipped -> stringResource(R.string.cron_status_skipped)
 }

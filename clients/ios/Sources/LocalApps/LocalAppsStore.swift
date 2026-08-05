@@ -67,6 +67,22 @@ final class LocalAppsStore {
     @ObservationIgnored private var inFlightEdits: [String: PendingEdit] = [:]
     @ObservationIgnored private var runningBeforeSuspension = Set<String>()
     @ObservationIgnored private var pendingCreation: PendingCreation?
+    /// Apps for which an `open_app_designer` has been sent and whose gate has
+    /// not come back yet.
+    ///
+    /// `open_designer` is only legal from `collecting_spec`/`generation_failed`;
+    /// the first one to land moves the app to `awaiting_spec_confirmation` and
+    /// the engine rejects every later one outright. Creation has two callers by
+    /// construction — the `appsChanged` handler opens the designer, and setting
+    /// `createdAppIDForDesigner` in the same tick pushes the view whose
+    /// `prepare()` opens it too — so one of them was always the loser.
+    ///
+    /// A guard on `apps.first(where:)?.workflow` cannot catch this: the summary
+    /// the view reads comes from the very `appsChanged` batch that triggered the
+    /// open, so on the create path it is stale by construction and always reads
+    /// `collecting_spec`. This marker instead spans send → gate-arrival, which
+    /// is exactly the interval in which a second request is illegal.
+    @ObservationIgnored private var designerOpenSent = Set<String>()
     @ObservationIgnored private var pendingPermissionSource: PendingPermissionSource?
     #if canImport(engine_mobileFFI)
         /// One page can raise several capability requests in a single tick (two
@@ -134,6 +150,9 @@ final class LocalAppsStore {
                 designer.revision = revision
                 designer.interactionID = interactionId
                 designers[appId] = designer
+                // The gate is here, so a later caller can read the
+                // interaction id instead of asking for one.
+                designerOpenSent.remove(appId)
 
             case let .appDesignDraftChanged(appId, revision, fields):
                 var designer = designers[appId] ?? LocalAppDesignerSession(
@@ -235,6 +254,13 @@ final class LocalAppsStore {
             case let .appOperationFailed(appId, code, message):
                 if let appId { generationProgress[appId] = nil }
                 isRefreshing = false
+                // A failed open never produces a gate, so nothing else would
+                // clear the marker and the app could never be opened again.
+                // `AppOperationFailed` carries no correlation id, so this
+                // clears on any failure for the app rather than on the one
+                // that was the open — releasing too eagerly costs at most one
+                // redundant request; holding it forever wedges the designer.
+                if let appId { designerOpenSent.remove(appId) }
                 if code == .revisionConflict,
                    let appId,
                    inFlightEdits[appId] != nil || pendingEdits[appId]?.isEmpty == false {
@@ -357,10 +383,26 @@ final class LocalAppsStore {
         #endif
     }
 
+    /// Opens the designer gate at most once per app until that gate arrives.
+    ///
+    /// A second `open_app_designer` between the first one landing and its
+    /// `appDesignerRequested` coming back is rejected by the engine with
+    /// `workflow state invalid`, because the first already moved the app to
+    /// `awaiting_spec_confirmation`. The details refresh still runs for the
+    /// caller that is turned away, so it is not left with an empty view — it
+    /// simply stops asking for a transition someone else already made.
     func openDesigner(appID: String) async {
         #if canImport(engine_mobileFFI)
+            let alreadySent = designerOpenSent.contains(appID)
+            if !alreadySent { designerOpenSent.insert(appID) }
             _ = await send(.getAppDetails(appId: appID))
-            _ = await send(.openAppDesigner(appId: appID))
+            guard !alreadySent else { return }
+            let opened = await send(.openAppDesigner(appId: appID))
+            if !opened {
+                // The command never reached the engine, so no gate is coming
+                // and nothing else will clear the marker.
+                designerOpenSent.remove(appID)
+            }
         #endif
     }
 

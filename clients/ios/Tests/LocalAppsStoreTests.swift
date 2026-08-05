@@ -914,6 +914,93 @@ final class LocalAppsStoreTests: XCTestCase {
         )
     }
 
+    #if canImport(engine_mobileFFI)
+        /// Creation has two independent callers of `openDesigner` — the
+        /// `appsChanged` handler and the designer view's `prepare()` — and the
+        /// engine rejects the second with
+        /// `open_designer is not allowed while app … is in workflow state
+        /// awaiting_spec_confirmation`, because the first already made that
+        /// transition. Only one request may leave the client until the gate
+        /// comes back.
+        func testASecondDesignerOpenIsWithheldUntilTheGateArrives() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            await store.openDesigner(appID: "tracker")
+            await store.openDesigner(appID: "tracker")
+
+            XCTAssertEqual(
+                Self.opens(in: submitted),
+                1,
+                "the second open would be rejected by the engine"
+            )
+            // The turned-away caller still gets its refresh, so it is not left
+            // staring at an empty designer.
+            XCTAssertEqual(Self.detailFetches(in: submitted), 2)
+        }
+
+        /// A reopen after `generation_failed` is legal, so arrival of the gate
+        /// must release the marker rather than wedge the app forever.
+        func testTheGateArrivingReleasesTheHoldOnFurtherOpens() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            await store.openDesigner(appID: "tracker")
+            store.handle(event: .appDesignerRequested(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1
+            ))
+            await store.openDesigner(appID: "tracker")
+
+            XCTAssertEqual(Self.opens(in: submitted), 2)
+        }
+
+        /// A failed open produces no gate, so nothing else would ever clear the
+        /// marker — the designer would be unreachable for the rest of the run.
+        func testAFailureReleasesTheHoldEvenThoughItCarriesNoCorrelationID() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            await store.openDesigner(appID: "tracker")
+            store.handle(event: .appOperationFailed(
+                appId: "tracker",
+                code: .workflowStateInvalid,
+                message: "boom"
+            ))
+            await store.openDesigner(appID: "tracker")
+
+            XCTAssertEqual(Self.opens(in: submitted), 2)
+        }
+
+        /// The hold is per app, not global.
+        func testTheHoldDoesNotBlockADifferentApp() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            await store.openDesigner(appID: "tracker")
+            await store.openDesigner(appID: "metrics")
+
+            XCTAssertEqual(Self.opens(in: submitted), 2)
+        }
+
+        /// Counted by pattern-matching the case rather than by string, so a
+        /// renamed or reshaped command is a compile error instead of a count
+        /// that quietly drops to zero and makes the "withheld" assertion pass
+        /// for the wrong reason.
+        private static func opens(in submitted: [ClientCommand]) -> Int {
+            submitted.filter { if case .openAppDesigner = $0 { true } else { false } }.count
+        }
+
+        private static func detailFetches(in submitted: [ClientCommand]) -> Int {
+            submitted.filter { if case .getAppDetails = $0 { true } else { false } }.count
+        }
+    #endif
+
     private func template(
         id: String,
         name: String,

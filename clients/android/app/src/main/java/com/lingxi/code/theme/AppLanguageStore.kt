@@ -66,24 +66,30 @@ class AppLanguageStore(context: Context) {
     /** Live persisted language code, defaulting to "" (follow system). */
     val language: StateFlow<String> = dataStore.data
         .map { it[LANGUAGE_KEY] ?: "" }
-        .stateIn(languageStoreScope, SharingStarted.Eagerly, "")
+        .stateIn(languageStoreScope, SharingStarted.Eagerly, currentLanguage(context))
 
     /** Persists [code] ("" = follow system). The host calls [android.app.Activity.recreate] after. */
     suspend fun setLanguage(code: String) {
         dataStore.edit { it[LANGUAGE_KEY] = code }
+        cached = code
     }
 
     companion object {
         private val LANGUAGE_KEY = stringPreferencesKey("app_language")
 
+        /** Last known persisted code; warmed by [LocaleWrapper.wrap] in attachBaseContext. */
+        @Volatile
+        private var cached: String? = null
+
         /**
-         * Synchronous read of the persisted code for [LocaleWrapper.wrap] —
-         * attachBaseContext runs before any composition, so the DataStore is
-         * read with runBlocking (the accepted cost of applying the locale at
-         * activity-creation time; the DataStore is already warm thereafter).
+         * Synchronous read of the persisted code. [LocaleWrapper.wrap] performs
+         * the one blocking DataStore read at attachBaseContext time (before any
+         * composition) and every later caller hits the warm [cached] value, so
+         * the UI thread never blocks during frame composition.
          */
         fun currentLanguage(context: Context): String =
-            runBlocking { context.languageDataStore.data.first()[LANGUAGE_KEY] ?: "" }
+            cached ?: runBlocking { context.languageDataStore.data.first()[LANGUAGE_KEY] ?: "" }
+                .also { cached = it }
     }
 }
 

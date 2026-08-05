@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -37,6 +39,7 @@ import com.lingxi.code.model.Presets
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.Accents
 import com.lingxi.code.theme.AppLanguage
+import com.lingxi.code.theme.AppLanguageStore
 import com.lingxi.code.theme.LingXiTheme
 
 /**
@@ -54,6 +57,9 @@ fun MainSettingsPage(
     onReplayOnboarding: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
+    val context = LocalContext.current
+    val languageStore = remember { AppLanguageStore(context.applicationContext) }
+    val currentLanguage by languageStore.language.collectAsState()
 
     Column(Modifier.fillMaxWidth()) {
         AccountCard(onAccount = { navController.navigate(SettingsRoutes.ACCOUNT) })
@@ -151,7 +157,7 @@ fun MainSettingsPage(
             )
             SettingsRow(
                 icon = LXIconName.Message, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
-                label = stringResource(R.string.settings_language_title), value = AppLanguage.label(state.language),
+                label = stringResource(R.string.settings_language_title), value = AppLanguage.label(currentLanguage),
                 onTap = { navController.navigate(SettingsRoutes.LANGUAGE) },
             )
             SettingsRow(

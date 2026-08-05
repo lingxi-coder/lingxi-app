@@ -165,9 +165,7 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
     var follow by remember { mutableStateOf(true) }
     val context = LocalContext.current
     val store = remember { AppLanguageStore(context.applicationContext) }
-    val current by store.language.collectAsState(
-        initial = AppLanguageStore.currentLanguage(context.applicationContext),
-    )
+    val current by store.language.collectAsState()
     val scope = rememberCoroutineScope()
     val activity = context.findComponentActivity()
     Column(Modifier.fillMaxWidth()) {

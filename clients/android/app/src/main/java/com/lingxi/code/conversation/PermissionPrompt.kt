@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import com.lingxi.code.R
 import com.lingxi.code.bindings.PermissionKindDto
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.WorkerInfoDto
@@ -54,7 +55,10 @@ data class WorkerPrompt(
  * is required) falls back to a generic prompt rather than a blank dialog. Mirrors
  * the Electron `describe(request)` switch.
  */
-fun permissionRequestToPrompt(request: PermissionRequest): PermissionPromptState {
+fun permissionRequestToPrompt(
+    request: PermissionRequest,
+    strings: ConversationStrings = DefaultConversationStrings,
+): PermissionPromptState {
     // The generated `PermissionKindDto` is a closed sealed class (UniFFI renders
     // the Rust `#[non_exhaustive]` enum as exactly its known variants), so this
     // `when` is exhaustive without an `else`. If a future binding adds a kind, this
@@ -62,11 +66,13 @@ fun permissionRequestToPrompt(request: PermissionRequest): PermissionPromptState
     // a request and hang the turn.
     val (title, detail) = when (val kind = request.kind) {
         is PermissionKindDto.ToolUseConfirm ->
-            "允许 ${kind.toolName}？" to previewToolInput(kind.toolInputJson)
+            strings.resolve(R.string.permission_allow_tool, "允许 %1\$s？", kind.toolName) to
+                previewToolInput(kind.toolInputJson)
         is PermissionKindDto.ExitPlanMode ->
-            "退出计划模式并继续？" to kind.plan
+            strings.resolve(R.string.permission_exit_plan_mode, "退出计划模式并继续？") to kind.plan
         is PermissionKindDto.BypassPermissionsMode ->
-            "开启免确认（绕过权限）模式？" to "智能体将不再就后续操作征求确认。"
+            strings.resolve(R.string.permission_bypass_mode_title, "开启免确认（绕过权限）模式？") to
+                strings.resolve(R.string.permission_bypass_confirmation_detail, "智能体将不再就后续操作征求确认。")
     }
     return PermissionPromptState(
         requestId = request.requestId,

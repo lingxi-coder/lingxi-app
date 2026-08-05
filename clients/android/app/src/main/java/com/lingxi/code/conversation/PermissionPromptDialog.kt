@@ -25,11 +25,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.theme.LingXiTheme
@@ -123,7 +125,7 @@ fun PermissionPromptDialog(
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 PromptButton(
-                    label = "拒绝",
+                    label = stringResource(R.string.permission_deny),
                     fg = t.danger,
                     bg = Color.Transparent,
                     borderColor = t.border,
@@ -132,7 +134,7 @@ fun PermissionPromptDialog(
                     modifier = Modifier.weight(1f),
                 )
                 PromptButton(
-                    label = "始终允许",
+                    label = stringResource(R.string.permission_allow_always),
                     fg = t.text2,
                     bg = Color.Transparent,
                     borderColor = t.border,
@@ -141,7 +143,7 @@ fun PermissionPromptDialog(
                     modifier = Modifier.weight(1f),
                 )
                 PromptButton(
-                    label = "允许一次",
+                    label = stringResource(R.string.permission_allow_once),
                     fg = Color.White,
                     bg = t.accent,
                     borderColor = t.borderStrong,

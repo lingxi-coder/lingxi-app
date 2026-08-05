@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -36,6 +37,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.lingxi.code.R
 import com.lingxi.code.components.UiTags
 
 /**
@@ -52,17 +54,18 @@ internal fun AgentRunTimeline(
 ) {
     var expanded by rememberSaveable(state.turnId) { mutableStateOf(true) }
     val title = when (state.outcome) {
-        AgentRunOutcome.Running -> "正在运行"
-        AgentRunOutcome.Completed -> "运行完成"
-        AgentRunOutcome.Failed -> "运行失败"
-        AgentRunOutcome.Cancelled -> "已停止"
+        AgentRunOutcome.Running -> stringResource(R.string.chat_run_status_running)
+        AgentRunOutcome.Completed -> stringResource(R.string.chat_run_status_completed)
+        AgentRunOutcome.Failed -> stringResource(R.string.chat_run_status_failed)
+        AgentRunOutcome.Cancelled -> stringResource(R.string.chat_run_status_cancelled)
     }
     val statusColor = runStatusColor(state.outcome)
+    val runAccessibilityLabel = stringResource(R.string.chat_run_accessibility_label, title)
     Card(
         modifier = modifier
             .fillMaxWidth()
             .testTag(UiTags.AGENT_RUN_TIMELINE)
-            .semantics { contentDescription = "Agent 运行过程，$title" }
+            .semantics { contentDescription = runAccessibilityLabel }
             .clickable(role = Role.Button) { expanded = !expanded },
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
@@ -98,10 +101,12 @@ internal fun AgentRunTimeline(
                     modifier = Modifier.weight(1f),
                 )
                 val activity = when {
-                    state.activeWorkers > 0 -> "${state.activeWorkers} 个协作者"
-                    state.tools.any { it.status == AgentToolStatus.Running } -> "工具执行中"
-                    state.reasoningActive -> "思考中"
-                    state.active -> "生成中"
+                    state.activeWorkers > 0 ->
+                        stringResource(R.string.chat_run_active_collaborators, state.activeWorkers)
+                    state.tools.any { it.status == AgentToolStatus.Running } ->
+                        stringResource(R.string.chat_run_tool_executing)
+                    state.reasoningActive -> stringResource(R.string.chat_run_reasoning_active)
+                    state.active -> stringResource(R.string.chat_run_generating)
                     else -> null
                 }
                 activity?.let {
@@ -113,7 +118,11 @@ internal fun AgentRunTimeline(
                 }
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = if (expanded) "收起" else "展开",
+                    text = if (expanded) {
+                        stringResource(R.string.chat_run_collapse)
+                    } else {
+                        stringResource(R.string.chat_run_expand)
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -122,9 +131,16 @@ internal fun AgentRunTimeline(
             AnimatedVisibility(expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (state.reasoning.isNotBlank() || state.reasoningActive) {
-                        TraceSection(title = if (state.reasoningActive) "思考中" else "思考") {
+                        val reasoningTitle = if (state.reasoningActive) {
+                            stringResource(R.string.chat_run_reasoning_active)
+                        } else {
+                            stringResource(R.string.chat_thinking)
+                        }
+                        TraceSection(title = reasoningTitle) {
                             Text(
-                                text = state.reasoning.ifBlank { "正在分析请求…" },
+                                text = state.reasoning.ifBlank {
+                                    stringResource(R.string.chat_run_analyzing_request)
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 16,
@@ -132,7 +148,7 @@ internal fun AgentRunTimeline(
                             )
                             if (state.reasoningTruncated) {
                                 Text(
-                                    text = "较早的思考内容已省略",
+                                    text = stringResource(R.string.chat_run_reasoning_truncated),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -149,7 +165,11 @@ internal fun AgentRunTimeline(
                     if (state.activeWorkers > 0 || state.teamName != null) {
                         val team = state.teamName?.let { " · $it" }.orEmpty()
                         Text(
-                            text = "协作者 ${state.activeWorkers}$team",
+                            text = stringResource(
+                                R.string.chat_run_collaborators_label,
+                                state.activeWorkers,
+                                team,
+                            ),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -180,10 +200,10 @@ private fun TraceSection(
 @Composable
 private fun ToolTraceRow(tool: AgentToolRunState) {
     val statusLabel = when (tool.status) {
-        AgentToolStatus.Running -> "运行中"
-        AgentToolStatus.Completed -> "完成"
-        AgentToolStatus.Failed -> "失败"
-        AgentToolStatus.Cancelled -> "已取消"
+        AgentToolStatus.Running -> stringResource(R.string.chat_status_running)
+        AgentToolStatus.Completed -> stringResource(R.string.chat_tool_status_completed)
+        AgentToolStatus.Failed -> stringResource(R.string.chat_status_failed)
+        AgentToolStatus.Cancelled -> stringResource(R.string.chat_status_cancelled)
     }
     val color = toolStatusColor(tool.status)
     Row(
@@ -244,11 +264,14 @@ private fun NoticeTraceRow(notice: AgentRunNotice) {
 private fun TraceFooter(state: AgentRunState) {
     val usage = state.usage
     if (usage == null && state.formattedCost == null) return
+    val inputLabel = stringResource(R.string.chat_usage_input)
+    val outputLabel = stringResource(R.string.chat_usage_output)
+    val cacheLabel = stringResource(R.string.chat_usage_cache)
     val parts = buildList {
         usage?.let {
-            add("输入 ${it.inputTokens}")
-            add("输出 ${it.outputTokens}")
-            if (it.cacheReadTokens > 0) add("缓存 ${it.cacheReadTokens}")
+            add("$inputLabel ${it.inputTokens}")
+            add("$outputLabel ${it.outputTokens}")
+            if (it.cacheReadTokens > 0) add("$cacheLabel ${it.cacheReadTokens}")
         }
         state.formattedCost?.takeIf(String::isNotBlank)?.let(::add)
     }

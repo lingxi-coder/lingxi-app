@@ -38,6 +38,7 @@ import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.EngineConversationSource
+import com.lingxi.code.conversation.conversationStrings
 import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.computeruse.ComputerUseApprovalDialog
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
@@ -176,6 +177,7 @@ fun RootScreen(
                     ),
                     savedState = createSavedStateHandle(),
                     sourceGeneration = reconnectToken,
+                    strings = conversationStrings(appContext),
                 )
             }
         },

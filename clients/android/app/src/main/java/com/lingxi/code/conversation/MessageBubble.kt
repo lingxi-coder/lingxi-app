@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.Pill
@@ -109,7 +111,13 @@ fun MessageBubble(
                             .testTag(UiTags.MESSAGE_SHARE),
                         contentAlignment = Alignment.Center,
                     ) {
-                        LXIcon(name = LXIconName.Share, size = 15.dp, color = t.text3, stroke = 1.8f, contentDescription = "分享回复")
+                        LXIcon(
+                            name = LXIconName.Share,
+                            size = 15.dp,
+                            color = t.text3,
+                            stroke = 1.8f,
+                            contentDescription = stringResource(R.string.chat_share_reply),
+                        )
                     }
                 }
             }

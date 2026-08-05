@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
@@ -245,11 +247,28 @@ data class ComputerUseSetupStatus(
     val ready: Boolean
         get() = accessibilityEnabled && browserAuthorized && sessionActive
 
-    val missingSteps: String
-        get() = buildList {
-            if (!accessibilityEnabled) add("启用 LingXi 无障碍服务")
-            if (!browserAuthorized) add("授权浏览器")
-            if (!sessionActive) add("启动控制会话")
+    /**
+     * Human-readable list of the still-missing setup steps, joined by "、".
+     *
+     * A plain function (not a property) because it needs [strings] to resolve
+     * real localized copy at the ONE production render site
+     * ([ComputerUseSetupBanner]); [strings] defaults to
+     * [DefaultConversationStrings] (the exact zh-Hans literals) so
+     * `ComputerUseSetupStatusTest` — which asserts this from a plain JVM test
+     * with no Android `Context` — keeps passing unmodified but for the added
+     * `()` call syntax.
+     */
+    fun missingSteps(strings: ConversationStrings = DefaultConversationStrings): String =
+        buildList {
+            if (!accessibilityEnabled) {
+                add(strings.resolve(R.string.chat_computer_use_missing_accessibility, "启用 LingXi 无障碍服务"))
+            }
+            if (!browserAuthorized) {
+                add(strings.resolve(R.string.chat_computer_use_missing_browser, "授权浏览器"))
+            }
+            if (!sessionActive) {
+                add(strings.resolve(R.string.settings_cu_start_session, "启动控制会话"))
+            }
         }.joinToString("、")
 }
 
@@ -274,7 +293,7 @@ private fun TopBar(
             color = t.text,
             size = 20.dp,
             onClick = onOpenDrawer,
-            contentDescription = "打开侧栏",
+            contentDescription = stringResource(R.string.chat_open_side_drawer),
             modifier = Modifier.testTag(UiTags.OPEN_DRAWER),
         )
         Spacer(Modifier.weight(1f))
@@ -292,14 +311,18 @@ private fun TopBar(
             color = t.text2,
             size = 18.dp,
             onClick = onToggleTheme,
-            contentDescription = if (isDark) "切换浅色主题" else "切换深色主题",
+            contentDescription = if (isDark) {
+                stringResource(R.string.chat_toggle_theme_light)
+            } else {
+                stringResource(R.string.chat_toggle_theme_dark)
+            },
         )
         IconButton(
             name = LXIconName.Edit,
             color = t.accent,
             size = 18.dp,
             onClick = onNewChat,
-            contentDescription = "新建对话",
+            contentDescription = stringResource(R.string.chat_new_chat),
         )
     }
 }
@@ -425,10 +448,15 @@ private fun EmptyState() {
             LXIcon(name = LXIconName.Sparkle, size = 26.dp, color = Color.White, stroke = 1.8f)
         }
         Spacer(Modifier.size(18.dp))
-        Text("开启新对话", color = t.text, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            stringResource(R.string.chat_start_new_conversation),
+            color = t.text,
+            fontSize = 21.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
         Spacer(Modifier.size(7.dp))
         Text(
-            "随便说点什么，或轻点输入框旁的波形按钮开启心流模式。",
+            stringResource(R.string.chat_new_chat_hint),
             color = t.text4,
             fontSize = 14.sp,
             lineHeight = (14f * 1.5f).sp,
@@ -488,13 +516,13 @@ private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "尚未设置模型",
+                text = stringResource(R.string.chat_model_not_configured_title),
                 color = t.text,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "添加 LLM Provider 并选择模型后即可开始对话",
+                text = stringResource(R.string.chat_model_not_configured_detail),
                 color = t.text2,
                 fontSize = 12.5f.sp,
                 lineHeight = (12.5f * 1.4f).sp,
@@ -511,7 +539,7 @@ private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
                 .padding(horizontal = 10.dp, vertical = 7.dp),
         ) {
             Text(
-                text = "去设置",
+                text = stringResource(R.string.chat_go_to_settings),
                 color = Color.White,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -519,6 +547,23 @@ private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
             LXIcon(name = LXIconName.ChevronR, size = 11.dp, color = Color.White, stroke = 2f)
         }
     }
+}
+
+/**
+ * Composable-context localized rendering of [ComputerUseSetupStatus.missingSteps] —
+ * the real [stringResource] lookup counterpart, since the pure member function
+ * has no `Context` to resolve the user's actual selected language from.
+ */
+@Composable
+private fun missingStepsLabel(status: ComputerUseSetupStatus): String {
+    val accessibility = stringResource(R.string.chat_computer_use_missing_accessibility)
+    val browser = stringResource(R.string.chat_computer_use_missing_browser)
+    val session = stringResource(R.string.settings_cu_start_session)
+    return buildList {
+        if (!status.accessibilityEnabled) add(accessibility)
+        if (!status.browserAuthorized) add(browser)
+        if (!status.sessionActive) add(session)
+    }.joinToString("、")
 }
 
 /** Direct link from an unavailable Computer Use state to its complete setup page. */
@@ -529,6 +574,7 @@ internal fun ComputerUseSetupBanner(
     onDismiss: () -> Unit,
 ) {
     val t = LingXiTheme.palette
+    val dismissComputerUseSetupDescription = stringResource(R.string.chat_computer_use_dismiss)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -558,13 +604,13 @@ internal fun ComputerUseSetupBanner(
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "Computer Use 尚未可用",
+                text = stringResource(R.string.chat_computer_use_unavailable_title),
                 color = t.text,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "请${status.missingSteps}",
+                text = stringResource(R.string.chat_computer_use_unavailable_detail, missingStepsLabel(status)),
                 color = t.text2,
                 fontSize = 12.5f.sp,
                 lineHeight = (12.5f * 1.4f).sp,
@@ -583,7 +629,7 @@ internal fun ComputerUseSetupBanner(
                 .padding(horizontal = 10.dp, vertical = 7.dp),
         ) {
             Text(
-                text = "去启用",
+                text = stringResource(R.string.chat_go_enable),
                 color = Color.White,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -601,7 +647,7 @@ internal fun ComputerUseSetupBanner(
                 .clip(CircleShape)
                 .clickable(onClick = onDismiss)
                 .semantics {
-                    contentDescription = "关闭 Computer Use 配置提示"
+                    contentDescription = dismissComputerUseSetupDescription
                     role = Role.Button
                 }
                 .testTag(UiTags.COMPUTER_USE_SETUP_DISMISS),
@@ -629,9 +675,9 @@ internal fun ComputerUseSetupBanner(
 private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
     val t = LingXiTheme.palette
     val headline = when (error.kind) {
-        ChatErrorKind.AUTH -> "鉴权失败"
-        ChatErrorKind.NETWORK -> "网络错误"
-        ChatErrorKind.GENERIC -> "出错了"
+        ChatErrorKind.AUTH -> stringResource(R.string.chat_error_auth_headline)
+        ChatErrorKind.NETWORK -> stringResource(R.string.chat_error_transport)
+        ChatErrorKind.GENERIC -> stringResource(R.string.chat_error_generic_headline)
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -679,7 +725,13 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
                 .testTag(UiTags.CHAT_ERROR_DISMISS),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f, contentDescription = "关闭错误提示")
+            LXIcon(
+                name = LXIconName.X,
+                size = 14.dp,
+                color = t.text3,
+                stroke = 2f,
+                contentDescription = stringResource(R.string.chat_dismiss_error),
+            )
         }
     }
 }

@@ -22,7 +22,7 @@ class ComputerUseSetupStatusTest {
         )
 
         assertFalse(status.ready)
-        assertEquals("授权浏览器、启动控制会话", status.missingSteps)
+        assertEquals("授权浏览器、启动控制会话", status.missingSteps())
     }
 
     @Test
@@ -34,7 +34,7 @@ class ComputerUseSetupStatusTest {
         )
 
         assertTrue(status.ready)
-        assertEquals("", status.missingSteps)
+        assertEquals("", status.missingSteps())
     }
 
     @Test
@@ -66,7 +66,7 @@ class ComputerUseSetupStatusTest {
         )
 
         assertFalse(status.ready)
-        assertEquals("启动控制会话", status.missingSteps)
+        assertEquals("启动控制会话", status.missingSteps())
     }
 
     @Test
@@ -78,7 +78,7 @@ class ComputerUseSetupStatusTest {
         )
 
         assertFalse(status.ready)
-        assertEquals("授权浏览器、启动控制会话", status.missingSteps)
+        assertEquals("授权浏览器、启动控制会话", status.missingSteps())
     }
 
     @Test

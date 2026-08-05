@@ -242,6 +242,102 @@
         }
       }
     },
+    "chat_compaction_status": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上下文已压缩：%1$d → %2$d 条，释放 %3$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Context compacted: %1$d → %2$d messages, freed %3$s"
+          }
+        }
+      }
+    },
+    "chat_computer_use_dismiss": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭 Computer Use 配置提示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dismiss the Computer Use setup notice"
+          }
+        }
+      }
+    },
+    "chat_computer_use_missing_accessibility": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用 LingXi 无障碍服务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable LingXi Accessibility Service"
+          }
+        }
+      }
+    },
+    "chat_computer_use_missing_browser": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权浏览器"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorize browser"
+          }
+        }
+      }
+    },
+    "chat_computer_use_unavailable_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please %1$s"
+          }
+        }
+      }
+    },
+    "chat_computer_use_unavailable_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Computer Use 尚未可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Computer Use isn't available yet"
+          }
+        }
+      }
+    },
     "chat_dismiss_error": {
       "localizations": {
         "zh-Hans": {
@@ -270,6 +366,166 @@
           "stringUnit": {
             "state": "translated",
             "value": "随便说点什么，或使用输入框旁的语音功能。"
+          }
+        }
+      }
+    },
+    "chat_engine_build_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移动端引擎不可用或未正确链接"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The mobile engine is unavailable or not linked correctly"
+          }
+        }
+      }
+    },
+    "chat_engine_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移动端引擎当前不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The mobile engine is currently unavailable"
+          }
+        }
+      }
+    },
+    "chat_error_auth_headline": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "鉴权失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authentication failed"
+          }
+        }
+      }
+    },
+    "chat_error_cancel_generation_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消生成失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to cancel generation: %1$s"
+          }
+        }
+      }
+    },
+    "chat_error_connect_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法连接模型服务。请检查当前网络或 VPN 后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't connect to the model service. Check your current network or VPN, then try again."
+          }
+        }
+      }
+    },
+    "chat_error_connect_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接模型服务超时。请检查当前网络或 VPN 后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting to the model service timed out. Check your current network or VPN, then try again."
+          }
+        }
+      }
+    },
+    "chat_error_dns": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法解析模型服务地址。请检查 VPN、私人 DNS 或当前网络后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't resolve the model service address. Check your VPN, private DNS, or current network, then try again."
+          }
+        }
+      }
+    },
+    "chat_error_engine_reconnect_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "引擎重连失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Engine reconnect failed: %1$s"
+          }
+        }
+      }
+    },
+    "chat_error_engine_submit_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "引擎错误：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Engine error: %1$s"
+          }
+        }
+      }
+    },
+    "chat_error_generic_headline": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "出错了"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something went wrong"
           }
         }
       }
@@ -322,6 +578,38 @@
         }
       }
     },
+    "chat_error_persist_active_project_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法保存活动项目：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't save the active project: %1$s"
+          }
+        }
+      }
+    },
+    "chat_error_project_engine_create_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "项目引擎创建失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to create project engine: %1$s"
+          }
+        }
+      }
+    },
     "chat_error_protocol": {
       "localizations": {
         "zh-Hans": {
@@ -370,6 +658,70 @@
         }
       }
     },
+    "chat_error_session_list_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话列表加载失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to load the session list: %1$s"
+          }
+        }
+      }
+    },
+    "chat_error_session_switch_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话切换失败：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to switch session: %1$s"
+          }
+        }
+      }
+    },
+    "chat_error_stop_before_switch_project": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先停止当前任务，再切换项目。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please stop the current task before switching projects."
+          }
+        }
+      }
+    },
+    "chat_error_tls": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型服务安全连接失败。请检查系统时间、VPN 或证书设置后重试。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Secure connection to the model service failed. Check your system time, VPN, or certificate settings, then try again."
+          }
+        }
+      }
+    },
     "chat_error_transport": {
       "localizations": {
         "zh-Hans": {
@@ -386,6 +738,70 @@
         }
       }
     },
+    "chat_go_enable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "去启用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Go enable"
+          }
+        }
+      }
+    },
+    "chat_go_to_settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "去设置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Go to settings"
+          }
+        }
+      }
+    },
+    "chat_model_not_configured_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 LLM Provider 并选择模型后即可开始对话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add an LLM provider and choose a model to start chatting"
+          }
+        }
+      }
+    },
+    "chat_model_not_configured_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未设置模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No model set up yet"
+          }
+        }
+      }
+    },
     "chat_new_chat": {
       "localizations": {
         "zh-Hans": {
@@ -398,6 +814,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "新建对话"
+          }
+        }
+      }
+    },
+    "chat_new_chat_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "随便说点什么，或轻点输入框旁的波形按钮开启心流模式。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Say anything, or tap the waveform button next to the input box to start Flow Mode."
           }
         }
       }
@@ -530,6 +962,38 @@
         }
       }
     },
+    "chat_open_in_terminal_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在终端中打开"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open in terminal"
+          }
+        }
+      }
+    },
+    "chat_open_side_drawer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开侧栏"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open side panel"
+          }
+        }
+      }
+    },
     "chat_output_truncated": {
       "localizations": {
         "zh-Hans": {
@@ -642,6 +1106,22 @@
         }
       }
     },
+    "chat_retry_status": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求重试 %1$d/%2$d（%3$s）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying request %1$d/%2$d (%3$s)"
+          }
+        }
+      }
+    },
     "chat_retrying %u %u": {
       "localizations": {
         "zh-Hans": {
@@ -654,6 +1134,230 @@
           "stringUnit": {
             "state": "translated",
             "value": "重试中（%u/%u）…"
+          }
+        }
+      }
+    },
+    "chat_run_accessibility_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 运行过程，%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent run in progress, %1$s"
+          }
+        }
+      }
+    },
+    "chat_run_active_collaborators": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 个协作者"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d collaborators"
+          }
+        }
+      }
+    },
+    "chat_run_analyzing_request": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在分析请求…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Analyzing request…"
+          }
+        }
+      }
+    },
+    "chat_run_collaborators_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "协作者 %1$d%2$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collaborators %1$d%2$s"
+          }
+        }
+      }
+    },
+    "chat_run_collapse": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapse"
+          }
+        }
+      }
+    },
+    "chat_run_expand": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expand"
+          }
+        }
+      }
+    },
+    "chat_run_generating": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generating"
+          }
+        }
+      }
+    },
+    "chat_run_reasoning_active": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "思考中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thinking"
+          }
+        }
+      }
+    },
+    "chat_run_reasoning_truncated": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "较早的思考内容已省略"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Earlier reasoning has been omitted"
+          }
+        }
+      }
+    },
+    "chat_run_status_cancelled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopped"
+          }
+        }
+      }
+    },
+    "chat_run_status_completed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run complete"
+          }
+        }
+      }
+    },
+    "chat_run_status_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run failed"
+          }
+        }
+      }
+    },
+    "chat_run_status_running": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在运行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running"
+          }
+        }
+      }
+    },
+    "chat_run_tool_executing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具执行中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running tool"
           }
         }
       }
@@ -866,6 +1570,86 @@
         }
       }
     },
+    "chat_status_new_project_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在新建项目会话…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starting a new project session…"
+          }
+        }
+      }
+    },
+    "chat_status_new_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在新建会话…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starting a new session…"
+          }
+        }
+      }
+    },
+    "chat_status_reconnecting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在重新连接…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "chat_status_resuming_project_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在恢复项目会话…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resuming project session…"
+          }
+        }
+      }
+    },
+    "chat_status_resuming_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在恢复会话…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resuming session…"
+          }
+        }
+      }
+    },
     "chat_status_running": {
       "localizations": {
         "zh-Hans": {
@@ -1010,6 +1794,38 @@
         }
       }
     },
+    "chat_toggle_theme_dark": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换深色主题"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switch to dark theme"
+          }
+        }
+      }
+    },
+    "chat_toggle_theme_light": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换浅色主题"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switch to light theme"
+          }
+        }
+      }
+    },
     "chat_tool_call_title %@": {
       "localizations": {
         "zh-Hans": {
@@ -1038,6 +1854,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "调用工具 %@…"
+          }
+        }
+      }
+    },
+    "chat_tool_calling_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "调用工具 %1$s…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Calling tool %1$s…"
           }
         }
       }
@@ -1074,6 +1906,22 @@
         }
       }
     },
+    "chat_tool_completed_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具 %1$s 完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tool %1$s completed"
+          }
+        }
+      }
+    },
     "chat_tool_failed %@": {
       "localizations": {
         "zh-Hans": {
@@ -1086,6 +1934,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "工具 %@ 失败"
+          }
+        }
+      }
+    },
+    "chat_tool_failed_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具 %1$s 失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tool %1$s failed"
           }
         }
       }
@@ -1118,6 +1982,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "工具失败"
+          }
+        }
+      }
+    },
+    "chat_tool_result_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具结果"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tool result"
           }
         }
       }
@@ -1166,6 +2046,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "工具 %@ 运行中…"
+          }
+        }
+      }
+    },
+    "chat_tool_running_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具 %1$s 运行中…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tool %1$s running…"
+          }
+        }
+      }
+    },
+    "chat_tool_status_completed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        }
+      }
+    },
+    "chat_usage_cache": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缓存"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cache"
           }
         }
       }
@@ -1522,6 +2450,86 @@
         }
       }
     },
+    "composer_camera": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拍照"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Take photo"
+          }
+        }
+      }
+    },
+    "composer_captured_photo": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已拍摄的照片"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captured photo"
+          }
+        }
+      }
+    },
+    "composer_configure_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Configure"
+          }
+        }
+      }
+    },
+    "composer_configure_provider": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Configure %1$s"
+          }
+        }
+      }
+    },
+    "composer_current_model": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current model"
+          }
+        }
+      }
+    },
     "composer_done": {
       "localizations": {
         "zh-Hans": {
@@ -1586,6 +2594,38 @@
         }
       }
     },
+    "composer_more": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更多"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More"
+          }
+        }
+      }
+    },
+    "composer_no_matching_models": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有匹配的模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching models"
+          }
+        }
+      }
+    },
     "composer_placeholder": {
       "localizations": {
         "zh-Hans": {
@@ -1634,6 +2674,54 @@
         }
       }
     },
+    "composer_remove_photo": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除照片"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove photo"
+          }
+        }
+      }
+    },
+    "composer_search_models_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search models"
+          }
+        }
+      }
+    },
+    "composer_search_models_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索模型、Provider 或规格"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search models, providers, or specs"
+          }
+        }
+      }
+    },
     "composer_send": {
       "localizations": {
         "zh-Hans": {
@@ -1650,6 +2738,38 @@
         }
       }
     },
+    "composer_setup_model": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up model"
+          }
+        }
+      }
+    },
+    "composer_start_recording": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开始普通录音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start recording"
+          }
+        }
+      }
+    },
     "composer_stop": {
       "localizations": {
         "zh-Hans": {
@@ -1662,6 +2782,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "停止"
+          }
+        }
+      }
+    },
+    "composer_stop_generating": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止生成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop generating"
           }
         }
       }
@@ -7890,6 +9026,38 @@
         }
       }
     },
+    "permission_allow_once": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许一次"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow once"
+          }
+        }
+      }
+    },
+    "permission_allow_tool": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许 %1$s？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow %1$s?"
+          }
+        }
+      }
+    },
     "permission_allow_tool %@": {
       "localizations": {
         "zh-Hans": {
@@ -7934,6 +9102,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "启用免确认模式？"
+          }
+        }
+      }
+    },
+    "permission_bypass_mode_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启免确认（绕过权限）模式？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn on no-confirmation (bypass permissions) mode?"
           }
         }
       }

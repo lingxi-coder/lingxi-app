@@ -1,3 +1,8 @@
 [submodule "docs/superpowers/references/OpenMinis"]
 	path = docs/superpowers/references/OpenMinis
 	url = https://github.com/OpenMinis/OpenMinis.git
+	# The checkout carries build scratch (its own `deps/ish` nested submodule
+	# leaves untracked content), which surfaced here as a permanent ` ?` line in
+	# every `git status`. `untracked`, not `dirty`/`all`: a moved pin or an edit
+	# to a tracked file inside the reference checkout is still reported.
+	ignore = untracked

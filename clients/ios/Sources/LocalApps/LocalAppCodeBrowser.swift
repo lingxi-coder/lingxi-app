@@ -114,7 +114,7 @@ final class LocalAppCodeBrowser {
             guard editorText.utf8.count <= Self.maximumEditableBytes else { throw BrowserError.tooLarge }
             let url = try resolvedFileURL(relativePath: selectedPath)
             try editorText.write(to: url, atomically: true, encoding: .utf8)
-            statusMessage = "已保存。下次生成或构建会校验依赖和源码策略。"
+            statusMessage = String(localized: "local_apps_saved_message")
             errorMessage = nil
             refresh()
         } catch {
@@ -174,9 +174,9 @@ final class LocalAppCodeBrowser {
 
         var errorDescription: String? {
             switch self {
-            case .notEditable: "该文件不是可编辑的 UTF-8 源码。"
-            case .pathEscaped: "已拒绝工作区之外的路径。"
-            case .tooLarge: "单个可编辑源码文件不能超过 1 MiB。"
+            case .notEditable: String(localized: "local_apps_browser_error_not_editable")
+            case .pathEscaped: String(localized: "local_apps_browser_error_path_escaped")
+            case .tooLarge: String(localized: "local_apps_browser_error_too_large")
             }
         }
     }

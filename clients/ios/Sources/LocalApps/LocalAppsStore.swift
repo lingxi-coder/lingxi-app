@@ -187,7 +187,7 @@ final class LocalAppsStore {
                 let fields = designers[appId]?.fields ?? [:]
                 suggestions[appId] = LocalAppSuggestionDiff(
                     id: suggestionId,
-                    summary: patch.note ?? "Agent 建议调整以下设计字段",
+                    summary: patch.note ?? String(localized: "local_apps_suggestion_note"),
                     basedOnRevision: basedOnRevision,
                     changes: LocalAppsProtocolAdapter.patchChanges(patch, fields: fields)
                 )
@@ -199,7 +199,7 @@ final class LocalAppsStore {
                     pendingEdits[appId, default: [:]][edit.field.id] = edit
                 }
                 designers[appId]?.revision = actualRevision
-                errorMessage = "设计已在其他位置更新，正在基于最新版本重试。"
+                errorMessage = String(localized: "local_apps_error_design_conflict")
                 flushNextEdit(appID: appId)
 
             case let .appWorkflowChanged(appId, state, detail):
@@ -332,7 +332,7 @@ final class LocalAppsStore {
     func refresh() async {
         #if canImport(engine_mobileFFI)
             guard let submitCommand else {
-                errorMessage = "本地应用引擎尚未连接。"
+                errorMessage = String(localized: "local_apps_error_engine_not_connected")
                 return
             }
             isRefreshing = true
@@ -358,7 +358,7 @@ final class LocalAppsStore {
     func createApp(name: String, template: LocalAppTemplate) async -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            errorMessage = "请输入应用名称。"
+            errorMessage = String(localized: "local_apps_error_name_required")
             return false
         }
         #if canImport(engine_mobileFFI)
@@ -378,7 +378,7 @@ final class LocalAppsStore {
             if !succeeded { pendingCreation = nil }
             return succeeded
         #else
-            errorMessage = "此构建未包含本地应用引擎。"
+            errorMessage = String(localized: "local_apps_error_engine_unavailable")
             return false
         #endif
     }
@@ -465,7 +465,7 @@ final class LocalAppsStore {
 
     func requestDesignSuggestion(appID: String, prompt: String? = nil) async {
         guard let revision = designers[appID]?.revision else {
-            errorMessage = "请等待应用设计详情加载完成。"
+            errorMessage = String(localized: "local_apps_error_design_loading")
             return
         }
         #if canImport(engine_mobileFFI)
@@ -494,7 +494,7 @@ final class LocalAppsStore {
 
     func confirmDesign(appID: String) async -> Bool {
         guard let designer = designers[appID], let interactionID = designer.interactionID else {
-            errorMessage = "设计确认请求尚未准备好。"
+            errorMessage = String(localized: "local_apps_error_design_not_ready")
             return false
         }
         #if canImport(engine_mobileFFI)
@@ -503,7 +503,7 @@ final class LocalAppsStore {
                 // reaches the engine BEFORE this confirm and moves the revision
                 // under it — the confirm could only fail with a revision
                 // conflict. Keep the user on the designer with the answer queued.
-                errorMessage = "设计尚未保存完成，请重试。"
+                errorMessage = String(localized: "local_apps_error_design_unsaved")
                 return false
             }
             return await send(
@@ -548,7 +548,7 @@ final class LocalAppsStore {
 
     func approvePreview(appID: String) async -> Bool {
         guard let preview = previews[appID] else {
-            errorMessage = "预览确认请求尚未准备好。"
+            errorMessage = String(localized: "local_apps_error_preview_not_ready")
             return false
         }
         #if canImport(engine_mobileFFI)
@@ -567,7 +567,7 @@ final class LocalAppsStore {
     func requestRevision(appID: String, feedback: String) async -> Bool {
         let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            errorMessage = "请输入要修改的内容。"
+            errorMessage = String(localized: "local_apps_error_feedback_required")
             return false
         }
         #if canImport(engine_mobileFFI)
@@ -599,7 +599,7 @@ final class LocalAppsStore {
                     appID: request.appID,
                     requestID: request.id,
                     resultJSON: nil,
-                    error: "不支持的 Lingxi Bridge 操作。"
+                    error: String(localized: "local_apps_error_bridge_unsupported")
                 )
                 return
             }
@@ -618,7 +618,7 @@ final class LocalAppsStore {
                     appID: request.appID,
                     requestID: request.id,
                     resultJSON: nil,
-                    error: "本地应用引擎未接受 Bridge 请求。"
+                    error: String(localized: "local_apps_error_bridge_rejected")
                 )
             }
         #endif
@@ -641,7 +641,7 @@ final class LocalAppsStore {
                         requestID: request.requestId,
                         decision: authorization,
                         resultJSON: nil,
-                        error: "用户拒绝了界面操作。"
+                        error: String(localized: "local_apps_error_ui_rejected")
                     )
                     return
                 }
@@ -792,7 +792,7 @@ final class LocalAppsStore {
                     appID: response.appId,
                     requestID: response.requestId,
                     resultJSON: response.resultJson,
-                    error: response.ok ? nil : (response.error ?? "Bridge 请求失败。")
+                    error: response.ok ? nil : (response.error ?? String(localized: "local_apps_error_bridge_failed"))
                 )
 
             case let .appUiRequest(request):
@@ -852,7 +852,7 @@ final class LocalAppsStore {
                 // Dropping the newest keeps every request that already has a
                 // page waiting on it; the dropped one fails closed on the
                 // engine's approval timeout.
-                errorMessage = "应用同时请求了过多授权，已忽略最新的请求。"
+                errorMessage = String(localized: "local_apps_error_permission_overflow")
                 return
             }
             permissionQueue.append((prompt: prompt, source: source))
@@ -919,8 +919,8 @@ final class LocalAppsStore {
             let target = [request.target?.elementId, request.target?.role, request.target?.name]
                 .compactMap { $0 }
                 .first
-            if let target { return "Agent 请求对 \(target) 执行结构化界面操作。" }
-            return "Agent 请求执行结构化界面操作。"
+            if let target { return String(localized: "local_apps_ui_reason_target \(target)") }
+            return String(localized: "local_apps_ui_reason")
         }
     #endif
 
@@ -990,7 +990,7 @@ final class LocalAppsStore {
 
         #if canImport(engine_mobileFFI)
             guard let value = LocalAppsProtocolAdapter.designValue(edit.value, fieldType: edit.field.type) else {
-                errorMessage = "当前引擎尚未支持字段 \(edit.field.label) 的结构化值。"
+                errorMessage = String(localized: "local_apps_error_field_unsupported \(edit.field.label)")
                 return
             }
             var inFlight = edit
@@ -1019,7 +1019,7 @@ final class LocalAppsStore {
     #if canImport(engine_mobileFFI)
         private func send(_ command: ClientCommand) async -> Bool {
             guard let submitCommand else {
-                errorMessage = "本地应用引擎尚未连接。"
+                errorMessage = String(localized: "local_apps_error_engine_not_connected")
                 return false
             }
             do {

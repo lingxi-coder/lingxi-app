@@ -63,19 +63,19 @@ struct LocalAppDesignerView: View {
                 }
             } else {
                 ContentUnavailableView {
-                    Label("设计器尚未准备好", systemImage: "slider.horizontal.3")
+                    Label("local_apps_designer_not_ready", systemImage: "slider.horizontal.3")
                 } description: {
-                    Text(template == nil ? "正在等待 Rust 模板和应用详情。" : "正在打开设计会话。")
+                    Text(template == nil ? String(localized: "local_apps_designer_waiting") : String(localized: "local_apps_designer_opening"))
                 } actions: {
-                    Button("重试") { Task { await prepare() } }
+                    Button("common_retry") { Task { await prepare() } }
                 }
             }
         }
-        .navigationTitle(app?.name ?? "应用设计")
+        .navigationTitle(app?.name ?? String(localized: "local_apps_designer_title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Agent 建议", systemImage: "sparkles") {
+                Button("local_apps_agent_suggestion", systemImage: "sparkles") {
                     Task { await store.requestDesignSuggestion(appID: appID) }
                 }
                 .disabled(designer == nil)
@@ -209,8 +209,8 @@ private struct DesignerStepHeader: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("第 \(index + 1) 步：\(step.title)")
-                    .accessibilityValue(index == selectedIndex ? "当前步骤" : "")
+                    .accessibilityLabel("local_apps_designer_step \(index + 1) \(step.title)")
+                    .accessibilityValue(index == selectedIndex ? "local_apps_current_step" : "")
                 }
             }
         }
@@ -291,7 +291,7 @@ private struct LocalAppFieldEditor: View {
                 .overlay { RoundedRectangle(cornerRadius: 10).stroke(theme.border) }
         case .singleChoice:
             Picker(field.label, selection: textBinding) {
-                Text("请选择").tag("")
+                Text("local_apps_please_select").tag("")
                 ForEach(field.options) { option in
                     Text(option.label).tag(option.value)
                 }
@@ -314,12 +314,12 @@ private struct LocalAppFieldEditor: View {
             }
         case .density:
             Picker(field.label, selection: textBinding) {
-                Text("紧凑").tag("compact")
-                Text("舒适").tag("comfortable")
+                Text("settings_density_compact").tag("compact")
+                Text("settings_density_comfortable").tag("comfortable")
             }
             .pickerStyle(.segmented)
         case .screenList, .featureList:
-            LocalAppStringListEditor(values: stringsBinding, placeholder: "每行一项")
+            LocalAppStringListEditor(values: stringsBinding, placeholder: String(localized: "local_apps_line_per_item"))
         case .domainList:
             LocalAppStringListEditor(
                 values: domainsBinding,
@@ -506,23 +506,23 @@ private struct LocalAppDataFieldsEditor: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach($fields) { $field in
                 HStack {
-                    TextField("字段名", text: $field.name)
-                    Picker("类型", selection: $field.type) {
+                    TextField("local_apps_field_name", text: $field.name)
+                    Picker("local_apps_field_type", selection: $field.type) {
                         ForEach(LocalAppDataFieldType.allCases, id: \.rawValue) { type in
                             Text(type.rawValue).tag(type)
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
-                    Toggle("必填", isOn: $field.required)
+                    Toggle("local_apps_field_required", isOn: $field.required)
                         .labelsHidden()
-                    Button("删除字段", systemImage: "minus.circle", role: .destructive) {
+                    Button("local_apps_field_delete", systemImage: "minus.circle", role: .destructive) {
                         fields.removeAll { $0.id == field.id }
                     }
                     .labelStyle(.iconOnly)
                 }
             }
-            Button("添加数据字段", systemImage: "plus") {
+            Button("local_apps_field_add", systemImage: "plus") {
                 fields.append(
                     LocalAppDataField(
                         id: LocalAppDataFieldIDPolicy.nextID(existing: fields),
@@ -560,7 +560,7 @@ private struct LocalAppSuggestionPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Agent 建议", systemImage: "sparkles")
+            Label("local_apps_agent_suggestion", systemImage: "sparkles")
                 .font(.headline)
                 .foregroundStyle(theme.accent)
             Text(suggestion.summary)
@@ -569,15 +569,15 @@ private struct LocalAppSuggestionPanel: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(change.fieldID)
                         .font(.caption.bold())
-                    Text("\(change.oldValue?.textValue ?? "未设置") → \(change.newValue?.textValue ?? "移除")")
+                    Text("local_apps_diff_change \(change.oldValue?.textValue ?? String(localized: "common_unset")) \(change.newValue?.textValue ?? String(localized: "common_removed"))")
                         .font(.caption)
                         .foregroundStyle(theme.text3)
                 }
             }
             HStack {
-                Button("忽略", action: onDismiss)
+                Button("local_apps_ignore", action: onDismiss)
                     .buttonStyle(.bordered)
-                Button("应用建议", action: onApply)
+                Button("local_apps_apply_suggestion", action: onApply)
                     .buttonStyle(.borderedProminent)
             }
         }
@@ -597,7 +597,7 @@ private struct DesignerBottomBar: View {
 
     var body: some View {
         HStack {
-            Button("上一步", systemImage: "chevron.left", action: onPrevious)
+            Button("local_apps_previous", systemImage: "chevron.left", action: onPrevious)
                 .disabled(stepIndex == 0)
             Spacer()
             Text("\(stepIndex + 1) / \(stepCount)")
@@ -606,8 +606,8 @@ private struct DesignerBottomBar: View {
             Spacer()
             Button(
                 stepIndex + 1 == stepCount
-                    ? (isConfirming ? "确认中…" : "确认并生成")
-                    : "下一步",
+                    ? (isConfirming ? "local_apps_confirming" : "local_apps_confirm_generate")
+                    : "local_apps_next",
                 action: onNext
             )
             .buttonStyle(.borderedProminent)

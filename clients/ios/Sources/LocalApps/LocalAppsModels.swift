@@ -12,8 +12,8 @@ enum LocalAppsDistributionMode: String, Sendable {
 
     var runtimeLabel: String {
         switch self {
-        case .store: "静态运行"
-        case .full: "Next 本地服务"
+        case .store: String(localized: "local_apps_runtime_static")
+        case .full: String(localized: "local_apps_runtime_next")
         }
     }
 }
@@ -56,15 +56,15 @@ enum LocalAppWorkflow: String, Hashable, Sendable {
 
     var label: String {
         switch self {
-        case .collectingSpec: "设计中"
-        case .awaitingSpecConfirmation: "等待确认设计"
-        case .generating: "正在生成"
-        case .validating: "正在校验"
-        case .awaitingPreviewConfirmation: "等待批准预览"
-        case .revising: "正在修改"
-        case .ready: "可运行"
-        case .generationFailed: "生成失败"
-        case .validationFailed: "校验失败"
+        case .collectingSpec: String(localized: "local_apps_workflow_collecting_spec")
+        case .awaitingSpecConfirmation: String(localized: "local_apps_workflow_awaiting_spec")
+        case .generating: String(localized: "local_apps_workflow_generating")
+        case .validating: String(localized: "local_apps_workflow_validating")
+        case .awaitingPreviewConfirmation: String(localized: "local_apps_workflow_awaiting_preview")
+        case .revising: String(localized: "local_apps_workflow_revising")
+        case .ready: String(localized: "local_apps_workflow_ready")
+        case .generationFailed: String(localized: "local_apps_workflow_generation_failed")
+        case .validationFailed: String(localized: "local_apps_workflow_validation_failed")
         }
     }
 
@@ -122,7 +122,7 @@ enum LocalAppDesignValue: Hashable, Sendable {
         switch self {
         case let .text(value), let .color(value), let .density(value): value
         case let .strings(values), let .domains(values): values.joined(separator: "\n")
-        case let .boolean(value): value ? "是" : "否"
+        case let .boolean(value): value ? String(localized: "common_yes") : String(localized: "common_no")
         case let .dataFields(fields): fields.map(\.name).joined(separator: "、")
         }
     }
@@ -214,12 +214,12 @@ enum LocalAppRuntimeStatus: Hashable, Sendable {
 
     var label: String {
         switch self {
-        case .stopped: "已停止"
-        case .starting: "正在启动"
-        case .running: "运行中"
-        case let .suspended(reason): reason.map { "已挂起 · \($0)" } ?? "已挂起"
-        case .stopping: "正在停止"
-        case let .failed(reason): "运行失败 · \(reason)"
+        case .stopped: String(localized: "local_apps_runtime_stopped")
+        case .starting: String(localized: "local_apps_runtime_starting")
+        case .running: String(localized: "local_apps_runtime_running")
+        case let .suspended(reason): reason.map { String(localized: "local_apps_runtime_suspended \($0)") } ?? String(localized: "local_apps_runtime_suspended_plain")
+        case .stopping: String(localized: "local_apps_runtime_stopping")
+        case let .failed(reason): String(localized: "local_apps_runtime_failed \(reason)")
         }
     }
 
@@ -252,10 +252,10 @@ enum LocalAppCapabilityDecision: String, CaseIterable, Identifiable, Sendable {
 
     var label: String {
         switch self {
-        case .once: "允许一次"
-        case .session: "本次会话"
-        case .always: "始终允许"
-        case .deny: "拒绝"
+        case .once: String(localized: "local_apps_allow_once")
+        case .session: String(localized: "local_apps_allow_session_short")
+        case .always: String(localized: "local_apps_allow_always")
+        case .deny: String(localized: "local_apps_deny")
         }
     }
 }
@@ -277,11 +277,11 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
 
     var title: String {
         switch kind {
-        case .dataMutation: "允许 Agent 修改应用数据？"
-        case .uiControl: "允许 Agent 控制应用界面？"
-        case .networkDomain: "允许应用访问网络？"
-        case .restoreCheckpoint: "允许恢复代码检查点？"
-        case let .uiAction(action): "允许界面操作：\(action)？"
+        case .dataMutation: String(localized: "local_apps_permission_data_mutation")
+        case .uiControl: String(localized: "local_apps_permission_ui_control")
+        case .networkDomain: String(localized: "local_apps_permission_network")
+        case .restoreCheckpoint: String(localized: "local_apps_permission_restore")
+        case let .uiAction(action): String(localized: "local_apps_permission_ui_action \(action)")
         }
     }
 }

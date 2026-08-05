@@ -9,7 +9,7 @@ struct LocalAppsDrawerSection: View {
     var body: some View {
         VStack(spacing: 6) {
             Button(action: onOpenLibrary) {
-                Label("创建应用", systemImage: "plus")
+                Label("local_apps_create", systemImage: "plus")
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundStyle(theme.accent)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -50,7 +50,7 @@ struct LocalAppsDrawerSection: View {
                 .accessibilityIdentifier("drawer.apps.row.\(app.id)")
             }
 
-            Button("查看全部应用", systemImage: "square.grid.2x2", action: onOpenLibrary)
+            Button("local_apps_view_all", systemImage: "square.grid.2x2", action: onOpenLibrary)
                 .font(.system(size: 13))
                 .foregroundStyle(theme.text3)
                 .frame(maxWidth: .infinity)

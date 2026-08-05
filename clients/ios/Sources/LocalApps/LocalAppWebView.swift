@@ -55,7 +55,7 @@ final class LocalAppWebViewRegistry {
         controller.broker.resolve(
             requestID: requestID,
             result: result,
-            error: invalidResult ? "Bridge 返回了无效 JSON。" : error
+            error: invalidResult ? String(localized: "local_apps_error_bridge_invalid_json") : error
         )
     }
 
@@ -67,7 +67,7 @@ final class LocalAppWebViewRegistry {
                 }
                 try? await Task.sleep(for: .milliseconds(200))
             }
-            return .failure("应用页面尚未打开，无法执行界面操作。")
+            return .failure(String(localized: "local_apps_error_ui_not_open"))
         }
     #endif
 
@@ -147,14 +147,14 @@ final class LocalAppWebViewController {
     #if canImport(engine_mobileFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
             guard request.appId == appID else {
-                return .failure("界面操作的应用标识不匹配。")
+                return .failure(String(localized: "local_apps_error_ui_appid_mismatch"))
             }
             guard let webView else {
-                return .failure("应用页面已关闭。")
+                return .failure(String(localized: "local_apps_error_ui_closed"))
             }
 
             if request.action == .back {
-                guard webView.canGoBack else { return .failure("应用页面没有可返回的历史记录。") }
+                guard webView.canGoBack else { return .failure(String(localized: "local_apps_error_ui_no_history")) }
                 webView.goBack()
                 return encodedResult(["ok": true, "action": "back"])
             }
@@ -172,7 +172,7 @@ final class LocalAppWebViewController {
                   let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8)
             else {
-                return .failure("界面操作参数无法编码。")
+                return .failure(String(localized: "local_apps_error_ui_encode_failed"))
             }
 
             do {
@@ -180,7 +180,7 @@ final class LocalAppWebViewController {
                 guard let resultJSON = rawResult as? String,
                       resultJSON.utf8.count <= 256 * 1_024
                 else {
-                    return .failure("界面操作未返回有效结果。")
+                    return .failure(String(localized: "local_apps_error_ui_invalid_result"))
                 }
                 return LocalAppUIExecutionResult(resultJSON: resultJSON, error: nil)
             } catch {
@@ -232,7 +232,7 @@ final class LocalAppWebViewController {
     private func encodedResult(_ value: [String: Any]) -> LocalAppUIExecutionResult {
         guard let data = try? JSONSerialization.data(withJSONObject: value),
               let json = String(data: data, encoding: .utf8)
-        else { return .failure("界面操作结果无法编码。") }
+        else { return .failure(String(localized: "local_apps_error_ui_result_encode")) }
         return LocalAppUIExecutionResult(resultJSON: json, error: nil)
     }
 
@@ -364,19 +364,19 @@ struct LocalAppWebView: View {
         )
         .ignoresSafeArea(.container, edges: .bottom)
         .confirmationDialog(
-            "在系统浏览器打开外部链接？",
+            "local_apps_external_link_title",
             isPresented: Binding(
                 get: { pendingExternalURL != nil },
                 set: { if !$0 { pendingExternalURL = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("打开") {
+            Button("common_open") {
                 guard let pendingExternalURL else { return }
                 UIApplication.shared.open(pendingExternalURL)
                 self.pendingExternalURL = nil
             }
-            Button("取消", role: .cancel) { pendingExternalURL = nil }
+            Button("common_cancel", role: .cancel) { pendingExternalURL = nil }
         } message: {
             Text(pendingExternalURL?.absoluteString ?? "")
         }

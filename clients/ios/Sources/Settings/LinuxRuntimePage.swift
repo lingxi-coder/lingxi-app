@@ -219,7 +219,7 @@ private enum LinuxRuntimeBridge {
                 LinuxTerminalLine(
                     streamID: "run-preview",
                     source: "run",
-                    text: combined.isEmpty ? "(无输出)" : combined,
+                    text: combined.isEmpty ? String(localized: "settings_linux_no_output") : combined,
                     isError: result.exitCode != 0 || result.timedOut || result.cancelled
                 )
             )
@@ -257,7 +257,7 @@ private enum LinuxRuntimeBridge {
             let handle = try await cache.handle(for: cfg)
             let stopped = try await handle.killTask(taskId: taskID)
             let tasks = try await handle.listTasks().map(mapTask)
-            let message = stopped.detail ?? "已停止任务 \(stopped.title)"
+            let message = stopped.detail ?? String(localized: "settings_linux_task_stopped_title \(stopped.title)")
             return .success(LinuxRuntimeTaskOperationResult(tasks: tasks, message: message))
         } catch {
             return .failure(LinuxRuntimeTaskOperationFailure(message: String(describing: error)))
@@ -272,18 +272,18 @@ private enum LinuxRuntimeBridge {
         action: LinuxRuntimeAction,
         tasks: [MobileLinuxTaskFfi]
     ) -> LinuxRuntimeState {
-        let detail = status.lastError ?? capability.reason ?? "未返回额外诊断信息"
+        let detail = status.lastError ?? capability.reason ?? String(localized: "settings_linux_no_diagnostics")
         let summary: String
         if mode == .legacy {
-            summary = "当前仍使用 iOS unavailable shell stub"
+            summary = String(localized: "settings_linux_summary_legacy_shell_stub")
         } else if status.state == .blockedByLicense {
-            summary = "缺少额外书面授权，iSH 后端被显式阻塞"
+            summary = String(localized: "settings_linux_summary_blocked_license")
         } else if status.state == .unsupported {
-            summary = "授权存在或模式已选中，但当前构建未链接 iSH 运行时"
+            summary = String(localized: "settings_linux_summary_ish_not_linked")
         } else if capability.available {
-            summary = "Mobile Linux 运行时可用"
+            summary = String(localized: "settings_linux_summary_available")
         } else {
-            summary = "Mobile Linux 运行时暂不可用"
+            summary = String(localized: "settings_linux_summary_unavailable")
         }
         return LinuxRuntimeState(
             selectedMode: mode,
@@ -346,7 +346,7 @@ private enum LinuxRuntimeBridge {
         state.backend = mode == .legacy ? "ios-posix" : "ios-ish"
         state.rootfsState = .unsupported
         state.summary = String(localized: "settings_linux_simulator_unavailable")
-        state.detail = "完整运行时只在 arm64 真机启用；Simulator 始终返回 unavailable stub。"
+        state.detail = String(localized: "settings_linux_summary_simulator_detail")
         state.lastAction = action
         state.lastActionMessage = state.detail
         return state

@@ -22,13 +22,13 @@ enum ProviderProfileValidationError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .missingName:
-            return "显示名称不能为空。"
+            return String(localized: "settings_provider_error_missing_name")
         case .invalidBaseURL:
-            return "API 地址必须是 http 或 https URL。"
+            return String(localized: "settings_provider_error_invalid_url")
         case .missingModel:
-            return "默认模型不能为空。"
+            return String(localized: "settings_provider_error_missing_model")
         case .missingCredential:
-            return "请先填写或保留一个可用的 API Key。"
+            return String(localized: "settings_provider_error_missing_credential")
         }
     }
 }
@@ -175,19 +175,19 @@ struct ProviderProfileState: Identifiable, Equatable {
     var statusLabel: String {
         switch connectionState {
         case .testing:
-            return "检测中…"
+            return String(localized: "settings_provider_status_testing")
         case .connected:
-            return "已连接"
+            return String(localized: "settings_provider_status_connected")
         case .failed:
-            return "连接失败"
+            return String(localized: "settings_provider_status_failed")
         case .idle:
             if hasPendingSecret {
-                return "待应用"
+                return String(localized: "settings_provider_status_pending_apply")
             }
             if hasStoredCredential {
-                return "已配置"
+                return String(localized: "settings_provider_status_configured")
             }
-            return "未配置"
+            return String(localized: "settings_provider_unconfigured")
         }
     }
 
@@ -203,18 +203,18 @@ struct ProviderProfileState: Identifiable, Equatable {
 
     var maskedCredentialSummary: String {
         if clearCredentialOnApply {
-            return "将于应用后清除"
+            return String(localized: "settings_provider_credential_will_clear")
         }
         if hasPendingSecret {
-            return "新密钥待应用"
+            return String(localized: "settings_provider_credential_pending")
         }
         if hasLegacyAnthropicCredential {
-            return "旧版密钥已迁移到本页"
+            return String(localized: "settings_provider_credential_legacy_migrated")
         }
         if hasStoredCredential {
-            return "已保存于安全存储"
+            return String(localized: "settings_provider_key_stored_securely")
         }
-        return "未配置"
+        return String(localized: "settings_provider_unconfigured")
     }
 }
 
@@ -356,15 +356,15 @@ final class ProviderRepository {
             case .list:
                 return nil
             case .set(let target):
-                if unavailable.contains(target.credentialID) { return "安全存储不可用" }
+                if unavailable.contains(target.credentialID) { return String(localized: "settings_provider_secure_storage_unavailable") }
                 if !configured.contains(target.credentialID) {
-                    return "安全存储未确认密钥已保存。"
+                    return String(localized: "settings_provider_secure_storage_not_confirmed")
                 }
                 return nil
             case .delete(let target):
-                if unavailable.contains(target.credentialID) { return "安全存储不可用" }
+                if unavailable.contains(target.credentialID) { return String(localized: "settings_provider_secure_storage_unavailable") }
                 if configured.contains(target.credentialID) {
-                    return "安全存储仍报告该密钥存在。"
+                    return String(localized: "settings_provider_secure_storage_still_present")
                 }
                 return nil
             }
@@ -391,7 +391,7 @@ final class ProviderRepository {
                 profiles[index].credentialState = .configured
                 profiles[index].pendingSecret = ""
                 profiles[index].clearCredentialOnApply = false
-                profiles[index].detailMessage = "密钥已保存到安全存储。"
+                profiles[index].detailMessage = String(localized: "settings_provider_credential_saved")
             }
         case .delete(let target):
             guard let index = indexOfProfile(id: target.settingsID) else { break }
@@ -403,7 +403,7 @@ final class ProviderRepository {
                 profiles[index].pendingSecret = ""
                 profiles[index].clearCredentialOnApply = false
                 profiles[index].hasLegacyAnthropicCredential = false
-                profiles[index].detailMessage = "密钥已从安全存储移除。"
+                profiles[index].detailMessage = String(localized: "settings_provider_credential_removed")
             }
         }
 
@@ -560,7 +560,7 @@ final class ProviderRepository {
         profiles[index].pendingSecret = ""
         profiles[index].clearCredentialOnApply = true
         profiles[index].validationMessage = nil
-        profiles[index].detailMessage = "将在下次应用时从安全存储中清除。"
+        profiles[index].detailMessage = String(localized: "settings_provider_credential_clear_scheduled")
         bumpSyncRevision()
     }
 
@@ -614,7 +614,7 @@ final class ProviderRepository {
             bumpSyncRevision()
             guard let connectionTester else {
                 profiles[index].connectionState = .idle
-                profiles[index].detailMessage = "当前会话尚未接入连接测试回调。"
+                profiles[index].detailMessage = String(localized: "settings_provider_test_callback_unavailable")
                 bumpSyncRevision()
                 return
             }
@@ -628,7 +628,7 @@ final class ProviderRepository {
             switch result {
             case .success(let message):
                 profiles[currentIndex].connectionState = .connected
-                profiles[currentIndex].detailMessage = message ?? "连接测试成功。"
+                profiles[currentIndex].detailMessage = message ?? String(localized: "settings_provider_test_success")
             case .failure(let message):
                 profiles[currentIndex].connectionState = .failed
                 profiles[currentIndex].detailMessage = message
@@ -678,13 +678,13 @@ final class ProviderRepository {
             if let applyReconnectHandler {
                 try await applyReconnectHandler(makeLaunchSnapshot())
                 if let currentIndex = indexOfProfile(id: id) {
-                    profiles[currentIndex].detailMessage = "已应用配置并请求重连。"
+                    profiles[currentIndex].detailMessage = String(localized: "settings_provider_applied_reconnect")
                 }
                 lastAppliedRoutingSettings = routingSettings
                 routingDirty = false
             } else if let currentIndex = indexOfProfile(id: id),
                       profiles[currentIndex].detailMessage == nil {
-                profiles[currentIndex].detailMessage = "已保存配置。"
+                profiles[currentIndex].detailMessage = String(localized: "settings_provider_saved")
             }
             if let currentIndex = indexOfProfile(id: id) {
                 profiles[currentIndex].connectionState = .idle
@@ -721,9 +721,9 @@ final class ProviderRepository {
                 try await applyReconnectHandler(makeLaunchSnapshot())
                 lastAppliedRoutingSettings = routingSettings
                 routingDirty = false
-                routingMessage = "已应用路由并请求重连。"
+                routingMessage = String(localized: "settings_provider_routing_applied_reconnect")
             } else {
-                routingMessage = "已保存路由配置。"
+                routingMessage = String(localized: "settings_provider_routing_saved")
             }
             bumpSyncRevision()
             return true
@@ -890,7 +890,7 @@ final class ProviderRepository {
         if settingsID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
             guard Keychain.set(.apiKey, secret) else {
                 throw NSError(domain: "ProviderRepository", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "旧版 Keychain 密钥写入失败。",
+                    NSLocalizedDescriptionKey: String(localized: "settings_provider_legacy_keychain_write_failed"),
                 ])
             }
             if let index = indexOfProfile(id: settingsID) {
@@ -902,7 +902,7 @@ final class ProviderRepository {
             return
         }
         throw NSError(domain: "ProviderRepository", code: 2, userInfo: [
-            NSLocalizedDescriptionKey: "当前会话尚未接入安全存储命令，无法保存此提供商密钥。",
+            NSLocalizedDescriptionKey: String(localized: "settings_provider_secure_storage_save_unavailable"),
         ])
     }
 
@@ -926,7 +926,7 @@ final class ProviderRepository {
         if settingsID == ProviderRepositoryDefaults.anthropicLegacyProfileID {
             guard Keychain.clear(.apiKey) else {
                 throw NSError(domain: "ProviderRepository", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "旧版 Keychain 密钥删除失败。",
+                    NSLocalizedDescriptionKey: String(localized: "settings_provider_legacy_keychain_delete_failed"),
                 ])
             }
             if let index = indexOfProfile(id: settingsID) {
@@ -937,7 +937,7 @@ final class ProviderRepository {
             return
         }
         throw NSError(domain: "ProviderRepository", code: 4, userInfo: [
-            NSLocalizedDescriptionKey: "当前会话尚未接入安全存储命令，无法删除此提供商密钥。",
+            NSLocalizedDescriptionKey: String(localized: "settings_provider_secure_storage_delete_unavailable"),
         ])
     }
 
@@ -1163,7 +1163,7 @@ final class ProviderRepository {
     private func expireCredentialOperation(_ operationID: UInt64) {
         failCredentialOperation(
             operationID,
-            error: ProviderRepositoryOperationError.failed("安全存储操作超时")
+            error: ProviderRepositoryOperationError.failed(String(localized: "settings_provider_secure_storage_timeout"))
         )
     }
 
@@ -1250,14 +1250,14 @@ final class ProviderRepository {
               ProviderRoutingSettings.minRetryMaxAttempts...ProviderRoutingSettings.maxRetryMaxAttempts ~= retryMaxAttempts
         else {
             throw ProviderRepositoryOperationError.failed(
-                "最大重试次数必须在 \(ProviderRoutingSettings.minRetryMaxAttempts)-\(ProviderRoutingSettings.maxRetryMaxAttempts) 之间。"
+                String(localized: "settings_provider_retry_range \(ProviderRoutingSettings.minRetryMaxAttempts) \(ProviderRoutingSettings.maxRetryMaxAttempts)")
             )
         }
         guard let retryBackoffMs = Int(backoffText),
               ProviderRoutingSettings.minRetryBackoffMs...ProviderRoutingSettings.maxRetryBackoffMs ~= retryBackoffMs
         else {
             throw ProviderRepositoryOperationError.failed(
-                "重试退避必须在 \(ProviderRoutingSettings.minRetryBackoffMs)-\(ProviderRoutingSettings.maxRetryBackoffMs) ms 之间。"
+                String(localized: "settings_provider_backoff_range \(ProviderRoutingSettings.minRetryBackoffMs) \(ProviderRoutingSettings.maxRetryBackoffMs)")
             )
         }
         return ProviderRoutingSettings(

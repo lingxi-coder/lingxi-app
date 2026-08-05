@@ -8,6 +8,17 @@ struct SkillsPage: View {
 
     private let authorOrder = ["官方", "我", "社区 · @arxiv-fan", "社区 · @lin"]
 
+    private func authorLabel(_ author: String) -> String {
+        switch author {
+        case "官方":
+            return String(localized: "skills_author_official")
+        case "我":
+            return String(localized: "skills_author_mine")
+        default:
+            return String(localized: "skills_author_community \(author.replacingOccurrences(of: "社区 · ", with: ""))")
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Text("skills_description_blurb")
@@ -17,7 +28,7 @@ struct SkillsPage: View {
             ForEach(authorOrder, id: \.self) { author in
                 let arr = store.skills.filter { $0.author == author }
                 if !arr.isEmpty {
-                    SettingsSection(label: author) {
+                    SettingsSection(label: authorLabel(author)) {
                         ForEach(Array(arr.enumerated()), id: \.element.id) { i, s in
                             SettingsRow(icon: .skill,
                                         iconColor: s.builtin ? Color(srgb: 0,0.7601,0.7664) : Color(srgb: 0.896,0.6013,0),

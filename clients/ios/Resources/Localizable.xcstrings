@@ -2882,6 +2882,22 @@
         }
       }
     },
+    "settings_linux_no_diagnostics": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未返回额外诊断信息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未返回额外诊断信息"
+          }
+        }
+      }
+    },
     "settings_linux_no_guest_tasks": {
       "localizations": {
         "zh-Hans": {
@@ -2926,6 +2942,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前无挂载；真实 runtime 接入后这里展示 workspace / memory / skills / shared"
+          }
+        }
+      }
+    },
+    "settings_linux_no_output": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "(无输出)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "(无输出)"
           }
         }
       }
@@ -3330,6 +3362,102 @@
         }
       }
     },
+    "settings_linux_summary_available": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 运行时可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 运行时可用"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_blocked_license": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缺少额外书面授权，iSH 后端被显式阻塞"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缺少额外书面授权，iSH 后端被显式阻塞"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_ish_not_linked": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权存在或模式已选中，但当前构建未链接 iSH 运行时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权存在或模式已选中，但当前构建未链接 iSH 运行时"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_legacy_shell_stub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仍使用 iOS unavailable shell stub"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仍使用 iOS unavailable shell stub"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_simulator_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完整运行时只在 arm64 真机启用；Simulator 始终返回 unavailable stub。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完整运行时只在 arm64 真机启用；Simulator 始终返回 unavailable stub。"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 运行时暂不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 运行时暂不可用"
+          }
+        }
+      }
+    },
     "settings_linux_task_completed": {
       "localizations": {
         "zh-Hans": {
@@ -3422,6 +3550,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "已停止"
+          }
+        }
+      }
+    },
+    "settings_linux_task_stopped_title %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止任务 %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止任务 %@"
           }
         }
       }
@@ -4066,6 +4210,22 @@
         }
       }
     },
+    "settings_provider_applied_reconnect": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用配置并请求重连。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用配置并请求重连。"
+          }
+        }
+      }
+    },
     "settings_provider_apply_reconnect": {
       "localizations": {
         "zh-Hans": {
@@ -4114,6 +4274,22 @@
         }
       }
     },
+    "settings_provider_backoff_range %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试退避必须在 %lld-%lld ms 之间。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试退避必须在 %lld-%lld ms 之间。"
+          }
+        }
+      }
+    },
     "settings_provider_clear_key": {
       "localizations": {
         "zh-Hans": {
@@ -4126,6 +4302,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "清除"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_clear_scheduled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将在下次应用时从安全存储中清除。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将在下次应用时从安全存储中清除。"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_legacy_migrated": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版密钥已迁移到本页"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版密钥已迁移到本页"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_pending": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新密钥待应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新密钥待应用"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_removed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密钥已从安全存储移除。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密钥已从安全存储移除。"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密钥已保存到安全存储。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密钥已保存到安全存储。"
+          }
+        }
+      }
+    },
+    "settings_provider_credential_will_clear": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将于应用后清除"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将于应用后清除"
           }
         }
       }
@@ -4258,6 +4530,70 @@
         }
       }
     },
+    "settings_provider_error_invalid_url": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 地址必须是 http 或 https URL。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 地址必须是 http 或 https URL。"
+          }
+        }
+      }
+    },
+    "settings_provider_error_missing_credential": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先填写或保留一个可用的 API Key。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先填写或保留一个可用的 API Key。"
+          }
+        }
+      }
+    },
+    "settings_provider_error_missing_model": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认模型不能为空。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认模型不能为空。"
+          }
+        }
+      }
+    },
+    "settings_provider_error_missing_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示名称不能为空。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示名称不能为空。"
+          }
+        }
+      }
+    },
     "settings_provider_fallback_hint": {
       "localizations": {
         "zh-Hans": {
@@ -4382,6 +4718,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "将在应用后删除"
+          }
+        }
+      }
+    },
+    "settings_provider_legacy_keychain_delete_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版 Keychain 密钥删除失败。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版 Keychain 密钥删除失败。"
+          }
+        }
+      }
+    },
+    "settings_provider_legacy_keychain_write_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版 Keychain 密钥写入失败。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版 Keychain 密钥写入失败。"
           }
         }
       }
@@ -4514,6 +4882,38 @@
         }
       }
     },
+    "settings_provider_retry_range %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最大重试次数必须在 %lld-%lld 之间。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最大重试次数必须在 %lld-%lld 之间。"
+          }
+        }
+      }
+    },
+    "settings_provider_routing_applied_reconnect": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用路由并请求重连。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用路由并请求重连。"
+          }
+        }
+      }
+    },
     "settings_provider_routing_footer %lld %lld %lld %lld": {
       "localizations": {
         "zh-Hans": {
@@ -4526,6 +4926,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "仅对默认模型生效。最大重试次数限制为 %lld-%lld，退避范围为 %lld-%lld ms。"
+          }
+        }
+      }
+    },
+    "settings_provider_routing_saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存路由配置。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存路由配置。"
+          }
+        }
+      }
+    },
+    "settings_provider_saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存配置。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存配置。"
           }
         }
       }
@@ -4558,6 +4990,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "路由与重试"
+          }
+        }
+      }
+    },
+    "settings_provider_secure_storage_delete_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话尚未接入安全存储命令，无法删除此提供商密钥。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话尚未接入安全存储命令，无法删除此提供商密钥。"
+          }
+        }
+      }
+    },
+    "settings_provider_secure_storage_not_confirmed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储未确认密钥已保存。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储未确认密钥已保存。"
+          }
+        }
+      }
+    },
+    "settings_provider_secure_storage_save_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话尚未接入安全存储命令，无法保存此提供商密钥。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话尚未接入安全存储命令，无法保存此提供商密钥。"
+          }
+        }
+      }
+    },
+    "settings_provider_secure_storage_still_present": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储仍报告该密钥存在。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储仍报告该密钥存在。"
+          }
+        }
+      }
+    },
+    "settings_provider_secure_storage_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储操作超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储操作超时"
+          }
+        }
+      }
+    },
+    "settings_provider_secure_storage_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全存储不可用"
           }
         }
       }
@@ -4610,6 +5138,102 @@
         }
       }
     },
+    "settings_provider_status_configured": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已配置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已配置"
+          }
+        }
+      }
+    },
+    "settings_provider_status_connected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已连接"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已连接"
+          }
+        }
+      }
+    },
+    "settings_provider_status_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接失败"
+          }
+        }
+      }
+    },
+    "settings_provider_status_pending_apply": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待应用"
+          }
+        }
+      }
+    },
+    "settings_provider_status_testing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测中…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测中…"
+          }
+        }
+      }
+    },
+    "settings_provider_test_callback_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话尚未接入连接测试回调。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话尚未接入连接测试回调。"
+          }
+        }
+      }
+    },
     "settings_provider_test_connection": {
       "localizations": {
         "zh-Hans": {
@@ -4622,6 +5246,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "测试连接"
+          }
+        }
+      }
+    },
+    "settings_provider_test_success": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接测试成功。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接测试成功。"
           }
         }
       }
@@ -5854,6 +6494,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "工作流由 cron 表达式或事件触发。在主界面侧栏 → 定时 可创建。"
+          }
+        }
+      }
+    },
+    "skills_author_community %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "社区 · %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "社区 · %@"
+          }
+        }
+      }
+    },
+    "skills_author_mine": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我"
+          }
+        }
+      }
+    },
+    "skills_author_official": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "官方"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "官方"
           }
         }
       }

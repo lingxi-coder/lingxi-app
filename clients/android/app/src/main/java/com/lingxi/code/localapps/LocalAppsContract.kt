@@ -1,6 +1,32 @@
 package com.lingxi.code.localapps
 
+import android.content.Context
 import androidx.compose.runtime.Immutable
+import com.lingxi.code.R
+
+/**
+ * Resolves a localized string for localapps-package code that runs OUTSIDE a
+ * `@Composable` body — [LocalAppsViewModel], [LocalAppRuntimeAssets],
+ * [LocalAppCodeBrowser] and the pure [readable] mapper below — and therefore
+ * cannot call `stringResource()`. Mirrors `ConversationStrings`
+ * (conversation/ConversationSource.kt): the fallback keeps every JVM unit test
+ * that constructs these types directly, with no Android `Context`, asserting
+ * the same literal Chinese copy without being touched; the production
+ * resolver ([localAppsStrings]) resolves the REAL localized text through
+ * [Context.getString] so the app renders in the user's selected language.
+ */
+fun interface LocalAppsStrings {
+    fun resolve(id: Int, fallback: String, vararg args: Any): String
+}
+
+/** Test/no-Context fallback: the literal zh-Hans copy, `String.format`-ed. */
+val DefaultLocalAppsStrings = LocalAppsStrings { _, fallback, args ->
+    if (args.isEmpty()) fallback else String.format(java.util.Locale.getDefault(), fallback, *args)
+}
+
+/** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
+fun localAppsStrings(context: Context): LocalAppsStrings =
+    LocalAppsStrings { id, _, args -> context.getString(id, *args) }
 
 @Immutable
 data class LocalAppItem(
@@ -312,12 +338,20 @@ sealed interface LocalAppsAction {
     data object DismissError : LocalAppsAction
 }
 
-internal fun LocalAppDesignValue.readable(): String = when (this) {
+internal fun LocalAppDesignValue.readable(strings: LocalAppsStrings = DefaultLocalAppsStrings): String = when (this) {
     is LocalAppDesignValue.Text -> value
     is LocalAppDesignValue.Choice -> value
     is LocalAppDesignValue.Choices -> values.joinToString("、")
-    is LocalAppDesignValue.Toggle -> if (value) "是" else "否"
-    is LocalAppDesignValue.Density -> if (compact) "紧凑" else "舒适"
+    is LocalAppDesignValue.Toggle -> if (value) {
+        strings.resolve(R.string.common_yes, "是")
+    } else {
+        strings.resolve(R.string.common_no, "否")
+    }
+    is LocalAppDesignValue.Density -> if (compact) {
+        strings.resolve(R.string.settings_density_compact, "紧凑")
+    } else {
+        strings.resolve(R.string.settings_density_comfortable, "舒适")
+    }
     is LocalAppDesignValue.StringList -> values.joinToString("、")
     is LocalAppDesignValue.DataFields -> values.joinToString("、") { it.label }
 }

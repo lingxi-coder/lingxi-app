@@ -12,12 +12,12 @@ private enum LocalAppDetailSection: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .overview: "概览"
-        case .preview: "预览"
-        case .data: "数据"
-        case .code: "代码"
-        case .history: "历史"
-        case .permissions: "权限"
+        case .overview: String(localized: "local_apps_section_overview")
+        case .preview: String(localized: "local_apps_section_preview")
+        case .data: String(localized: "local_apps_section_data")
+        case .code: String(localized: "local_apps_section_code")
+        case .history: String(localized: "local_apps_section_history")
+        case .permissions: String(localized: "local_apps_section_permissions")
         }
     }
 }
@@ -35,7 +35,7 @@ struct LocalAppDetailView: View {
 
     var body: some View {
         content
-            .navigationTitle(app?.name ?? "应用详情")
+            .navigationTitle(app?.name ?? String(localized: "local_apps_detail_title"))
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 await store.refresh()
@@ -57,34 +57,34 @@ struct LocalAppDetailView: View {
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
                         if case .running = runtime {
-                            Button("停止", systemImage: "stop.fill") {
+                            Button("composer_stop", systemImage: "stop.fill") {
                                 Task { await store.stop(appID: appID) }
                             }
                         } else {
-                            Button("启动", systemImage: "play.fill") {
+                            Button("common_start", systemImage: "play.fill") {
                                 Task { await store.start(appID: appID) }
                             }
                             .disabled(app.workflow != .ready && app.workflow != .awaitingPreviewConfirmation)
                         }
                         Menu {
                             if app.workflow == .generationFailed || app.workflow == .validationFailed {
-                                Button("重试生成", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
+                                Button("local_apps_retry_generate", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
                                     Task { await store.retryGeneration(appID: appID) }
                                 }
                             }
-                            Button("重新启动", systemImage: "arrow.clockwise") {
+                            Button("local_apps_restart", systemImage: "arrow.clockwise") {
                                 Task { await store.restart(appID: appID) }
                             }
-                            Button("继续设计", systemImage: "slider.horizontal.3") {
+                            Button("local_apps_continue_design", systemImage: "slider.horizontal.3") {
                                 path.append(.designer(appID))
                             }
                         } label: {
-                            Label("更多", systemImage: "ellipsis.circle")
+                            Label("local_apps_more", systemImage: "ellipsis.circle")
                         }
                     }
                 }
             } else {
-                ContentUnavailableView("应用不存在", systemImage: "questionmark.app")
+                ContentUnavailableView("local_apps_not_found", systemImage: "questionmark.app")
             }
         }
     }
@@ -168,17 +168,17 @@ private struct LocalAppOverviewSection: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    LabeledContent("运行模式", value: distribution.runtimeLabel)
-                    LabeledContent("工作区", value: app.workspaceRelativePath)
-                    LabeledContent("模板", value: app.templateKind.rawValue)
-                    LabeledContent("更新时间") {
+                    LabeledContent("local_apps_runtime_mode", value: distribution.runtimeLabel)
+                    LabeledContent("local_apps_workspace", value: app.workspaceRelativePath)
+                    LabeledContent("local_apps_template", value: app.templateKind.rawValue)
+                    LabeledContent("local_apps_updated_at") {
                         Text(app.updatedAt, format: .relative(presentation: .named))
                     }
                 }
                 .padding()
                 .background(theme.surface, in: .rect(cornerRadius: 16))
 
-                Button("打开预览", systemImage: "safari", action: onOpenPreview)
+                Button("local_apps_open_preview", systemImage: "safari", action: onOpenPreview)
                     .buttonStyle(.borderedProminent)
                     .disabled(runtime.url == nil)
             }
@@ -220,11 +220,11 @@ private struct LocalAppEmbeddedPreview: View {
             )
         } else {
             ContentUnavailableView {
-                Label("预览尚未运行", systemImage: "safari")
+                Label("local_apps_preview_not_running", systemImage: "safari")
             } description: {
-                Text("启动应用后，页面将从 Rust 回环服务加载。")
+                Text("local_apps_preview_not_running_detail")
             } actions: {
-                Button("启动") { Task { await store.start(appID: appID) } }
+                Button("common_start") { Task { await store.start(appID: appID) } }
             }
         }
     }
@@ -236,8 +236,8 @@ private struct LocalAppDataSection: View {
     var body: some View {
         List {
             Section {
-                Label("SQLite 由 Rust AppService 独占管理", systemImage: "lock.shield")
-                Text("页面和 Agent 只能通过受控 collection API 查询和修改，不接受原始 SQL。")
+                Label("local_apps_data_sqlite", systemImage: "lock.shield")
+                Text("local_apps_data_sqlite_detail")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -265,12 +265,12 @@ private struct LocalAppCodeSection: View {
 
     var body: some View {
         List {
-            Section("工作区") {
+            Section("local_apps_workspace") {
                 Text(app.workspaceRelativePath)
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
             }
-            Section("源码") {
+            Section("local_apps_source") {
                 ForEach(browser.files) { file in
                     Button {
                         browser.open(file)
@@ -287,16 +287,16 @@ private struct LocalAppCodeSection: View {
                 }
             }
             Section {
-                Text("可查看和编辑完整文本源码；符号链接、构建产物和工作区外路径不会显示。修改固定依赖可以保存，但构建验证会拒绝不受支持的版本或安装操作。")
+                Text("local_apps_source_detail")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
         .overlay {
             if browser.isLoading {
-                ProgressView("正在读取源码…")
+                ProgressView("local_apps_source_loading")
             } else if browser.files.isEmpty {
-                ContentUnavailableView("暂无可编辑源码", systemImage: "doc.text.magnifyingglass")
+                ContentUnavailableView("local_apps_source_empty", systemImage: "doc.text.magnifyingglass")
             }
         }
         .task { browser.refresh() }
@@ -313,7 +313,7 @@ private struct LocalAppCodeSection: View {
                 ))
                 .font(.system(.body, design: .monospaced))
                 .padding(.horizontal, 8)
-                .navigationTitle(browser.selectedPath ?? "源码")
+                .navigationTitle(browser.selectedPath ?? String(localized: "local_apps_source"))
                 .navigationBarTitleDisplayMode(.inline)
                 .safeAreaInset(edge: .bottom) {
                     if let message = browser.statusMessage {
@@ -327,25 +327,25 @@ private struct LocalAppCodeSection: View {
                 }
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("关闭") { browser.closeEditor() }
+                        Button("common_close") { browser.closeEditor() }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("保存") { browser.save() }
+                        Button("voice_save_button") { browser.save() }
                             .disabled(browser.isSaving)
                     }
                 }
             }
         }
         .alert(
-            "源码错误",
+            "local_apps_source_error_title",
             isPresented: Binding(
                 get: { browser.errorMessage != nil },
                 set: { if !$0 { browser.clearError() } }
             )
         ) {
-            Button("好", role: .cancel, action: browser.clearError)
+            Button("common_ok", role: .cancel, action: browser.clearError)
         } message: {
-            Text(browser.errorMessage ?? "未知错误")
+            Text(browser.errorMessage ?? String(localized: "common_unknown_error"))
         }
     }
 }
@@ -371,25 +371,25 @@ private struct LocalAppHistorySection: View {
         }
         .overlay {
             if (store.checkpoints[appID] ?? []).isEmpty {
-                ContentUnavailableView("暂无检查点", systemImage: "clock.arrow.circlepath")
+                ContentUnavailableView("local_apps_no_checkpoints", systemImage: "clock.arrow.circlepath")
             }
         }
         .confirmationDialog(
-            "恢复代码检查点？",
+            "local_apps_restore_checkpoint_title",
             isPresented: Binding(
                 get: { pendingRestore != nil },
                 set: { if !$0 { pendingRestore = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("恢复代码", role: .destructive) {
+            Button("local_apps_restore_code", role: .destructive) {
                 guard let checkpoint = pendingRestore else { return }
                 pendingRestore = nil
                 Task { _ = await store.restore(appID: appID, checkpointID: checkpoint.id) }
             }
-            Button("取消", role: .cancel) { pendingRestore = nil }
+            Button("common_cancel", role: .cancel) { pendingRestore = nil }
         } message: {
-            Text("恢复前会自动创建 pre_restore 检查点。应用数据库不会回滚。")
+            Text("local_apps_restore_checkpoint_detail")
         }
     }
 }
@@ -401,32 +401,32 @@ private struct LocalAppPermissionsSection: View {
 
     var body: some View {
         List {
-            Section("Agent 控制") {
-                Label("读取数据与检查 UI 默认允许", systemImage: "eye")
-                Label("修改数据或控制 UI 首次需要授权", systemImage: "hand.raised")
-                Button("撤销全部授权", role: .destructive) { confirmReset = true }
+            Section("local_apps_section_agent") {
+                Label("local_apps_permission_read_default", systemImage: "eye")
+                Label("local_apps_permission_mutation_requires", systemImage: "hand.raised")
+                Button("local_apps_permissions_reset", role: .destructive) { confirmReset = true }
             }
-            Section("网络") {
-                Label("默认禁止外网", systemImage: "network.slash")
-                Text("仅可访问设计清单声明的 HTTPS 域名，每个域名首次访问单独授权。")
+            Section("local_apps_section_network") {
+                Label("local_apps_permission_network_default", systemImage: "network.slash")
+                Text("local_apps_permission_network_detail")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            Section("应用标识") {
+            Section("local_apps_section_app_id") {
                 Text(appID).textSelection(.enabled)
             }
         }
         .confirmationDialog(
-            "撤销该应用的全部授权？",
+            "local_apps_permissions_reset_title",
             isPresented: $confirmReset,
             titleVisibility: .visible
         ) {
-            Button("撤销会话与持久授权", role: .destructive) {
+            Button("local_apps_permissions_reset_confirm", role: .destructive) {
                 Task { _ = await store.resetPermissions(appID: appID) }
             }
-            Button("取消", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: {
-            Text("下次修改数据、控制界面或访问域名时会重新询问。")
+            Text("local_apps_permissions_reset_detail")
         }
     }
 }
@@ -455,10 +455,10 @@ struct LocalAppPreviewView: View {
                 .safeAreaInset(edge: .bottom) {
                     if store.previews[appID] != nil {
                         HStack {
-                            Button("反馈修改") { showFeedback = true }
+                            Button("local_apps_feedback") { showFeedback = true }
                                 .buttonStyle(.bordered)
                             Spacer()
-                            Button("批准预览") {
+                            Button("local_apps_approve_preview") {
                                 Task { _ = await store.approvePreview(appID: appID) }
                             }
                             .buttonStyle(.borderedProminent)
@@ -468,10 +468,10 @@ struct LocalAppPreviewView: View {
                     }
                 }
             } else {
-                ContentUnavailableView("预览尚未准备好", systemImage: "hourglass")
+                ContentUnavailableView("local_apps_preview_not_ready", systemImage: "hourglass")
             }
         }
-        .navigationTitle("预览确认")
+        .navigationTitle("local_apps_preview_confirm_title")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showFeedback) {
             NavigationStack {
@@ -479,13 +479,13 @@ struct LocalAppPreviewView: View {
                     TextEditor(text: $feedback)
                         .frame(minHeight: 140)
                 }
-                .navigationTitle("反馈修改")
+                .navigationTitle("local_apps_feedback")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") { showFeedback = false }
+                        Button("common_cancel") { showFeedback = false }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("提交") {
+                        Button("local_apps_submit") {
                             Task {
                                 if await store.requestRevision(appID: appID, feedback: feedback) {
                                     showFeedback = false

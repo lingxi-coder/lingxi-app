@@ -7,14 +7,16 @@ struct AppearancePage: View {
     var body: some View {
         @Bindable var app = app
         VStack(spacing: 0) {
-            SettingsSection(label: "主题") {
+            SettingsSection(label: String(localized: "settings_section_theme")) {
                 RadioList(options: [
-                    .init(value: "light", label: "浅色", sub: "暖白纸感 + 半透卡片"),
-                    .init(value: "dark",  label: "深色", sub: "午夜紫 + 低饱和"),
+                    .init(value: "light", label: String(localized: "settings_appearance_light"),
+                          sub: String(localized: "settings_appearance_light_sub")),
+                    .init(value: "dark",  label: String(localized: "settings_appearance_dark"),
+                          sub: String(localized: "settings_appearance_dark_sub")),
                 ], value: Binding(get: { app.themeRaw }, set: { app.setTheme($0) }))
             }
 
-            SettingsSection(label: "强调色") {
+            SettingsSection(label: String(localized: "settings_section_accent_color")) {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 6), spacing: 10) {
                     ForEach(Accents.all) { a in
                         VStack(spacing: 5) {
@@ -29,22 +31,26 @@ struct AppearancePage: View {
                 .padding(14)
             }
 
-            SettingsSection(label: "密度") {
+            SettingsSection(label: String(localized: "settings_section_density")) {
                 RadioList(options: [
-                    .init(value: "compact",     label: "紧凑", sub: "一屏显示更多内容"),
-                    .init(value: "comfortable", label: "舒适", sub: "默认，平衡"),
-                    .init(value: "spacious",    label: "宽松", sub: "更大间距，更易读"),
+                    .init(value: "compact",     label: String(localized: "settings_density_compact"),
+                          sub: String(localized: "settings_density_compact_sub")),
+                    .init(value: "comfortable", label: String(localized: "settings_density_comfortable"),
+                          sub: String(localized: "settings_density_comfortable_sub")),
+                    .init(value: "spacious",    label: String(localized: "settings_density_spacious"),
+                          sub: String(localized: "settings_density_spacious_sub")),
                 ], value: $app.density)
             }
 
-            SettingsSection(label: "字号", footer: "当前 \(Int(app.fontSize))pt · 影响对话与列表正文") {
+            SettingsSection(label: String(localized: "settings_section_font_size"),
+                            footer: String(localized: "settings_font_size_footer \(Int(app.fontSize))")) {
                 VStack(spacing: 8) {
                     HStack(spacing: 8) {
                         Text("A").font(.system(size: 11)).foregroundColor(t.text4)
                         Slider(value: $app.fontSize, in: 13...19, step: 1).tint(t.accent)
                         Text("A").font(.system(size: 17)).foregroundColor(t.text4)
                     }
-                    Text("\"灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。\"")
+                    Text("settings_font_size_preview")
                         .font(.system(size: app.fontSize)).foregroundColor(t.text).lineSpacing(app.fontSize * 0.5)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12).padding(.vertical, 10)

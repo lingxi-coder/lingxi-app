@@ -12,22 +12,23 @@ struct AccountPage: View {
                     .padding(.bottom, 12)
                 Text("Yuxin Yang").font(.system(size: 18, weight: .bold)).foregroundColor(t.text)
                 Text("yuxin@axielix.com").font(.system(size: 13)).foregroundColor(t.text4).padding(.top, 4)
-                Text("Pro · 续费日 2026-09-30")
+                Text("settings_account_pro_renewal")
                     .font(.system(size: 11.5, weight: .semibold)).foregroundColor(t.accent)
                     .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(t.accent.tint(0.18)).clipShape(Capsule()).padding(.top, 10)
             }
             .padding(.top, 8).padding(.bottom, 18)
 
-            SettingsSection(label: "本月用量") {
-                SettingsRow(label: "对话次数", value: "247 / 1000", chevron: false)
-                SettingsRow(label: "推理时长", value: "5.5 / 8 小时", chevron: false)
-                SettingsRow(label: "存储", value: "1.2 / 10 GB", chevron: false, isLast: true)
+            SettingsSection(label: String(localized: "settings_section_monthly_usage")) {
+                SettingsRow(label: String(localized: "settings_conversation_count"), value: "247 / 1000", chevron: false)
+                SettingsRow(label: String(localized: "settings_inference_duration"), value: String(localized: "settings_inference_duration_value"), chevron: false)
+                SettingsRow(label: String(localized: "settings_storage"), value: "1.2 / 10 GB", chevron: false, isLast: true)
             }
             SettingsSection {
-                SettingsRow(icon: .brain, label: "管理订阅", onTap: {})
-                SettingsRow(icon: .link, label: "同步设备", sub: "3 台设备已连接", onTap: {})
-                SettingsRow(icon: .x, label: "退出登录", danger: true, isLast: true, onTap: {})
+                SettingsRow(icon: .brain, label: String(localized: "settings_manage_subscription"), onTap: {})
+                SettingsRow(icon: .link, label: String(localized: "settings_sync_devices"),
+                            sub: String(localized: "settings_sync_devices_sub"), onTap: {})
+                SettingsRow(icon: .x, label: String(localized: "settings_logout"), danger: true, isLast: true, onTap: {})
             }
         }
     }
@@ -39,15 +40,18 @@ struct KnowledgePage: View {
     @State private var autoRecall = true
     var body: some View {
         VStack(spacing: 0) {
-            blurb("知识库内容会被嵌入并附加到 AI 上下文。所有索引在本机完成。")
-            SettingsSection(label: "存储") {
-                SettingsRow(label: "使用空间", value: "142 MB", chevron: false)
-                SettingsRow(label: "文件数", value: "24 个", chevron: false)
-                SettingsRow(label: "索引模型", value: "bge-m3-local", isLast: true, onTap: {})
+            blurb(String(localized: "settings_knowledge_blurb"))
+            SettingsSection(label: String(localized: "settings_section_storage")) {
+                SettingsRow(label: String(localized: "settings_used_space"), value: "142 MB", chevron: false)
+                SettingsRow(label: String(localized: "settings_file_count"),
+                            value: String(localized: "settings_knowledge_file_count"), chevron: false)
+                SettingsRow(label: String(localized: "settings_index_model"), value: "bge-m3-local", isLast: true, onTap: {})
             }
-            SettingsSection(label: "行为") {
-                SettingsRow(label: "自动检索", sub: "每次提问自动召回相关片段", chevron: false) { LXToggle(isOn: $autoRecall) }
-                SettingsRow(label: "召回数量上限", value: "8 段", isLast: true, onTap: {})
+            SettingsSection(label: String(localized: "settings_section_behavior")) {
+                SettingsRow(label: String(localized: "settings_auto_recall"),
+                            sub: String(localized: "settings_auto_recall_sub"), chevron: false) { LXToggle(isOn: $autoRecall) }
+                SettingsRow(label: String(localized: "settings_recall_limit"),
+                            value: String(localized: "settings_recall_limit_count"), isLast: true, onTap: {})
             }
         }
     }
@@ -58,14 +62,18 @@ struct MemoryPage: View {
     @Environment(\.theme) private var t
     var body: some View {
         VStack(spacing: 0) {
-            blurb("灵犀根据对话自动提取关于你的偏好、习惯、关系。你可以随时编辑或删除。")
-            SettingsSection(label: "近期记忆") {
-                SettingsRow(label: "偏好深色 + 中文", sub: "2026-05-12 形成", onTap: {})
-                SettingsRow(label: "工作日 8:30 倾向收到晨报", sub: "2026-05-10 形成", onTap: {})
-                SettingsRow(label: "正在做 AxieLix 灵犀项目", sub: "2026-05-08 形成", isLast: true, onTap: {})
+            blurb(String(localized: "settings_memory_blurb"))
+            SettingsSection(label: String(localized: "settings_section_recent_memory")) {
+                SettingsRow(label: String(localized: "settings_memory_mock_item_1"),
+                            sub: String(localized: "settings_memory_mock_sub_1"), onTap: {})
+                SettingsRow(label: String(localized: "settings_memory_mock_item_2"),
+                            sub: String(localized: "settings_memory_mock_sub_2"), onTap: {})
+                SettingsRow(label: String(localized: "settings_memory_mock_item_3"),
+                            sub: String(localized: "settings_memory_mock_sub_3"), isLast: true, onTap: {})
             }
             SettingsSection {
-                SettingsRow(icon: .x, label: "清除全部记忆", chevron: false, danger: true, isLast: true, onTap: {})
+                SettingsRow(icon: .x, label: String(localized: "settings_clear_all_memory"),
+                            chevron: false, danger: true, isLast: true, onTap: {})
             }
         }
     }
@@ -78,11 +86,16 @@ struct WorkflowsPage: View {
     @State private var w3 = true
     @State private var w4 = false
     var body: some View {
-        SettingsSection(label: "自动化", footer: "工作流由 cron 表达式或事件触发。在主界面侧栏 → 定时 可创建。") {
-            SettingsRow(label: "每日晨报", sub: "工作日 08:30", chevron: false) { LXToggle(isOn: $w1) }
-            SettingsRow(label: "周报自动生成", sub: "每周五 17:00", chevron: false) { LXToggle(isOn: $w2) }
-            SettingsRow(label: "客户反馈周聚合", sub: "每周一 09:00", chevron: false) { LXToggle(isOn: $w3) }
-            SettingsRow(label: "凌晨日志巡检", sub: "已暂停", chevron: false, isLast: true) { LXToggle(isOn: $w4) }
+        SettingsSection(label: String(localized: "settings_section_automation"),
+                        footer: String(localized: "settings_workflows_footer")) {
+            SettingsRow(label: String(localized: "settings_workflow_daily_brief"),
+                        sub: String(localized: "settings_workflow_weekday_0830"), chevron: false) { LXToggle(isOn: $w1) }
+            SettingsRow(label: String(localized: "settings_workflow_weekly_report"),
+                        sub: String(localized: "settings_workflow_friday_1700"), chevron: false) { LXToggle(isOn: $w2) }
+            SettingsRow(label: String(localized: "settings_workflow_customer_feedback"),
+                        sub: String(localized: "settings_workflow_monday_0900"), chevron: false) { LXToggle(isOn: $w3) }
+            SettingsRow(label: String(localized: "settings_workflow_midnight_log"),
+                        sub: String(localized: "settings_status_paused"), chevron: false, isLast: true) { LXToggle(isOn: $w4) }
         }
     }
 }
@@ -91,11 +104,16 @@ struct WorkflowsPage: View {
 struct NotificationsPage: View {
     @Bindable var store: SettingsStore
     var body: some View {
-        SettingsSection(label: "通知类型", footer: "所有通知通过系统通知中心，灵犀不会单独打扰你。") {
-            SettingsRow(label: "工作流完成", sub: "AI 跑完多步任务时", chevron: false) { LXToggle(isOn: $store.notifs.workflows) }
-            SettingsRow(label: "我被 @", sub: "会话内有人提到你", chevron: false) { LXToggle(isOn: $store.notifs.mentions) }
-            SettingsRow(label: "定时任务报告", sub: "cron 触发执行后", chevron: false) { LXToggle(isOn: $store.notifs.crons) }
-            SettingsRow(label: "产品更新", sub: "新功能与重要变更", chevron: false, isLast: true) { LXToggle(isOn: $store.notifs.marketing) }
+        SettingsSection(label: String(localized: "settings_section_notification_type"),
+                        footer: String(localized: "settings_notifications_footer")) {
+            SettingsRow(label: String(localized: "settings_notif_workflow_complete"),
+                        sub: String(localized: "settings_notif_workflow_complete_sub"), chevron: false) { LXToggle(isOn: $store.notifs.workflows) }
+            SettingsRow(label: String(localized: "settings_notif_mention"),
+                        sub: String(localized: "settings_notif_mention_sub"), chevron: false) { LXToggle(isOn: $store.notifs.mentions) }
+            SettingsRow(label: String(localized: "settings_notif_cron_report"),
+                        sub: String(localized: "settings_notif_cron_report_sub"), chevron: false) { LXToggle(isOn: $store.notifs.crons) }
+            SettingsRow(label: String(localized: "settings_notif_product_update"),
+                        sub: String(localized: "settings_notif_product_update_sub"), chevron: false, isLast: true) { LXToggle(isOn: $store.notifs.marketing) }
         }
     }
 }
@@ -107,13 +125,14 @@ struct InputPage: View {
     @State private var fromHistory = true
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSection(label: "语音输入") {
-                SettingsRow(label: "按住说话识别语言", value: "自动", onTap: {})
-                SettingsRow(label: "松开后自动发送", chevron: false, isLast: true) { LXToggle(isOn: $autoSend) }
+            SettingsSection(label: String(localized: "settings_section_voice_input")) {
+                SettingsRow(label: String(localized: "settings_push_to_talk_language"),
+                            value: String(localized: "settings_auto"), onTap: {})
+                SettingsRow(label: String(localized: "settings_auto_send"), chevron: false, isLast: true) { LXToggle(isOn: $autoSend) }
             }
-            SettingsSection(label: "候选词") {
-                SettingsRow(label: "启用智能候选", chevron: false) { LXToggle(isOn: $smartSugg) }
-                SettingsRow(label: "基于历史会话", chevron: false, isLast: true) { LXToggle(isOn: $fromHistory) }
+            SettingsSection(label: String(localized: "settings_section_suggestions")) {
+                SettingsRow(label: String(localized: "settings_smart_suggestions"), chevron: false) { LXToggle(isOn: $smartSugg) }
+                SettingsRow(label: String(localized: "settings_suggestions_history"), chevron: false, isLast: true) { LXToggle(isOn: $fromHistory) }
             }
         }
     }
@@ -125,13 +144,14 @@ struct PrivacyPage: View {
     @State private var crash = true
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSection(label: "数据") {
-                SettingsRow(icon: .brain, label: "导出我的所有数据", onTap: {})
-                SettingsRow(icon: .x, label: "删除账号与数据", danger: true, isLast: true, onTap: {})
+            SettingsSection(label: String(localized: "settings_section_data")) {
+                SettingsRow(icon: .brain, label: String(localized: "settings_export_data"), onTap: {})
+                SettingsRow(icon: .x, label: String(localized: "settings_delete_account"), danger: true, isLast: true, onTap: {})
             }
-            SettingsSection(label: "可见性", footer: "灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。") {
-                SettingsRow(label: "使用数据贡献训练", chevron: false) { LXToggle(isOn: $contribute) }
-                SettingsRow(label: "崩溃报告", chevron: false, isLast: true) { LXToggle(isOn: $crash) }
+            SettingsSection(label: String(localized: "settings_section_visibility"),
+                            footer: String(localized: "settings_privacy_footer")) {
+                SettingsRow(label: String(localized: "settings_contribute_training"), chevron: false) { LXToggle(isOn: $contribute) }
+                SettingsRow(label: String(localized: "settings_crash_report"), chevron: false, isLast: true) { LXToggle(isOn: $crash) }
             }
         }
     }
@@ -139,23 +159,24 @@ struct PrivacyPage: View {
 
 // MARK: - Language
 struct LanguagePage: View {
-    @Bindable var store: SettingsStore
+    @Environment(LocalizationManager.self) private var localization
     @State private var follow = true
     var body: some View {
+        @Bindable var l10n = localization
         VStack(spacing: 0) {
-            SettingsSection(label: "语言", footer: "切换语言后将重新加载界面。AI 对话语言独立配置。") {
-                RadioList(options: [
-                    .init(value: "zh-CN", label: "简体中文"),
-                    .init(value: "zh-TW", label: "繁體中文"),
-                    .init(value: "en-US", label: "English (US)"),
-                    .init(value: "ja-JP", label: "日本語"),
-                ], value: $store.language)
+            SettingsSection(label: String(localized: "settings_language_title"),
+                            footer: String(localized: "settings_language_footer")) {
+                RadioList(
+                    options: LocalizationManager.supported.map { .init(value: $0.code, label: $0.label) },
+                    value: $l10n.language
+                )
             }
-            SettingsSection(label: "区域") {
-                SettingsRow(label: "日期格式", value: "2026/5/14", isLast: true, onTap: {})
+            SettingsSection(label: String(localized: "settings_section_region")) {
+                SettingsRow(label: String(localized: "settings_date_format"), value: "2026/5/14", isLast: true, onTap: {})
             }
-            SettingsSection(label: "AI 回复语言") {
-                SettingsRow(label: "跟随界面", sub: "灵犀根据你的输入语言自动判断", chevron: false, isLast: true) { LXToggle(isOn: $follow) }
+            SettingsSection(label: String(localized: "settings_section_ai_reply_language")) {
+                SettingsRow(label: String(localized: "settings_follow_interface"),
+                            sub: String(localized: "settings_follow_interface_sub"), chevron: false, isLast: true) { LXToggle(isOn: $follow) }
             }
         }
     }
@@ -174,23 +195,23 @@ struct VoicePage: View {
     var body: some View {
         VStack(spacing: 0) {
             SettingsSection(
-                label: "配置状态",
+                label: String(localized: "voice_section_config_status"),
                 footer: saveMessage ?? capability.configurationReadiness.message
             ) {
                 SettingsRow(
-                    label: "语音识别",
-                    value: capability.speechConfigurationConfirmed ? "已保存" : "待保存",
+                    label: String(localized: "voice_speech_recognition"),
+                    value: capability.speechConfigurationConfirmed ? String(localized: "voice_status_saved") : String(localized: "voice_status_pending"),
                     valueColor: capability.speechConfigurationConfirmed ? t.ok : t.text3,
                     chevron: false
                 )
                 SettingsRow(
-                    label: "语音播报",
-                    value: capability.ttsConfigurationConfirmed ? "已保存" : "待保存",
+                    label: String(localized: "voice_speech_playback"),
+                    value: capability.ttsConfigurationConfirmed ? String(localized: "voice_status_saved") : String(localized: "voice_status_pending"),
                     valueColor: capability.ttsConfigurationConfirmed ? t.ok : t.text3,
                     chevron: false
                 )
-                SettingsRow(label: "保存语音配置", chevron: false, isLast: true) {
-                    Button("保存") {
+                SettingsRow(label: String(localized: "voice_save_config"), chevron: false, isLast: true) {
+                    Button("voice_save_button") {
                         saveVoiceConfiguration()
                     }
                     .buttonStyle(.borderedProminent)
@@ -199,9 +220,10 @@ struct VoicePage: View {
                 }
             }
 
-            SettingsSection(label: "语音识别", footer: capability.effectiveRecognitionLabel) {
-                SettingsRow(label: "识别语言", chevron: false) {
-                    Picker("识别语言", selection: languageBinding) {
+            SettingsSection(label: String(localized: "voice_speech_recognition"),
+                            footer: capability.effectiveRecognitionLabel) {
+                SettingsRow(label: String(localized: "voice_recognition_language"), chevron: false) {
+                    Picker("voice_recognition_language", selection: languageBinding) {
                         ForEach(capability.languageOptions) { option in
                             Text(option.title).tag(option.id)
                         }
@@ -210,17 +232,17 @@ struct VoicePage: View {
                     .frame(maxWidth: 190)
                 }
                 SettingsRow(
-                    label: "当前选择",
+                    label: String(localized: "voice_current_selection"),
                     value: capability.selectedLanguageLabel,
                     chevron: false
                 )
                 SettingsRow(
-                    label: "实际语言",
+                    label: String(localized: "voice_effective_language"),
                     value: capability.effectiveLanguageLabel,
                     chevron: false
                 )
-                SettingsRow(label: "识别方式", chevron: false) {
-                    Picker("识别方式", selection: modeBinding) {
+                SettingsRow(label: String(localized: "voice_recognition_mode"), chevron: false) {
+                    Picker("voice_recognition_mode", selection: modeBinding) {
                         ForEach(VoiceRecognitionMode.allCases) { mode in
                             Text(mode.title).tag(mode)
                         }
@@ -229,32 +251,33 @@ struct VoicePage: View {
                     .frame(maxWidth: 190)
                 }
                 SettingsRow(
-                    label: "生效方式",
+                    label: String(localized: "voice_active_mode"),
                     value: capability.effectiveRecognitionStatus.modeLabel,
                     chevron: false,
                     isLast: capability.effectiveRecognitionStatus.fallbackReason == nil
                 )
                 if let fallbackReason = capability.effectiveRecognitionStatus.fallbackReason {
                     SettingsRow(
-                        label: "在线回退原因",
+                        label: String(localized: "voice_online_fallback_reason"),
                         sub: fallbackReason,
-                        value: "已回退",
+                        value: String(localized: "voice_status_fallback"),
                         chevron: false,
                         isLast: true
                     )
                 }
             }
 
-            SettingsSection(label: "权限", footer: "语音识别与麦克风权限都会影响设备端和系统在线识别。") {
+            SettingsSection(label: String(localized: "voice_section_permissions"),
+                            footer: String(localized: "voice_permissions_footer")) {
                 SettingsRow(
-                    label: "语音识别",
+                    label: String(localized: "voice_speech_recognition"),
                     sub: capability.speechPermission.detail,
                     value: capability.speechPermission.label,
                     valueColor: capability.speechAuthorization == .authorized ? t.ok : t.text3,
                     chevron: false
                 )
                 SettingsRow(
-                    label: "麦克风",
+                    label: String(localized: "voice_microphone"),
                     sub: capability.microphonePermission.detail,
                     value: capability.microphonePermission.label,
                     chevron: false,
@@ -266,9 +289,10 @@ struct VoicePage: View {
                 }
             }
 
-            SettingsSection(label: "系统语音 TTS", footer: "语音由 iOS 管理，不下载或模拟 Android 模型包。") {
-                SettingsRow(label: "声音", chevron: false) {
-                    Picker("声音", selection: voiceBinding) {
+            SettingsSection(label: String(localized: "voice_section_system_tts"),
+                            footer: String(localized: "voice_tts_footer")) {
+                SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
+                    Picker("voice_voice_name", selection: voiceBinding) {
                         ForEach(capability.voices) { voice in
                             Text("\(voice.name) · \(voice.language)").tag(voice.id)
                         }
@@ -277,7 +301,7 @@ struct VoicePage: View {
                     .frame(maxWidth: 190)
                 }
                 SettingsRow(
-                    label: "语速",
+                    label: String(localized: "voice_speech_rate"),
                     value: capability.speed.formatted(.number.precision(.fractionLength(1))) + "x",
                     chevron: false
                 ) {
@@ -285,11 +309,11 @@ struct VoicePage: View {
                         .frame(width: 110)
                         .tint(t.accent)
                 }
-                SettingsRow(label: "自动播放回复", chevron: false) {
+                SettingsRow(label: String(localized: "voice_auto_play"), chevron: false) {
                     LXToggle(isOn: autoPlayBinding)
                 }
-                SettingsRow(label: "试听", chevron: false, isLast: true) {
-                    Button(capability.isPreviewing ? "播放中…" : "播放示例") {
+                SettingsRow(label: String(localized: "voice_preview"), chevron: false, isLast: true) {
+                    Button(capability.isPreviewing ? String(localized: "voice_playing") : String(localized: "voice_play_sample")) {
                         Task { await capability.preview() }
                     }
                     .disabled(capability.isPreviewing)
@@ -355,7 +379,7 @@ struct VoicePage: View {
         let speechDenied = capability.speechAuthorization == .denied
             || capability.speechAuthorization == .restricted
         let microphoneDenied = capability.microphonePermissionStatus == .denied
-        return speechDenied || microphoneDenied ? "系统设置" : "检查权限"
+        return speechDenied || microphoneDenied ? String(localized: "voice_system_settings") : String(localized: "voice_check_permissions")
     }
 
     private func handlePermissionAction() {

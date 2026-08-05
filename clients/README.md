@@ -11,6 +11,7 @@ and an **iOS** app — all driving the same Rust engine over the local
 | [`electron/`](electron/) | Desktop shell (Electron + Vite + React + TS). Spawns the Rust `bridge-server` and streams events to the renderer. |
 | [`android/`](android/) | Android app (Gradle + Kotlin). Links the engine via UniFFI JNI bindings. |
 | [`ios/`](ios/) | iOS app (XcodeGen + Swift). Links the engine via a UniFFI `.xcframework`. |
+| [`translations/`](translations/) | Canonical i18n source (zh-Hans/zh-Hant/en/ja/ko) + the generator that emits both clients' localized resources. |
 
 ---
 
@@ -94,3 +95,4 @@ cd clients/ios && bash scripts/build-xcframework.sh && xcodegen generate
 - **Electron shell:** [`electron/README.md`](electron/README.md)
 - **Android app:** [`android/README.md`](android/README.md)
 - **iOS app:** [`ios/README.md`](ios/README.md) and [`ios/README-engine.md`](ios/README-engine.md)
+- **Translations / adding a language:** [`translations/README.md`](translations/README.md)

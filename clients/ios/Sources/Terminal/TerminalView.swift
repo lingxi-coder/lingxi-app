@@ -54,7 +54,7 @@ struct TerminalView: View {
         .accessibilityIdentifier("terminal.root")
         #if os(iOS) || os(tvOS)
             content
-                .navigationTitle("终端")
+                .navigationTitle("settings_linux_section_terminal")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItemGroup(placement: .topBarTrailing) {
@@ -63,10 +63,10 @@ struct TerminalView: View {
                 }
         #else
             content
-                .navigationTitle("终端")
+                .navigationTitle("settings_linux_section_terminal")
                 .toolbar {
                     ToolbarItem {
-                        Button("关闭") {
+                        Button("common_close") {
                             onDismiss?()
                         }
                     }
@@ -111,7 +111,7 @@ struct TerminalView: View {
         switch recovery {
         case .workspaceNotMounted, .runtimeUnavailable:
             if let onOpenRuntimeSettings {
-                Button("打开运行时设置") { onOpenRuntimeSettings() }
+                Button("terminal_open_runtime_settings") { onOpenRuntimeSettings() }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
                     .accessibilityIdentifier("terminal.repair.runtimeSettings")
@@ -119,12 +119,12 @@ struct TerminalView: View {
         case .repairRuntime:
             HStack(spacing: 10) {
                 if let onRepairRuntime {
-                    Button("尝试修复") { onRepairRuntime() }
+                    Button("terminal_try_repair") { onRepairRuntime() }
                         .buttonStyle(.borderedProminent)
                         .tint(.orange)
                 }
                 if let onOpenRuntimeSettings {
-                    Button("查看运行时") { onOpenRuntimeSettings() }
+                    Button("terminal_view_runtime") { onOpenRuntimeSettings() }
                         .buttonStyle(.bordered)
                 }
             }
@@ -194,12 +194,12 @@ struct TerminalView: View {
                 }
                 .buttonStyle(.bordered)
 
-                TextField("输入命令", text: $model.inputText, axis: .vertical)
+                TextField("terminal_input_placeholder", text: $model.inputText, axis: .vertical)
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     .disabled(!model.availability.canInteract)
 
-                Button("发送") {
+                Button("composer_send") {
                     Task { await model.submitInput() }
                 }
                 .buttonStyle(.borderedProminent)
@@ -220,6 +220,6 @@ struct TerminalView: View {
 
     @ViewBuilder
     private var actionToolbar: some View {
-        Button("复制") { model.copyTranscript() }
+        Button("terminal_copy_button") { model.copyTranscript() }
     }
 }

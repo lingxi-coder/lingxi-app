@@ -45,6 +45,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
@@ -133,7 +135,7 @@ fun Composer(
             Box(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
                 if (text.isEmpty()) {
                     Text(
-                        text = "向灵犀提问…",
+                        text = stringResource(R.string.composer_placeholder),
                         color = t.text4,
                         fontSize = 15.5f.sp,
                     )
@@ -166,7 +168,13 @@ fun Composer(
             // Action row: attach · model chip · spacer · mic|send.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconHit(onClick = {}) {
-                    LXIcon(name = LXIconName.Plus, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "更多")
+                    LXIcon(
+                        name = LXIconName.Plus,
+                        size = 18.dp,
+                        color = t.text3,
+                        stroke = 1.8f,
+                        contentDescription = stringResource(R.string.composer_more),
+                    )
                 }
                 // Camera affordance: tap drives a real on-device capture through
                 // the same CameraController the engine bridges onto
@@ -176,7 +184,13 @@ fun Composer(
                     onClick = { if (enabled) onCameraClick() },
                     modifier = Modifier.testTag(UiTags.COMPOSER_CAMERA),
                 ) {
-                    LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "拍照")
+                    LXIcon(
+                        name = LXIconName.Paperclip,
+                        size = 18.dp,
+                        color = t.text3,
+                        stroke = 1.8f,
+                        contentDescription = stringResource(R.string.composer_camera),
+                    )
                 }
                 ModelChip(
                     model = model,
@@ -188,6 +202,12 @@ fun Composer(
                     onModelChange = onModelChange,
                 )
                 Spacer(Modifier.weight(1f))
+                val stopGeneratingDescription = stringResource(R.string.composer_stop_generating)
+                val sendDescription = stringResource(R.string.composer_send)
+                val recordDescription = stringResource(R.string.composer_record)
+                val startRecordingLabel = stringResource(R.string.composer_start_recording)
+                val flowModeOnDescription = stringResource(R.string.voice_close_flow_mode_a11y)
+                val flowModeOffDescription = stringResource(R.string.composer_flow_mode)
                 when {
                     // Streaming: the send action becomes a Stop button that
                     // cancels the in-flight turn (a filled square — the universal
@@ -206,7 +226,7 @@ fun Composer(
                                 .size(12.dp)
                                 .clip(RoundedCornerShape(3.dp))
                                 .background(Color.White)
-                                .clearAndSetSemantics { contentDescription = "停止生成" },
+                                .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
                         )
                     }
                     // Idle with text: the accent Send button.
@@ -221,7 +241,7 @@ fun Composer(
                             .testTag(UiTags.COMPOSER_SEND),
                         contentAlignment = Alignment.Center,
                     ) {
-                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White, contentDescription = "发送")
+                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White, contentDescription = sendDescription)
                     }
                     // Idle, empty: separate ordinary recording and Flow Mode.
                     else -> Row(
@@ -237,8 +257,8 @@ fun Composer(
                                     onRelease = { if (enabled) onMicHoldRelease() },
                                 )
                                 .semantics {
-                                    contentDescription = "普通录音"
-                                    onClick(label = "开始普通录音") {
+                                    contentDescription = recordDescription
+                                    onClick(label = startRecordingLabel) {
                                         if (enabled) onMicClick()
                                         enabled
                                     }
@@ -254,7 +274,11 @@ fun Composer(
                                 .background(if (flowModeActive) t.accent else t.text)
                                 .clickable(enabled = enabled, onClick = onFlowModeClick)
                                 .semantics {
-                                    contentDescription = if (flowModeActive) "关闭心流模式" else "开启心流模式"
+                                    contentDescription = if (flowModeActive) {
+                                        flowModeOnDescription
+                                    } else {
+                                        flowModeOffDescription
+                                    }
                                 },
                             contentAlignment = Alignment.Center,
                         ) {
@@ -296,7 +320,7 @@ private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit
     ) {
         Image(
             bitmap = attachment.thumb,
-            contentDescription = "已拍摄的照片",
+            contentDescription = stringResource(R.string.composer_captured_photo),
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .size(48.dp)
@@ -315,7 +339,13 @@ private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit
                 .clickable(onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f, contentDescription = "移除照片")
+            LXIcon(
+                name = LXIconName.X,
+                size = 14.dp,
+                color = t.text3,
+                stroke = 2f,
+                contentDescription = stringResource(R.string.composer_remove_photo),
+            )
         }
     }
 }
@@ -385,7 +415,7 @@ private fun ModelChip(
                 Dot(color = model.color, size = 6.dp)
             }
             Text(
-                text = if (modelSetupRequired) "设置模型" else model.shortName,
+                text = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName,
                 color = if (modelSetupRequired) t.accent else t.text2,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
@@ -412,7 +442,7 @@ private fun ModelChip(
             )
             groups.forEachIndexed { groupIndex, group ->
                 val providerStatus = EngineModelCatalog.providerStatus(group.id, providerStatuses)
-                val providerLabel = providerStatus?.displayLabel ?: "未配置"
+                val providerLabel = providerStatus?.displayLabel ?: stringResource(R.string.settings_provider_unconfigured)
                 val providerColor = providerStatus?.status?.dot(t) ?: t.text4
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -491,13 +521,13 @@ private fun ModelChip(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                Text("配置", color = t.accent, fontSize = 10.sp)
+                                Text(stringResource(R.string.composer_configure_button), color = t.accent, fontSize = 10.sp)
                                 LXIcon(
                                     name = LXIconName.ChevronR,
                                     size = 10.dp,
                                     color = t.accent,
                                     stroke = 2f,
-                                    contentDescription = "配置 ${group.name}",
+                                    contentDescription = stringResource(R.string.composer_configure_provider, group.name),
                                 )
                             }
                             active -> LXIcon(
@@ -505,7 +535,7 @@ private fun ModelChip(
                                 size = 13.dp,
                                 color = t.accent,
                                 stroke = 2f,
-                                contentDescription = "当前模型",
+                                contentDescription = stringResource(R.string.composer_current_model),
                             )
                         }
                     }
@@ -513,7 +543,7 @@ private fun ModelChip(
             }
             if (groups.isEmpty()) {
                 Text(
-                    text = "没有匹配的模型",
+                    text = stringResource(R.string.composer_no_matching_models),
                     color = t.text3,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
@@ -544,11 +574,11 @@ private fun ModelSearchField(
             size = 14.dp,
             color = t.text3,
             stroke = 1.8f,
-            contentDescription = "搜索模型",
+            contentDescription = stringResource(R.string.composer_search_models_description),
         )
         Box(Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text("搜索模型、Provider 或规格", color = t.text4, fontSize = 12.sp)
+                Text(stringResource(R.string.composer_search_models_placeholder), color = t.text4, fontSize = 12.sp)
             }
             BasicTextField(
                 value = query,

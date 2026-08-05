@@ -7,6 +7,7 @@ import android.provider.DocumentsContract
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.R
 import com.lingxi.code.model.SessionRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,21 +34,30 @@ class ProjectStore private constructor(
 
     fun reload() {
         viewModelScope.launch {
-            runOperation(ProjectOperationKind.RefreshSessions, message = "正在读取项目…") {
+            runOperation(
+                ProjectOperationKind.RefreshSessions,
+                message = appContext.getString(R.string.project_loading_message),
+            ) {
                 repository.load()
             }
         }
     }
 
     suspend fun createInternal(name: String): ProjectSnapshot =
-        runSuspendingOperation(ProjectOperationKind.Create, message = "正在创建项目…") {
+        runSuspendingOperation(
+            ProjectOperationKind.Create,
+            message = appContext.getString(R.string.project_creating_message),
+        ) {
             val created = repository.createInternal(name)
             _state.value = repository.load()
             created
         }
 
     suspend fun importSaf(name: String, treeUri: Uri): ProjectSnapshot =
-        runSuspendingOperation(ProjectOperationKind.Import, message = "正在导入外部目录…") {
+        runSuspendingOperation(
+            ProjectOperationKind.Import,
+            message = appContext.getString(R.string.project_importing_message),
+        ) {
             persistTreePermission(treeUri)
             val created = repository.createSafMirror(
                 name = name,
@@ -121,7 +131,11 @@ class ProjectStore private constructor(
 
     fun reimport(projectId: String) {
         viewModelScope.launch {
-            runOperation(ProjectOperationKind.Reimport, projectId, "正在从外部目录重新导入…") {
+            runOperation(
+                ProjectOperationKind.Reimport,
+                projectId,
+                appContext.getString(R.string.project_reimporting_message),
+            ) {
                 val result = synchronizer.reimport(projectId)
                 repository.load().copy(conflicts = result.conflicts)
             }
@@ -130,7 +144,11 @@ class ProjectStore private constructor(
 
     fun reauthorize(projectId: String, treeUri: Uri) {
         viewModelScope.launch {
-            runOperation(ProjectOperationKind.Reimport, projectId, "正在重新授权并导入…") {
+            runOperation(
+                ProjectOperationKind.Reimport,
+                projectId,
+                appContext.getString(R.string.project_reauthorizing_message),
+            ) {
                 persistTreePermission(treeUri)
                 val current = repository.project(projectId)
                 repository.updateProject(
@@ -148,7 +166,11 @@ class ProjectStore private constructor(
 
     fun export(projectId: String) {
         viewModelScope.launch {
-            runOperation(ProjectOperationKind.Export, projectId, "正在同步回外部目录…") {
+            runOperation(
+                ProjectOperationKind.Export,
+                projectId,
+                appContext.getString(R.string.project_exporting_message),
+            ) {
                 val result = synchronizer.export(projectId)
                 repository.load().copy(conflicts = result.conflicts)
             }
@@ -157,7 +179,11 @@ class ProjectStore private constructor(
 
     fun resolveConflicts(projectId: String, resolution: ConflictResolution) {
         viewModelScope.launch {
-            runOperation(ProjectOperationKind.ResolveConflicts, projectId, "正在解决同步冲突…") {
+            runOperation(
+                ProjectOperationKind.ResolveConflicts,
+                projectId,
+                appContext.getString(R.string.project_resolving_conflicts_message),
+            ) {
                 val result = synchronizer.resolve(projectId, resolution)
                 repository.load().copy(conflicts = result.conflicts)
             }
@@ -246,7 +272,10 @@ class ProjectStore private constructor(
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    val repository = ProjectRepository(File(appContext.filesDir, "projects"))
+                    val repository = ProjectRepository(
+                        File(appContext.filesDir, "projects"),
+                        strings = projectStrings(appContext),
+                    )
                     return ProjectStore(
                         repository = repository,
                         synchronizer = SafProjectSynchronizer(appContext, repository),

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.BuildConfig
+import com.lingxi.code.R
 import com.lingxi.code.bindings.AppAuthorizationDecisionDto
 import com.lingxi.code.bindings.AppBridgeOperationDto
 import com.lingxi.code.bindings.AppBridgeRequestDto
@@ -47,6 +48,7 @@ import org.json.JSONObject
 class LocalAppsViewModel(
     private val sourceFlow: StateFlow<ConversationSource>,
     distributionChannel: String = BuildConfig.DISTRIBUTION_CHANNEL,
+    private val strings: LocalAppsStrings = DefaultLocalAppsStrings,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(
         LocalAppsUiState(
@@ -223,13 +225,29 @@ class LocalAppsViewModel(
 
     private suspend fun requestSnapshots(bound: ConversationSource) {
         runCatching { bound.submitClientCommand(ClientCommand.ListApps) }
-            .onFailure { error("无法加载应用：${it.message ?: it::class.simpleName}") }
+            .onFailure {
+                error(
+                    strings.resolve(
+                        R.string.local_apps_error_load_apps,
+                        "无法加载应用：%1\$s",
+                        "${it.message ?: it::class.simpleName}",
+                    ),
+                )
+            }
         requestTemplates(bound)
     }
 
     private suspend fun requestTemplates(bound: ConversationSource) {
         runCatching { bound.submitClientCommand(ClientCommand.ListAppTemplates) }
-            .onFailure { error("无法加载应用模板：${it.message ?: it::class.simpleName}") }
+            .onFailure {
+                error(
+                    strings.resolve(
+                        R.string.local_apps_error_load_templates,
+                        "无法加载应用模板：%1\$s",
+                        "${it.message ?: it::class.simpleName}",
+                    ),
+                )
+            }
     }
 
     private fun createSelectedTemplate() {
@@ -528,7 +546,7 @@ class LocalAppsViewModel(
                 // the patch has already moved it to R+1: a guaranteed
                 // RevisionConflict. Keep the user on the designer with their
                 // answer intact instead.
-                error("设计尚未保存完成，请重试")
+                error(strings.resolve(R.string.local_apps_design_unsaved_retry, "设计尚未保存完成，请重试"))
                 return@launch
             }
             val designer = _uiState.value.designer ?: return@launch
@@ -583,7 +601,13 @@ class LocalAppsViewModel(
             "network_request" -> AppBridgeOperationDto.NETWORK_REQUEST
             "runtime_status" -> AppBridgeOperationDto.RUNTIME_STATUS
             else -> {
-                error("应用请求了不支持的 Bridge 操作：${message.operation}")
+                error(
+                    strings.resolve(
+                        R.string.local_apps_error_bridge_unsupported_op,
+                        "应用请求了不支持的 Bridge 操作：%1\$s",
+                        message.operation,
+                    ),
+                )
                 return
             }
         }
@@ -615,7 +639,7 @@ class LocalAppsViewModel(
         if (queuedAuthorizations.size >= MAX_QUEUED_AUTHORIZATIONS) {
             // Drop the newest, not the oldest: the oldest already has a page
             // awaiting it. This is pathological-only (8 unanswered prompts).
-            error("应用的授权请求过多，已忽略最新一条")
+            error(strings.resolve(R.string.local_apps_authorization_queue_overflow, "应用的授权请求过多，已忽略最新一条"))
             return
         }
         queuedAuthorizations.addLast(request)
@@ -632,7 +656,7 @@ class LocalAppsViewModel(
                         bindingDecision,
                         null,
                         if (request.uiAction == null && decision != LocalAppAuthorizationDecision.Deny) {
-                            "UI 请求缺少有效目标或参数"
+                            strings.resolve(R.string.local_apps_ui_action_missing_target, "UI 请求缺少有效目标或参数")
                         } else null,
                     ),
                 )
@@ -866,7 +890,7 @@ class LocalAppsViewModel(
                             requestId = request.requestId,
                             decision = executionDecision.toBindingDecision(),
                             resultJson = null,
-                            error = "UI 请求缺少有效目标或参数",
+                            error = strings.resolve(R.string.local_apps_ui_action_missing_target, "UI 请求缺少有效目标或参数"),
                         ),
                     )
                 } else {
@@ -874,8 +898,12 @@ class LocalAppsViewModel(
                         LocalAppAuthorizationRequest(
                             requestId = request.requestId,
                             appId = request.appId,
-                            title = "允许 Agent 控制应用界面？",
-                            reason = "Agent 请求执行 ${request.action.name.lowercase()} 操作。",
+                            title = strings.resolve(R.string.local_apps_permission_ui_control, "允许 Agent 控制应用界面？"),
+                            reason = strings.resolve(
+                                R.string.local_apps_ui_action_reason,
+                                "Agent 请求执行 %1\$s 操作。",
+                                request.action.name.lowercase(),
+                            ),
                             isUiControl = true,
                             uiAction = action,
                         ),
@@ -885,14 +913,17 @@ class LocalAppsViewModel(
             is AppEventDto.AppCapabilityRequested -> {
                 val request = event.request
                 pendingCapabilityKinds[request.requestId] = request.capability
+                val domainSuffix = request.domain?.let {
+                    strings.resolve(R.string.local_apps_capability_domain_suffix, "\n域名：%1\$s", it)
+                }
                 enqueueAuthorization(
                     LocalAppAuthorizationRequest(
                         requestId = request.requestId,
                         appId = request.appId,
-                        title = request.capability.authorizationTitle(),
+                        title = request.capability.authorizationTitle(strings),
                         reason = buildString {
                             append(request.reason)
-                            request.domain?.let { append("\n域名：").append(it) }
+                            domainSuffix?.let(::append)
                         },
                         isUiControl = false,
                     ),
@@ -961,7 +992,7 @@ class LocalAppsViewModel(
                     )
                 },
                 generation = details.generationJob?.let { job ->
-                    current.generation + (app.id to job.toUiGeneration())
+                    current.generation + (app.id to job.toUiGeneration(strings))
                 } ?: current.generation,
                 details = current.details + (
                     app.id to LocalAppDetails(
@@ -998,7 +1029,7 @@ class LocalAppsViewModel(
     private fun reduceGenerationJob(job: AppGenerationJobDto) {
         _uiState.update { state ->
             state.copy(
-                generation = state.generation + (job.appId to job.toUiGeneration()),
+                generation = state.generation + (job.appId to job.toUiGeneration(strings)),
                 destination = if (state.selectedAppId == job.appId) LocalAppsDestination.Preview(job.appId) else state.destination,
             )
         }
@@ -1092,7 +1123,14 @@ class LocalAppsViewModel(
         // Navigation is not a failure, so the rescue above is silent. Losing an
         // answer the user typed is, and it is the only part of a deletion they
         // could not have predicted.
-        if (strandedEdits) error("该应用已被删除，尚未保存的设计修改已丢失，已返回应用列表。")
+        if (strandedEdits) {
+            error(
+                strings.resolve(
+                    R.string.local_apps_app_deleted_edits_lost,
+                    "该应用已被删除，尚未保存的设计修改已丢失，已返回应用列表。",
+                ),
+            )
+        }
         if (queuePruned || flightPruned || gatePruned) pumpDraftEditQueue()
 
         val pending = pendingCreate ?: return
@@ -1134,8 +1172,8 @@ class LocalAppsViewModel(
                 LocalAppSuggestedChange(
                     fieldId = set.fieldId,
                     label = fields[set.fieldId]?.label ?: set.fieldId,
-                    before = designer.values[set.fieldId]?.readable().orEmpty(),
-                    after = after.readable(),
+                    before = designer.values[set.fieldId]?.readable(strings).orEmpty(),
+                    after = after.readable(strings),
                 )
             }
             state.copy(
@@ -1143,7 +1181,11 @@ class LocalAppsViewModel(
                     suggestion = LocalAppSuggestion(
                         id = event.suggestionId,
                         basedOnRevision = event.basedOnRevision,
-                        summary = event.patch.note ?: "建议调整 ${changes.size} 个字段",
+                        summary = event.patch.note ?: strings.resolve(
+                            R.string.local_apps_suggestion_default_summary,
+                            "建议调整 %1\$d 个字段",
+                            changes.size,
+                        ),
                         changes = changes,
                     ),
                 ),
@@ -1175,11 +1217,14 @@ class LocalAppsViewModel(
     companion object {
         private const val MAX_QUEUED_AUTHORIZATIONS = 8
 
-        fun factory(sourceFlow: StateFlow<ConversationSource>): ViewModelProvider.Factory =
+        fun factory(
+            sourceFlow: StateFlow<ConversationSource>,
+            strings: LocalAppsStrings = DefaultLocalAppsStrings,
+        ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    LocalAppsViewModel(sourceFlow) as T
+                    LocalAppsViewModel(sourceFlow, strings = strings) as T
             }
     }
 }
@@ -1302,7 +1347,9 @@ private fun AppDesignFieldTypeDto.toUiFieldKind(): LocalAppFieldKind = when (thi
     AppDesignFieldTypeDto.DOMAIN_LIST -> LocalAppFieldKind.DomainList
 }
 
-private fun AppGenerationJobDto.toUiGeneration(): LocalAppGeneration = LocalAppGeneration(
+private fun AppGenerationJobDto.toUiGeneration(
+    strings: LocalAppsStrings = DefaultLocalAppsStrings,
+): LocalAppGeneration = LocalAppGeneration(
     jobId = id,
     state = state.name.lowercase().replace('_', ' '),
     percent = percent?.toInt(),
@@ -1314,14 +1361,19 @@ private fun AppGenerationJobDto.toUiGeneration(): LocalAppGeneration = LocalAppG
     detail = LocalAppRuntimeAssets.generationDetail(
         detail = detail,
         failed = state == AppGenerationJobStateDto.FAILED,
+        strings = strings,
     ),
 )
 
-private fun AppCapabilityKindDto.authorizationTitle(): String = when (this) {
-    AppCapabilityKindDto.DATA_MUTATION -> "允许修改应用数据？"
-    AppCapabilityKindDto.UI_CONTROL -> "允许 Agent 控制应用界面？"
-    AppCapabilityKindDto.NETWORK_DOMAIN -> "允许应用联网？"
-    AppCapabilityKindDto.RESTORE_CHECKPOINT -> "允许恢复代码检查点？"
+private fun AppCapabilityKindDto.authorizationTitle(strings: LocalAppsStrings): String = when (this) {
+    AppCapabilityKindDto.DATA_MUTATION ->
+        strings.resolve(R.string.local_apps_permission_data_mutation_plain, "允许修改应用数据？")
+    AppCapabilityKindDto.UI_CONTROL ->
+        strings.resolve(R.string.local_apps_permission_ui_control, "允许 Agent 控制应用界面？")
+    AppCapabilityKindDto.NETWORK_DOMAIN ->
+        strings.resolve(R.string.local_apps_permission_network_short, "允许应用联网？")
+    AppCapabilityKindDto.RESTORE_CHECKPOINT ->
+        strings.resolve(R.string.local_apps_permission_restore, "允许恢复代码检查点？")
 }
 
 private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationDecisionDto = when (this) {

@@ -38,6 +38,7 @@ import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.EngineConversationSource
+import com.lingxi.code.conversation.conversationStrings
 import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.computeruse.ComputerUseApprovalDialog
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
@@ -87,6 +88,7 @@ import com.lingxi.code.localapps.LocalAppsAction
 import com.lingxi.code.localapps.LocalAppsDestination
 import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
+import com.lingxi.code.localapps.localAppsStrings
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberOrbVoiceListen
@@ -127,6 +129,10 @@ fun RootScreen(
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
+    // The `"灵犀"` default here is unreachable in production: MainActivity's one
+    // real call site always passes `prefs.assistantName` explicitly (itself
+    // sourced from the localized `AppearanceStore.prefs`, see ThemeState.kt).
+    // Only `@Preview`/tests that omit the argument would ever see it.
     assistantName: String = "灵犀",
     inputDialog: Boolean = true,
     // The chosen offline voice-pack language ("zh"/"en"/""). When its sherpa pack
@@ -176,6 +182,7 @@ fun RootScreen(
                     ),
                     savedState = createSavedStateHandle(),
                     sourceGeneration = reconnectToken,
+                    strings = conversationStrings(appContext),
                 )
             }
         },
@@ -236,7 +243,7 @@ fun RootScreen(
     val state by chatViewModel.state.collectAsState()
     val localAppsViewModel: LocalAppsViewModel = viewModel(
         key = "local-apps",
-        factory = LocalAppsViewModel.factory(chatViewModel.engineSource),
+        factory = LocalAppsViewModel.factory(chatViewModel.engineSource, strings = localAppsStrings(context)),
     )
     val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
     var showingApps by rememberSaveable { mutableStateOf(false) }
@@ -442,7 +449,7 @@ fun RootScreen(
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
     ): Boolean {
-        val destination = target ?: SessionRef("new", "新对话")
+        val destination = target ?: SessionRef("new", context.getString(R.string.chat_new_conversation))
         var persisted: ProjectStoreState? = null
         return chatViewModel.switchWorkspaceSource(
             projectId = project?.record?.id,
@@ -518,7 +525,7 @@ fun RootScreen(
                         )
             if (!provisionalSessionMayNotBeListed) {
                 runCatching { projectStore.syncEngineSessions(sourceProjectId, sessionState.rows) }
-                    .onFailure { chatViewModel.reportHostError("会话索引保存失败：${it.message}") }
+                    .onFailure { chatViewModel.reportHostError(context.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty())) }
             }
         }
     }
@@ -544,7 +551,7 @@ fun RootScreen(
                     title = state.session.title,
                 )
             }.onFailure {
-                chatViewModel.reportHostError("新会话索引保存失败：${it.message}")
+                chatViewModel.reportHostError(context.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
             }
         }
     }
@@ -607,18 +614,19 @@ fun RootScreen(
                     ?.ifBlank { cron.task.id }
                     ?: cron.task.id,
                 cron = cron.task.cron,
-                next = cron.task.nextFireMs?.toLong()?.let(::formatCronTime) ?: "无后续触发",
+                next = cron.task.nextFireMs?.toLong()?.let(::formatCronTime)
+                    ?: context.getString(R.string.cron_no_next_fire),
                 desc = buildString {
                     append(cron.scope.projectName)
                     append(" · ")
                     append(
                         when {
                             cron.schedulingMode == CronSchedulingMode.Unsupported ->
-                                cron.unsupportedReason ?: "Android 不支持此周期"
-                            status != null -> cronStatusLabel(status)
+                                cron.unsupportedReason ?: context.getString(R.string.cron_unsupported_period_fallback)
+                            status != null -> cronStatusLabel(status, context)
                             cron.schedulingMode == CronSchedulingMode.FifteenMinuteFallback ->
-                                "15 分钟巡检"
-                            else -> "精确闹钟"
+                                context.getString(R.string.cron_fifteen_minute_patrol_short)
+                            else -> context.getString(R.string.cron_exact_alarm_short)
                         },
                     )
                 },
@@ -646,7 +654,7 @@ fun RootScreen(
         } == true
     fun runConversationAction(action: () -> Unit) {
         if (activeProjectSyncing) {
-            chatViewModel.reportHostError("项目正在同步，请等待同步完成。")
+            chatViewModel.reportHostError(context.getString(R.string.project_sync_in_progress_notice))
         } else {
             action()
         }
@@ -655,7 +663,7 @@ fun RootScreen(
         val activeProjectIsExecuting =
             projectId == sourceProjectId && (state.streaming || state.sessionTransitioning)
         if (activeProjectIsExecuting) {
-            chatViewModel.reportHostError("请先停止当前任务，再同步项目。")
+            chatViewModel.reportHostError(context.getString(R.string.project_sync_stop_task_first_notice))
             return false
         }
         action()
@@ -1061,14 +1069,19 @@ private fun formatCronTime(epochMs: Long): String =
         .atZone(java.time.ZoneId.systemDefault())
         .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
 
-private fun cronStatusLabel(status: CronRunStatus): String = when (status) {
-    CronRunStatus.Queued -> "已排队"
-    CronRunStatus.Running -> "运行中"
-    CronRunStatus.Succeeded -> "最近成功"
-    CronRunStatus.Failed -> "最近失败"
-    CronRunStatus.TimedOut -> "最近超时"
-    CronRunStatus.Cancelled -> "已取消"
-    CronRunStatus.Skipped -> "已跳过"
+private fun cronStatusLabel(status: CronRunStatus, context: Context): String = when (status) {
+    // Bare "已排队"/"运行中"/"已取消"/"已跳过" reuse the exact same copy already
+    // extracted for the full Cron screen's per-run badge (cron/CronScreen.kt).
+    // The "最近…" ("recently…") variants are this compact drawer summary's own,
+    // distinct copy, so they get their own keys rather than reusing
+    // cron_status_succeeded/chat_status_failed/chat_status_timed_out.
+    CronRunStatus.Queued -> context.getString(R.string.cron_status_queued)
+    CronRunStatus.Running -> context.getString(R.string.chat_status_running)
+    CronRunStatus.Succeeded -> context.getString(R.string.cron_status_recent_succeeded)
+    CronRunStatus.Failed -> context.getString(R.string.cron_status_recent_failed)
+    CronRunStatus.TimedOut -> context.getString(R.string.cron_status_recent_timed_out)
+    CronRunStatus.Cancelled -> context.getString(R.string.chat_status_cancelled)
+    CronRunStatus.Skipped -> context.getString(R.string.cron_status_skipped)
 }
 
 internal fun appendVoiceTranscript(base: String, transcript: String): String = when {

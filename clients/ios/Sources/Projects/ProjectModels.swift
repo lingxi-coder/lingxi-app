@@ -16,13 +16,13 @@ enum ProjectSyncState: String, Codable, Equatable, Sendable {
 
     var label: String {
         switch self {
-        case .localOnly: return "本机"
-        case .synced: return "已同步"
-        case .changesPending: return "有待同步更改"
-        case .conflict: return "存在同步冲突"
-        case .authorizationLost: return "外部目录授权失效"
-        case .syncing: return "同步中"
-        case .error: return "同步失败"
+        case .localOnly: return String(localized: "project_sync_state_local")
+        case .synced: return String(localized: "project_sync_state_synced")
+        case .changesPending: return String(localized: "project_sync_state_pending")
+        case .conflict: return String(localized: "project_sync_state_conflict")
+        case .authorizationLost: return String(localized: "project_sync_state_auth_lost")
+        case .syncing: return String(localized: "project_sync_state_syncing")
+        case .error: return String(localized: "project_sync_state_error")
         }
     }
 }

@@ -32,9 +32,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.tint
 import com.lingxi.code.theme.LingXiTheme
 import kotlin.math.abs
@@ -97,14 +99,14 @@ private fun VoiceFlowContent(captureState: VoiceCaptureUiState) {
             HaloOrb()
             Spacer(Modifier.height(28.dp))
             androidx.compose.material3.Text(
-                text = captureState.statusText,
+                text = captureState.statusText.ifBlank { stringResource(R.string.voice_hold_to_talk_hint) },
                 color = Color.White,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(6.dp))
             androidx.compose.material3.Text(
-                text = captureState.partialTranscript.ifBlank { "松开发送 · 上滑取消" },
+                text = captureState.partialTranscript.ifBlank { stringResource(R.string.voice_flow_release_hint) },
                 color = Color.White.copy(alpha = 0.6f),
                 fontSize = 13.sp,
             )

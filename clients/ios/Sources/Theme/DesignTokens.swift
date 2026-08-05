@@ -149,12 +149,12 @@ struct AccentOption: Identifiable, Equatable {
 
 enum Accents {
     static let all: [AccentOption] = [
-        .init(id: "oklch(70% 0.18 268)", name: "靛紫", color: Color(srgb: 0.4340, 0.5865, 1.0000)),
-        .init(id: "oklch(70% 0.18 320)", name: "玫红", color: Color(srgb: 0.8090, 0.4552, 0.8891)),
-        .init(id: "oklch(72% 0.16 195)", name: "青蓝", color: Color(srgb: 0.0000, 0.7601, 0.7664)),
-        .init(id: "oklch(72% 0.16 155)", name: "青绿", color: Color(srgb: 0.2085, 0.7571, 0.4656)),
-        .init(id: "oklch(74% 0.16 75)",  name: "琥珀", color: Color(srgb: 0.8960, 0.6013, 0.0000)),
-        .init(id: "oklch(70% 0.20 30)",  name: "砖红", color: Color(srgb: 1.0000, 0.3802, 0.3010)),
+        .init(id: "oklch(70% 0.18 268)", name: String(localized: "settings_accent_indigo"), color: Color(srgb: 0.4340, 0.5865, 1.0000)),
+        .init(id: "oklch(70% 0.18 320)", name: String(localized: "settings_accent_rose"), color: Color(srgb: 0.8090, 0.4552, 0.8891)),
+        .init(id: "oklch(72% 0.16 195)", name: String(localized: "settings_accent_cyan"), color: Color(srgb: 0.0000, 0.7601, 0.7664)),
+        .init(id: "oklch(72% 0.16 155)", name: String(localized: "settings_accent_teal"), color: Color(srgb: 0.2085, 0.7571, 0.4656)),
+        .init(id: "oklch(74% 0.16 75)",  name: String(localized: "settings_accent_amber"), color: Color(srgb: 0.8960, 0.6013, 0.0000)),
+        .init(id: "oklch(70% 0.20 30)",  name: String(localized: "settings_accent_brick"), color: Color(srgb: 1.0000, 0.3802, 0.3010)),
     ]
     static func color(for id: String) -> Color {
         all.first(where: { $0.id == id })?.color ?? all[0].color

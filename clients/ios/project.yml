@@ -4,6 +4,15 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+  developmentLanguage: "zh-Hans"
+
+attributes:
+  knownRegions:
+    - zh-Hans
+    - zh-Hant
+    - en
+    - ja
+    - ko
 
 configs:
   StoreDebug: debug
@@ -17,6 +26,12 @@ settings:
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1" # iPhone only
+    CFBundleLocalizations:
+      - zh-Hans
+      - zh-Hant
+      - en
+      - ja
+      - ko
 
 targets:
   LingxiCode:
@@ -29,7 +44,6 @@ targets:
       # Gitignored; compiled directly into this app target. They import the
       # per-namespace C/FFI clang modules from LingxiCodeFFI.xcframework below.
       - path: Generated
-    resources:
       - path: Resources
     dependencies:
       # UniFFI FFI static-library xcframework: exports the engine_mobile /
@@ -196,6 +210,14 @@ schemes:
         - LingxiCodeTests
         - LingxiCodeUITests
       gatherCoverageData: false
+      # Unit tests assert business logic that now returns catalog-resolved
+      # copy (String(localized:)), not the pre-i18n Chinese literal — without
+      # this, results depend on whatever language the host Mac/simulator
+      # happens to be set to. Pinning to the catalog's source language keeps
+      # the suite deterministic and matches every test's existing zh-Hans
+      # expected values, which were never rewritten for i18n.
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
     run:
       config: StoreDebug
 
@@ -210,6 +232,8 @@ schemes:
       targets:
         - LingxiCodeTests
         - LingxiCodeUITests
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
     run:
       config: StoreDebug
     archive:
@@ -226,6 +250,8 @@ schemes:
       targets:
         - LingxiCodeTests
         - LingxiCodeUITests
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
     run:
       config: FullDebug
     archive:

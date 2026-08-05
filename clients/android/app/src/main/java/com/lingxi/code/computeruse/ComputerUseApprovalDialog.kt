@@ -4,6 +4,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 
 @Composable
 fun ComputerUseApprovalDialog(
@@ -13,22 +15,24 @@ fun ComputerUseApprovalDialog(
     val pending = approval ?: return
     AlertDialog(
         onDismissRequest = { onResolve(pending.id, false) },
-        title = { Text("确认高风险操作") },
+        title = { Text(stringResource(R.string.computeruse_approval_title)) },
         text = {
             Text(
-                "目标应用：${pending.targetPackage}\n" +
-                    "动作：${pending.summary}\n\n" +
-                    "此确认只对当前这一次操作有效，60 秒后自动拒绝。",
+                stringResource(
+                    R.string.computeruse_approval_body_fmt,
+                    pending.targetPackage,
+                    pending.summary,
+                ),
             )
         },
         confirmButton = {
             TextButton(onClick = { onResolve(pending.id, true) }) {
-                Text("仅允许这一次")
+                Text(stringResource(R.string.computeruse_approval_allow_once))
             }
         },
         dismissButton = {
             TextButton(onClick = { onResolve(pending.id, false) }) {
-                Text("拒绝")
+                Text(stringResource(R.string.permission_deny))
             }
         },
     )

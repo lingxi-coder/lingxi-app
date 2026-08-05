@@ -3,6 +3,7 @@ package com.lingxi.code.conversation
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.R
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.bindings.MobileLinuxEventFfi
 import com.lingxi.code.bindings.MobileLinuxEventKindFfi
@@ -157,6 +158,14 @@ class ChatViewModel(
     private var source: ConversationSource = UnavailableConversationSource(),
     private val savedState: SavedStateHandle? = null,
     private var sourceGeneration: Int = 0,
+    /**
+     * Resolves user-facing copy from this non-`@Composable` ViewModel. Defaults
+     * to [DefaultConversationStrings] (the exact zh-Hans literals) so the many
+     * JVM unit tests that construct [ChatViewModel] directly — with no Android
+     * `Context` — keep passing unmodified; the production call site
+     * ([com.lingxi.code.RootScreen]) passes one backed by a real `Context`.
+     */
+    private val strings: ConversationStrings = DefaultConversationStrings,
 ) : ViewModel() {
     /** Provider reconnect token is independent from workspace-source swaps. */
     private var reconnectGeneration: Int = sourceGeneration
@@ -169,7 +178,7 @@ class ChatViewModel(
             val sessionTitle = savedState?.get<String>(KEY_SESSION_TITLE)
             val session =
                 if (sessionId != null && sessionTitle != null) SessionRef(sessionId, sessionTitle)
-                else SessionRef(id = "new", title = "新对话")
+                else SessionRef(id = "new", title = strings.resolve(R.string.chat_new_conversation, "新对话"))
             val requiresResume = session.id != "new"
             val seededMessages = if (requiresResume) emptyList() else source.initialMessages()
             val isNew = savedState?.get<Boolean>(KEY_IS_NEW) ?: seededMessages.isEmpty()
@@ -180,7 +189,11 @@ class ChatViewModel(
                 sessionTransitioning = requiresResume,
                 sessionReady = !requiresResume,
                 model = EngineModelCatalog.pending,
-                statusLine = if (requiresResume) "正在恢复会话…" else null,
+                statusLine = if (requiresResume) {
+                    strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…")
+                } else {
+                    null
+                },
             )
         },
     )
@@ -275,7 +288,7 @@ class ChatViewModel(
                 target = _state.value.session,
                 newSession = false,
                 resumeEmpty = _state.value.isNew,
-                status = "正在恢复会话…",
+                status = strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…"),
             )
         }
     }
@@ -342,7 +355,11 @@ class ChatViewModel(
                 it.copy(
                     statusLine = null,
                     error = ChatError(
-                        message = "引擎重连失败：${replacement.reason}",
+                        message = strings.resolve(
+                            R.string.chat_error_engine_reconnect_failed,
+                            "引擎重连失败：%1\$s",
+                            replacement.reason,
+                        ),
                         kind = classifyError(replacement.reason),
                     ),
                 )
@@ -373,7 +390,11 @@ class ChatViewModel(
             target = visibleSession,
             newSession = visibleSession.id == "new",
             resumeEmpty = visibleSession.id != "new" && _state.value.isNew,
-            status = if (visibleSession.id == "new") "正在重新连接…" else "正在恢复会话…",
+            status = if (visibleSession.id == "new") {
+                strings.resolve(R.string.chat_status_reconnecting, "正在重新连接…")
+            } else {
+                strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…")
+            },
         )
     }
 
@@ -384,7 +405,10 @@ class ChatViewModel(
      */
     suspend fun switchWorkspaceSource(
         projectId: String?,
-        target: SessionRef = SessionRef(id = "new", title = "新对话"),
+        target: SessionRef = SessionRef(
+            id = "new",
+            title = strings.resolve(R.string.chat_new_conversation, "新对话"),
+        ),
         newSession: Boolean = target.id == "new",
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
@@ -398,7 +422,10 @@ class ChatViewModel(
             _state.update {
                 it.copy(
                     error = ChatError(
-                        message = "请先停止当前任务，再切换项目。",
+                        message = strings.resolve(
+                            R.string.chat_error_stop_before_switch_project,
+                            "请先停止当前任务，再切换项目。",
+                        ),
                         kind = ChatErrorKind.GENERIC,
                     ),
                 )
@@ -409,7 +436,11 @@ class ChatViewModel(
             _state.update {
                 it.copy(
                     error = ChatError(
-                        message = "项目引擎创建失败：${error.message ?: error::class.simpleName}",
+                        message = strings.resolve(
+                            R.string.chat_error_project_engine_create_failed,
+                            "项目引擎创建失败：%1\$s",
+                            "${error.message ?: error::class.simpleName}",
+                        ),
                         kind = classifyError(error.message.orEmpty()),
                     ),
                 )
@@ -421,7 +452,11 @@ class ChatViewModel(
             _state.update {
                 it.copy(
                     error = ChatError(
-                        message = "项目引擎创建失败：${replacement.reason}",
+                        message = strings.resolve(
+                            R.string.chat_error_project_engine_create_failed,
+                            "项目引擎创建失败：%1\$s",
+                            replacement.reason,
+                        ),
                         kind = classifyError(replacement.reason),
                     ),
                 )
@@ -436,7 +471,11 @@ class ChatViewModel(
             _state.update {
                 it.copy(
                     error = ChatError(
-                        message = "无法保存活动项目：${error?.message ?: error?.let { it::class.simpleName }}",
+                        message = strings.resolve(
+                            R.string.chat_error_persist_active_project_failed,
+                            "无法保存活动项目：%1\$s",
+                            "${error?.message ?: error?.let { it::class.simpleName }}",
+                        ),
                         kind = classifyError(error?.message.orEmpty()),
                     ),
                 )
@@ -464,7 +503,11 @@ class ChatViewModel(
             target = target,
             newSession = newSession,
             resumeEmpty = resumeEmpty,
-            status = if (newSession) "正在新建项目会话…" else "正在恢复项目会话…",
+            status = if (newSession) {
+                strings.resolve(R.string.chat_status_new_project_session, "正在新建项目会话…")
+            } else {
+                strings.resolve(R.string.chat_status_resuming_project_session, "正在恢复项目会话…")
+            },
         )
         true
     }
@@ -579,16 +622,16 @@ class ChatViewModel(
             canonicalRef,
             newSession = false,
             resumeEmpty = empty,
-            status = "正在恢复会话…",
+            status = strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…"),
         )
     }
 
     /** Start a fresh chat through the real engine. */
     fun newChat() {
         beginSessionTransition(
-            target = SessionRef(id = "new", title = "新对话"),
+            target = SessionRef(id = "new", title = strings.resolve(R.string.chat_new_conversation, "新对话")),
             newSession = true,
-            status = "正在新建会话…",
+            status = strings.resolve(R.string.chat_status_new_session, "正在新建会话…"),
         )
     }
 
@@ -679,7 +722,11 @@ class ChatViewModel(
                             sessionReady = false,
                             statusLine = null,
                             error = ChatError(
-                                message = "会话切换失败：${t.message ?: t::class.simpleName}",
+                                message = strings.resolve(
+                                    R.string.chat_error_session_switch_failed,
+                                    "会话切换失败：%1\$s",
+                                    "${t.message ?: t::class.simpleName}",
+                                ),
                                 kind = classifyError(t.message.orEmpty()),
                             ),
                         )
@@ -793,7 +840,7 @@ class ChatViewModel(
                 streaming = false,
                 messages = settledMessages,
                 streamingMessage = null,
-                statusLine = "正在停止…",
+                statusLine = strings.resolve(R.string.chat_stopping, "正在停止…"),
                 agentRun = it.agentRun?.finish(AgentRunOutcome.Cancelled),
             )
         }
@@ -815,7 +862,11 @@ class ChatViewModel(
                         it.copy(
                             statusLine = null,
                             error = ChatError(
-                                "取消生成失败：${t.message ?: t::class.simpleName}",
+                                strings.resolve(
+                                    R.string.chat_error_cancel_generation_failed,
+                                    "取消生成失败：%1\$s",
+                                    "${t.message ?: t::class.simpleName}",
+                                ),
                                 classifyError(t.message.orEmpty()),
                             ),
                         )
@@ -946,11 +997,11 @@ class ChatViewModel(
                     }
                     val traceEvent = ReplyEvent.ToolActivity(
                         label = when (replacement.status) {
-                            ShellToolStatus.Running -> "Shell 运行中…"
-                            ShellToolStatus.Completed -> "Shell 完成"
-                            ShellToolStatus.Failed -> "Shell 失败"
-                            ShellToolStatus.TimedOut -> "Shell 超时"
-                            ShellToolStatus.Cancelled -> "Shell 已取消"
+                            ShellToolStatus.Running -> strings.resolve(R.string.chat_shell_running, "Shell 运行中…")
+                            ShellToolStatus.Completed -> strings.resolve(R.string.chat_shell_completed, "Shell 完成")
+                            ShellToolStatus.Failed -> strings.resolve(R.string.chat_shell_failed, "Shell 失败")
+                            ShellToolStatus.TimedOut -> strings.resolve(R.string.chat_shell_timed_out, "Shell 超时")
+                            ShellToolStatus.Cancelled -> strings.resolve(R.string.chat_shell_cancelled, "Shell 已取消")
                         },
                         id = replacement.taskId,
                         tool = "Shell",
@@ -986,7 +1037,13 @@ class ChatViewModel(
 
             is ReplyEvent.Retry -> _state.update {
                 val delaySeconds = event.delayMs / 1_000.0
-                val label = "请求重试 ${event.attempt}/${event.maxRetries}（${delaySeconds}s）"
+                val label = strings.resolve(
+                    R.string.chat_retry_status,
+                    "请求重试 %1\$d/%2\$d（%3\$s）",
+                    event.attempt,
+                    event.maxRetries,
+                    "${delaySeconds}s",
+                )
                 it.copy(
                     statusLine = label,
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
@@ -1012,7 +1069,13 @@ class ChatViewModel(
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
                         .addNotice(
                             AgentRunNotice(
-                                "上下文已压缩：${event.messagesBefore} → ${event.messagesAfter} 条，释放 $saved",
+                                strings.resolve(
+                                    R.string.chat_compaction_status,
+                                    "上下文已压缩：%1\$d → %2\$d 条，释放 %3\$s",
+                                    event.messagesBefore,
+                                    event.messagesAfter,
+                                    saved,
+                                ),
                             ),
                         ),
                 )

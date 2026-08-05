@@ -225,16 +225,16 @@ enum LocalAppsProtocolAdapter {
         case .starting: .starting
         case .running: .running(loopbackURL)
         case .stopping: .stopping
-        case .failed: .failed(details?.lastError ?? lastError ?? "本地应用进程已退出")
+        case .failed: .failed(details?.lastError ?? lastError ?? String(localized: "local_apps_process_exited"))
         }
     }
 
     static func suspensionReason(_ reason: AppRuntimeSuspensionReasonDto) -> String {
         switch reason {
-        case .backgrounded: "进入后台"
-        case .memoryWarning: "内存压力"
-        case .runtimeQuota: "运行配额"
-        case .processExited: "进程已退出"
+        case .backgrounded: String(localized: "local_apps_suspension_background")
+        case .memoryWarning: String(localized: "local_apps_suspension_memory")
+        case .runtimeQuota: String(localized: "local_apps_suspension_quota")
+        case .processExited: String(localized: "local_apps_suspension_exited")
         }
     }
 
@@ -264,15 +264,15 @@ enum LocalAppsProtocolAdapter {
 
     static func uiActionLabel(_ action: AppUiActionKindDto) -> String {
         switch action {
-        case .inspect: "检查界面"
-        case .click: "点击"
-        case .fill: "填写"
-        case .select: "选择"
-        case .toggle: "切换"
-        case .scroll: "滚动"
-        case .navigate: "导航"
-        case .back: "返回"
-        case .reload: "重新加载"
+        case .inspect: String(localized: "local_apps_ui_action_inspect")
+        case .click: String(localized: "local_apps_ui_action_click")
+        case .fill: String(localized: "local_apps_ui_action_fill")
+        case .select: String(localized: "local_apps_ui_action_select")
+        case .toggle: String(localized: "local_apps_ui_action_toggle")
+        case .scroll: String(localized: "local_apps_ui_action_scroll")
+        case .navigate: String(localized: "local_apps_ui_action_navigate")
+        case .back: String(localized: "local_apps_ui_action_back")
+        case .reload: String(localized: "local_apps_ui_action_reload")
         }
     }
 

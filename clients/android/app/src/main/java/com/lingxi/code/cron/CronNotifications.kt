@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.lingxi.code.MainActivity
+import com.lingxi.code.R
 
 /**
  * The result notification channel is separate from the
@@ -81,7 +82,7 @@ object CronNotifications {
             manager.createNotificationChannel(
                 NotificationChannel(
                     RESULT_CHANNEL,
-                    "定时任务结果",
+                    context.getString(R.string.cron_notification_channel_name),
                     NotificationManager.IMPORTANCE_DEFAULT,
                 ),
             )

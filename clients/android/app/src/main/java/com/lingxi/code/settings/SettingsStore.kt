@@ -3,6 +3,7 @@ package com.lingxi.code.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.R
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
 import com.lingxi.code.model.GenericProvider
@@ -38,8 +39,8 @@ data class SettingsUiState(
     val fetchProviders: List<GenericProvider> = emptyList(),
     val voice: VoiceConfig = VoiceConfig(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
-    val skills: List<Skill> = SettingsMock.skills,
-    val mcpServers: List<MCPServer> = SettingsMock.mcpServers,
+    val skills: List<Skill> = SettingsMock.skills(),
+    val mcpServers: List<MCPServer> = SettingsMock.mcpServers(),
     val dream: DreamConfig = DreamConfig(),
     val language: String = "zh-CN",
     val notifs: NotifConfig = NotifConfig(),
@@ -72,7 +73,23 @@ data class SettingsUiState(
 class SettingsStore(
     private val providerRepo: ProviderSettingsRepository? = null,
     private val voiceRepo: VoiceSettingsRepository? = null,
+    /**
+     * Resolves a string resource id to its localized text. The production
+     * factory wires the application context's `getString`; unit tests keep the
+     * empty default (they never assert on these user-facing messages).
+     */
+    private val resolveString: (Int) -> String = { _ -> "" },
 ) : ViewModel() {
+    /**
+     * Adapts [resolveString] (empty-string in tests, real `Context.getString`
+     * in production — see the factory below) to [SettingsMock.skills]/
+     * [SettingsMock.mcpServers]'s (id, fallback) shape: falls back to the
+     * literal zh-Hans copy whenever [resolveString] has nothing (i.e. every
+     * JVM test that constructs [SettingsStore] with no [Context] at all).
+     */
+    private fun resolveWithFallback(id: Int, fallback: String): String =
+        resolveString(id).ifEmpty { fallback }
+
     private val _state = MutableStateFlow(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
             SettingsUiState(
@@ -80,8 +97,26 @@ class SettingsStore(
                 searchProviders = search,
                 fetchProviders = fetch,
                 voice = voiceRepo?.load() ?: VoiceConfig(),
+                skills = SettingsMock.skills(::resolveWithFallback),
+                mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
+                dream = DreamConfig(
+                    lastRun = resolveWithFallback(
+                        R.string.settings_dream_last_run_seed,
+                        "今早 03:24 · 整理 7 条记忆 / 草拟今日计划",
+                    ),
+                ),
             )
-        } ?: SettingsUiState(voice = voiceRepo?.load() ?: VoiceConfig())
+        } ?: SettingsUiState(
+            voice = voiceRepo?.load() ?: VoiceConfig(),
+            skills = SettingsMock.skills(::resolveWithFallback),
+            mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
+            dream = DreamConfig(
+                lastRun = resolveWithFallback(
+                    R.string.settings_dream_last_run_seed,
+                    "今早 03:24 · 整理 7 条记忆 / 草拟今日计划",
+                ),
+            ),
+        )
     )
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 
@@ -158,7 +193,7 @@ class SettingsStore(
         }
         _state.value = current.copy(
             linuxRuntime = current.linuxRuntime.copy(
-                summary = "Mobile Linux 操作失败",
+                summaryRes = R.string.settings_linux_op_failed,
                 detail = message,
                 lastAction = action,
                 lastActionMessage = message,
@@ -301,7 +336,7 @@ class SettingsStore(
                     modelAvailable = false,
                     httpStatus = null,
                     latencyMs = 0,
-                    message = "Provider 连接服务不可用",
+                    message = resolveString(R.string.settings_provider_conn_service_unavailable),
                     usedStoredCredential = credentialOverride.isNullOrBlank(),
                 ),
             )
@@ -314,7 +349,7 @@ class SettingsStore(
                     modelAvailable = false,
                     httpStatus = null,
                     latencyMs = 0,
-                    message = "Provider 不存在",
+                    message = resolveString(R.string.settings_provider_not_found),
                     usedStoredCredential = credentialOverride.isNullOrBlank(),
                 ),
             )
@@ -327,7 +362,7 @@ class SettingsStore(
                     modelAvailable = false,
                     httpStatus = null,
                     latencyMs = 0,
-                    message = "当前仅支持测试 LLM Provider",
+                    message = resolveString(R.string.settings_provider_test_llm_only),
                     usedStoredCredential = credentialOverride.isNullOrBlank(),
                 ),
             )
@@ -368,7 +403,7 @@ class SettingsStore(
                 onDone(
                     result.copy(
                         connected = false,
-                        message = "配置已在测试期间变化，请重新测试",
+                        message = resolveString(R.string.settings_provider_config_changed_retest),
                     ),
                 )
             }
@@ -480,6 +515,7 @@ class SettingsStore(
                     return SettingsStore(
                         providerRepo = ProviderSettingsRepository(appContext),
                         voiceRepo = VoiceSettingsRepository(appContext),
+                        resolveString = appContext::getString,
                     ) as T
                 }
             }

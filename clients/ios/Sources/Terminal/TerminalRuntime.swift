@@ -202,25 +202,25 @@ extension TerminalRuntimeDescriptor {
         // Only a cwd the CALLER asked for can be unsatisfiable. "No project" is
         // no longer a failure — it just means the shell opens in its own home.
         guard !workspaceGuestPath.isEmpty else {
-            return (nil, "请求的 cwd 需要一个已打开的项目：\(requestedCwd.displayValue)")
+            return (nil, String(localized: "terminal_cwd_requires_open_project \(requestedCwd.displayValue)"))
         }
 
         switch requestedCwd {
         case let .guestPath(path):
             let normalized = normalizeGuestPath(path)
             guard isWithinWorkspace(normalized, workspaceGuestPath: workspaceGuestPath) else {
-                return (nil, "请求的 cwd 超出 workspace：\(path)")
+                return (nil, String(localized: "terminal_cwd_outside_workspace \(path)"))
             }
             return (normalized, nil)
         case let .workspaceRelative(path):
             guard let normalizedRelative = normalizeRelativePath(path) else {
-                return (nil, "请求的相对 cwd 非法：\(path)")
+                return (nil, String(localized: "terminal_relative_cwd_invalid \(path)"))
             }
             let combined = normalizeGuestPath(
                 workspaceGuestPath + (normalizedRelative.isEmpty ? "" : "/\(normalizedRelative)")
             )
             guard isWithinWorkspace(combined, workspaceGuestPath: workspaceGuestPath) else {
-                return (nil, "请求的 cwd 超出 workspace：\(path)")
+                return (nil, String(localized: "terminal_cwd_outside_workspace \(path)"))
             }
             return (combined, nil)
         }
@@ -344,14 +344,14 @@ enum TerminalRuntimeError: LocalizedError, Equatable, Sendable {
     var errorDescription: String? {
         switch self {
         case .unsupported:
-            return "当前构建未提供 PTY 终端"
+            return String(localized: "terminal_pty_not_available_build")
         case let .unavailable(message),
             let .integrityFailure(message),
             let .invalidRequest(message),
             let .io(message):
             return message
         case .timeout:
-            return "终端操作超时"
+            return String(localized: "terminal_operation_timeout")
         }
     }
 

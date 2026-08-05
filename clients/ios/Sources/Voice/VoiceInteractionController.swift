@@ -531,14 +531,14 @@ final class VoiceInteractionController {
 
     var statusTitle: String {
         switch phase {
-        case .configurationRequired: return "等待配置"
-        case .listening: return "正在聆听"
-        case .recognizing: return "正在识别"
-        case .thinking: return "Agent 正在思考"
-        case .speaking: return "正在播报"
-        case .interrupting: return "检测到你在说话"
-        case .paused: return "已暂停"
-        case .failed: return "语音暂不可用"
+        case .configurationRequired: return String(localized: "voice_status_config_required")
+        case .listening: return String(localized: "voice_status_listening")
+        case .recognizing: return String(localized: "voice_status_recognizing")
+        case .thinking: return String(localized: "voice_status_thinking")
+        case .speaking: return String(localized: "voice_status_speaking")
+        case .interrupting: return String(localized: "voice_status_interrupting")
+        case .paused: return String(localized: "settings_status_paused")
+        case .failed: return String(localized: "voice_status_failed")
         }
     }
 
@@ -546,16 +546,16 @@ final class VoiceInteractionController {
         if let detailOverride, !detailOverride.isEmpty { return detailOverride }
         switch phase {
         case .configurationRequired:
-            guard let mode else { return "请先完成语音识别与系统声音设置" }
+            guard let mode else { return String(localized: "voice_detail_config_required_default") }
             return configurationMessage(for: mode)
         case .listening:
-            return mode == .flow ? "检测到说话停顿后会自动发送" : "说完后松开或再次点击"
-        case .recognizing: return "正在整理刚才的语音…"
-        case .thinking: return "自然短句生成后会立即播报，也可以直接说话打断"
-        case .speaking: return "可以直接说话打断，或轻点光球重新监听"
-        case .interrupting: return "正在识别打断内容…"
-        case .paused: return "轻点重试恢复语音"
-        case .failed: return "请检查设置后重试"
+            return mode == .flow ? String(localized: "voice_detail_listening_flow") : String(localized: "voice_detail_listening_dictation")
+        case .recognizing: return String(localized: "voice_detail_recognizing")
+        case .thinking: return String(localized: "voice_detail_thinking")
+        case .speaking: return String(localized: "voice_detail_speaking")
+        case .interrupting: return String(localized: "voice_detail_interrupting")
+        case .paused: return String(localized: "voice_detail_paused")
+        case .failed: return String(localized: "voice_detail_failed")
         }
     }
 
@@ -573,11 +573,11 @@ final class VoiceInteractionController {
     var orbAccessibilityHint: String {
         switch phase {
         case .listening:
-            return mode == .flow ? "停顿后自动发送，也可轻点立即结束收音" : "轻点结束收音"
-        case .thinking: return "可以直接说话打断；轻点会取消当前回复并重新监听"
-        case .speaking: return "可以直接说话打断；轻点会停止当前回复并重新监听"
-        case .interrupting: return "正在听取新的问题"
-        case .paused, .failed: return "轻点重试"
+            return mode == .flow ? String(localized: "voice_hint_listening_flow") : String(localized: "voice_hint_listening_dictation")
+        case .thinking: return String(localized: "voice_hint_thinking")
+        case .speaking: return String(localized: "voice_hint_speaking")
+        case .interrupting: return String(localized: "voice_hint_interrupting")
+        case .paused, .failed: return String(localized: "voice_hint_paused_failed")
         default: return ""
         }
     }
@@ -606,7 +606,7 @@ final class VoiceInteractionController {
               !source.model.isCancelling,
               !source.model.sessionTransitionPending
         else {
-            fail("请等待当前回复或会话切换完成后再开启心流模式")
+            fail(String(localized: "voice_flow_busy_wait_to_open"))
             return
         }
         scheduleListening()
@@ -662,7 +662,7 @@ final class VoiceInteractionController {
         if mode == .flow,
            let source,
            source.model.streaming || source.model.isCancelling || source.model.sessionTransitionPending {
-            fail("请等待当前回复或会话切换完成后重试")
+            fail(String(localized: "voice_flow_busy_wait_to_retry"))
             return
         }
         invalidateTasks(keepingMode: true, cancelOwnedTurn: false)
@@ -736,11 +736,11 @@ final class VoiceInteractionController {
         case .completed:
             break
         case .cancelled:
-            fail("本轮已取消，轻点重试继续心流")
+            fail(String(localized: "voice_turn_cancelled_retry"))
         case .maxTurns:
-            fail("Agent 已达到最大轮数，请轻点重试")
+            fail(String(localized: "voice_turn_max_turns"))
         case .failed:
-            fail("Agent 回复失败，请检查网络或 Provider 后重试")
+            fail(String(localized: "voice_turn_failed"))
         }
     }
 
@@ -763,7 +763,7 @@ final class VoiceInteractionController {
         pendingInterruptionTranscript = nil
         isCancellingFlowTurn = false
         caption = ""
-        detailOverride = "已在后台停止收音，轻点重试恢复"
+        detailOverride = String(localized: "voice_stopped_in_background")
         transition(to: .paused)
         if let ownedSource {
             startDetachedCancellation(of: ownedSource)
@@ -845,17 +845,17 @@ final class VoiceInteractionController {
             }
             .prefix(4)
             .map(Self.compactConfigurationIssue)
-        return messages.isEmpty ? "请先完成语音设置" : messages.joined(separator: "；")
+        return messages.isEmpty ? String(localized: "voice_setup_required_default") : messages.joined(separator: "；")
     }
 
     private static func compactConfigurationIssue(_ issue: VoiceConfigurationIssue) -> String {
         switch (issue.component, issue.kind) {
-        case (.speech, .unconfigured) where issue.message == "请先保存语音识别语言和识别方式":
-            return "未保存语音识别配置"
-        case (.tts, .unconfigured) where issue.message == "请先选择并保存系统播报声音":
-            return "未选择系统播报声音"
-        case (.speech, .permissionUndetermined): return "需要语音识别权限"
-        case (.microphone, .permissionUndetermined): return "需要麦克风权限"
+        case (.speech, .unconfigured) where issue.message == String(localized: "voice_issue_save_language_mode"):
+            return String(localized: "voice_issue_speech_config_unsaved")
+        case (.tts, .unconfigured) where issue.message == String(localized: "voice_issue_save_voice"):
+            return String(localized: "voice_issue_voice_not_selected")
+        case (.speech, .permissionUndetermined): return String(localized: "voice_issue_need_speech_permission_short")
+        case (.microphone, .permissionUndetermined): return String(localized: "voice_mic_permission_required")
         default: return issue.message
         }
     }
@@ -889,7 +889,7 @@ final class VoiceInteractionController {
         if mode == .flow,
            let source,
            source.model.streaming || source.model.isCancelling || source.model.sessionTransitionPending {
-            fail("上一轮尚未结束，请稍后重试")
+            fail(String(localized: "voice_previous_turn_not_finished"))
             return
         }
 
@@ -928,28 +928,28 @@ final class VoiceInteractionController {
             capability.reloadFromDefaults()
             requireConfiguration(for: mode)
         case .failed(let message):
-            fail("语音识别失败：\(message)")
+            fail(String(localized: "voice_recognition_failed_message \(message)"))
         }
     }
 
     private func handleEmptyCapture(mode: VoiceInteractionMode) {
         if mode == .flow {
-            detailOverride = "未听清，正在重新监听…"
+            detailOverride = String(localized: "voice_relistening_unclear")
             scheduleListening(after: loopDelay)
         } else {
-            fail("未识别到语音，请轻点重试")
+            fail(String(localized: "voice_nothing_recognized_retry"))
         }
     }
 
     private func submitFlowTranscript(_ text: String) {
         guard let source else {
-            fail("当前会话不可用")
+            fail(String(localized: "voice_session_unavailable"))
             return
         }
         caption = text
         transition(to: .thinking)
         guard let token = source.send(text) else {
-            fail("当前会话正忙，请稍后重试")
+            fail(String(localized: "voice_session_busy_retry"))
             return
         }
         activeFlowToken = token
@@ -975,7 +975,7 @@ final class VoiceInteractionController {
     ) {
         guard let bargeInRecognizer else {
             context.bargeInUnavailable = true
-            detailOverride = "免手打断不可用，轻点光球后说话"
+            detailOverride = String(localized: "voice_bargein_unavailable_tap_orb")
             context.speechSession?.resume()
             enqueuePendingSpeechIfPossible(context)
             finishFlowResponseIfReady(context)
@@ -1024,7 +1024,7 @@ final class VoiceInteractionController {
                     context.speechSession?.resume()
                     self.transition(to: context.speechSession == nil ? .thinking : .speaking)
                 }
-                self.detailOverride = "免手打断不可用，轻点光球后说话"
+                self.detailOverride = String(localized: "voice_bargein_unavailable_tap_orb")
                 self.enqueuePendingSpeechIfPossible(context)
                 self.finishFlowResponseIfReady(context)
             }
@@ -1060,7 +1060,7 @@ final class VoiceInteractionController {
             context.isInterrupting = true
             context.speechSession?.pause()
             caption = ""
-            detailOverride = "检测到你在说话，正在识别…"
+            detailOverride = String(localized: "voice_detecting_speech")
             transition(to: .interrupting)
 
         case let .partial(text):
@@ -1085,12 +1085,12 @@ final class VoiceInteractionController {
                           self.flowContext === context,
                           self.mode == .flow
                     else { return }
-                    self.fail("语音打断识别失败：\(message)")
+                    self.fail(String(localized: "voice_bargein_failed_message \(message)"))
                 }
             } else {
                 context.bargeInSession = nil
                 context.bargeInUnavailable = true
-                detailOverride = "免手打断不可用，轻点光球后说话"
+                detailOverride = String(localized: "voice_bargein_unavailable_tap_orb")
                 enqueuePendingSpeechIfPossible(context)
             }
         }
@@ -1106,7 +1106,7 @@ final class VoiceInteractionController {
             handleTurnCompletion(completion)
             return
         }
-        detailOverride = "未识别到新的问题，正在恢复回复…"
+        detailOverride = String(localized: "voice_resuming_no_new_question")
         startBargeInMonitoring(context, resumeSpeechOnSuccess: true)
     }
 
@@ -1124,7 +1124,7 @@ final class VoiceInteractionController {
         suppressedFlowToken = context.token
         isCancellingFlowTurn = true
         caption = text
-        detailOverride = "正在停止上一轮并发送新问题…"
+        detailOverride = String(localized: "voice_stopping_previous_sending_new")
         transition(to: .paused)
         let operation = nextGeneration()
         responseSetupTask?.cancel()
@@ -1147,7 +1147,7 @@ final class VoiceInteractionController {
             } catch {
                 guard self.generation == operation, self.mode == .flow else { return }
                 self.isCancellingFlowTurn = false
-                self.fail("停止上一轮失败：\(error.localizedDescription)", preservingCaption: true)
+                self.fail(String(localized: "voice_stop_previous_failed \(error.localizedDescription)"), preservingCaption: true)
                 return
             }
             guard self.generation == operation, self.mode == .flow else { return }
@@ -1220,7 +1220,7 @@ final class VoiceInteractionController {
                 context.isOpeningSpeech = false
                 self.pauseFlowResponseForFailure(
                     context,
-                    message: "语音播报失败：\(error.localizedDescription)"
+                    message: String(localized: "voice_playback_failed_message \(error.localizedDescription)")
                 )
             }
         }
@@ -1255,7 +1255,7 @@ final class VoiceInteractionController {
                 else { return }
                 self.pauseFlowResponseForFailure(
                     context,
-                    message: "语音播报失败：\(error.localizedDescription)"
+                    message: String(localized: "voice_playback_failed_message \(error.localizedDescription)")
                 )
                 return
             }
@@ -1276,7 +1276,7 @@ final class VoiceInteractionController {
                 self.detailOverride = nil
                 self.scheduleListening(after: self.loopDelay)
             case .interrupted:
-                self.detailOverride = "语音播报被系统中断，轻点重试继续心流"
+                self.detailOverride = String(localized: "voice_playback_interrupted_retry")
                 self.transition(to: .paused)
             }
         }
@@ -1354,7 +1354,7 @@ final class VoiceInteractionController {
         let operation = nextGeneration()
         suppressedFlowToken = activeFlowToken
         isCancellingFlowTurn = true
-        detailOverride = "正在停止当前回复…"
+        detailOverride = String(localized: "voice_stopping_current_reply")
         transition(to: .paused)
         responseSetupTask?.cancel()
         responseSetupTask = nil
@@ -1375,7 +1375,7 @@ final class VoiceInteractionController {
             } catch {
                 guard let self, self.generation == operation else { return }
                 self.isCancellingFlowTurn = false
-                self.fail("停止失败：\(error.localizedDescription)")
+                self.fail(String(localized: "voice_stop_failed_message \(error.localizedDescription)"))
                 return
             }
             guard let self, self.generation == operation, self.mode == .flow else { return }

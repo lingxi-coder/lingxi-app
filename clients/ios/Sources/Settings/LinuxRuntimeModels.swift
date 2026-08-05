@@ -5,11 +5,11 @@ enum LinuxRuntimeTaskState: Equatable {
 
     var label: String {
         switch self {
-        case .running: return "运行中"
-        case .completed: return "完成"
-        case .failed: return "失败"
-        case .cancelled: return "已停止"
-        case .unavailable: return "不可用"
+        case .running: return String(localized: "settings_linux_task_running")
+        case .completed: return String(localized: "settings_linux_task_completed")
+        case .failed: return String(localized: "settings_linux_task_failed")
+        case .cancelled: return String(localized: "settings_linux_task_stopped")
+        case .unavailable: return String(localized: "settings_linux_task_unavailable")
         }
     }
 }

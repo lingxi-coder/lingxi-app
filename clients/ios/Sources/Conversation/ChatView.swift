@@ -149,16 +149,16 @@ struct ChatView: View {
     // MARK: top bar
     private var topBar: some View {
         HStack(spacing: 4) {
-            iconButton(.menu, color: t.text, label: "打开抽屉", action: openDrawer)
+            iconButton(.menu, color: t.text, label: String(localized: "chat_open_drawer"), action: openDrawer)
             Spacer()
-            Text(convo.isNew ? "新对话" : session.title)
+            Text(convo.isNew ? String(localized: "chat_new_conversation") : session.title)
                 .font(.scaledSystem(14.5, weight: .semibold, relativeTo: .subheadline))
                 .foregroundColor(t.text)
                 .lineLimit(1)
             Spacer()
             iconButton(app.isDark ? .sun : .moon, size: 18, color: t.text2,
-                       label: app.isDark ? "切换到浅色主题" : "切换到深色主题") { app.toggleTheme() }
-            iconButton(.edit, size: 18, color: t.accent, label: "新建对话") { newChat() }
+                       label: app.isDark ? String(localized: "chat_theme_light") : String(localized: "chat_theme_dark")) { app.toggleTheme() }
+            iconButton(.edit, size: 18, color: t.accent, label: String(localized: "chat_new_chat")) { newChat() }
         }
         .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 10)
     }
@@ -243,11 +243,11 @@ struct ChatView: View {
                 .frame(width: 52, height: 52)
                 .overlay(LXIcon(name: .sparkle, size: 26, color: .white, stroke: 1.8))
                 .padding(.bottom, 18)
-            Text("开启新对话")
+            Text("chat_start_new_conversation")
                 .font(.scaledSystem(21, weight: .semibold, relativeTo: .title2))
                 .foregroundColor(t.text)
                 .padding(.bottom, 7)
-            Text("随便说点什么，或使用输入框旁的语音功能。")
+            Text("chat_empty_state_hint")
                 .font(.scaledSystem(14, relativeTo: .subheadline)).foregroundColor(t.text4)
                 .multilineTextAlignment(.center).lineSpacing(14 * 0.5)
                 .frame(maxWidth: 260)
@@ -377,9 +377,9 @@ struct ChatView: View {
             case .cancelled:
                 break
             case .permissionDenied:
-                captureStatus = "需要相机或相册权限"
+                captureStatus = String(localized: "chat_capture_permission_denied")
             case let .failed(message):
-                captureStatus = "拍照失败：\(message)"
+                captureStatus = String(localized: "chat_capture_failed \(message)")
             }
         }
     }
@@ -426,7 +426,7 @@ private struct ErrorBanner: View {
                     .contentShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("关闭错误提示")
+            .accessibilityLabel("chat_dismiss_error")
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
         .background(t.danger.opacity(0.10))

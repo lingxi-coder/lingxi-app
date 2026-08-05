@@ -1,5 +1,7 @@
 package com.lingxi.code.settings
 
+import androidx.annotation.StringRes
+import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidMobileLinuxConfigFfi
 import com.lingxi.code.bindings.MobileLinuxCapabilityFfi
 import com.lingxi.code.bindings.MobileLinuxRootfsStateFfi
@@ -25,45 +27,46 @@ enum class LinuxRuntimeMode(val title: String) {
     }
 }
 
-enum class LinuxRuntimeAction(val label: String) {
-    Refresh("刷新"),
-    Install("安装"),
-    Verify("校验"),
-    Repair("修复"),
-    Reset("重置"),
-    Boot("启动"),
-    Shutdown("关闭"),
-    OpenTerminal("新建终端"),
-    RefreshTasks("刷新任务"),
-    RefreshMounts("刷新挂载"),
-    StopTask("停止任务"),
+enum class LinuxRuntimeAction(@StringRes val labelRes: Int) {
+    Refresh(R.string.settings_linux_refresh_button),
+    Install(R.string.settings_linux_action_install_short),
+    Verify(R.string.settings_linux_action_verify_short),
+    Repair(R.string.settings_linux_action_repair_short),
+    Reset(R.string.settings_linux_action_reset_short),
+    Boot(R.string.common_start),
+    Shutdown(R.string.common_close),
+    OpenTerminal(R.string.settings_linux_open_terminal),
+    RefreshTasks(R.string.settings_linux_refresh_tasks_short),
+    RefreshMounts(R.string.settings_linux_refresh_mounts_short),
+    StopTask(R.string.settings_linux_stop_task_short),
 }
 
 enum class LinuxRuntimeTerminalStatus { Disabled, Idle, Starting, Active }
 
-enum class LinuxRuntimeMountAccess(val label: String) {
-    ReadOnly("只读"),
-    ReadWrite("读写"),
+enum class LinuxRuntimeMountAccess(@StringRes val labelRes: Int) {
+    ReadOnly(R.string.settings_linux_read_only),
+    ReadWrite(R.string.settings_linux_read_write),
 }
 
 data class LinuxRuntimeMountUiState(
     val id: String,
     val guestPath: String,
-    val summary: String,
+    @StringRes val summaryRes: Int,
     val access: LinuxRuntimeMountAccess,
     val pendingGrant: Boolean = false,
 )
 
 data class LinuxRuntimeMountDraft(
-    val purposeLabel: String = "外部目录",
+    @StringRes val purposeLabelRes: Int = R.string.settings_linux_external_dir,
     val access: LinuxRuntimeMountAccess = LinuxRuntimeMountAccess.ReadOnly,
-    val pickerSummary: String = "将通过系统目录选择器（SAF）逐目录授权，不暴露任意宿主路径",
+    @StringRes val pickerSummaryRes: Int = R.string.settings_linux_saf_picker_summary,
 )
 
 data class LinuxRuntimeTaskUiState(
     val id: String,
     val label: String,
-    val state: String,
+    @StringRes val stateRes: Int,
+    val stateDetail: String? = null,
     val stoppable: Boolean,
 )
 
@@ -71,7 +74,7 @@ data class LinuxRuntimeTerminalUiState(
     val status: LinuxRuntimeTerminalStatus = LinuxRuntimeTerminalStatus.Disabled,
     val sessionId: String? = null,
     val commandDraft: String = "python3 -V",
-    val transcript: List<String> = listOf("当前构建未接入可用 PTY 运行时。"),
+    val transcript: List<String> = emptyList(),
 )
 
 data class LinuxRuntimeTerminalLaunchRequest(
@@ -94,8 +97,9 @@ data class LinuxRuntimeUiState(
     val repairAllowed: Boolean = false,
     val resetAllowed: Boolean = false,
     val writableGuestPaths: List<String> = emptyList(),
-    val summary: String = "当前仍使用 legacy Android 执行层",
-    val detail: String = "Minijail + 现有 shell 路径保持不变；Mobile Linux 迁移仅接入到 phase-1 管理面板。",
+    @StringRes val summaryRes: Int = R.string.settings_linux_summary_legacy_android,
+    val detail: String? = null,
+    @StringRes val detailRes: Int = R.string.settings_linux_detail_legacy_android,
     val lastAction: LinuxRuntimeAction? = null,
     val lastActionMessage: String? = null,
     val busyAction: LinuxRuntimeAction? = null,
@@ -104,13 +108,14 @@ data class LinuxRuntimeUiState(
     val tasks: List<LinuxRuntimeTaskUiState> = emptyList(),
     val terminal: LinuxRuntimeTerminalUiState = LinuxRuntimeTerminalUiState(),
 ) {
-    val badge: String
+    @get:StringRes
+    val badgeRes: Int
         get() = when {
-            selectedMode == LinuxRuntimeMode.Legacy -> "默认"
-            rootfsState == MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE -> "授权阻塞"
-            rootfsState == MobileLinuxRootfsStateFfi.UNSUPPORTED -> "未接入"
-            available -> "可用"
-            else -> "不可用"
+            selectedMode == LinuxRuntimeMode.Legacy -> R.string.settings_badge_default
+            rootfsState == MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE -> R.string.settings_linux_badge_blocked
+            rootfsState == MobileLinuxRootfsStateFfi.UNSUPPORTED -> R.string.settings_linux_badge_not_linked
+            available -> R.string.settings_status_available
+            else -> R.string.settings_linux_task_unavailable
         }
 
     val canOpenTerminal: Boolean
@@ -119,16 +124,17 @@ data class LinuxRuntimeUiState(
     val canInspectTasks: Boolean get() = available
 }
 
-fun linuxRuntimeStateLabel(state: MobileLinuxRootfsStateFfi): String =
+@StringRes
+fun linuxRuntimeStateLabel(state: MobileLinuxRootfsStateFfi): Int =
     when (state) {
-        MobileLinuxRootfsStateFfi.MISSING -> "未安装"
-        MobileLinuxRootfsStateFfi.INSTALLING -> "安装中"
-        MobileLinuxRootfsStateFfi.READY -> "就绪"
-        MobileLinuxRootfsStateFfi.CORRUPT -> "损坏"
-        MobileLinuxRootfsStateFfi.REPAIRING -> "修复中"
-        MobileLinuxRootfsStateFfi.RESETTING -> "重置中"
-        MobileLinuxRootfsStateFfi.UNSUPPORTED -> "未接入"
-        MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE -> "授权阻塞"
+        MobileLinuxRootfsStateFfi.MISSING -> R.string.settings_linux_not_installed
+        MobileLinuxRootfsStateFfi.INSTALLING -> R.string.settings_linux_state_installing
+        MobileLinuxRootfsStateFfi.READY -> R.string.settings_linux_state_ready
+        MobileLinuxRootfsStateFfi.CORRUPT -> R.string.settings_linux_state_corrupt
+        MobileLinuxRootfsStateFfi.REPAIRING -> R.string.settings_linux_state_repairing
+        MobileLinuxRootfsStateFfi.RESETTING -> R.string.settings_linux_state_resetting
+        MobileLinuxRootfsStateFfi.UNSUPPORTED -> R.string.settings_linux_badge_not_linked
+        MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE -> R.string.settings_linux_badge_blocked
     }
 
 fun mobileLinuxConfig(
@@ -161,18 +167,18 @@ fun linuxRuntimeUiStateFrom(
     lastAction: LinuxRuntimeAction? = null,
     tasks: List<com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi> = emptyList(),
 ): LinuxRuntimeUiState {
-    val detail = status.lastError ?: capability.reason ?: "未返回额外诊断信息"
-    val summary = when {
+    val detail = status.lastError ?: capability.reason
+    val summaryRes = when {
         mode == LinuxRuntimeMode.Legacy ->
-            "当前仍使用 legacy Minijail + 现有 shell 执行层"
+            R.string.settings_linux_summary_legacy_minijail
         status.state == MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE ->
-            "缺少额外书面授权，Mobile Linux 后端被显式阻塞"
+            R.string.settings_linux_summary_blocked_license_android
         status.state == MobileLinuxRootfsStateFfi.UNSUPPORTED ->
-            "授权存在或模式已选中，但当前构建未链接 Android PRoot 运行时"
+            R.string.settings_linux_summary_not_linked_android
         capability.available ->
-            "Mobile Linux 运行时可用"
+            R.string.settings_linux_summary_available
         else ->
-            "Mobile Linux 运行时暂不可用"
+            R.string.settings_linux_summary_unavailable
     }
     return LinuxRuntimeUiState(
         selectedMode = mode,
@@ -190,18 +196,19 @@ fun linuxRuntimeUiStateFrom(
         repairAllowed = capability.rootfsIntegrity,
         resetAllowed = capability.rootfsIntegrity,
         writableGuestPaths = status.writableGuestPaths,
-        summary = summary,
+        summaryRes = summaryRes,
         detail = detail,
+        detailRes = R.string.settings_linux_no_diagnostics,
         lastAction = lastAction,
         lastActionMessage = detail,
         mounts = status.writableGuestPaths.mapIndexed { index, guestPath ->
             LinuxRuntimeMountUiState(
                 id = "managed-$index",
                 guestPath = guestPath,
-                summary = if (guestPath == "/workspace") {
-                    "工作区映射；外部目录将通过 SAF 单独授权"
+                summaryRes = if (guestPath == "/workspace") {
+                    R.string.settings_linux_mount_workspace_summary
                 } else {
-                    "rootfs 受管写路径"
+                    R.string.settings_linux_mount_managed_summary
                 },
                 access = LinuxRuntimeMountAccess.ReadWrite,
             )
@@ -210,15 +217,16 @@ fun linuxRuntimeUiStateFrom(
             LinuxRuntimeTaskUiState(
                 id = it.taskId,
                 label = it.command.ifBlank { "guest task" },
-                state = when (it.status) {
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.QUEUED -> "排队中"
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.RUNNING -> "运行中"
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.BACKGROUNDED -> "后台运行"
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.COMPLETED -> "已完成"
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.FAILED -> "失败"
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.CANCELLED -> "已取消"
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.TIMED_OUT -> "已超时"
-                } + (it.detail?.let { detail -> " · $detail" } ?: ""),
+                stateRes = when (it.status) {
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.QUEUED -> R.string.settings_linux_task_queued
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.RUNNING -> R.string.settings_linux_task_running
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.BACKGROUNDED -> R.string.settings_linux_task_backgrounded
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.COMPLETED -> R.string.chat_status_completed
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.FAILED -> R.string.settings_linux_task_failed
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.CANCELLED -> R.string.chat_status_cancelled
+                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.TIMED_OUT -> R.string.settings_linux_task_timed_out
+                },
+                stateDetail = it.detail,
                 stoppable = it.status == com.lingxi.code.bindings.MobileLinuxTaskStateFfi.RUNNING
                     || it.status == com.lingxi.code.bindings.MobileLinuxTaskStateFfi.BACKGROUNDED,
             )
@@ -233,17 +241,6 @@ fun linuxRuntimeUiStateFrom(
             } else {
                 LinuxRuntimeTerminalStatus.Disabled
             },
-            transcript = listOf(
-                if (
-                    capability.pty &&
-                    capability.available &&
-                    status.state == MobileLinuxRootfsStateFfi.READY
-                ) {
-                    "终端入口已就绪。"
-                } else {
-                    "当前构建未接入可用 PTY 运行时。"
-                },
-            ),
         ),
     )
 }

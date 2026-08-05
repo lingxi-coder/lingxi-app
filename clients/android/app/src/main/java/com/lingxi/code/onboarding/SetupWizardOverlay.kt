@@ -37,6 +37,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.clip
 import com.lingxi.code.voice.offline.ModelState
+import com.lingxi.code.voice.offline.OfflineModelEntry
 import com.lingxi.code.voice.offline.VOICE_PACKS
 import com.lingxi.code.voice.offline.VoicePack
 import com.lingxi.code.voice.offline.VoicePackProgress
@@ -59,8 +60,10 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
@@ -131,9 +134,9 @@ private fun SetupWizardContent(
         else -> false
     }
     val cta = when (step) {
-        0 -> "开始设置"
-        TOTAL - 1 -> "进入灵犀"
-        else -> "继续"
+        0 -> stringResource(R.string.onboarding_cta_start)
+        TOTAL - 1 -> stringResource(R.string.onboarding_cta_finish)
+        else -> stringResource(R.string.onboarding_cta_continue)
     }
 
     fun next() {
@@ -163,7 +166,13 @@ private fun SetupWizardContent(
                     ) {
                         // ChevronR mirrored → a left chevron (back).
                         Box(Modifier.rotate(180f)) {
-                            LXIcon(LXIconName.ChevronR, size = 17.dp, color = oklch(0.88f, 0.02f, 275f), stroke = 2f, contentDescription = "返回")
+                            LXIcon(
+                                LXIconName.ChevronR,
+                                size = 17.dp,
+                                color = oklch(0.88f, 0.02f, 275f),
+                                stroke = 2f,
+                                contentDescription = stringResource(R.string.onboarding_back),
+                            )
                         }
                     }
                 } else {
@@ -201,14 +210,15 @@ private fun SetupWizardContent(
                 when (step) {
                     0 -> {
                         OrbCanvas(phase = OrbPhase.Idle, modifier = Modifier.fillMaxWidth().height(220.dp), cyFrac = 0.5f)
-                        WizH("欢迎使用灵犀")
-                        WizSub("花一分钟，让它认识你——之后你只需开口，它就会回应。")
+                        WizH(stringResource(R.string.onboarding_welcome_title))
+                        WizSub(stringResource(R.string.onboarding_welcome_subtitle))
                     }
                     1 -> {
                         Badge(LXIconName.Sparkle)
-                        WizH("给你的灵犀起个名字")
-                        WizSub("这会成为它的唤醒词。之后你可以说「嘿，${assistantName.ifBlank { "灵犀" }}」随时唤醒它。")
-                        WizField(assistantName, "灵犀") { assistantName = it.take(12) }
+                        WizH(stringResource(R.string.onboarding_assistant_title))
+                        val wakeWordName = assistantName.ifBlank { stringResource(R.string.app_name) }
+                        WizSub(stringResource(R.string.onboarding_assistant_wake_hint, wakeWordName))
+                        WizField(assistantName, stringResource(R.string.app_name)) { assistantName = it.take(12) }
                         Spacer(Modifier.height(18.dp))
                         Row(
                             modifier = Modifier
@@ -219,14 +229,19 @@ private fun SetupWizardContent(
                         ) {
                             Canvas(Modifier.size(7.dp)) { drawCircle(oklch(0.72f, 0.18f, 150f)) }
                             Spacer(Modifier.width(8.dp))
-                            Text("嘿，${assistantName.ifBlank { "灵犀" }}", color = oklch(0.88f, 0.04f, 285f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                stringResource(R.string.onboarding_wake_word_preview, wakeWordName),
+                                color = oklch(0.88f, 0.04f, 285f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
                         }
                     }
                     2 -> {
                         Badge(LXIconName.Skill)
-                        WizH("我该怎么称呼你？")
-                        WizSub("灵犀会用这个名字称呼你，让对话更自然亲切。")
-                        WizField(userName, "你的名字") { userName = it.take(16) }
+                        WizH(stringResource(R.string.onboarding_user_title))
+                        WizSub(stringResource(R.string.onboarding_user_subtitle))
+                        WizField(userName, stringResource(R.string.onboarding_user_placeholder)) { userName = it.take(16) }
                     }
                     3 -> VoicePackStep(
                         states = modelStates,
@@ -236,8 +251,8 @@ private fun SetupWizardContent(
                     )
                     else -> {
                         Badge(LXIconName.Brain)
-                        WizH("基础设置完成")
-                        WizSub("进入应用后，请在「设置 → AI 提供商」保存真实凭据并选择默认模型。模型列表会直接来自当前已配置的提供商。")
+                        WizH(stringResource(R.string.onboarding_done_title))
+                        WizSub(stringResource(R.string.onboarding_done_subtitle_detail))
                     }
                 }
             }
@@ -272,8 +287,8 @@ private fun SetupWizardContent(
 @Composable
 private fun VoiceprintStep(vp: VpState, pct: Float, userName: String, onRecord: () -> Unit) {
     Badge(LXIconName.Mic)
-    WizH("录入你的声纹")
-    WizSub("让灵犀听声识人，只对你的声音响应、唤起属于你的记忆。可稍后在设置里完成。")
+    WizH(stringResource(R.string.onboarding_voiceprint_title))
+    WizSub(stringResource(R.string.onboarding_voiceprint_subtitle))
     Box(Modifier.size(140.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.size(108.dp)) {
             val sw = 4.dp.toPx()
@@ -304,15 +319,21 @@ private fun VoiceprintStep(vp: VpState, pct: Float, userName: String, onRecord: 
     }
     Spacer(Modifier.height(20.dp))
     val status = when (vp) {
-        VpState.Idle -> "轻点麦克风，朗读下面这句话"
-        VpState.Rec -> "正在聆听你的声音… ${pct.toInt()}%"
-        VpState.Done -> "✓ 声纹已录入"
+        VpState.Idle -> stringResource(R.string.onboarding_voiceprint_status_idle)
+        VpState.Rec -> stringResource(R.string.onboarding_voiceprint_status_recording, pct.toInt())
+        VpState.Done -> stringResource(R.string.onboarding_voiceprint_status_done)
     }
     Text(status, color = if (vp == VpState.Done) oklch(0.74f, 0.15f, 155f) else oklch(0.78f, 0.04f, 280f),
         fontSize = 14.sp, fontWeight = FontWeight.Medium)
     if (vp != VpState.Done) {
         Spacer(Modifier.height(8.dp))
-        Text("「你好灵犀，我是${userName.ifBlank { "我" }}。」", color = oklch(0.86f, 0.03f, 280f), fontSize = 15.sp, fontStyle = FontStyle.Italic)
+        val speaker = userName.ifBlank { stringResource(R.string.onboarding_voiceprint_self_pronoun) }
+        Text(
+            stringResource(R.string.onboarding_voiceprint_sample_phrase, speaker),
+            color = oklch(0.86f, 0.03f, 280f),
+            fontSize = 15.sp,
+            fontStyle = FontStyle.Italic,
+        )
     }
 }
 
@@ -377,8 +398,8 @@ private fun VoicePackStep(
     onDownload: (String) -> Unit,
 ) {
     Badge(LXIconName.Mic)
-    WizH("选择语音包")
-    WizSub("下载离线语音模型后，听写与朗读完全在本机进行、不依赖网络。可稍后在设置里更换或删除。")
+    WizH(stringResource(R.string.onboarding_voice_pack_title))
+    WizSub(stringResource(R.string.onboarding_voice_pack_subtitle))
     Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
         VOICE_PACKS.forEach { pack ->
             VoicePackRow(
@@ -400,8 +421,8 @@ private fun VoicePackStep(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("暂不下载", color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-                Text("使用系统语音 · 可稍后在设置下载", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+                Text(stringResource(R.string.onboarding_voice_pack_skip), color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.onboarding_voice_pack_skip_detail), color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
             }
             RadioDot(selected == "")
         }
@@ -419,7 +440,7 @@ private fun VoicePackRow(
     val sizeText = formatDownloadSize(pack.totalBytes)
     val agg = progress.state
     val activeModel = progress.activeModel
-    val activeLabel = activeModel?.localizedDisplayName("zh").orEmpty()
+    val activeLabel = activeModel?.let { voiceModelZhLabel(it) }.orEmpty()
     val activePosition = if (activeModel != null && progress.activeModelIndex >= 0) {
         "（${progress.activeModelIndex + 1}/${pack.models.size}）"
     } else {
@@ -435,49 +456,89 @@ private fun VoicePackRow(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(pack.title, color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-                Text("${pack.subtitle} · $sizeText", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+                Text(pack.localizedTitle(), color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                Text("${pack.localizedSubtitle()} · $sizeText", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
             }
             RadioDot(selected)
         }
         Spacer(Modifier.height(10.dp))
+        val activeModelLabel = "$activeLabel$activePosition"
         when (agg) {
-            is ModelState.Ready -> Text("✓ 已下载到本机", color = oklch(0.74f, 0.15f, 155f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            is ModelState.Ready -> Text(
+                stringResource(R.string.onboarding_voice_pack_ready),
+                color = oklch(0.74f, 0.15f, 155f),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
             is ModelState.Queued -> VoicePackProgressStatus(
                 progress = progress,
-                status = "等待下载 $activeLabel$activePosition",
+                status = stringResource(R.string.onboarding_voice_pack_queued, activeModelLabel),
             )
             is ModelState.Verifying -> VoicePackProgressStatus(
                 progress = progress,
-                status = "正在校验 $activeLabel$activePosition",
+                status = stringResource(R.string.onboarding_voice_pack_verifying, activeModelLabel),
             )
             is ModelState.Extracting -> {
-                val next = progress.nextModel?.localizedDisplayName("zh")
+                val next = progress.nextModel?.let { voiceModelZhLabel(it) }
+                val extracting = stringResource(R.string.onboarding_voice_pack_extracting, activeModelLabel)
+                val extractingNext = next?.let { stringResource(R.string.onboarding_voice_pack_extracting_next, it) }
                 VoicePackProgressStatus(
                     progress = progress,
                     status = buildString {
-                        append("正在安装 $activeLabel$activePosition")
-                        if (next != null) append("，完成后继续下载 $next")
+                        append(extracting)
+                        extractingNext?.let(::append)
                     },
                 )
             }
             is ModelState.Downloading -> {
                 val status = if (progress.downloadedBytes == 0L) {
-                    "正在连接 $activeLabel$activePosition"
+                    stringResource(R.string.onboarding_voice_pack_connecting, activeModelLabel)
                 } else {
-                    "正在下载 $activeLabel$activePosition"
+                    stringResource(R.string.onboarding_voice_pack_downloading, activeModelLabel)
                 }
                 VoicePackProgressStatus(progress = progress, status = status)
             }
             is ModelState.Failed -> DownloadBtn(
-                "下载失败（$activeLabel$activePosition）：${agg.message} · 点此重试",
+                stringResource(R.string.onboarding_voice_pack_failed, activeModelLabel, agg.message),
                 oklch(0.65f, 0.2f, 25f),
                 onDownload,
             )
-            ModelState.NotInstalled -> DownloadBtn("下载 ($sizeText)", oklch(0.66f, 0.2f, 288f), onDownload)
+            ModelState.NotInstalled -> DownloadBtn(
+                stringResource(R.string.onboarding_voice_pack_download_action, sizeText),
+                oklch(0.66f, 0.2f, 288f),
+                onDownload,
+            )
         }
     }
 }
+
+/**
+ * [OfflineModelEntry.displayName] and [VoicePack.title]/[.subtitle] stay the
+ * literal zh-Hans copy on the model (`voice/offline/VoiceModels.kt` is a
+ * plain, engine-agnostic catalog with no Android/Compose dependency — kept
+ * that way so [com.lingxi.code.voice.offline.VoiceModelDownloaderTest] stays
+ * pure JVM). Both call sites here always resolve the "zh" bucket regardless
+ * of the app's own language (a model like "Zipformer 中文 14M" describes the
+ * model in a fixed script, unlike [com.lingxi.code.theme.AppLanguageStore]'s
+ * self-referential language-picker names), so these `id`-keyed lookups
+ * resolve the real localized text at render time.
+ */
+@Composable
+private fun voiceModelZhLabel(entry: OfflineModelEntry): String = when (entry.id) {
+    "sherpa.zipformer-zh-14m-mobile" -> stringResource(R.string.voice_model_name_zipformer_zh_14m)
+    "sherpa.moonshine-tiny-en" -> stringResource(R.string.voice_model_name_moonshine_tiny_en)
+    "sherpa.melo-zh-en" -> stringResource(R.string.voice_model_name_melo_zh_en)
+    "sherpa.kitten-nano-en" -> stringResource(R.string.voice_model_name_kitten_nano_en)
+    else -> entry.localizedDisplayName("zh")
+}
+
+@Composable
+private fun VoicePack.localizedTitle(): String =
+    if (language == "zh") stringResource(R.string.voice_pack_title_zh) else title
+
+@Composable
+private fun VoicePack.localizedSubtitle(): String =
+    if (language == "zh") stringResource(R.string.voice_pack_subtitle_zh) else subtitle
 
 @Composable
 private fun VoicePackProgressStatus(

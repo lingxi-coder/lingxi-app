@@ -13,6 +13,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.PackageInfoCompat
 import com.lingxi.code.BuildConfig
+import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidEventListener
 import com.lingxi.code.bindings.AndroidEngineLaunchConfigFfi
 import com.lingxi.code.bindings.AndroidPermissionSink
@@ -45,6 +46,31 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 private const val TAG = "VoiceController"
+
+/**
+ * Resolves a localized string for voice-package code that runs OUTSIDE a
+ * `@Composable` body — [VoiceCapture] — and therefore cannot call
+ * `stringResource()`. Mirrors `ConversationStrings`
+ * (conversation/ConversationSource.kt) and `LocalAppsStrings`
+ * (localapps/LocalAppsContract.kt): the fallback keeps `VoiceCaptureLifecycleTest`
+ * — which constructs [VoiceCapture] directly with a non-functional
+ * `ContextWrapper(null)` — passing unmodified (calling `context.getString`
+ * there would NPE, since that test's [android.content.Context] has no base to
+ * delegate to). The production resolver ([voiceStrings]) resolves the REAL
+ * localized text through [Context.getString].
+ */
+fun interface VoiceStrings {
+    fun resolve(id: Int, fallback: String, vararg args: Any): String
+}
+
+/** Test/no-Context fallback: the literal zh-Hans copy, `String.format`-ed. */
+val DefaultVoiceStrings = VoiceStrings { _, fallback, args ->
+    if (args.isEmpty()) fallback else String.format(java.util.Locale.getDefault(), fallback, *args)
+}
+
+/** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
+fun voiceStrings(context: Context): VoiceStrings =
+    VoiceStrings { id, _, args -> context.getString(id, *args) }
 
 /**
  * T3.3 — wire the device-audio path into the engine + the Compose hold-to-talk
@@ -261,7 +287,11 @@ data class VoiceCaptureUiState(
     val phase: VoiceCapturePhase = VoiceCapturePhase.Idle,
     val partialTranscript: String = "",
     val finalTranscript: String = "",
-    val statusText: String = "按住说话",
+    // Blank means "resting, nothing to say yet" — [VoiceFlowOverlay] resolves
+    // the localized "hold to talk" hint at render time (`R.string.voice_hold_to_talk_hint`)
+    // rather than baking a fixed-locale literal into this process-global default,
+    // which is constructed once at class-load with no Context available.
+    val statusText: String = "",
     val errorMessage: String? = null,
 )
 
@@ -303,6 +333,7 @@ class VoiceCapture internal constructor(
             VoiceCaptureResult.Failed(t.message ?: "speech error")
         }
     },
+    private val strings: VoiceStrings = DefaultVoiceStrings,
 ) {
     private var session: RealtimeSpeechSession? = null
     private var pendingResult: ((VoiceCaptureResult) -> Unit)? = null
@@ -320,7 +351,7 @@ class VoiceCapture internal constructor(
             VoiceCaptureStore.update {
                 it.copy(
                     phase = VoiceCapturePhase.PermissionRequired,
-                    statusText = "需要麦克风权限",
+                    statusText = strings.resolve(R.string.voice_mic_permission_required, "需要麦克风权限"),
                     errorMessage = null,
                 )
             }
@@ -337,7 +368,7 @@ class VoiceCapture internal constructor(
             VoiceCaptureStore.update {
                 it.copy(
                     phase = VoiceCapturePhase.PermissionRequired,
-                    statusText = "需要麦克风权限",
+                    statusText = strings.resolve(R.string.voice_mic_permission_required, "需要麦克风权限"),
                     errorMessage = null,
                     partialTranscript = "",
                     finalTranscript = "",
@@ -357,7 +388,7 @@ class VoiceCapture internal constructor(
                 phase = VoiceCapturePhase.Starting,
                 partialTranscript = "",
                 finalTranscript = "",
-                statusText = "正在启动麦克风…",
+                statusText = strings.resolve(R.string.voice_starting_mic, "正在启动麦克风…"),
                 errorMessage = null,
             )
         }
@@ -368,7 +399,7 @@ class VoiceCapture internal constructor(
                     VoiceCaptureStore.update {
                         it.copy(
                             phase = VoiceCapturePhase.Listening,
-                            statusText = "正在聆听…",
+                            statusText = strings.resolve(R.string.voice_listening, "正在聆听…"),
                             errorMessage = null,
                         )
                     }
@@ -381,7 +412,7 @@ class VoiceCapture internal constructor(
                         it.copy(
                             phase = VoiceCapturePhase.Listening,
                             partialTranscript = text,
-                            statusText = if (text.isBlank()) "正在聆听…" else text,
+                            statusText = text.ifBlank { strings.resolve(R.string.voice_listening, "正在聆听…") },
                             errorMessage = null,
                         )
                     }
@@ -395,7 +426,9 @@ class VoiceCapture internal constructor(
                             phase = VoiceCapturePhase.Completed,
                             partialTranscript = trimmed,
                             finalTranscript = trimmed,
-                            statusText = if (trimmed.isBlank()) "未识别到语音" else trimmed,
+                            statusText = trimmed.ifBlank {
+                                strings.resolve(R.string.voice_no_speech_recognized, "未识别到语音")
+                            },
                             errorMessage = null,
                         )
                     }
@@ -420,9 +453,15 @@ class VoiceCapture internal constructor(
                         it.copy(
                             phase = if (code == "no_speech") VoiceCapturePhase.Cancelled else VoiceCapturePhase.Failed,
                             statusText = when (result) {
-                                VoiceCaptureResult.PermissionDenied -> "需要麦克风权限"
-                                VoiceCaptureResult.Empty -> "未识别到语音"
-                                is VoiceCaptureResult.Failed -> if (retriable) "识别失败，可重试" else "识别失败"
+                                VoiceCaptureResult.PermissionDenied ->
+                                    strings.resolve(R.string.voice_mic_permission_required, "需要麦克风权限")
+                                VoiceCaptureResult.Empty ->
+                                    strings.resolve(R.string.voice_no_speech_recognized, "未识别到语音")
+                                is VoiceCaptureResult.Failed -> if (retriable) {
+                                    strings.resolve(R.string.voice_recognition_failed_retriable, "识别失败，可重试")
+                                } else {
+                                    strings.resolve(R.string.voice_recognition_failed, "识别失败")
+                                }
                                 is VoiceCaptureResult.Transcript -> result.text
                             },
                             errorMessage = if (result is VoiceCaptureResult.Failed) result.message else null,
@@ -440,7 +479,7 @@ class VoiceCapture internal constructor(
                             if (it.phase == VoiceCapturePhase.Listening || it.phase == VoiceCapturePhase.Starting || it.phase == VoiceCapturePhase.Stopping) {
                                 it.copy(
                                     phase = VoiceCapturePhase.Cancelled,
-                                    statusText = "录音已取消",
+                                    statusText = strings.resolve(R.string.voice_recording_cancelled, "录音已取消"),
                                 )
                             } else {
                                 it
@@ -455,7 +494,7 @@ class VoiceCapture internal constructor(
             VoiceCaptureStore.update {
                 it.copy(
                     phase = VoiceCapturePhase.Failed,
-                    statusText = "设备不支持语音识别",
+                    statusText = strings.resolve(R.string.voice_device_unsupported, "设备不支持语音识别"),
                     errorMessage = e.message,
                 )
             }
@@ -467,7 +506,7 @@ class VoiceCapture internal constructor(
             VoiceCaptureStore.update {
                 it.copy(
                     phase = VoiceCapturePhase.Failed,
-                    statusText = "启动语音识别失败",
+                    statusText = strings.resolve(R.string.voice_start_recognition_failed, "启动语音识别失败"),
                     errorMessage = t.message,
                 )
             }
@@ -494,7 +533,9 @@ class VoiceCapture internal constructor(
         VoiceCaptureStore.update {
             it.copy(
                 phase = VoiceCapturePhase.Stopping,
-                statusText = if (it.partialTranscript.isBlank()) "正在结束录音…" else it.partialTranscript,
+                statusText = it.partialTranscript.ifBlank {
+                    strings.resolve(R.string.voice_stopping_recording, "正在结束录音…")
+                },
             )
         }
         active.stop()
@@ -509,7 +550,7 @@ class VoiceCapture internal constructor(
         VoiceCaptureStore.update {
             it.copy(
                 phase = VoiceCapturePhase.Cancelled,
-                statusText = "录音已取消",
+                statusText = strings.resolve(R.string.voice_recording_cancelled, "录音已取消"),
                 errorMessage = null,
             )
         }
@@ -638,6 +679,7 @@ fun rememberVoiceCapture(
                 ) == PackageManager.PERMISSION_GRANTED
             },
             onPartialTranscript = { currentOnPartial.value(it) },
+            strings = voiceStrings(context),
         )
     }
     DisposableEffect(capture) {
@@ -683,6 +725,7 @@ fun rememberOrbVoiceListen(): OrbVoiceListenController {
                     context, Manifest.permission.RECORD_AUDIO,
                 ) == PackageManager.PERMISSION_GRANTED
             },
+            strings = voiceStrings(context),
         )
     }
     val controller = remember(capture) {

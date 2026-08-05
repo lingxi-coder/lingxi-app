@@ -45,11 +45,11 @@ enum ConversationExecutionStatus: String, Equatable {
 
     var label: String {
         switch self {
-        case .running: return "运行中"
-        case .completed: return "已完成"
-        case .failed: return "失败"
-        case .cancelled: return "已取消"
-        case .maxTurns: return "达到上限"
+        case .running: return String(localized: "chat_status_running")
+        case .completed: return String(localized: "chat_status_completed")
+        case .failed: return String(localized: "chat_status_failed")
+        case .cancelled: return String(localized: "chat_status_cancelled")
+        case .maxTurns: return String(localized: "chat_status_max_turns")
         }
     }
 }
@@ -62,10 +62,10 @@ enum ConversationToolStatus: Equatable {
 
     var label: String {
         switch self {
-        case .running: return "运行中"
-        case .completed: return "已完成"
-        case .failed: return "失败"
-        case .cancelled: return "已取消"
+        case .running: return String(localized: "chat_status_running")
+        case .completed: return String(localized: "chat_status_completed")
+        case .failed: return String(localized: "chat_status_failed")
+        case .cancelled: return String(localized: "chat_status_cancelled")
         }
     }
 }
@@ -88,11 +88,11 @@ enum ConversationShellStatus: Equatable {
 
     var label: String {
         switch self {
-        case .running: return "运行中"
-        case .completed: return "已完成"
-        case .failed: return "失败"
-        case .timedOut: return "超时"
-        case .cancelled: return "已取消"
+        case .running: return String(localized: "chat_status_running")
+        case .completed: return String(localized: "chat_status_completed")
+        case .failed: return String(localized: "chat_status_failed")
+        case .timedOut: return String(localized: "chat_status_timed_out")
+        case .cancelled: return String(localized: "chat_status_cancelled")
         }
     }
 
@@ -216,7 +216,7 @@ enum ConversationExecutionParsing {
             }
         }
         guard let object = nestedDataObject(from: resultJson) ?? jsonObject(from: resultJson) else {
-            return isError ? "工具失败" : "工具完成"
+            return isError ? String(localized: "chat_tool_result_failed") : String(localized: "chat_tool_result_completed")
         }
         if let error = stringValue(object["error"])?.nilIfBlank {
             return error
@@ -226,7 +226,7 @@ enum ConversationExecutionParsing {
                 return value
             }
         }
-        return isError ? "工具失败" : "工具完成"
+        return isError ? String(localized: "chat_tool_result_failed") : String(localized: "chat_tool_result_completed")
     }
 
     static func isCancellationResult(_ resultJson: String) -> Bool {
@@ -289,11 +289,11 @@ enum ConversationExecutionParsing {
 
     static func shellStatusLabel(_ status: ConversationShellStatus) -> String {
         switch status {
-        case .running: return "Shell 运行中…"
-        case .completed: return "Shell 完成"
-        case .failed: return "Shell 失败"
-        case .timedOut: return "Shell 超时"
-        case .cancelled: return "Shell 已取消"
+        case .running: return String(localized: "chat_shell_running")
+        case .completed: return String(localized: "chat_shell_completed")
+        case .failed: return String(localized: "chat_shell_failed")
+        case .timedOut: return String(localized: "chat_shell_timed_out")
+        case .cancelled: return String(localized: "chat_shell_cancelled")
         }
     }
 

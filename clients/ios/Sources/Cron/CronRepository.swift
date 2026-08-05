@@ -132,14 +132,14 @@ final class CronRepository {
                     prompt: draft.prompt,
                     recurring: draft.recurring
                 )
-                state.lastActionMessage = "已更新定时任务"
+                state.lastActionMessage = String(localized: "cron_task_updated")
             } else {
                 _ = try await store.create(
                     cronExpr: draft.cron,
                     prompt: draft.prompt,
                     recurring: draft.recurring
                 )
-                state.lastActionMessage = "已创建定时任务"
+                state.lastActionMessage = String(localized: "cron_task_created")
             }
             draft = .create(scopeID: scope.scopeID)
             resetRoutes()
@@ -159,10 +159,10 @@ final class CronRepository {
                 _ = try await historyStore.cancelUnfinished(
                     scopeID: scopeID,
                     taskID: taskID,
-                    message: "任务已删除"
+                    message: String(localized: "cron_task_deleted_message")
                 )
             }
-            state.lastActionMessage = deleted ? "已删除定时任务" : "任务已不存在"
+            state.lastActionMessage = deleted ? String(localized: "cron_task_delete_success") : String(localized: "cron_task_delete_not_found")
             if draft.taskID == taskID {
                 draft = .create(scopeID: state.activeScopeID)
             }
@@ -187,7 +187,7 @@ final class CronRepository {
                 scheduledAtMs: now(),
                 manual: true
             ) else {
-                state.errorMessage = "该任务已有排队或运行中的执行"
+                state.errorMessage = String(localized: "cron_task_already_running")
                 return
             }
             let outcome: CronExecutionOutcome
@@ -199,7 +199,7 @@ final class CronRepository {
                 outcome = CronExecutionOutcome(
                     status: .cancelled,
                     resultText: nil,
-                    errorMessage: "执行已取消",
+                    errorMessage: String(localized: "cron_execution_cancelled"),
                     errorKind: .cancelled
                 )
             }
@@ -213,7 +213,7 @@ final class CronRepository {
             if let record {
                 await notifier.deliver(notificationPayload(for: record))
             }
-            state.lastActionMessage = "已触发立即运行"
+            state.lastActionMessage = String(localized: "cron_run_triggered")
             await loadState(lastReconciledAtMs: state.scheduling.lastReconciledAtMs)
         } catch is CancellationError {
             state.loading = false
@@ -237,7 +237,7 @@ final class CronRepository {
                 try await executeDueOccurrence(item.scope, task: item.task, scheduledAtMs: item.scheduledAtMs)
             }
             try Task.checkCancellation()
-            state.lastActionMessage = reason == "launch" ? "已完成定时任务巡检" : nil
+            state.lastActionMessage = reason == "launch" ? String(localized: "cron_reconcile_complete") : nil
             await loadState(lastReconciledAtMs: lastReconciledAtMs)
         } catch is CancellationError {
             state.loading = false
@@ -454,7 +454,7 @@ final class CronRepository {
                     runID: existing.runID,
                     status: .timedOut,
                     resultText: nil,
-                    errorMessage: "应用在上次计划执行中断后恢复，当前已将该次触发标记为超时并确认。",
+                    errorMessage: String(localized: "cron_recovered_timeout_message"),
                     errorKind: .timedOut
                 )
                 try Task.checkCancellation()
@@ -482,7 +482,7 @@ final class CronRepository {
             ) ?? CronExecutionOutcome(
                 status: .skipped,
                 resultText: nil,
-                errorMessage: "该次触发已由其他运行处理或不再满足执行条件。",
+                errorMessage: String(localized: "cron_trigger_already_handled"),
                 errorKind: .system
             )
         }
@@ -507,7 +507,7 @@ final class CronRepository {
         guard let scope = state.scopes.first(where: { $0.scopeID == scopeID }) else {
             throw CronExecutionError(
                 kind: .validation,
-                message: "Project 工作区不存在或已失效",
+                message: String(localized: "cron_workspace_unavailable"),
                 statusOverride: .failed
             )
         }
@@ -524,7 +524,7 @@ final class CronRepository {
         var last = CronExecutionOutcome(
             status: .failed,
             resultText: nil,
-            errorMessage: "执行失败",
+            errorMessage: String(localized: "cron_execution_failed_default"),
             errorKind: .unknown
         )
         for attempt in 1...3 {
@@ -557,7 +557,7 @@ final class CronRepository {
         guard let task = state.tasks.first(where: { $0.scope.scopeID == scopeID && $0.task.id == taskID })?.task else {
             throw CronExecutionError(
                 kind: .validation,
-                message: "任务不属于当前 Project 或已被删除",
+                message: String(localized: "cron_task_not_in_project"),
                 statusOverride: .failed
             )
         }
@@ -568,17 +568,17 @@ final class CronRepository {
         let title: String
         switch record.status {
         case .succeeded:
-            title = "\(record.projectName) 定时任务已完成"
+            title = String(localized: "cron_notification_completed \(record.projectName)")
         case .timedOut:
-            title = "\(record.projectName) 定时任务执行超时"
+            title = String(localized: "cron_notification_timed_out \(record.projectName)")
         case .cancelled:
-            title = "\(record.projectName) 定时任务已取消"
+            title = String(localized: "cron_notification_cancelled \(record.projectName)")
         case .failed:
-            title = "\(record.projectName) 定时任务执行失败"
+            title = String(localized: "cron_notification_failed \(record.projectName)")
         case .skipped:
-            title = "\(record.projectName) 定时任务已跳过"
+            title = String(localized: "cron_notification_skipped \(record.projectName)")
         case .queued, .running:
-            title = "\(record.projectName) 定时任务状态更新"
+            title = String(localized: "cron_notification_status_update \(record.projectName)")
         }
         let resultPreview = record.resultText?
             .trimmingCharacters(in: .whitespacesAndNewlines)

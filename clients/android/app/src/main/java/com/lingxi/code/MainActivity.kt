@@ -1,6 +1,7 @@
 package com.lingxi.code
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -47,6 +48,7 @@ import com.lingxi.code.terminal.createTerminalGateway
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.theme.LocaleWrapper
 import com.lingxi.code.theme.ThemeMode
 import kotlinx.coroutines.launch
 
@@ -63,6 +65,13 @@ class MainActivity : ComponentActivity() {
     private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val pendingTerminalArgs =
         kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
+
+    // Apply the persisted in-app language to the base context before the
+    // activity (and its resources) are created, so the whole surface renders
+    // in the chosen locale. On selection the Language page persists + recreates.
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleWrapper.wrap(newBase))
+    }
 
     @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {

@@ -9,11 +9,16 @@ struct DreamPage: View {
 
     private struct Activity { let key: String; let label: String; let sub: String }
     private let acts: [Activity] = [
-        .init(key: "reorganize", label: "整理记忆",     sub: "合并相似 / 去重 / 归档过期"),
-        .init(key: "plan",       label: "草拟今日计划", sub: "基于昨日未完成 + 日历"),
-        .init(key: "recap",      label: "总结过去一周", sub: "每周日凌晨生成回顾报告"),
-        .init(key: "prefetch",   label: "预热常用上下文", sub: "预生成你最常问的回答"),
-        .init(key: "polish",     label: "润色草稿",     sub: "为待发邮件/文档生成 2 套候选"),
+        .init(key: "reorganize", label: String(localized: "dream_activity_reorganize"),
+              sub: String(localized: "dream_activity_reorganize_sub")),
+        .init(key: "plan",       label: String(localized: "dream_activity_plan"),
+              sub: String(localized: "dream_activity_plan_sub")),
+        .init(key: "recap",      label: String(localized: "dream_activity_recap"),
+              sub: String(localized: "dream_activity_recap_sub")),
+        .init(key: "prefetch",   label: String(localized: "dream_activity_prefetch"),
+              sub: String(localized: "dream_activity_prefetch_sub")),
+        .init(key: "polish",     label: String(localized: "dream_activity_polish"),
+              sub: String(localized: "dream_activity_polish_sub")),
     ]
 
     var body: some View {
@@ -30,8 +35,8 @@ struct DreamPage: View {
                         .overlay(LXIcon(name: .dream, size: 32, color: rose, stroke: 1.6))
                 }
                 .padding(.bottom, 14)
-                Text("Dream 模式").font(.system(size: 19, weight: .bold)).foregroundColor(t.text)
-                Text("当设备闲置时，灵犀在后台运行\n整理、规划、润色 — 醒来即可看到结果")
+                Text("settings_dream_mode").font(.system(size: 19, weight: .bold)).foregroundColor(t.text)
+                Text("dream_description_blurb")
                     .font(.system(size: 12.5)).foregroundColor(t.text3)
                     .multilineTextAlignment(.center).lineSpacing(5).padding(.top, 6).padding(.horizontal, 16)
             }
@@ -39,25 +44,30 @@ struct DreamPage: View {
             .onAppear { withAnimation(.easeInOut(duration: 3).repeatForever()) { orbPulse = true } }
 
             SettingsSection {
-                SettingsRow(label: "开启 Dream 模式", sub: store.dream.lastRun, chevron: false, isLast: true) {
+                SettingsRow(label: String(localized: "dream_enable"), sub: store.dream.lastRun, chevron: false, isLast: true) {
                     LXToggle(isOn: $store.dream.enabled)
                 }
             }
 
-            SettingsSection(label: "时间窗") {
+            SettingsSection(label: String(localized: "dream_section_time_window")) {
                 RadioList(options: [
-                    .init(value: "night",  label: "夜间 (00:00–06:00)", sub: "默认，最不打扰"),
-                    .init(value: "always", label: "随时",                sub: "只要设备闲置"),
-                    .init(value: "custom", label: "自定义时段",          sub: "设置每日时间窗"),
+                    .init(value: "night",  label: String(localized: "dream_window_night"),
+                          sub: String(localized: "dream_window_night_sub")),
+                    .init(value: "always", label: String(localized: "dream_window_always"),
+                          sub: String(localized: "dream_window_always_sub")),
+                    .init(value: "custom", label: String(localized: "dream_window_custom"),
+                          sub: String(localized: "dream_window_custom_sub")),
                 ], value: $store.dream.window)
             }
 
-            SettingsSection(label: "运行条件", footer: "确保不会影响日常使用：仅在充电 + Wi-Fi 时跑昂贵任务。") {
-                SettingsRow(label: "仅在充电时", chevron: false) { LXToggle(isOn: $store.dream.onCharging) }
-                SettingsRow(label: "仅在 Wi-Fi 时", chevron: false, isLast: true) { LXToggle(isOn: $store.dream.onWifi) }
+            SettingsSection(label: String(localized: "dream_section_conditions"),
+                            footer: String(localized: "dream_conditions_footer")) {
+                SettingsRow(label: String(localized: "dream_only_charging"), chevron: false) { LXToggle(isOn: $store.dream.onCharging) }
+                SettingsRow(label: String(localized: "dream_only_wifi"), chevron: false, isLast: true) { LXToggle(isOn: $store.dream.onWifi) }
             }
 
-            SettingsSection(label: "允许的活动", footer: "可叠加，越多越费电与算力。") {
+            SettingsSection(label: String(localized: "dream_section_activities"),
+                            footer: String(localized: "dream_activities_footer")) {
                 ForEach(Array(acts.enumerated()), id: \.element.key) { i, a in
                     SettingsRow(label: a.label, sub: a.sub, chevron: false, isLast: i == acts.count - 1) {
                         LXToggle(isOn: Binding(
@@ -67,19 +77,25 @@ struct DreamPage: View {
                 }
             }
 
-            SettingsSection(label: "算力预算",
-                            footer: "高预算会优先调用更强模型（如 Claude Opus），并访问 MCP 工具。低预算只用本地 + 最便宜模型。") {
+            SettingsSection(label: String(localized: "dream_section_compute_budget"),
+                            footer: String(localized: "dream_compute_budget_footer")) {
                 RadioList(options: [
-                    .init(value: "low",    label: "低", sub: "本地模型为主 · 几乎免费"),
-                    .init(value: "medium", label: "中", sub: "中等模型 · 默认"),
-                    .init(value: "high",   label: "高", sub: "推理模型 + 工具 · 最深入"),
+                    .init(value: "low",    label: String(localized: "dream_budget_low"),
+                          sub: String(localized: "dream_budget_low_sub")),
+                    .init(value: "medium", label: String(localized: "dream_budget_medium"),
+                          sub: String(localized: "dream_budget_medium_sub")),
+                    .init(value: "high",   label: String(localized: "dream_budget_high"),
+                          sub: String(localized: "dream_budget_high_sub")),
                 ], value: $store.dream.budget)
             }
 
-            SettingsSection(label: "昨夜 Dream 回顾") {
-                SettingsRow(label: "03:24 - 03:41 · 整理记忆", sub: "合并 12 条 → 7 条，归档 5 条过期", onTap: {})
-                SettingsRow(label: "03:41 - 04:02 · 草拟今日计划", sub: "基于 8 个未完成事项 + 3 场会议", onTap: {})
-                SettingsRow(label: "04:02 - 04:08 · 润色邮件", sub: "为 2 封草稿各生成 1 套候选", isLast: true, onTap: {})
+            SettingsSection(label: String(localized: "dream_section_last_night")) {
+                SettingsRow(label: String(localized: "dream_recap_item_1"),
+                            sub: String(localized: "dream_recap_sub_1"), onTap: {})
+                SettingsRow(label: String(localized: "dream_recap_item_2"),
+                            sub: String(localized: "dream_recap_sub_2"), onTap: {})
+                SettingsRow(label: String(localized: "dream_recap_item_3"),
+                            sub: String(localized: "dream_recap_sub_3"), isLast: true, onTap: {})
             }
         }
     }

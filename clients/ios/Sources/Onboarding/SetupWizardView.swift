@@ -26,7 +26,7 @@ struct SetupWizardView: View {
     @State private var seeded = false
 
     // Editable copies, seeded from AppState on first appear.
-    @State private var assistantName = "灵犀"
+    @State private var assistantName = String(localized: "app_name")
     @State private var userName = ""
     @State private var recognitionMode: VoiceRecognitionMode = .onDevice
     @State private var voiceLanguage = VoiceCapabilityModel.automaticLanguageIdentifier
@@ -101,7 +101,7 @@ struct SetupWizardView: View {
                 // behind it. Every other button in this app that supplies a
                 // background declares `.plain` — these two were the omissions.
                 .buttonStyle(.plain)
-                .accessibilityLabel("返回")
+                .accessibilityLabel("onboarding_back")
             } else {
                 Color.clear.frame(width: 36, height: 36)
             }
@@ -166,20 +166,20 @@ struct SetupWizardView: View {
             VStack(spacing: 0) {
                 OrbCanvas(phase: .idle, cyFrac: 0.5)
                     .frame(height: 220)
-                wizH("欢迎使用灵犀")
-                wizSub("花一分钟，让它认识你——之后你只需开口，它就会回应。")
+                wizH(String(localized: "onboarding_welcome_title"))
+                wizSub(String(localized: "onboarding_welcome_subtitle"))
             }
         case 1:
             VStack(spacing: 0) {
                 badge(.sparkle)
-                wizH("给你的灵犀起个名字")
-                wizSub("这是助手在界面和对话中的称呼，之后可以随时在设置中修改。")
-                wizField(text: $assistantName, placeholder: "灵犀")
+                wizH(String(localized: "onboarding_assistant_title"))
+                wizSub(String(localized: "onboarding_assistant_subtitle"))
+                wizField(text: $assistantName, placeholder: String(localized: "app_name"))
                 HStack {
                     HStack(spacing: 8) {
                         Circle().fill(Color(okl: 0.72, 0.18, 150)).frame(width: 7, height: 7)
                             .shadow(color: Color(okl: 0.72, 0.18, 150), radius: 4)
-                        Text(assistantName.isEmpty ? "灵犀" : assistantName)
+                        Text(assistantName.isEmpty ? String(localized: "app_name") : assistantName)
                             .font(.system(size: 14, weight: .medium)).foregroundColor(Color(okl: 0.88, 0.04, 285))
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
@@ -192,23 +192,23 @@ struct SetupWizardView: View {
         case 2:
             VStack(spacing: 0) {
                 badge(.skill)
-                wizH("我该怎么称呼你？")
-                wizSub("灵犀会用这个名字称呼你，让对话更自然亲切。")
-                wizField(text: $userName, placeholder: "你的名字")
+                wizH(String(localized: "onboarding_user_title"))
+                wizSub(String(localized: "onboarding_user_subtitle"))
+                wizField(text: $userName, placeholder: String(localized: "onboarding_user_placeholder"))
             }
         case 3:
             voiceCapabilityStep
         default:
             VStack(spacing: 0) {
                 badge(.brain)
-                wizH("基础设置完成")
-                wizSub("进入应用后，请在「设置 → LLM 提供商」保存真实凭据并选择默认模型。")
+                wizH(String(localized: "onboarding_done_title"))
+                wizSub(String(localized: "onboarding_done_subtitle"))
                 VStack(alignment: .leading, spacing: 12) {
-                    completionRow("助手", assistantName)
-                    completionRow("称呼", userName)
-                    completionRow("语音", recognitionMode.title)
-                    completionRow("语言", VoiceCapabilityModel.displayName(for: voiceLanguage))
-                    completionRow("播报", voiceCapability.selectedVoice?.name ?? "稍后配置")
+                    completionRow(String(localized: "onboarding_done_row_assistant"), assistantName)
+                    completionRow(String(localized: "onboarding_done_row_name"), userName)
+                    completionRow(String(localized: "onboarding_done_row_voice"), recognitionMode.title)
+                    completionRow(String(localized: "settings_language_title"), VoiceCapabilityModel.displayName(for: voiceLanguage))
+                    completionRow(String(localized: "onboarding_done_row_voiceover"), voiceCapability.selectedVoice?.name ?? String(localized: "onboarding_voice_later"))
                 }
                 .padding(16)
                 .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
@@ -220,23 +220,23 @@ struct SetupWizardView: View {
     private var voiceCapabilityStep: some View {
         VStack(spacing: 0) {
             badge(.mic)
-            wizH("配置语音能力")
-            wizSub("选择识别方式和系统播报声音；心流模式会自动听取并朗读回复。")
+            wizH(String(localized: "onboarding_voice_title"))
+            wizSub(String(localized: "onboarding_voice_subtitle"))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("语言")
+                Text("settings_language_title")
                     .font(.caption.bold())
                     .foregroundStyle(Color(okl: 0.68, 0.04, 280))
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], spacing: 8) {
                     voiceLanguageButton(
-                        "跟随系统",
+                        String(localized: "onboarding_voice_language_system"),
                         value: VoiceCapabilityModel.automaticLanguageIdentifier
                     )
-                    voiceLanguageButton("中文", value: "zh-CN")
-                    voiceLanguageButton("English", value: "en-US")
-                    voiceLanguageButton("日本語", value: "ja-JP")
+                    voiceLanguageButton(String(localized: "onboarding_voice_language_zh"), value: "zh-CN")
+                    voiceLanguageButton(String(localized: "onboarding_voice_language_en"), value: "en-US")
+                    voiceLanguageButton(String(localized: "onboarding_voice_language_ja"), value: "ja-JP")
                 }
-                Text("识别方式")
+                Text("voice_recognition_mode")
                     .font(.caption.bold())
                     .foregroundStyle(Color(okl: 0.68, 0.04, 280))
                     .padding(.top, 8)
@@ -244,15 +244,15 @@ struct SetupWizardView: View {
                     voiceModeButton(mode)
                 }
 
-                Text("系统播报声音")
+                Text("onboarding_voice_voice_title")
                     .font(.caption.bold())
                     .foregroundStyle(Color(okl: 0.68, 0.04, 280))
                     .padding(.top, 8)
 
                 HStack(spacing: 12) {
-                    Picker("系统播报声音", selection: onboardingVoiceBinding) {
+                    Picker("onboarding_voice_voice_title", selection: onboardingVoiceBinding) {
                         if voiceCapability.voices.isEmpty {
-                            Text("没有可用声音").tag("")
+                            Text("onboarding_voice_no_voices").tag("")
                         } else {
                             ForEach(voiceCapability.voices) { voice in
                                 Text("\(voice.name) · \(voice.language)").tag(voice.id)
@@ -262,7 +262,7 @@ struct SetupWizardView: View {
                     .labelsHidden()
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Button(voiceCapability.isPreviewing ? "播放中…" : "试听") {
+                    Button(voiceCapability.isPreviewing ? "voice_playing" : "voice_preview") {
                         Task { await voiceCapability.preview() }
                     }
                     .buttonStyle(.bordered)
@@ -374,10 +374,10 @@ struct SetupWizardView: View {
     // MARK: CTA state
     private var cta: String {
         switch step {
-        case 0: return "开始设置"
-        case 3: return "继续"
-        case Self.total - 1: return "进入灵犀"
-        default: return "继续"
+        case 0: return String(localized: "onboarding_cta_start")
+        case 3: return String(localized: "onboarding_cta_continue")
+        case Self.total - 1: return String(localized: "onboarding_cta_finish")
+        default: return String(localized: "onboarding_cta_continue")
         }
     }
     private var ctaDisabled: Bool {

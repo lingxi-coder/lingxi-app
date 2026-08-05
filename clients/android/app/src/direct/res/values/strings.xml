@@ -5,6 +5,4 @@
     <bool name="high_risk_native_offloads_available">true</bool>
     <string name="computer_use_service_name">LingXi Computer Use</string>
     <string name="computer_use_service_description">Allows a user-started LingXi session to observe and operate only the apps you explicitly approve.</string>
-    <string name="computer_use_notification_title">LingXi 正在控制设备</string>
-    <string name="computer_use_notification_stop">立即停止</string>
 </resources>

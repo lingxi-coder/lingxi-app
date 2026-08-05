@@ -1,6 +1,7 @@
 package com.lingxi.code.cron
 
 import android.content.Context
+import com.lingxi.code.R
 import com.lingxi.code.bindings.CronTaskDto
 import com.lingxi.code.bindings.MobileCronStoreHandle
 import com.lingxi.code.bindings.MobileEngineHandle
@@ -128,7 +129,9 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
         block: suspend (MobileEngineHandle) -> T,
     ): T {
         val handle = HeadlessEngineFactory.build(appContext, scope)
-            ?: throw CronPermanentExecutionException("移动端引擎不可用或未正确配置")
+            ?: throw CronPermanentExecutionException(
+                appContext.getString(R.string.cron_engine_unavailable),
+            )
         return try {
             block(handle)
         } finally {

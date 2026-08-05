@@ -3,6 +3,7 @@ package com.lingxi.code.cron
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.R
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
@@ -68,7 +69,11 @@ class CronManagementViewModel(app: Application) : AndroidViewModel(app) {
             val result = runCatching { repository.delete(scopeId, taskId) }
             onResult(
                 result.exceptionOrNull()?.message
-                    ?: if (result.getOrDefault(false)) null else "任务不存在或已经删除",
+                    ?: if (result.getOrDefault(false)) {
+                        null
+                    } else {
+                        getApplication<Application>().getString(R.string.cron_task_delete_failed_message)
+                    },
             )
         }
     }

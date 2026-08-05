@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 struct RootView: View {
     @Environment(AppState.self) private var app
+    @Environment(LocalizationManager.self) private var localization
     @Environment(\.theme) private var theme
     @Environment(\.scenePhase) private var scenePhase
 
@@ -127,7 +128,7 @@ struct RootView: View {
         if let row = projectStore.activeProject?.sessions.first(where: { $0.sessionId == activeSession }) {
             return SessionRef(id: row.sessionId, title: row.title)
         }
-        return SessionRef(id: activeSession, title: "新对话")
+        return SessionRef(id: activeSession, title: String(localized: "chat_new_conversation"))
     }
 
     var body: some View {
@@ -135,7 +136,9 @@ struct RootView: View {
         NavigationStack(path: $navigation.path) {
             rootSurface
                 .navigationDestination(for: AppRoute.self, destination: destination)
+                .id(localization.language)
         }
+        .environment(\.locale, localization.effectiveLocale())
         .onChange(of: scenePhase, handleScenePhase)
         .onChange(of: draft) { _, value in
             scopedPreferences.setDraft(value, projectID: projectStore.activeProjectId)
@@ -298,7 +301,7 @@ struct RootView: View {
             }
 
             if projectSwitching {
-                ProgressView("正在切换项目…")
+                ProgressView(String(localized: "project_switching_message"))
                     .padding(18)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                     .zIndex(90)
@@ -533,7 +536,7 @@ struct RootView: View {
                 await cronRepository.refresh()
             } catch {
                 if let rollback { _ = try? await projectStore.rollbackActiveSwitch(rollback) }
-                projectStore.errorMessage = "项目切换失败：\(error.localizedDescription)"
+                projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
                 previousSource.handleForeground()
                 previousSource.warmUp()
             }
@@ -829,7 +832,7 @@ private struct ConversationProjectBridge: View {
                 try? await projectStore.recordStartedSession(
                     projectId: projectID,
                     sessionId: sessionID,
-                    title: "新对话"
+                    title: String(localized: "chat_new_conversation")
                 )
             }
             if let projectID {

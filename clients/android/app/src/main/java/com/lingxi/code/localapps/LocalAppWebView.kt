@@ -22,8 +22,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import com.lingxi.code.BuildConfig
+import com.lingxi.code.R
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -636,16 +638,16 @@ fun LocalAppWebView(
     pendingExternalUrl?.let { target ->
         AlertDialog(
             onDismissRequest = { pendingExternalUrl = null },
-            title = { Text("离开本地应用？") },
-            text = { Text("此链接将交给系统浏览器打开：\n$target") },
+            title = { Text(stringResource(R.string.local_apps_leave_app_title)) },
+            text = { Text(stringResource(R.string.local_apps_leave_app_detail, target)) },
             dismissButton = {
-                TextButton(onClick = { pendingExternalUrl = null }) { Text("取消") }
+                TextButton(onClick = { pendingExternalUrl = null }) { Text(stringResource(R.string.common_cancel)) }
             },
             confirmButton = {
                 TextButton(onClick = {
                     pendingExternalUrl = null
                     onExternalNavigation(target)
-                }) { Text("继续") }
+                }) { Text(stringResource(R.string.onboarding_cta_continue)) }
             },
         )
     }

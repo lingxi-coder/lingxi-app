@@ -139,7 +139,15 @@ data class AccentOption(
     val color: Color,
 )
 
-/** The 6 brand accents offered by the Appearance picker. */
+/**
+ * The 6 brand accents offered by the Appearance picker.
+ *
+ * [AccentOption.name] stays the literal zh-Hans copy — this is a plain data
+ * object with no `Context`. The real localized text is resolved at the one
+ * render site ([com.lingxi.code.settings.AppearancePage]'s `AccentOption.
+ * localizedName()`) via `stringResource`, reusing the existing
+ * `settings_accent_*` catalog keys.
+ */
 object Accents {
     val all: List<AccentOption> = listOf(
         AccentOption("oklch(70% 0.18 268)", "靛紫", Color(red = 0.4340f, green = 0.5865f, blue = 1.0000f)),

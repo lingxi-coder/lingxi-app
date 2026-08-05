@@ -27,10 +27,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
@@ -75,20 +77,17 @@ fun MCPListPage(
         .sumOf { it.tools }
 
     Column(Modifier.fillMaxWidth()) {
-        Blurb(
-            "MCP (Model Context Protocol) 是连接外部工具的开放协议。" +
-                "已连接的服务器会向 AI 暴露工具调用能力。",
-        )
+        Blurb(stringResource(R.string.mcp_description_blurb))
 
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp),
         ) {
-            StatCard("已连接", connectedCount, Modifier.weight(1f))
-            StatCard("可用工具", totalTools, Modifier.weight(1f))
+            StatCard(stringResource(R.string.mcp_stat_connected), connectedCount, Modifier.weight(1f))
+            StatCard(stringResource(R.string.mcp_stat_available_tools), totalTools, Modifier.weight(1f))
         }
 
-        SettingsSection(label = "服务器 · ${servers.size}") {
+        SettingsSection(label = stringResource(R.string.mcp_section_servers_fmt, servers.size)) {
             servers.forEachIndexed { i, s ->
                 MCPServerRow(
                     server = s,
@@ -99,10 +98,9 @@ fun MCPListPage(
             }
         }
 
-        DashedAddButton(title = "添加 MCP 服务器")
+        DashedAddButton(title = stringResource(R.string.mcp_add_server))
         Text(
-            "支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。\n" +
-                "浏览公开服务器目录：mcp.directory",
+            stringResource(R.string.mcp_transport_description_prefix) + "mcp.directory",
             color = t.text4,
             fontSize = 11.sp,
             lineHeight = 16.sp,
@@ -160,7 +158,7 @@ private fun MCPServerRow(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(server.status.dot(t)))
                     Text(
-                        "${server.status.label} · ${server.tools} 工具 · ${server.transport}",
+                        stringResource(R.string.mcp_server_status_tools_fmt, server.status.label, server.tools, server.transport),
                         color = t.text4,
                         fontSize = 11.5f.sp,
                         fontFamily = LXFont.mono,
@@ -226,14 +224,14 @@ fun MCPEditPage(
         ) {
             PulsingDot(color = dot, pulsing = s.status == ConnStatus.Testing)
             Text(
-                "${s.status.label} · ${s.tools} 工具可用",
+                stringResource(R.string.mcp_edit_status_tools_fmt, s.status.label, s.tools),
                 color = t.text2,
                 fontSize = 12.5f.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(start = 8.dp).weight(1f),
             )
             Text(
-                "重新连接",
+                stringResource(R.string.mcp_reconnect),
                 color = t.text2,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
@@ -254,7 +252,7 @@ fun MCPEditPage(
             }
         }
 
-        FieldLabel("显示名称")
+        FieldLabel(stringResource(R.string.settings_display_name))
         SettingsField(
             value = s.name,
             onValueChange = { v -> store.updateMcp(mcpId) { it.copy(name = v) } },
@@ -262,24 +260,24 @@ fun MCPEditPage(
             modifier = Modifier.padding(bottom = 14.dp),
         )
 
-        FieldLabel("端点")
+        FieldLabel(stringResource(R.string.mcp_endpoint))
         SettingsField(
             value = s.url,
             onValueChange = { v -> store.updateMcp(mcpId) { it.copy(url = v) } },
         )
-        FieldHint("支持 `stdio://`、`https://`、`sse://`")
+        FieldHint(stringResource(R.string.mcp_endpoint_hint))
 
-        SettingsSection(label = "传输与鉴权") {
-            SettingsRow(label = "传输方式", value = s.transport, onTap = {})
-            SettingsRow(label = "鉴权", value = s.auth ?: "无", isLast = true, onTap = {})
+        SettingsSection(label = stringResource(R.string.mcp_section_transport_auth)) {
+            SettingsRow(label = stringResource(R.string.mcp_transport_mode), value = s.transport, onTap = {})
+            SettingsRow(label = stringResource(R.string.mcp_auth), value = s.auth ?: stringResource(R.string.common_none), isLast = true, onTap = {})
         }
 
-        SettingsSection(label = "工具权限", footer = "灵犀只会调用你允许的工具。每次首次调用会请求确认。") {
+        SettingsSection(label = stringResource(R.string.mcp_section_tool_permissions), footer = stringResource(R.string.mcp_tool_permissions_footer)) {
             val tools = McpToolNames.take(minOf(6, s.tools))
             tools.forEachIndexed { i, tn ->
                 SettingsRow(
                     label = tn,
-                    sub = if (i % 2 == 0) "只读" else "可写",
+                    sub = if (i % 2 == 0) stringResource(R.string.mcp_tool_readonly) else stringResource(R.string.mcp_tool_writable),
                     chevron = false,
                     isLast = i == tools.size - 1,
                     trailing = { LocalToggle(seed = i < 4) },
@@ -289,7 +287,7 @@ fun MCPEditPage(
 
         SettingsSection {
             SettingsRow(
-                label = "启用服务器",
+                label = stringResource(R.string.mcp_enable_server),
                 chevron = false,
                 trailing = {
                     LXToggle(
@@ -299,7 +297,7 @@ fun MCPEditPage(
                 },
             )
             SettingsRow(
-                label = "自动启动",
+                label = stringResource(R.string.mcp_auto_start),
                 chevron = false,
                 isLast = true,
                 trailing = { LocalToggle(seed = true) },
@@ -317,7 +315,7 @@ fun MCPEditPage(
                 .clickable { store.removeMcp(mcpId); onPop() }
                 .padding(12.dp),
         ) {
-            Text("移除此服务器", color = t.danger, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.mcp_remove_server), color = t.danger, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
         }
     }
 }

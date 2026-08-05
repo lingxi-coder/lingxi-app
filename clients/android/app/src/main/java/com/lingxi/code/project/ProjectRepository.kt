@@ -1,5 +1,7 @@
 package com.lingxi.code.project
 
+import android.content.Context
+import com.lingxi.code.R
 import com.lingxi.code.model.canonicalSessionId
 import org.json.JSONArray
 import org.json.JSONObject
@@ -9,6 +11,29 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
+
+/**
+ * Resolves a localized string for [ProjectRepository], which runs outside a
+ * `@Composable` body and is constructed directly (with no `Context`) by
+ * [ProjectRepositoryInstrumentedTest]. [fallback] is always the exact zh-Hans
+ * base-locale copy for [id]; [DefaultProjectStrings] (the parameter default)
+ * returns it verbatim (`String.format`-ed when [args] are present), so that
+ * instrumented test keeps asserting the same literal Chinese copy without being
+ * touched. The production resolver ([projectStrings]) ignores [fallback] and
+ * resolves the real localized text through [Context.getString].
+ */
+fun interface ProjectStrings {
+    fun resolve(id: Int, fallback: String, vararg args: Any): String
+}
+
+/** Test/no-Context fallback: the literal zh-Hans copy, `String.format`-ed. */
+val DefaultProjectStrings = ProjectStrings { _, fallback, args ->
+    if (args.isEmpty()) fallback else String.format(java.util.Locale.getDefault(), fallback, *args)
+}
+
+/** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
+fun projectStrings(context: Context): ProjectStrings =
+    ProjectStrings { id, _, args -> context.getString(id, *args) }
 
 internal const val PROJECTS_INDEX_FILE = "index.json"
 internal const val PROJECT_MANIFEST_FILE = "project.json"
@@ -57,6 +82,7 @@ internal class ProjectRepository(
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString().lowercase() },
     private val writer: ProjectAtomicWriter = DefaultProjectAtomicWriter(),
+    private val strings: ProjectStrings = DefaultProjectStrings,
 ) {
     init {
         projectsRoot.mkdirs()
@@ -85,7 +111,11 @@ internal class ProjectRepository(
             globalSessions = readSessions(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE)),
             loading = false,
             errorMessage = if (corruptCount > 0) {
-                "$corruptCount 个项目数据损坏或路径异常，已隔离；其他项目仍可使用。"
+                strings.resolve(
+                    R.string.project_corrupt_projects_message_fmt,
+                    "%1\$d 个项目数据损坏或路径异常，已隔离；其他项目仍可使用。",
+                    corruptCount,
+                )
             } else {
                 null
             },
@@ -214,9 +244,11 @@ internal class ProjectRepository(
         val existing = sessions.firstOrNull { it.sessionId == canonicalId }
         val started = ProjectSessionSummary(
             sessionId = canonicalId,
-            title = title.ifBlank { existing?.title ?: "新对话" },
+            title = title.ifBlank {
+                existing?.title ?: strings.resolve(R.string.chat_new_conversation, "新对话")
+            },
             messageCount = existing?.messageCount ?: 0,
-            relativeTime = "刚刚",
+            relativeTime = strings.resolve(R.string.project_relative_time_just_now, "刚刚"),
             updatedAtEpochMillis = timestamp,
         )
         val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }

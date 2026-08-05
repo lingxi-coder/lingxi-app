@@ -12,9 +12,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.lingxi.code.R
 
 private data class SourceDisclosure(
     val component: String,
@@ -23,7 +25,8 @@ private data class SourceDisclosure(
     val sourceUrl: String,
 )
 
-private val androidSourceDisclosures = listOf(
+@Composable
+private fun androidSourceDisclosures(): List<SourceDisclosure> = listOf(
     SourceDisclosure(
         component = "OpenMinis Android Shell / PTY",
         version = "9cf3a855fecd27bb5735b84cacbd56852a3ab8dd",
@@ -33,7 +36,7 @@ private val androidSourceDisclosures = listOf(
     SourceDisclosure(
         component = "OpenMinis PRoot fork",
         version = "8cf13e997cdc9472997aae19df8050c073c9a86c",
-        license = "GPL-2.0-or-later（本组合选择 GPLv3）",
+        license = stringResource(R.string.oss_license_proot),
         sourceUrl = "https://github.com/OpenMinis/proot/tree/8cf13e997cdc9472997aae19df8050c073c9a86c",
     ),
     SourceDisclosure(
@@ -45,7 +48,7 @@ private val androidSourceDisclosures = listOf(
     SourceDisclosure(
         component = "Alpine Linux minirootfs",
         version = "3.21.3 · arm64-v8a / x86_64",
-        license = "各软件包许可证（清单和 SBOM 随发行物提供）",
+        license = stringResource(R.string.oss_license_alpine_packages),
         sourceUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/",
     ),
 )
@@ -53,6 +56,7 @@ private val androidSourceDisclosures = listOf(
 @Composable
 fun OpenSourceLicensesPage(modifier: Modifier = Modifier) {
     val uriHandler = LocalUriHandler.current
+    val disclosures = androidSourceDisclosures()
     LazyColumn(
         modifier = modifier.padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -60,19 +64,17 @@ fun OpenSourceLicensesPage(modifier: Modifier = Modifier) {
         item("summary") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Android 组合发行物",
+                    stringResource(R.string.oss_android_bundle_title),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "本 Android 组合产品按 GNU GPLv3 分发。原有 MIT、Apache、LGPL " +
-                        "及 Alpine 软件包继续保留各自声明。构建产物同时携带 NOTICE、" +
-                        "SPDX SBOM、固定摘要和对应源码信息。",
+                    stringResource(R.string.oss_android_bundle_body),
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
         }
-        items(androidSourceDisclosures, key = SourceDisclosure::component) { disclosure ->
+        items(disclosures, key = SourceDisclosure::component) { disclosure ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -88,7 +90,7 @@ fun OpenSourceLicensesPage(modifier: Modifier = Modifier) {
                     fontFamily = FontFamily.Monospace,
                 )
                 Text(
-                    "查看对应源码",
+                    stringResource(R.string.oss_view_source),
                     color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.labelLarge,
                 )
@@ -96,8 +98,7 @@ fun OpenSourceLicensesPage(modifier: Modifier = Modifier) {
         }
         item("offer") {
             Text(
-                "若应用内链接暂时不可用，请以发行包内 NOTICE 与 SBOM 所列固定版本、" +
-                    "哈希和源码地址为准。",
+                stringResource(R.string.oss_offer_note),
                 modifier = Modifier.padding(bottom = 28.dp),
                 style = MaterialTheme.typography.bodySmall,
             )

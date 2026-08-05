@@ -91,12 +91,12 @@ struct InlineVoicePanel: View {
                     ),
                     in: Circle()
                 )
-            Text(controller.mode == .flow ? "心流模式" : "语音输入")
+            Text(controller.mode == .flow ? "voice_flow_mode_label" : "settings_section_voice_input")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Color(okl: 0.94, 0.02, 280))
             Spacer()
             if controller.phase == .failed || controller.phase == .paused {
-                Button("重试", action: controller.retry)
+                Button("common_retry", action: controller.retry)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Color(okl: 0.82, 0.12, 285))
                     .padding(.horizontal, 12)
@@ -113,7 +113,7 @@ struct InlineVoicePanel: View {
                     .background(.white.opacity(0.07), in: Circle())
             }
             .buttonStyle(VoicePanelButtonStyle())
-            .accessibilityLabel(controller.mode == .flow ? "关闭心流模式" : "关闭语音输入")
+            .accessibilityLabel(controller.mode == .flow ? String(localized: "voice_close_flow_mode_a11y") : String(localized: "voice_close_voice_input_a11y"))
             .accessibilityIdentifier("voice.close")
         }
     }
@@ -151,7 +151,7 @@ struct InlineVoicePanel: View {
                 .background(Color(okl: 0.75, 0.16, 65, 0.12), in: RoundedRectangle(cornerRadius: 12))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("需要配置语音能力")
+                Text("voice_config_required_title")
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(Color(okl: 0.96, 0.02, 280))
                 Text(controller.statusDetail)
@@ -161,7 +161,7 @@ struct InlineVoicePanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button("设置", action: onConfigure)
+            Button("settings_title_main", action: onConfigure)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)

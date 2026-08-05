@@ -96,9 +96,9 @@ struct SettingsHost: View {
                             LXIcon(name: .x, size: 18, color: t.text3, stroke: 1.8)
                                 .frame(width: 34, height: 34)
                         }
-                        .accessibilityLabel("关闭设置")
+                        .accessibilityLabel(String(localized: "settings_close_accessibility"))
                     } else {
-                        Button("完成") { reset() }
+                        Button("settings_done") { reset() }
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(t.accent)
                     }
@@ -113,28 +113,31 @@ struct SettingsHost: View {
     // MARK: titles
     func title(of page: SettingsPage) -> String {
         switch page {
-        case .main: return "设置"
-        case .account: return "账户"
+        case .main: return String(localized: "settings_title_main")
+        case .account: return String(localized: "settings_title_account")
         case .providerList(let b): return b.kind.title
-        case .providerPicker(let b): return "添加 " + (b.kind == .llm ? "LLM" : b.kind == .search ? "搜索" : "抓取")
+        case .providerPicker(let b):
+            return b.kind == .llm ? String(localized: "settings_title_add_llm")
+                : b.kind == .search ? String(localized: "settings_title_add_search")
+                : String(localized: "settings_title_add_fetch")
         case .providerEdit(let b, let id):
-            return store.providers(b.kind).first(where: { $0.id == id })?.name ?? "编辑"
-        case .voice: return "语音 TTS"
-        case .linuxRuntime: return "Linux 运行时"
-        case .knowledge: return "知识库"
-        case .memory: return "记忆"
-        case .workflows: return "工作流"
-        case .appearance: return "外观"
-        case .language: return "语言"
-        case .notifications: return "通知"
-        case .input: return "键盘与输入"
-        case .appIntegration: return "应用接入"
-        case .privacy: return "数据与隐私"
+            return store.providers(b.kind).first(where: { $0.id == id })?.name ?? String(localized: "settings_title_edit")
+        case .voice: return String(localized: "settings_voice_tts")
+        case .linuxRuntime: return String(localized: "settings_linux_runtime")
+        case .knowledge: return String(localized: "settings_knowledge")
+        case .memory: return String(localized: "settings_memory")
+        case .workflows: return String(localized: "settings_title_workflows")
+        case .appearance: return String(localized: "settings_appearance")
+        case .language: return String(localized: "settings_language_title")
+        case .notifications: return String(localized: "settings_notifications")
+        case .input: return String(localized: "settings_keyboard_input")
+        case .appIntegration: return String(localized: "settings_app_integration")
+        case .privacy: return String(localized: "settings_data_privacy")
         case .skills: return "Skills"
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"
-        case .mcpList: return "MCP 服务器"
+        case .mcpList: return String(localized: "settings_mcp_servers")
         case .mcpEdit(let id): return store.mcpServers.first(where: { $0.id == id })?.name ?? "MCP"
-        case .dream: return "Dream 模式"
+        case .dream: return String(localized: "settings_dream_mode")
         }
     }
 }

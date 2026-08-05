@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import android.content.Context
+import com.lingxi.code.R
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ListingKindDto
@@ -18,8 +19,11 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
+import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.SessionCatalog
+import com.lingxi.code.model.SessionCatalogStrings
 import com.lingxi.code.model.canonicalSessionId
+import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.project.ProjectWorkspace
@@ -46,6 +50,37 @@ import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.transformWhile
 
 /**
+ * Resolves a localized string for conversation-package code that runs OUTSIDE a
+ * `@Composable` body — [ChatViewModel], [ConversationSource] and the pure
+ * top-level mappers below ([clientEventToReply], [userFacingEngineError],
+ * [mapReplyStream], [messageDtoText]) — and therefore cannot call
+ * `stringResource()`.
+ *
+ * [fallback] is always the exact zh-Hans base-locale copy for [id], passed in at
+ * the call site right next to the resource id. [DefaultConversationStrings]
+ * (the parameter default everywhere this is threaded through) returns [fallback]
+ * verbatim — formatted with [args] when present — which is why the many JVM unit
+ * tests that construct [ChatViewModel] / call these mappers directly, with no
+ * Android `Context` at all, keep asserting the same literal Chinese copy without
+ * being touched. The production implementation ([conversationStrings]) ignores
+ * [fallback] and resolves the REAL localized text through
+ * [Context.getString], so the app actually renders in the user's selected
+ * language, not just in tests.
+ */
+fun interface ConversationStrings {
+    fun resolve(id: Int, fallback: String, vararg args: Any): String
+}
+
+/** Test/no-Context fallback: the literal zh-Hans copy, `String.format`-ed. */
+val DefaultConversationStrings = ConversationStrings { _, fallback, args ->
+    if (args.isEmpty()) fallback else String.format(java.util.Locale.getDefault(), fallback, *args)
+}
+
+/** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
+fun conversationStrings(context: Context): ConversationStrings =
+    ConversationStrings { id, _, args -> context.getString(id, *args) }
+
+/**
  * Linearizes permission callback ingress with turn cancellation. Checking a
  * standalone boolean and then assigning the StateFlow allowed a callback to
  * republish a stale prompt after Cancel had cleared it. Every phase transition
@@ -53,6 +88,7 @@ import kotlinx.coroutines.flow.transformWhile
  */
 internal class PermissionIngress(
     private val permissions: MutableStateFlow<PermissionPromptState?>,
+    private val strings: ConversationStrings = DefaultConversationStrings,
 ) {
     private enum class Phase { IDLE, ACCEPTING, CANCELLING, ENDED }
 
@@ -110,7 +146,7 @@ internal class PermissionIngress(
     @Synchronized
     fun publish(request: PermissionRequest) {
         if (phase == Phase.ACCEPTING) {
-            permissions.value = permissionRequestToPrompt(request)
+            permissions.value = permissionRequestToPrompt(request, strings)
         }
     }
 
@@ -359,6 +395,7 @@ fun reduceSessionEvent(
     prev: EngineSessionState,
     event: ClientEvent,
     nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
+    strings: SessionCatalogStrings = DefaultSessionCatalogStrings,
 ): EngineSessionState =
     when (event) {
         is ClientEvent.SessionList -> EngineSessionState.ready(
@@ -369,6 +406,7 @@ fun reduceSessionEvent(
                     messageCount = dto.messageCount.toInt(),
                     modifiedRfc3339 = dto.modifiedRfc3339,
                     nowEpochSeconds = nowEpochSeconds,
+                    strings = strings,
                 )
             },
         )
@@ -418,7 +456,10 @@ fun McpServerDto.toMcpServer(): MCPServer {
  * renders in conversation order. A free function with NO engine / Android
  * dependency so it is exhaustively unit-testable on the JVM.
  */
-fun sessionActivationFrom(event: ClientEvent): ActivatedSession? = when (event) {
+fun sessionActivationFrom(
+    event: ClientEvent,
+    strings: ConversationStrings = DefaultConversationStrings,
+): ActivatedSession? = when (event) {
     is ClientEvent.SessionStarted -> ActivatedSession(
         sessionId = canonicalSessionId(event.sessionId),
         transcript = emptyList(),
@@ -426,7 +467,7 @@ fun sessionActivationFrom(event: ClientEvent): ActivatedSession? = when (event) 
     )
     is ClientEvent.SessionResumed -> ActivatedSession(
         sessionId = canonicalSessionId(event.sessionId),
-        transcript = event.messages.map(::messageDtoToMessage),
+        transcript = event.messages.map { messageDtoToMessage(it, strings) },
         kind = SessionActivationKind.Resumed,
     )
     else -> null
@@ -440,9 +481,12 @@ fun sessionActivationFrom(event: ClientEvent): ActivatedSession? = when (event) 
  * [Role]: "user" → [Role.User]; everything else (assistant / system) → [Role.Ai]
  * (the avatar+markdown bubble). PURE — no engine / Android dependency.
  */
-fun messageDtoToMessage(dto: MessageDto): Message {
+fun messageDtoToMessage(
+    dto: MessageDto,
+    strings: ConversationStrings = DefaultConversationStrings,
+): Message {
     val role = if (dto.role.equals("user", ignoreCase = true)) Role.User else Role.Ai
-    return Message(role = role, text = messageDtoText(dto.blocks))
+    return Message(role = role, text = messageDtoText(dto.blocks, strings))
 }
 
 /**
@@ -462,16 +506,24 @@ fun messageDtoToMessage(dto: MessageDto): Message {
  * generated [MessageBlockDto] subclasses — a regen that adds a new block kind is
  * a compile error here, mirroring the engine's exhaustive `ContentBlock` match.
  */
-fun messageDtoText(blocks: List<MessageBlockDto>): String =
+fun messageDtoText(
+    blocks: List<MessageBlockDto>,
+    strings: ConversationStrings = DefaultConversationStrings,
+): String =
     blocks.mapNotNull { block ->
         val line: String = when (block) {
             is MessageBlockDto.Text -> block.text
             is MessageBlockDto.Thinking -> block.thinking
-            is MessageBlockDto.RedactedThinking -> "[已折叠的思考]"
-            is MessageBlockDto.CompactBoundary -> "对话已压缩"
-            is MessageBlockDto.ToolUse -> "调用工具 ${block.tool}…"
+            is MessageBlockDto.RedactedThinking -> strings.resolve(R.string.chat_redacted_thinking, "[已折叠的思考]")
+            is MessageBlockDto.CompactBoundary -> strings.resolve(R.string.chat_compacted_label, "对话已压缩")
+            is MessageBlockDto.ToolUse ->
+                strings.resolve(R.string.chat_tool_calling_label, "调用工具 %1\$s…", block.tool)
             is MessageBlockDto.ToolResult ->
-                if (block.isError) "工具失败" else "工具结果"
+                if (block.isError) {
+                    strings.resolve(R.string.chat_tool_result_failed, "工具失败")
+                } else {
+                    strings.resolve(R.string.chat_tool_result_label, "工具结果")
+                }
         }
         line.takeUnless { it.isBlank() }
     }.joinToString("\n\n")
@@ -553,7 +605,10 @@ sealed interface ReplyEvent {
  * everything else — `ClientEvent` is `#[non_exhaustive]`, so an `else` is
  * required and must mean "ignore, don't break the stream".
  */
-fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
+fun clientEventToReply(
+    event: ClientEvent,
+    strings: ConversationStrings = DefaultConversationStrings,
+): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
     is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
     is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)
@@ -563,7 +618,7 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
             ReplyEvent.ShellTool(shellStarted(event.id, event.inputJson))
         } else {
             ReplyEvent.ToolActivity(
-                label = "调用工具 ${event.tool}…",
+                label = strings.resolve(R.string.chat_tool_calling_label, "调用工具 %1\$s…", event.tool),
                 id = event.id,
                 tool = event.tool,
                 status = AgentToolStatus.Running,
@@ -577,7 +632,7 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
             )
         } else {
             ReplyEvent.ToolActivity(
-                label = "工具 ${event.tool} 运行中…",
+                label = strings.resolve(R.string.chat_tool_running_label, "工具 %1\$s 运行中…", event.tool),
                 id = event.id,
                 tool = event.tool,
                 status = AgentToolStatus.Running,
@@ -589,14 +644,14 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
             ReplyEvent.ShellTool(shellFinished(event.id, event.resultJson, event.isError))
         } else if (event.isError) {
             ReplyEvent.ToolActivity(
-                label = "工具 ${event.tool} 失败",
+                label = strings.resolve(R.string.chat_tool_failed_label, "工具 %1\$s 失败", event.tool),
                 id = event.id,
                 tool = event.tool,
                 status = AgentToolStatus.Failed,
             )
         } else {
             ReplyEvent.ToolActivity(
-                label = "工具 ${event.tool} 完成",
+                label = strings.resolve(R.string.chat_tool_completed_label, "工具 %1\$s 完成", event.tool),
                 id = event.id,
                 tool = event.tool,
                 status = AgentToolStatus.Completed,
@@ -625,11 +680,11 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
     is ClientEvent.CoordinatorStatus ->
         ReplyEvent.Coordinator(event.activeWorkers.toInt(), event.team)
     is ClientEvent.MessageComplete -> event.message
-        ?.let { ReplyEvent.Completed(messageDtoToMessage(it)) }
+        ?.let { ReplyEvent.Completed(messageDtoToMessage(it, strings)) }
         ?: ReplyEvent.End
     is ClientEvent.TurnEnded -> ReplyEvent.End
     is ClientEvent.Error -> ReplyEvent.Error(
-        userFacingEngineError(event.kind, event.message),
+        userFacingEngineError(event.kind, event.message, strings),
     )
     else -> null // model / session / permission / listings ride out-of-band flows
 }
@@ -642,7 +697,11 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
  * 401/404 are not rewritten: their original message still reaches the existing
  * auth/model error handling.
  */
-internal fun userFacingEngineError(kind: ErrorKindDto, message: String): String {
+internal fun userFacingEngineError(
+    kind: ErrorKindDto,
+    message: String,
+    strings: ConversationStrings = DefaultConversationStrings,
+): String {
     if (kind != ErrorKindDto.TRANSPORT) return message
     val normalized = message.lowercase()
     return when {
@@ -654,20 +713,20 @@ internal fun userFacingEngineError(kind: ErrorKindDto, message: String): String 
             "name or service not known",
             "nodename nor servname",
         ).any(normalized::contains) ->
-            "无法解析模型服务地址。请检查 VPN、私人 DNS 或当前网络后重试。"
+            strings.resolve(R.string.chat_error_dns, "无法解析模型服务地址。请检查 VPN、私人 DNS 或当前网络后重试。")
 
         listOf("certificate", "tls", "ssl").any(normalized::contains) ->
-            "模型服务安全连接失败。请检查系统时间、VPN 或证书设置后重试。"
+            strings.resolve(R.string.chat_error_tls, "模型服务安全连接失败。请检查系统时间、VPN 或证书设置后重试。")
 
         listOf("timeout", "timed out").any(normalized::contains) ->
-            "连接模型服务超时。请检查当前网络或 VPN 后重试。"
+            strings.resolve(R.string.chat_error_connect_timeout, "连接模型服务超时。请检查当前网络或 VPN 后重试。")
 
         listOf(
             "connection failed",
             "connect error",
             "error sending request",
         ).any(normalized::contains) ->
-            "无法连接模型服务。请检查当前网络或 VPN 后重试。"
+            strings.resolve(R.string.chat_error_connect_failed, "无法连接模型服务。请检查当前网络或 VPN 后重试。")
 
         else -> message
     }
@@ -688,11 +747,14 @@ internal fun userFacingEngineError(kind: ErrorKindDto, message: String): String 
  * the plain JVM (see `EngineReplyStreamTest`) — including the subscribe-before-
  * submit guarantee, which a flow-level test can prove without a native engine.
  */
-fun mapReplyStream(events: Flow<ClientEvent>): Flow<ReplyEvent> = flow {
+fun mapReplyStream(
+    events: Flow<ClientEvent>,
+    strings: ConversationStrings = DefaultConversationStrings,
+): Flow<ReplyEvent> = flow {
     emit(ReplyEvent.Thinking)
     emitAll(
         events.transformWhile { event ->
-            val reply = clientEventToReply(event) ?: return@transformWhile true
+            val reply = clientEventToReply(event, strings) ?: return@transformWhile true
             emit(reply)
             val terminal =
                 reply is ReplyEvent.End || reply is ReplyEvent.Error || reply is ReplyEvent.Completed
@@ -707,8 +769,11 @@ fun mapReplyStream(events: Flow<ClientEvent>): Flow<ReplyEvent> = flow {
  * built instead of falling back to branded mock sessions/messages.
  */
 class UnavailableConversationSource(
-    internal val reason: String = "移动端引擎当前不可用",
+    explicitReason: String? = null,
+    strings: ConversationStrings = DefaultConversationStrings,
 ) : ConversationSource {
+    internal val reason: String = explicitReason
+        ?: strings.resolve(R.string.chat_engine_unavailable, "移动端引擎当前不可用")
     override fun submit(text: String): Flow<ReplyEvent> = flow {
         emit(ReplyEvent.Error(reason))
         emit(ReplyEvent.End)
@@ -755,6 +820,7 @@ class EngineConversationSource private constructor(
     private val sessions: MutableStateFlow<EngineSessionState>,
     private val activeSession: MutableStateFlow<ActivatedSession?>,
     private val mcp: MutableStateFlow<List<MCPServer>>,
+    private val strings: ConversationStrings,
 ) : ConversationSource {
 
     override val clientEvents: Flow<ClientEvent> = events
@@ -807,7 +873,11 @@ class EngineConversationSource private constructor(
             handle.submit(ClientCommand.ListSessions(limit = null))
         } catch (t: Throwable) {
             sessions.value = EngineSessionState.error(
-                "会话列表加载失败：${t.message ?: t::class.simpleName}"
+                strings.resolve(
+                    R.string.chat_error_session_list_failed,
+                    "会话列表加载失败：%1\$s",
+                    "${t.message ?: t::class.simpleName}",
+                ),
             )
         }
     }
@@ -829,7 +899,7 @@ class EngineConversationSource private constructor(
         if (uuid.isBlank()) return
         handle.resumeEmptySession(
             sessionId = canonicalSessionId(uuid),
-            title = title.ifBlank { "新对话" },
+            title = title.ifBlank { strings.resolve(R.string.chat_new_conversation, "新对话") },
         )
     }
 
@@ -915,11 +985,16 @@ class EngineConversationSource private constructor(
                     emit(
                         ClientEvent.Error(
                             kind = ErrorKindDto.TRANSPORT,
-                            message = "引擎错误：${t.message ?: t::class.simpleName}",
+                            message = strings.resolve(
+                                R.string.chat_error_engine_submit_failed,
+                                "引擎错误：%1\$s",
+                                "${t.message ?: t::class.simpleName}",
+                            ),
                         ),
                     )
                 }
             },
+            strings,
         )
 
     override suspend fun cancel() {
@@ -961,13 +1036,17 @@ class EngineConversationSource private constructor(
             // callback or dropping assistant text / terminal events.
             val eventScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val eventRelay = LosslessEventRelay<ClientEvent>(eventScope)
+            // Resolves user-facing copy in the app's actual selected language
+            // (via Context.getString, so it honors AppLanguageStore's locale
+            // wrap) for every non-Composable emission site below.
+            val strings = conversationStrings(context)
             // The head parked permission request. The engine's outbound
             // `AndroidPermissionSink.onRequest` pushes each request here (mapped
             // to the UI render model); the prompt clears it on resolve. A plain
             // StateFlow (latest wins) is fine: only one request is parked per gate
             // at a time in the foundation (no concurrent worker permissions yet).
             val permissions = MutableStateFlow<PermissionPromptState?>(null)
-            val permissionIngress = PermissionIngress(permissions)
+            val permissionIngress = PermissionIngress(permissions, strings)
             // The engine's REAL model catalog + active id (SHIP-BLOCKER #2). The
             // listener below folds every inbound `ModelList` / `ModelChanged`
             // into this StateFlow via the pure `reduceModelEvent`, so the picker
@@ -1021,8 +1100,8 @@ class EngineConversationSource private constructor(
                     // (lifecycle events like SessionStarted ride the per-turn
                     // stream; the ViewModel acts on them there).
                     models.value = reduceModelEvent(models.value, event)
-                    sessions.value = reduceSessionEvent(sessions.value, event)
-                    sessionActivationFrom(event)?.let { activeSession.value = it }
+                    sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
+                    sessionActivationFrom(event, strings)?.let { activeSession.value = it }
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
                     if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
@@ -1037,7 +1116,9 @@ class EngineConversationSource private constructor(
             ) ?: run {
                 eventRelay.close()
                 eventScope.cancel()
-                return UnavailableConversationSource("移动端引擎不可用或未正确链接")
+                return UnavailableConversationSource(
+                    context.getString(R.string.chat_engine_build_failed),
+                )
             }
             // Ask the engine for its REAL catalog now that the handle exists; the
             // reply (`ModelList`) flows back through the listener above into the
@@ -1059,7 +1140,11 @@ class EngineConversationSource private constructor(
                     handle.submit(ClientCommand.ListSessions(limit = null))
                 } catch (t: Throwable) {
                     sessions.value = EngineSessionState.error(
-                        "会话列表加载失败：${t.message ?: t::class.simpleName}"
+                        strings.resolve(
+                            R.string.chat_error_session_list_failed,
+                            "会话列表加载失败：%1\$s",
+                            "${t.message ?: t::class.simpleName}",
+                        ),
                     )
                 }
             }
@@ -1074,6 +1159,7 @@ class EngineConversationSource private constructor(
                 sessions = sessions,
                 activeSession = activeSession,
                 mcp = mcp,
+                strings = strings,
             )
         }
     }

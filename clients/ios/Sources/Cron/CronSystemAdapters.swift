@@ -147,7 +147,7 @@ final class CronBackgroundTaskBridge: @unchecked Sendable {
 
 final class BestEffortBackgroundCronScheduler: CronBackgroundScheduling, Sendable {
     let mode: CronSchedulingMode = .bestEffortBackground
-    let note = "iOS 后台任务只保证“不会早于”最早执行时间，不保证准点启动；始终可以立即运行。"
+    let note = String(localized: "cron_scheduler_background_note")
 
     func schedule(taskIdentifier: String, earliestAtMs: UInt64?) async throws {
         #if canImport(BackgroundTasks)

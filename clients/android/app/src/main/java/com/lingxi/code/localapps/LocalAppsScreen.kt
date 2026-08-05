@@ -137,11 +137,11 @@ fun LocalAppsScreen(
         state.error?.let { message ->
             AlertDialog(
                 onDismissRequest = { onAction(LocalAppsAction.DismissError) },
-                title = { Text("应用操作失败") },
+                title = { Text(stringResource(R.string.local_apps_action_failed_title)) },
                 text = { Text(message) },
                 confirmButton = {
                     TextButton(onClick = { onAction(LocalAppsAction.DismissError) }) {
-                        Text("知道了")
+                        Text(stringResource(R.string.common_got_it))
                     }
                 },
             )
@@ -165,7 +165,7 @@ private fun LocalAppsLibraryScreen(
                 title = { Text(stringResource(R.string.local_apps_title)) },
                 navigationIcon = {
                     IconButton(onClick = onOpenDrawer) {
-                        Icon(Icons.Rounded.Menu, contentDescription = "打开侧栏")
+                        Icon(Icons.Rounded.Menu, contentDescription = stringResource(R.string.chat_open_side_drawer))
                     }
                 },
                 actions = {
@@ -201,7 +201,7 @@ private fun LocalAppsLibraryScreen(
                     FilterChip(
                         selected = state.templateFilter == null,
                         onClick = { onAction(LocalAppsAction.FilterTemplate(null)) },
-                        label = { Text("全部") },
+                        label = { Text(stringResource(R.string.local_apps_filter_all)) },
                     )
                 }
                 items(state.templates, key = { it.kind }) { template ->
@@ -251,9 +251,20 @@ private fun RuntimeModeBanner(mode: LocalAppRuntimeMode) {
         ) {
             Icon(Icons.Rounded.Apps, contentDescription = null)
             Column {
-                Text(if (direct) "Direct · Next 本地服务" else "Play · 静态应用", fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (direct) "使用生产构建，运行实例受设备内存配额控制。" else "使用已校验的静态导出产物。",
+                    if (direct) {
+                        stringResource(R.string.local_apps_mode_direct)
+                    } else {
+                        stringResource(R.string.local_apps_mode_play)
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    if (direct) {
+                        stringResource(R.string.local_apps_mode_direct_detail)
+                    } else {
+                        stringResource(R.string.local_apps_mode_play_detail)
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -295,11 +306,11 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
                 AssistChip(onClick = {}, label = { Text(app.workflow.label()) })
                 Box {
                     IconButton(onClick = { menuExpanded = true }) {
-                        Icon(Icons.Rounded.MoreVert, contentDescription = "应用操作")
+                        Icon(Icons.Rounded.MoreVert, contentDescription = stringResource(R.string.local_apps_card_menu_a11y))
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                         DropdownMenuItem(
-                            text = { Text("删除应用", color = MaterialTheme.colorScheme.error) },
+                            text = { Text(stringResource(R.string.local_apps_delete), color = MaterialTheme.colorScheme.error) },
                             onClick = { menuExpanded = false; confirmDelete = true },
                         )
                     }
@@ -319,13 +330,13 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
                     OutlinedButton(onClick = { onAction(LocalAppsAction.StopRuntime(app.id)) }) {
                         Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("停止")
+                        Text(stringResource(R.string.composer_stop))
                     }
                 } else if (app.workflow == LocalAppWorkflow.Ready) {
                     Button(onClick = { onAction(LocalAppsAction.StartRuntime(app.id)) }) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("启动")
+                        Text(stringResource(R.string.common_start))
                     }
                 }
             }
@@ -334,15 +345,15 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("删除 ${app.name}？") },
-            text = { Text("代码、构建产物、日志和本地 SQLite 数据都会永久删除。") },
+            title = { Text(stringResource(R.string.local_apps_delete_confirm, app.name)) },
+            text = { Text(stringResource(R.string.local_apps_delete_confirm_detail)) },
             confirmButton = {
                 Button(onClick = {
                     confirmDelete = false
                     onAction(LocalAppsAction.DeleteApp(app.id))
-                }) { Text("删除应用") }
+                }) { Text(stringResource(R.string.local_apps_delete)) }
             },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 }
@@ -362,8 +373,8 @@ private fun LocalAppTemplatePicker(state: LocalAppsUiState, onAction: (LocalApps
             OutlinedTextField(
                 value = state.createName,
                 onValueChange = { onAction(LocalAppsAction.ChangeCreateName(it)) },
-                label = { Text("应用名称") },
-                supportingText = { Text("稍后可在设计器中继续完善用途和目标用户。") },
+                label = { Text(stringResource(R.string.local_apps_name)) },
+                supportingText = { Text(stringResource(R.string.local_apps_create_name_hint)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -372,7 +383,7 @@ private fun LocalAppTemplatePicker(state: LocalAppsUiState, onAction: (LocalApps
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             } else if (state.templates.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("模板尚未从本地引擎加载")
+                    Text(stringResource(R.string.local_apps_templates_not_loaded))
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -391,7 +402,14 @@ private fun LocalAppTemplatePicker(state: LocalAppsUiState, onAction: (LocalApps
                             Column(Modifier.padding(16.dp)) {
                                 Text(template.name, style = MaterialTheme.typography.titleMedium)
                                 Text(template.description, style = MaterialTheme.typography.bodyMedium)
-                                Text("${template.steps.size} 步 · 模板 v${template.version}", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    stringResource(
+                                        R.string.local_apps_template_meta,
+                                        template.steps.size,
+                                        template.version.toString(),
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
                             }
                         }
                     }
@@ -400,7 +418,7 @@ private fun LocalAppTemplatePicker(state: LocalAppsUiState, onAction: (LocalApps
                             enabled = state.createName.isNotBlank() && state.selectedTemplateKind != null,
                             onClick = { onAction(LocalAppsAction.CreateSelectedTemplate) },
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text("创建并开始设计") }
+                        ) { Text(stringResource(R.string.local_apps_create_and_design)) }
                     }
                     item { Spacer(Modifier.height(20.dp)) }
                 }
@@ -437,7 +455,7 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
                         enabled = stepIndex > 0,
                         onClick = { onAction(LocalAppsAction.ChangeStep(stepIndex - 1)) },
                         modifier = Modifier.weight(1f),
-                    ) { Text("上一步") }
+                    ) { Text(stringResource(R.string.local_apps_previous)) }
                     Button(
                         enabled = currentStepComplete,
                         onClick = {
@@ -445,7 +463,15 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
                             else onAction(LocalAppsAction.ConfirmDesign)
                         },
                         modifier = Modifier.weight(1f),
-                    ) { Text(if (stepIndex < steps.lastIndex) "下一步" else stringResource(R.string.local_apps_confirm_generate)) }
+                    ) {
+                        Text(
+                            if (stepIndex < steps.lastIndex) {
+                                stringResource(R.string.local_apps_next)
+                            } else {
+                                stringResource(R.string.local_apps_confirm_generate)
+                            },
+                        )
+                    }
                 }
             }
         },
@@ -458,7 +484,10 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
-            Text("步骤 ${stepIndex + 1} / ${steps.size}", style = MaterialTheme.typography.labelLarge)
+            Text(
+                stringResource(R.string.local_apps_step_progress, stepIndex + 1, steps.size),
+                style = MaterialTheme.typography.labelLarge,
+            )
             LinearProgressIndicator(
                 progress = { if (steps.isEmpty()) 0f else (stepIndex + 1).toFloat() / steps.size },
                 modifier = Modifier.fillMaxWidth(),
@@ -477,13 +506,16 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
                 }
             }
             OutlinedButton(onClick = { onAction(LocalAppsAction.RequestSuggestion) }, modifier = Modifier.fillMaxWidth()) {
-                Text("让 Agent 提出设计建议")
+                Text(stringResource(R.string.local_apps_request_suggestion))
             }
             designer.suggestion?.let { suggestion ->
                 SuggestionPanel(suggestion = suggestion, onAction = onAction)
             }
             designer.conflictRevision?.let {
-                Text("设计已在其他位置更新到版本 $it，已重新加载，请检查后继续。", color = MaterialTheme.colorScheme.error)
+                Text(
+                    stringResource(R.string.local_apps_design_conflict_reloaded, it.toString()),
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
             Spacer(Modifier.height(84.dp))
         }
@@ -550,7 +582,14 @@ private fun LocalAppDynamicField(
                 LocalAppFieldKind.Boolean -> {
                     val checked = (value as? LocalAppDesignValue.Toggle)?.value == true
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (checked) "已启用" else "未启用", modifier = Modifier.weight(1f))
+                        Text(
+                            if (checked) {
+                                stringResource(R.string.local_apps_field_enabled)
+                            } else {
+                                stringResource(R.string.settings_status_not_enabled)
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
                         Switch(checked = checked, onCheckedChange = { onValueChange(LocalAppDesignValue.Toggle(it), false) })
                     }
                 }
@@ -558,8 +597,16 @@ private fun LocalAppDynamicField(
                 LocalAppFieldKind.Density -> {
                     val compact = (value as? LocalAppDesignValue.Density)?.compact == true
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = compact, onClick = { onValueChange(LocalAppDesignValue.Density(true), false) }, label = { Text("紧凑") })
-                        FilterChip(selected = !compact, onClick = { onValueChange(LocalAppDesignValue.Density(false), false) }, label = { Text("舒适") })
+                        FilterChip(
+                            selected = compact,
+                            onClick = { onValueChange(LocalAppDesignValue.Density(true), false) },
+                            label = { Text(stringResource(R.string.settings_density_compact)) },
+                        )
+                        FilterChip(
+                            selected = !compact,
+                            onClick = { onValueChange(LocalAppDesignValue.Density(false), false) },
+                            label = { Text(stringResource(R.string.settings_density_comfortable)) },
+                        )
                     }
                 }
 
@@ -569,7 +616,11 @@ private fun LocalAppDynamicField(
                     val values = (value as? LocalAppDesignValue.StringList)?.values.orEmpty()
                     StringListEditor(
                         values = values,
-                        placeholder = if (field.kind == LocalAppFieldKind.DomainList) "example.com" else "添加一项",
+                        placeholder = if (field.kind == LocalAppFieldKind.DomainList) {
+                            "example.com"
+                        } else {
+                            stringResource(R.string.local_apps_add_item_placeholder)
+                        },
                         validator = { candidate ->
                             candidate.isNotBlank() &&
                                 (field.kind != LocalAppFieldKind.DomainList || isValidDomain(candidate))
@@ -599,7 +650,7 @@ private fun StringListEditor(
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(item, modifier = Modifier.weight(1f))
             IconButton(onClick = { onChange(values.filterIndexed { i, _ -> i != index }) }) {
-                Icon(Icons.Rounded.Close, contentDescription = "删除 $item")
+                Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.local_apps_delete_item_a11y, item))
             }
         }
     }
@@ -612,7 +663,7 @@ private fun StringListEditor(
                 if (candidate.isNotEmpty() && candidate !in values) onChange(values + candidate)
                 draft = ""
             },
-        ) { Icon(Icons.Rounded.Add, contentDescription = "添加") }
+        ) { Icon(Icons.Rounded.Add, contentDescription = stringResource(R.string.local_apps_add_a11y)) }
     }
 }
 
@@ -645,12 +696,12 @@ private fun DataFieldListEditor(fields: List<LocalAppDataField>, onChange: (List
                     OutlinedTextField(
                         value = field.label,
                         onValueChange = { label -> onChange(fields.updated(index, field.copy(label = label))) },
-                        label = { Text("字段名称") },
+                        label = { Text(stringResource(R.string.local_apps_data_field_name)) },
                         singleLine = true,
                         modifier = Modifier.weight(1f),
                     )
                     IconButton(onClick = { onChange(fields.filterIndexed { i, _ -> i != index }) }) {
-                        Icon(Icons.Rounded.Close, contentDescription = "删除字段")
+                        Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.local_apps_field_delete))
                     }
                 }
                 Box {
@@ -672,21 +723,22 @@ private fun DataFieldListEditor(fields: List<LocalAppDataField>, onChange: (List
                         checked = field.required,
                         onCheckedChange = { onChange(fields.updated(index, field.copy(required = it))) },
                     )
-                    Text("必填")
+                    Text(stringResource(R.string.local_apps_field_required))
                 }
             }
         }
     }
+    val newFieldLabel = stringResource(R.string.local_apps_new_field_default_label)
     OutlinedButton(
         onClick = {
             val id = generateFieldId(fields)
-            onChange(fields + LocalAppDataField(id, "新字段", LocalAppDataFieldType.Text, false))
+            onChange(fields + LocalAppDataField(id, newFieldLabel, LocalAppDataFieldType.Text, false))
         },
         modifier = Modifier.fillMaxWidth(),
     ) {
         Icon(Icons.Rounded.Add, contentDescription = null)
         Spacer(Modifier.width(6.dp))
-        Text("添加数据字段")
+        Text(stringResource(R.string.local_apps_field_add))
     }
 }
 
@@ -694,14 +746,14 @@ private fun DataFieldListEditor(fields: List<LocalAppDataField>, onChange: (List
 private fun SuggestionPanel(suggestion: LocalAppSuggestion, onAction: (LocalAppsAction) -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(14.dp)) {
-            Text("Agent 建议", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.local_apps_agent_suggestion), style = MaterialTheme.typography.titleMedium)
             Text(suggestion.summary)
             suggestion.changes.forEach { change ->
                 Text("${change.label}：${change.before} → ${change.after}", style = MaterialTheme.typography.bodySmall)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onAction(LocalAppsAction.ApplySuggestion) }) { Text("应用建议") }
-                TextButton(onClick = { onAction(LocalAppsAction.DismissSuggestion) }) { Text("忽略") }
+                Button(onClick = { onAction(LocalAppsAction.ApplySuggestion) }) { Text(stringResource(R.string.local_apps_apply_suggestion)) }
+                TextButton(onClick = { onAction(LocalAppsAction.DismissSuggestion) }) { Text(stringResource(R.string.local_apps_ignore)) }
             }
         }
     }
@@ -719,7 +771,14 @@ private fun LocalAppPreviewScreen(
     val preview = state.previews[appId]
     val generation = state.generation[appId]
     var feedback by remember(appId) { mutableStateOf("") }
-    Scaffold(topBar = { LocalAppsTopBar(app?.name ?: "应用预览", onBack = { onAction(LocalAppsAction.Back) }) }) { padding ->
+    Scaffold(
+        topBar = {
+            LocalAppsTopBar(
+                app?.name ?: stringResource(R.string.local_apps_preview_title),
+                onBack = { onAction(LocalAppsAction.Back) },
+            )
+        },
+    ) { padding ->
         Column(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
@@ -736,7 +795,7 @@ private fun LocalAppPreviewScreen(
                 Button(
                     onClick = { onAction(LocalAppsAction.OpenDesigner(appId)) },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("继续设计") }
+                ) { Text(stringResource(R.string.local_apps_continue_design)) }
             }
             // Only the WebView needs a url; approval and revision need just the
             // gate's interaction id, so they must stay reachable while the
@@ -754,21 +813,28 @@ private fun LocalAppPreviewScreen(
                     )
                 } else {
                     Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                        Text("预览服务尚未就绪，仍可批准或提交修改。")
+                        Text(stringResource(R.string.local_apps_preview_not_ready_detail))
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { onAction(LocalAppsAction.ApprovePreview(appId)) }) { Text("批准预览") }
-                    OutlinedButton(onClick = { onAction(LocalAppsAction.StartRuntime(appId)) }) { Text("重新加载") }
+                    Button(onClick = { onAction(LocalAppsAction.ApprovePreview(appId)) }) { Text(stringResource(R.string.local_apps_approve_preview)) }
+                    OutlinedButton(onClick = { onAction(LocalAppsAction.StartRuntime(appId)) }) { Text(stringResource(R.string.local_apps_ui_action_reload)) }
                 }
-                OutlinedTextField(value = feedback, onValueChange = { feedback = it }, label = { Text("反馈修改") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = feedback,
+                    onValueChange = { feedback = it },
+                    label = { Text(stringResource(R.string.local_apps_feedback)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Button(
                     enabled = feedback.isNotBlank(),
                     onClick = { onAction(LocalAppsAction.SubmitRevision(appId, feedback)); feedback = "" },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("提交给 Agent") }
+                ) { Text(stringResource(R.string.local_apps_submit_to_agent)) }
             } else if (generation == null) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("正在等待生成任务…") }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(stringResource(R.string.local_apps_awaiting_generation_job))
+                }
             }
         }
     }
@@ -783,7 +849,14 @@ private fun LocalAppDetailsScreen(
     onExternalNavigation: (String) -> Unit,
 ) {
     val app = state.apps.firstOrNull { it.id == appId }
-    Scaffold(topBar = { LocalAppsTopBar(app?.name ?: "应用详情", onBack = { onAction(LocalAppsAction.Back) }) }) { padding ->
+    Scaffold(
+        topBar = {
+            LocalAppsTopBar(
+                app?.name ?: stringResource(R.string.local_apps_detail_title),
+                onBack = { onAction(LocalAppsAction.Back) },
+            )
+        },
+    ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -811,7 +884,10 @@ private fun LocalAppDetailsScreen(
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
-                        DetailsPlaceholder("应用尚未运行", "启动后可在此预览。")
+                        DetailsPlaceholder(
+                            stringResource(R.string.local_apps_not_running_title),
+                            stringResource(R.string.local_apps_not_running_detail),
+                        )
                     }
                 }
                 LocalAppDetailsTab.Data -> LocalAppDataDetails(state.details[appId])
@@ -830,9 +906,13 @@ private fun LocalAppDetailsScreen(
 @Composable
 private fun LocalAppDataDetails(details: LocalAppDetails?) {
     if (details == null) {
-        DetailsPlaceholder("正在加载数据结构", "应用详情返回后会显示受控 SQLite 集合。")
+        DetailsPlaceholder(
+            stringResource(R.string.local_apps_loading_data_title),
+            stringResource(R.string.local_apps_loading_data_detail),
+        )
         return
     }
+    val requiredSuffix = stringResource(R.string.local_apps_required_suffix)
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -840,13 +920,18 @@ private fun LocalAppDataDetails(details: LocalAppDetails?) {
         item {
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("受控本地数据", style = MaterialTheme.typography.titleMedium)
-                    Text("SQLite 由 Rust AppService 独占管理。页面与 Agent 只能使用 collection API；原始 SQL 不会暴露。")
+                    Text(stringResource(R.string.local_apps_data_section_title), style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.local_apps_data_section_detail))
                 }
             }
         }
         if (details.collections.isEmpty()) {
-            item { Text("此应用未声明持久化集合。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item {
+                Text(
+                    stringResource(R.string.local_apps_no_collections),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         items(details.collections, key = { it.id }) { collection ->
             Card {
@@ -857,10 +942,11 @@ private fun LocalAppDataDetails(details: LocalAppDetails?) {
                         HorizontalDivider()
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(field.label)
+                            val typeLabel = field.type.label()
                             Text(
                                 buildString {
-                                    append(field.type.label())
-                                    if (field.required) append(" · 必填")
+                                    append(typeLabel)
+                                    if (field.required) append(requiredSuffix)
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -879,7 +965,7 @@ private fun LocalAppCodeDetails(appId: String, details: LocalAppDetails?) {
     val scope = rememberCoroutineScope()
     val browserResult = remember(appId, details?.workspaceRelativePath) {
         details?.workspaceRelativePath?.let { path ->
-            runCatching { LocalAppCodeBrowser(context.filesDir, path) }
+            runCatching { LocalAppCodeBrowser(context.filesDir, path, strings = localAppsStrings(context)) }
         }
     }
     val browser = browserResult?.getOrNull()
@@ -900,13 +986,20 @@ private fun LocalAppCodeDetails(appId: String, details: LocalAppDetails?) {
 
     LaunchedEffect(browser) { refresh() }
     if (details == null) {
-        DetailsPlaceholder("正在加载工作区", "应用详情返回后会显示可编辑源码。")
+        DetailsPlaceholder(
+            stringResource(R.string.local_apps_loading_workspace_title),
+            stringResource(R.string.local_apps_loading_workspace_detail),
+        )
         return
     }
     if (browser == null) {
-        DetailsPlaceholder("无法打开工作区", message ?: "工作区路径无效。")
+        DetailsPlaceholder(
+            stringResource(R.string.local_apps_workspace_open_failed_title),
+            message ?: stringResource(R.string.local_apps_workspace_path_invalid),
+        )
         return
     }
+    val savedMessage = stringResource(R.string.local_apps_source_saved_message)
 
     if (selectedPath == null) {
         LazyColumn(
@@ -916,13 +1009,13 @@ private fun LocalAppCodeDetails(appId: String, details: LocalAppDetails?) {
             item {
                 Text(details.workspaceRelativePath, style = MaterialTheme.typography.bodySmall)
                 Text(
-                    "仅显示 1 MiB 以内的文本源码；符号链接、构建产物和私有目录已排除。依赖文件可编辑，但不受支持的版本会在构建校验时被拒绝。",
+                    stringResource(R.string.local_apps_source_browser_notice),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            if (!loading && files.isEmpty()) item { Text("暂无可编辑源码。") }
+            if (!loading && files.isEmpty()) item { Text(stringResource(R.string.local_apps_source_no_editable_files)) }
             items(files, key = { it.relativePath }) { file ->
                 Card(onClick = {
                     scope.launch {
@@ -951,19 +1044,19 @@ private fun LocalAppCodeDetails(appId: String, details: LocalAppDetails?) {
             message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = { selectedPath = null; editorText = "" }, modifier = Modifier.weight(1f)) {
-                    Text("关闭")
+                    Text(stringResource(R.string.common_close))
                 }
                 Button(
                     onClick = {
                         val path = selectedPath ?: return@Button
                         scope.launch {
                             runCatching { withContext(Dispatchers.IO) { browser.save(path, editorText) } }
-                                .onSuccess { message = "已保存；下次构建会重新校验源码。" }
+                                .onSuccess { message = savedMessage }
                                 .onFailure { message = it.message }
                         }
                     },
                     modifier = Modifier.weight(1f),
-                ) { Text("保存") }
+                ) { Text(stringResource(R.string.voice_save_button)) }
             }
         }
     }
@@ -981,10 +1074,10 @@ private fun LocalAppHistoryDetails(
         modifier = Modifier.fillMaxSize().padding(16.dp),
     ) {
         item {
-            Text("恢复只回退 Git 管理的源码，SQLite 数据不会回滚。恢复前会自动创建 pre_restore 检查点。")
+            Text(stringResource(R.string.local_apps_history_notice))
         }
         if (details == null) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-        if (details != null && details.checkpoints.isEmpty()) item { Text("尚无检查点。") }
+        if (details != null && details.checkpoints.isEmpty()) item { Text(stringResource(R.string.local_apps_no_checkpoints_detail)) }
         items(details?.checkpoints.orEmpty(), key = { it.id }) { checkpoint ->
             Card {
                 Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -996,7 +1089,7 @@ private fun LocalAppHistoryDetails(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    TextButton(onClick = { pendingRestore = checkpoint }) { Text("恢复") }
+                    TextButton(onClick = { pendingRestore = checkpoint }) { Text(stringResource(R.string.local_apps_checkpoint_restore_action)) }
                 }
             }
         }
@@ -1004,15 +1097,19 @@ private fun LocalAppHistoryDetails(
     pendingRestore?.let { checkpoint ->
         AlertDialog(
             onDismissRequest = { pendingRestore = null },
-            title = { Text("恢复源码检查点？") },
-            text = { Text("将恢复到“${checkpoint.label}”。当前源码会先保存为 pre_restore，应用数据保持不变。") },
+            title = { Text(stringResource(R.string.local_apps_restore_checkpoint_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(R.string.local_apps_restore_checkpoint_confirm_detail, checkpoint.label),
+                )
+            },
             confirmButton = {
                 Button(onClick = {
                     pendingRestore = null
                     onAction(LocalAppsAction.RestoreCheckpoint(appId, checkpoint.id))
-                }) { Text("继续") }
+                }) { Text(stringResource(R.string.onboarding_cta_continue)) }
             },
-            dismissButton = { TextButton(onClick = { pendingRestore = null }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { pendingRestore = null }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 }
@@ -1029,44 +1126,49 @@ private fun LocalAppPermissionsDetails(
         modifier = Modifier.fillMaxSize().padding(16.dp),
     ) {
         item {
-            Text("能力授权", style = MaterialTheme.typography.titleMedium)
-            Text("首次修改数据、控制 UI 或访问声明域名时，系统会提供允许一次、本次会话或始终允许。未授权请求默认拒绝。")
+            Text(stringResource(R.string.local_apps_capability_section_title), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.local_apps_capability_section_detail))
             OutlinedButton(onClick = { confirmReset = true }) {
-                Text("撤销全部授权")
+                Text(stringResource(R.string.local_apps_permissions_reset))
             }
         }
         item {
-            Text("清单声明的 HTTPS 域名", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.local_apps_manifest_domains_title), style = MaterialTheme.typography.titleMedium)
             if (details?.allowedDomains.isNullOrEmpty()) {
-                Text("无（默认 CSP 禁止外网）", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.local_apps_no_domains_detail), color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 details?.allowedDomains.orEmpty().forEach { Text("• $it") }
             }
         }
         item {
-            Text("运行日志", style = MaterialTheme.typography.titleMedium)
-            Text("状态：${details?.runtime?.state?.label() ?: "加载中"}")
-            details?.runtime?.mode?.let { Text("模式：${it.name}") }
-            details?.runtime?.recovery?.let { Text("恢复：$it") }
+            Text(stringResource(R.string.local_apps_runtime_log_title), style = MaterialTheme.typography.titleMedium)
+            Text(
+                stringResource(
+                    R.string.local_apps_runtime_log_status,
+                    details?.runtime?.state?.label() ?: stringResource(R.string.local_apps_loading_generic),
+                ),
+            )
+            details?.runtime?.mode?.let { Text(stringResource(R.string.local_apps_runtime_log_mode, it.name)) }
+            details?.runtime?.recovery?.let { Text(stringResource(R.string.local_apps_runtime_log_recovery, it)) }
             details?.runtime?.detail?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (details?.runtime?.detail == null) {
-                Text("当前没有运行错误。完整构建日志保存在应用 logs 目录，并可由受控 MCP read_logs 查询。")
+                Text(stringResource(R.string.local_apps_runtime_log_none))
             }
         }
     }
     if (confirmReset) {
         AlertDialog(
             onDismissRequest = { confirmReset = false },
-            title = { Text("撤销该应用的全部授权？") },
-            text = { Text("会话授权和持久授权都会清除。下次修改数据、控制界面或访问域名时会重新询问。") },
+            title = { Text(stringResource(R.string.local_apps_permissions_reset_title)) },
+            text = { Text(stringResource(R.string.local_apps_permissions_reset_confirm_detail)) },
             confirmButton = {
                 Button(onClick = {
                     confirmReset = false
                     onAction(LocalAppsAction.ResetPermissions(appId))
-                }) { Text("撤销") }
+                }) { Text(stringResource(R.string.local_apps_revoke_action)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmReset = false }) { Text("取消") }
+                TextButton(onClick = { confirmReset = false }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
@@ -1134,7 +1236,10 @@ private fun AuthorizationDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(request.reason)
-                Text("应用：${request.appId}", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    stringResource(R.string.local_apps_authorization_app_id, request.appId),
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Button(
                     onClick = { onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowOnce)) },
                     modifier = Modifier.fillMaxWidth(),
@@ -1165,49 +1270,53 @@ private fun LocalAppsTopBar(title: String, onBack: () -> Unit) {
         title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = stringResource(R.string.local_apps_ui_action_back))
             }
         },
     )
 }
 
+@Composable
 private fun LocalAppWorkflow.label(): String = when (this) {
-    LocalAppWorkflow.CollectingSpec -> "设计中"
-    LocalAppWorkflow.AwaitingSpecConfirmation -> "待确认设计"
-    LocalAppWorkflow.Generating -> "生成中"
-    LocalAppWorkflow.Validating -> "校验中"
-    LocalAppWorkflow.AwaitingPreviewConfirmation -> "待批准预览"
-    LocalAppWorkflow.Revising -> "修改中"
-    LocalAppWorkflow.Ready -> "就绪"
-    LocalAppWorkflow.GenerationFailed -> "生成失败"
-    LocalAppWorkflow.ValidationFailed -> "校验失败"
+    LocalAppWorkflow.CollectingSpec -> stringResource(R.string.local_apps_workflow_collecting_spec)
+    LocalAppWorkflow.AwaitingSpecConfirmation -> stringResource(R.string.local_apps_workflow_awaiting_spec_confirm)
+    LocalAppWorkflow.Generating -> stringResource(R.string.chat_run_generating)
+    LocalAppWorkflow.Validating -> stringResource(R.string.local_apps_workflow_validating_label)
+    LocalAppWorkflow.AwaitingPreviewConfirmation -> stringResource(R.string.local_apps_workflow_awaiting_preview_label)
+    LocalAppWorkflow.Revising -> stringResource(R.string.local_apps_workflow_revising_label)
+    LocalAppWorkflow.Ready -> stringResource(R.string.settings_linux_state_ready)
+    LocalAppWorkflow.GenerationFailed -> stringResource(R.string.local_apps_workflow_generation_failed)
+    LocalAppWorkflow.ValidationFailed -> stringResource(R.string.local_apps_workflow_validation_failed)
 }
 
+@Composable
 private fun LocalAppRuntimeState.label(): String = when (this) {
-    LocalAppRuntimeState.Stopped -> "已停止"
-    LocalAppRuntimeState.Starting -> "启动中"
-    LocalAppRuntimeState.Running -> "运行中"
-    LocalAppRuntimeState.Stopping -> "停止中"
-    LocalAppRuntimeState.Failed -> "运行失败"
+    LocalAppRuntimeState.Stopped -> stringResource(R.string.local_apps_runtime_stopped)
+    LocalAppRuntimeState.Starting -> stringResource(R.string.settings_cu_state_starting)
+    LocalAppRuntimeState.Running -> stringResource(R.string.local_apps_runtime_running)
+    LocalAppRuntimeState.Stopping -> stringResource(R.string.settings_cu_state_stopping)
+    LocalAppRuntimeState.Failed -> stringResource(R.string.chat_run_status_failed)
 }
 
+@Composable
 private fun LocalAppDataFieldType.label(): String = when (this) {
-    LocalAppDataFieldType.Text -> "文本"
-    LocalAppDataFieldType.LongText -> "长文本"
-    LocalAppDataFieldType.Integer -> "整数"
-    LocalAppDataFieldType.Decimal -> "小数"
-    LocalAppDataFieldType.Boolean -> "布尔"
-    LocalAppDataFieldType.DateTime -> "日期时间"
-    LocalAppDataFieldType.Enum -> "枚举"
-    LocalAppDataFieldType.ImageRef -> "图片引用"
+    LocalAppDataFieldType.Text -> stringResource(R.string.local_apps_data_field_type_text)
+    LocalAppDataFieldType.LongText -> stringResource(R.string.local_apps_data_field_type_long_text)
+    LocalAppDataFieldType.Integer -> stringResource(R.string.local_apps_data_field_type_integer)
+    LocalAppDataFieldType.Decimal -> stringResource(R.string.local_apps_data_field_type_decimal)
+    LocalAppDataFieldType.Boolean -> stringResource(R.string.local_apps_data_field_type_boolean)
+    LocalAppDataFieldType.DateTime -> stringResource(R.string.local_apps_data_field_type_datetime)
+    LocalAppDataFieldType.Enum -> stringResource(R.string.local_apps_data_field_type_enum)
+    LocalAppDataFieldType.ImageRef -> stringResource(R.string.local_apps_data_field_type_image_ref)
 }
 
+@Composable
 private fun LocalAppDetailsTab.label(): String = when (this) {
-    LocalAppDetailsTab.Preview -> "预览"
-    LocalAppDetailsTab.Data -> "数据"
-    LocalAppDetailsTab.Code -> "代码"
-    LocalAppDetailsTab.History -> "历史"
-    LocalAppDetailsTab.PermissionsLogs -> "权限/日志"
+    LocalAppDetailsTab.Preview -> stringResource(R.string.local_apps_section_preview)
+    LocalAppDetailsTab.Data -> stringResource(R.string.local_apps_section_data)
+    LocalAppDetailsTab.Code -> stringResource(R.string.local_apps_section_code)
+    LocalAppDetailsTab.History -> stringResource(R.string.local_apps_section_history)
+    LocalAppDetailsTab.PermissionsLogs -> stringResource(R.string.local_apps_section_permissions_logs)
 }
 
 private fun LocalAppDesignField.emptyValue(): LocalAppDesignValue = when (kind) {

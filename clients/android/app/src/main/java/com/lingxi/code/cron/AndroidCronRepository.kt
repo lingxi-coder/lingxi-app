@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.work.WorkManager
+import com.lingxi.code.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -141,7 +142,8 @@ class AndroidCronRepository private constructor(
             }.getOrElse { error ->
                 _state.value.copy(
                     loading = false,
-                    errorMessage = error.message ?: "定时任务读取失败",
+                    errorMessage = error.message
+                        ?: appContext.getString(R.string.cron_load_failed_default),
                     exactAlarmAllowed = CronAlarmScheduler.canScheduleExact(appContext),
                     networkAvailable = hasConnectedNetwork(),
                     workManagerStateCounts = _state.value.workManagerStateCounts,
@@ -176,7 +178,7 @@ class AndroidCronRepository private constructor(
         scopeId = scopeId,
     ) { scope ->
         require(gateway.list(scope).any { it.id == taskId }) {
-            "任务不属于当前 Project 或已被删除"
+            appContext.getString(R.string.cron_task_not_in_project)
         }
         gateway.update(scope, taskId, cron.trim(), prompt.trim(), recurring)
     }
@@ -188,7 +190,11 @@ class AndroidCronRepository private constructor(
         ) { scope ->
             gateway.delete(scope, taskId).also { deleted ->
                 if (deleted) {
-                    historyStore.cancelUnfinished(scope.scopeId, taskId, "任务已删除")
+                    historyStore.cancelUnfinished(
+                        scope.scopeId,
+                        taskId,
+                        appContext.getString(R.string.cron_task_deleted_message),
+                    )
                 }
             }
         }
@@ -198,7 +204,9 @@ class AndroidCronRepository private constructor(
             mutationMutex.withLock {
                 val scope = requireScope(scopeId)
                 val task = gateway.list(scope).firstOrNull { it.id == taskId }
-                    ?: throw IllegalArgumentException("任务不属于当前 Project 或已被删除")
+                    ?: throw IllegalArgumentException(
+                        appContext.getString(R.string.cron_task_not_in_project),
+                    )
                 val now = System.currentTimeMillis()
                 val record = historyStore.enqueue(
                     scope = scope,
@@ -207,7 +215,9 @@ class AndroidCronRepository private constructor(
                     scheduledAtMs = now,
                     triggeredAtMs = now,
                     manual = true,
-                ) ?: throw IllegalStateException("该任务已有排队或运行中的执行")
+                ) ?: throw IllegalStateException(
+                    appContext.getString(R.string.cron_task_already_running),
+                )
                 CronWorkScheduler.enqueueExecutionChain(appContext, listOf(record))
                 CronCoordinator(appContext, this@AndroidCronRepository).reconcile("run-now")
                 record
@@ -260,7 +270,9 @@ class AndroidCronRepository private constructor(
     internal fun scope(scopeId: String): CronScope? = scopeScanner.find(scopeId)
 
     private fun requireScope(scopeId: String): CronScope =
-        scope(scopeId) ?: throw IllegalArgumentException("Project 工作区不存在或已失效")
+        scope(scopeId) ?: throw IllegalArgumentException(
+            appContext.getString(R.string.cron_workspace_unavailable),
+        )
 
     private fun hasConnectedNetwork(): Boolean {
         val manager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager

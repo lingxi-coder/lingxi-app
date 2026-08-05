@@ -15,6 +15,7 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.lingxi.code.R
 import com.lingxi.code.bindings.CronFireStatusDto
 import com.lingxi.code.bindings.FiredCronJobDto
 import java.util.concurrent.TimeUnit
@@ -215,7 +216,10 @@ class CronExecutionWorker(
         val existing = history.record(id) ?: return Result.success()
         if (existing.status.isTerminal) return Result.success()
         val scope = repository.scope(existing.scopeId)
-            ?: return terminalFailure(existing, "Project 工作区不存在或已失效")
+            ?: return terminalFailure(
+                existing,
+                applicationContext.getString(R.string.cron_workspace_unavailable),
+            )
         history.markRunning(id, runAttemptCount + 1)
         repository.refresh()
         return try {
@@ -230,26 +234,38 @@ class CronExecutionWorker(
         } catch (timeout: TimeoutCancellationException) {
             terminalFailure(
                 existing,
-                "执行超过 3 分钟",
+                applicationContext.getString(R.string.cron_execution_timeout_message),
                 status = CronRunStatus.TimedOut,
             )
         } catch (cancel: CancellationException) {
-            history.markRetry(id, runAttemptCount + 1, "系统中断，等待重新调度")
+            history.markRetry(
+                id,
+                runAttemptCount + 1,
+                applicationContext.getString(R.string.cron_execution_interrupted_retry_message),
+            )
             repository.refresh()
             throw cancel
         } catch (error: Throwable) {
             if (error is CronPermanentExecutionException || !isRetryableCronFailure(error.message)) {
-                terminalFailure(existing, error.message ?: "定时任务执行失败")
+                terminalFailure(
+                    existing,
+                    error.message
+                        ?: applicationContext.getString(R.string.cron_execution_failed_default_android),
+                )
             } else if (runAttemptCount + 1 < MAX_EXECUTION_ATTEMPTS) {
                 history.markRetry(
                     id,
                     runAttemptCount + 1,
-                    error.message ?: "临时网络或服务错误",
+                    error.message
+                        ?: applicationContext.getString(R.string.cron_temporary_network_error),
                 )
                 repository.refresh()
                 Result.retry()
             } else {
-                terminalFailure(existing, error.message ?: "重试次数已耗尽")
+                terminalFailure(
+                    existing,
+                    error.message ?: applicationContext.getString(R.string.cron_retries_exhausted),
+                )
             }
         } finally {
             withContext(NonCancellable) {
@@ -281,7 +297,8 @@ class CronExecutionWorker(
                     history.markTerminal(
                         queued.runId,
                         CronRunStatus.Succeeded,
-                        resultText = fired.resultText?.ifBlank { null } ?: "已完成",
+                        resultText = fired.resultText?.ifBlank { null }
+                            ?: applicationContext.getString(R.string.chat_status_completed),
                     )
                     postTerminal(history.record(queued.runId))
                     if (queued.runId == requested.runId) requestedResult = Result.success()
@@ -318,7 +335,9 @@ class CronExecutionWorker(
             history.markTerminal(
                 requested.runId,
                 CronRunStatus.Skipped,
-                errorMessage = "任务已删除、尚未到期或已由同作用域批次领取",
+                errorMessage = applicationContext.getString(
+                    R.string.cron_task_removed_or_claimed_message,
+                ),
             )
             postTerminal(history.record(requested.runId))
             requestedResult = Result.success()
@@ -350,11 +369,12 @@ class CronExecutionWorker(
 
     private fun postTerminal(record: CronRunRecord?) {
         record ?: return
-        val body = record.resultText ?: record.errorMessage ?: "已完成"
+        val body = record.resultText ?: record.errorMessage
+            ?: applicationContext.getString(R.string.chat_status_completed)
         CronNotifications.postResult(
             context = applicationContext,
             title = record.prompt.lineSequence().firstOrNull()?.take(40)?.ifBlank { null }
-                ?: "定时任务",
+                ?: applicationContext.getString(R.string.cron_result_title_default),
             body = body,
             tag = "cron-${record.taskId}",
             runId = record.runId,

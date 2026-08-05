@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +42,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.model.ProviderKind
@@ -272,42 +274,44 @@ private fun providerKindArg(entry: androidx.navigation.NavBackStackEntry): Provi
         .getOrDefault(ProviderKind.Llm)
 
 /** Resolve the top-bar title for a back-stack entry (+ data-derived titles). */
+@Composable
 private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: SettingsUiState): String =
     when (val route = entry?.destination?.route) {
-        null, SettingsRoutes.MAIN -> SettingsTitles.MAIN
-        SettingsRoutes.ACCOUNT -> SettingsTitles.ACCOUNT
-        SettingsRoutes.VOICE -> SettingsTitles.VOICE
-        SettingsRoutes.APPEARANCE -> SettingsTitles.APPEARANCE
-        SettingsRoutes.LANGUAGE -> SettingsTitles.LANGUAGE
-        SettingsRoutes.NOTIFICATIONS -> SettingsTitles.NOTIFICATIONS
-        SettingsRoutes.INPUT -> SettingsTitles.INPUT
-        SettingsRoutes.PRIVACY -> SettingsTitles.PRIVACY
-        SettingsRoutes.OPEN_SOURCE -> SettingsTitles.OPEN_SOURCE
-        SettingsRoutes.SKILLS -> SettingsTitles.SKILLS
-        SettingsRoutes.MCP_LIST -> SettingsTitles.MCP
-        SettingsRoutes.LINUX_RUNTIME -> SettingsTitles.LINUX_RUNTIME
-        SettingsRoutes.COMPUTER_USE -> SettingsTitles.COMPUTER_USE
-        SettingsRoutes.DREAM -> SettingsTitles.DREAM
+        null, SettingsRoutes.MAIN -> stringResource(SettingsTitles.MAIN)
+        SettingsRoutes.ACCOUNT -> stringResource(SettingsTitles.ACCOUNT)
+        SettingsRoutes.VOICE -> stringResource(SettingsTitles.VOICE)
+        SettingsRoutes.APPEARANCE -> stringResource(SettingsTitles.APPEARANCE)
+        SettingsRoutes.LANGUAGE -> stringResource(SettingsTitles.LANGUAGE)
+        SettingsRoutes.NOTIFICATIONS -> stringResource(SettingsTitles.NOTIFICATIONS)
+        SettingsRoutes.INPUT -> stringResource(SettingsTitles.INPUT)
+        SettingsRoutes.PRIVACY -> stringResource(SettingsTitles.PRIVACY)
+        SettingsRoutes.OPEN_SOURCE -> stringResource(SettingsTitles.OPEN_SOURCE)
+        SettingsRoutes.SKILLS -> stringResource(SettingsTitles.SKILLS)
+        SettingsRoutes.MCP_LIST -> stringResource(SettingsTitles.MCP)
+        SettingsRoutes.LINUX_RUNTIME -> stringResource(SettingsTitles.LINUX_RUNTIME)
+        SettingsRoutes.COMPUTER_USE -> stringResource(SettingsTitles.COMPUTER_USE)
+        SettingsRoutes.DREAM -> stringResource(SettingsTitles.DREAM)
         SettingsRoutes.CRON,
         SettingsRoutes.CRON_TASK,
         SettingsRoutes.CRON_RUN,
-        -> SettingsTitles.CRON
-        SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).title
-        SettingsRoutes.PROVIDER_PICKER -> "添加${providerKindArg(entry).title}"
+        -> stringResource(SettingsTitles.CRON)
+        SettingsRoutes.PROVIDER_LIST -> stringResource(providerKindArg(entry).titleRes)
+        SettingsRoutes.PROVIDER_PICKER ->
+            stringResource(R.string.provider_add_kind_fmt, stringResource(providerKindArg(entry).titleRes))
         SettingsRoutes.PROVIDER_EDIT -> {
             val kind = providerKindArg(entry)
             val id = entry.arguments?.getString("id")
-            state.providers(kind).firstOrNull { it.id == id }?.name ?: kind.title
+            state.providers(kind).firstOrNull { it.id == id }?.name ?: stringResource(kind.titleRes)
         }
         SettingsRoutes.SKILL_DETAIL -> {
             val id = entry.arguments?.getString("id")
-            state.skills.firstOrNull { it.id == id }?.name ?: SettingsTitles.SKILLS
+            state.skills.firstOrNull { it.id == id }?.name ?: stringResource(SettingsTitles.SKILLS)
         }
         SettingsRoutes.MCP_EDIT -> {
             val id = entry.arguments?.getString("id")
-            state.mcpServers.firstOrNull { it.id == id }?.name ?: SettingsTitles.MCP
+            state.mcpServers.firstOrNull { it.id == id }?.name ?: stringResource(SettingsTitles.MCP)
         }
-        else -> SettingsTitles.MAIN
+        else -> stringResource(SettingsTitles.MAIN)
     }
 
 /**
@@ -354,10 +358,14 @@ private fun SettingsTopBar(
                 color = t.text2,
                 stroke = 2.2f,
                 modifier = Modifier.rotate(180f),
-                contentDescription = if (atRoot) "关闭设置" else "返回",
+                contentDescription = if (atRoot) {
+                    stringResource(R.string.settings_close_accessibility)
+                } else {
+                    stringResource(R.string.onboarding_back)
+                },
             )
             if (atRoot) {
-                Text("关闭", color = t.text2, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                Text(stringResource(R.string.common_close), color = t.text2, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
             }
         }
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -374,7 +382,7 @@ private fun SettingsTopBar(
         // Trailing: 完成 (reset to root) when nested, otherwise a close 'x'.
         if (!atRoot) {
             Text(
-                "完成",
+                stringResource(R.string.settings_done),
                 color = t.accent,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -391,7 +399,7 @@ private fun SettingsTopBar(
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(onClick = onClose),
             ) {
-                LXIcon(name = LXIconName.X, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "关闭设置")
+                LXIcon(name = LXIconName.X, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = stringResource(R.string.settings_close_accessibility))
             }
         }
     }

@@ -115,7 +115,7 @@ struct Composer: View {
                     AttachmentThumb(attachment: attachment, onRemove: onRemoveAttachment)
                 }
 
-                TextField("", text: $draft, prompt: Text("向灵犀提问…").foregroundColor(t.text4), axis: .vertical)
+                TextField("", text: $draft, prompt: Text("composer_placeholder").foregroundColor(t.text4), axis: .vertical)
                     .font(.system(size: 15.5))
                     .foregroundStyle(t.text)
                     .lineLimit(1...5)
@@ -136,14 +136,14 @@ struct Composer: View {
                             .frame(width: 40, height: 40)
                     }
                     .buttonStyle(ComposerActionButtonStyle())
-                    .accessibilityLabel("添加附件")
+                    .accessibilityLabel("composer_add_attachment")
                     modelChip
                     Spacer()
                     if isCancelling {
                         ProgressView()
                             .tint(t.text3)
                             .frame(width: 40, height: 40)
-                            .accessibilityLabel("正在停止")
+                            .accessibilityLabel("composer_stopping")
                     } else if streaming {
                         // PR-4 item 2: the Stop button replaces Send while a turn
                         // is in flight — tapping it cancels the in-flight turn.
@@ -155,7 +155,7 @@ struct Composer: View {
                                 .shadow(color: t.danger.tint(0.40), radius: 6, y: 4)
                         }
                         .buttonStyle(ComposerActionButtonStyle())
-                        .accessibilityLabel("停止")
+                        .accessibilityLabel("composer_stop")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Match Android: ordinary recording and Flow Mode are
                         // distinct controls instead of overloading one tap.
@@ -185,9 +185,9 @@ struct Composer: View {
                             .buttonStyle(ComposerActionButtonStyle())
                             .simultaneousGesture(micHoldGesture)
                             .accessibilityLabel(
-                                isDictationListening ? "结束普通录音" : "普通录音"
+                                isDictationListening ? String(localized: "composer_stop_recording") : String(localized: "composer_record")
                             )
-                            .accessibilityHint("轻点开始或结束；按住说话，上滑取消")
+                            .accessibilityHint("composer_voice_hint")
                             .accessibilityIdentifier("composer.voice")
                             .disabled(
                                 !sendEnabled
@@ -209,7 +209,7 @@ struct Composer: View {
                                     .shadow(color: t.accent.tint(0.28), radius: 7, y: 4)
                             }
                             .buttonStyle(ComposerActionButtonStyle())
-                            .accessibilityLabel("开启心流模式")
+                            .accessibilityLabel("composer_flow_mode")
                             .accessibilityIdentifier("composer.flow")
                             .disabled(!sendEnabled || voiceInteractionMode != nil)
                         }
@@ -223,7 +223,7 @@ struct Composer: View {
                                 .shadow(color: t.accent.tint(0.40), radius: 6, y: 4)
                         }
                         .buttonStyle(ComposerActionButtonStyle())
-                        .accessibilityLabel("发送")
+                        .accessibilityLabel("composer_send")
                         .disabled(!sendEnabled)
                         .opacity(sendEnabled ? 1 : 0.45)
                     }
@@ -254,7 +254,7 @@ struct Composer: View {
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
-                Button("完成") { inputFocused = false }
+                Button("composer_done") { inputFocused = false }
                     .accessibilityIdentifier("composer.keyboard.dismiss")
             }
         }
@@ -357,7 +357,7 @@ struct Composer: View {
 
     /// The chip's short label from authoritative engine state.
     private var chipLabel: String {
-        availableModels.isEmpty ? "加载模型…" : ModelDisplay.shortName(for: activeModelId)
+        availableModels.isEmpty ? String(localized: "composer_loading_model") : ModelDisplay.shortName(for: activeModelId)
     }
 
     /// The chip's dot color: derived from the active engine id when driving.
@@ -386,7 +386,7 @@ struct Composer: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if modelSections.isEmpty {
-                    Text("正在加载模型…")
+                    Text("composer_loading_models")
                         .font(.system(size: 12))
                         .foregroundStyle(t.text3)
                         .padding(12)
@@ -487,7 +487,7 @@ private struct AttachmentThumb: View {
                     .frame(width: 40, height: 40)
             }
             .buttonStyle(ComposerActionButtonStyle())
-            .accessibilityLabel("移除附件")
+            .accessibilityLabel("composer_remove_attachment")
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
     }

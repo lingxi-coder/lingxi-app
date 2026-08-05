@@ -104,6 +104,21 @@ is linked (not embedded — it wraps a static archive); both are referenced from
 | `Sources/Drawer` | `Drawer` (workspace pills, chats/projects/crons, knowledge/memory, account) |
 | `Sources/Settings` | Settings sheet host + every page (LLM/search/fetch providers, voice, skills, MCP, dream, appearance, language, etc.) |
 | `Sources/Voice` | `VoiceFlowView` (long-press immersive recording) |
+| `Sources/Theme/LocalizationManager.swift` | Persisted app-language override (follow-system default) + the `Bundle` swizzle that makes `String(localized:)`/`Text` re-resolve without a relaunch |
+
+### Localization
+
+UI copy lives in [`clients/translations/`](../translations/README.md), not in
+this target's own `.strings`/`.xcstrings` files by hand — `Resources/Localizable.xcstrings`
+is generated from `clients/translations/*.json` by `clients/translations/generate.py`
+and gets overwritten on every run. To add or change a string, edit the JSON
+source and regenerate; see that README for the extraction conventions
+(placeholder formats, what NOT to extract, how a plain `ViewModel`/non-View
+class reaches localized text). Unit tests that assert exact localized copy
+depend on the `-AppleLanguages (zh-Hans)` launch argument pinned on the
+`LingxiCode`/`LingxiCodeStore`/`LingxiCodeFull` schemes' Test action in
+`project.yml` — without it, results follow whatever language the host Mac
+happens to be running.
 
 ### Design tokens
 

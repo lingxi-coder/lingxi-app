@@ -22,10 +22,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
@@ -45,14 +47,14 @@ private val DreamRose = Color(red = 0.809f, green = 0.4552f, blue = 0.8891f)  //
 private val DreamIndigo = Color(red = 0.1289f, green = 0.214f, blue = 0.6526f) // gradient inner-glow target
 
 /** A Dream background activity (stackable). */
-private data class DreamActivity(val key: String, val label: String, val sub: String)
+private data class DreamActivity(val key: String, val labelRes: Int, val subRes: Int)
 
 private val DreamActivities = listOf(
-    DreamActivity("reorganize", "整理记忆", "合并相似 / 去重 / 归档过期"),
-    DreamActivity("plan", "草拟今日计划", "基于昨日未完成 + 日历"),
-    DreamActivity("recap", "总结过去一周", "每周日凌晨生成回顾报告"),
-    DreamActivity("prefetch", "预热常用上下文", "预生成你最常问的回答"),
-    DreamActivity("polish", "润色草稿", "为待发邮件/文档生成 2 套候选"),
+    DreamActivity("reorganize", R.string.dream_activity_reorganize, R.string.dream_activity_reorganize_sub),
+    DreamActivity("plan", R.string.dream_activity_plan, R.string.dream_activity_plan_sub),
+    DreamActivity("recap", R.string.dream_activity_recap, R.string.dream_activity_recap_sub),
+    DreamActivity("prefetch", R.string.dream_activity_prefetch, R.string.dream_activity_prefetch_sub),
+    DreamActivity("polish", R.string.dream_activity_polish, R.string.dream_activity_polish_sub),
 )
 
 @Composable
@@ -71,14 +73,14 @@ fun DreamPage(
         ) {
             DreamOrb()
             Text(
-                "Dream 模式",
+                stringResource(R.string.settings_dream_mode),
                 color = t.text,
                 fontSize = 19.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 14.dp),
             )
             Text(
-                "当设备闲置时，灵犀在后台运行\n整理、规划、润色 — 醒来即可看到结果",
+                stringResource(R.string.dream_description_blurb),
                 color = t.text3,
                 fontSize = 12.5f.sp,
                 lineHeight = 17.sp,
@@ -90,7 +92,7 @@ fun DreamPage(
         // Master enable -------------------------------------------------------
         SettingsSection {
             SettingsRow(
-                label = "开启 Dream 模式",
+                label = stringResource(R.string.dream_enable),
                 sub = dream.lastRun,
                 chevron = false,
                 isLast = true,
@@ -105,20 +107,20 @@ fun DreamPage(
 
         // Time window ---------------------------------------------------------
         SectionWithRadio(
-            label = "时间窗",
+            label = stringResource(R.string.dream_section_time_window),
             options = listOf(
-                RadioOption("night", "夜间 (00:00–06:00)", "默认，最不打扰"),
-                RadioOption("always", "随时", "只要设备闲置"),
-                RadioOption("custom", "自定义时段", "设置每日时间窗"),
+                RadioOption("night", stringResource(R.string.dream_window_night), stringResource(R.string.dream_window_night_sub)),
+                RadioOption("always", stringResource(R.string.dream_window_always), stringResource(R.string.dream_window_always_sub)),
+                RadioOption("custom", stringResource(R.string.dream_window_custom), stringResource(R.string.dream_window_custom_sub)),
             ),
             selected = dream.window,
             onSelect = { store.setDream(dream.copy(window = it)) },
         )
 
         // Run conditions ------------------------------------------------------
-        SettingsSection(label = "运行条件", footer = "确保不会影响日常使用：仅在充电 + Wi-Fi 时跑昂贵任务。") {
+        SettingsSection(label = stringResource(R.string.dream_section_conditions), footer = stringResource(R.string.dream_conditions_footer)) {
             SettingsRow(
-                label = "仅在充电时",
+                label = stringResource(R.string.dream_only_charging),
                 chevron = false,
                 trailing = {
                     LXToggle(
@@ -128,7 +130,7 @@ fun DreamPage(
                 },
             )
             SettingsRow(
-                label = "仅在 Wi-Fi 时",
+                label = stringResource(R.string.dream_only_wifi),
                 chevron = false,
                 isLast = true,
                 trailing = {
@@ -141,12 +143,12 @@ fun DreamPage(
         }
 
         // Allowed activities (stackable) --------------------------------------
-        SettingsSection(label = "允许的活动", footer = "可叠加，越多越费电与算力。") {
+        SettingsSection(label = stringResource(R.string.dream_section_activities), footer = stringResource(R.string.dream_activities_footer)) {
             DreamActivities.forEachIndexed { i, a ->
                 val on = dream.activities[a.key] ?: false
                 SettingsRow(
-                    label = a.label,
-                    sub = a.sub,
+                    label = stringResource(a.labelRes),
+                    sub = stringResource(a.subRes),
                     chevron = false,
                     isLast = i == DreamActivities.size - 1,
                     trailing = {
@@ -163,22 +165,22 @@ fun DreamPage(
 
         // Compute budget ------------------------------------------------------
         SectionWithRadio(
-            label = "算力预算",
-            footer = "高预算会优先调用更强模型（如 Claude Opus），并访问 MCP 工具。低预算只用本地 + 最便宜模型。",
+            label = stringResource(R.string.dream_section_compute_budget),
+            footer = stringResource(R.string.dream_compute_budget_footer),
             options = listOf(
-                RadioOption("low", "低", "本地模型为主 · 几乎免费"),
-                RadioOption("medium", "中", "中等模型 · 默认"),
-                RadioOption("high", "高", "推理模型 + 工具 · 最深入"),
+                RadioOption("low", stringResource(R.string.dream_budget_low), stringResource(R.string.dream_budget_low_sub)),
+                RadioOption("medium", stringResource(R.string.dream_budget_medium), stringResource(R.string.dream_budget_medium_sub)),
+                RadioOption("high", stringResource(R.string.dream_budget_high), stringResource(R.string.dream_budget_high_sub)),
             ),
             selected = dream.budget,
             onSelect = { store.setDream(dream.copy(budget = it)) },
         )
 
         // Last-night review ---------------------------------------------------
-        SettingsSection(label = "昨夜 Dream 回顾") {
-            SettingsRow(label = "03:24 - 03:41 · 整理记忆", sub = "合并 12 条 → 7 条，归档 5 条过期", onTap = {})
-            SettingsRow(label = "03:41 - 04:02 · 草拟今日计划", sub = "基于 8 个未完成事项 + 3 场会议", onTap = {})
-            SettingsRow(label = "04:02 - 04:08 · 润色邮件", sub = "为 2 封草稿各生成 1 套候选", isLast = true, onTap = {})
+        SettingsSection(label = stringResource(R.string.dream_section_last_night)) {
+            SettingsRow(label = stringResource(R.string.dream_recap_item_1), sub = stringResource(R.string.dream_recap_sub_1), onTap = {})
+            SettingsRow(label = stringResource(R.string.dream_recap_item_2), sub = stringResource(R.string.dream_recap_sub_2), onTap = {})
+            SettingsRow(label = stringResource(R.string.dream_recap_item_3), sub = stringResource(R.string.dream_recap_sub_3), isLast = true, onTap = {})
         }
     }
 }

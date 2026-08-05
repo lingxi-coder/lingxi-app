@@ -1,5 +1,7 @@
 package com.lingxi.code.settings
 
+import com.lingxi.code.R
+
 /**
  * Settings nav-graph routes — the Android analog of the iOS `SettingsPage` enum.
  * Each entry is a Navigation-Compose route string; pages that take an argument
@@ -55,21 +57,21 @@ object SettingsRoutes {
     fun cronRun(runId: String): String = "$CRON/run/${android.net.Uri.encode(runId)}"
 }
 
-/** The titles shown in the [SettingsHost] TopAppBar (and the back chevron). */
+/** The title resources shown in the [SettingsHost] TopAppBar (and the back chevron). */
 object SettingsTitles {
-    const val MAIN = "设置"
-    const val ACCOUNT = "账户"
-    const val VOICE = "语音与音频"
-    const val APPEARANCE = "外观"
-    const val LANGUAGE = "语言"
-    const val NOTIFICATIONS = "通知"
-    const val INPUT = "键盘与输入"
-    const val PRIVACY = "数据与隐私"
-    const val OPEN_SOURCE = "开源许可与对应源码"
-    const val SKILLS = "Skills"
-    const val MCP = "MCP 服务器"
-    const val LINUX_RUNTIME = "Linux 运行时"
-    const val COMPUTER_USE = "Computer Use"
-    const val DREAM = "Dream 模式"
-    const val CRON = "定时任务"
+    val MAIN = R.string.settings_title_main
+    val ACCOUNT = R.string.settings_title_account
+    val VOICE = R.string.settings_voice_audio
+    val APPEARANCE = R.string.settings_appearance
+    val LANGUAGE = R.string.settings_language_title
+    val NOTIFICATIONS = R.string.settings_notifications
+    val INPUT = R.string.settings_keyboard_input
+    val PRIVACY = R.string.settings_data_privacy
+    val OPEN_SOURCE = R.string.settings_title_open_source
+    val SKILLS = R.string.settings_title_skills
+    val MCP = R.string.settings_mcp_servers
+    val LINUX_RUNTIME = R.string.settings_linux_runtime
+    val COMPUTER_USE = R.string.settings_title_computer_use
+    val DREAM = R.string.settings_dream_mode
+    val CRON = R.string.settings_title_cron
 }

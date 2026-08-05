@@ -60,7 +60,7 @@ final class AppState {
         accentId = defaults.string(forKey: "accent") ?? "oklch(70% 0.18 268)"
         density = defaults.string(forKey: "density") ?? "comfortable"
         fontSize = defaults.object(forKey: "fontSize") == nil ? 15 : defaults.double(forKey: "fontSize")
-        assistantName = defaults.string(forKey: "assistantName") ?? "灵犀"
+        assistantName = defaults.string(forKey: "assistantName") ?? String(localized: "app_name")
         userName = defaults.string(forKey: "userName") ?? ""
         flowDefault = defaults.object(forKey: "flowDefault") == nil ? true : defaults.bool(forKey: "flowDefault")
         inputDialog = defaults.object(forKey: "inputDialog") == nil ? true : defaults.bool(forKey: "inputDialog")

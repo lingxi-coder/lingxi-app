@@ -28,15 +28,15 @@ struct LocalAppsRootView: View {
             }
         }
         .alert(
-            "应用错误",
+            "local_apps_error_title",
             isPresented: Binding(
                 get: { store.errorMessage != nil },
                 set: { if !$0 { store.clearError() } }
             )
         ) {
-            Button("好", role: .cancel, action: store.clearError)
+            Button("common_ok", role: .cancel, action: store.clearError)
         } message: {
-            Text(store.errorMessage ?? "未知错误")
+            Text(store.errorMessage ?? String(localized: "common_unknown_error"))
         }
         // Every capability request a user can trigger is raised from inside this
         // cover, and the root presenter (RootView) cannot present while the cover
@@ -78,7 +78,7 @@ struct LocalAppPermissionSheet: View {
                 Text(prompt.reason)
                     .foregroundStyle(.secondary)
                 if let domain = prompt.domain {
-                    LabeledContent("域名") {
+                    LabeledContent("local_apps_domain") {
                         Text(domain)
                             .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
@@ -93,7 +93,7 @@ struct LocalAppPermissionSheet: View {
                 }
             }
             .padding(24)
-            .navigationTitle("应用授权")
+            .navigationTitle("local_apps_permissions_title")
             .navigationBarTitleDisplayMode(.inline)
         }
         .interactiveDismissDisabled()
@@ -153,26 +153,26 @@ private struct LocalAppsLibraryScreen: View {
                 .refreshable { await store.refresh() }
             }
         }
-        .searchable(text: $store.searchQuery, prompt: "搜索应用或状态")
-        .navigationTitle("应用")
+        .searchable(text: $store.searchQuery, prompt: "local_apps_search_prompt")
+        .navigationTitle("local_apps_title")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("关闭", action: onDismiss)
+                Button("common_close", action: onDismiss)
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
-                    Button("全部模板") { store.templateFilter = nil }
+                    Button("local_apps_templates_all") { store.templateFilter = nil }
                     ForEach(LocalAppTemplateKind.allCases, id: \.rawValue) { kind in
                         Button(templateFilterLabel(kind)) { store.templateFilter = kind }
                     }
                 } label: {
-                    Label("筛选", systemImage: "line.3.horizontal.decrease.circle")
+                    Label("local_apps_filter", systemImage: "line.3.horizontal.decrease.circle")
                 }
                 Button {
                     path.append(.templates)
                 } label: {
-                    Label("创建应用", systemImage: "plus")
+                    Label("local_apps_create", systemImage: "plus")
                 }
                 .accessibilityIdentifier("local-apps.create")
             }
@@ -180,7 +180,7 @@ private struct LocalAppsLibraryScreen: View {
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 8) {
                 Image(systemName: store.distributionMode == .full ? "server.rack" : "doc.badge.gearshape")
-                Text("\(store.distributionMode.runtimeLabel) · 依赖由 Lingxi 固定管理")
+                Text("local_apps_runtime_footer \(store.distributionMode.runtimeLabel)")
             }
             .font(.caption)
             .foregroundStyle(theme.text3)
@@ -191,31 +191,31 @@ private struct LocalAppsLibraryScreen: View {
         .onAppear(perform: openCreatedAppIfNeeded)
         .onChange(of: store.createdAppIDForDesigner) { _, _ in openCreatedAppIfNeeded() }
         .confirmationDialog(
-            "删除 \(pendingDelete?.name ?? "应用")？",
+            "local_apps_delete_confirm \(pendingDelete?.name ?? String(localized: "local_apps_title"))",
             isPresented: Binding(
                 get: { pendingDelete != nil },
                 set: { if !$0 { pendingDelete = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("删除应用", role: .destructive) {
+            Button("local_apps_delete", role: .destructive) {
                 guard let app = pendingDelete else { return }
                 pendingDelete = nil
                 Task { _ = await store.delete(appID: app.id) }
             }
-            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button("common_cancel", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("代码、构建产物和该应用的本地数据将被删除。")
+            Text("local_apps_delete_detail")
         }
     }
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("还没有本地应用", systemImage: "square.grid.2x2")
+            Label("local_apps_empty", systemImage: "square.grid.2x2")
         } description: {
-            Text(store.isRefreshing ? "正在读取应用库…" : "从模板开始设计，Agent 会在确认后生成应用。")
+            Text(store.isRefreshing ? String(localized: "local_apps_empty_loading") : String(localized: "local_apps_empty_hint"))
         } actions: {
-            Button("选择模板") { path.append(.templates) }
+            Button("local_apps_templates_title") { path.append(.templates) }
                 .buttonStyle(.borderedProminent)
         }
     }
@@ -276,16 +276,16 @@ private struct LocalAppLibraryRow: View {
                 Spacer()
                 Menu {
                     if case .running = runtime {
-                        Button("停止", systemImage: "stop.fill", action: onStop)
+                        Button("composer_stop", systemImage: "stop.fill", action: onStop)
                     } else {
-                        Button("启动", systemImage: "play.fill", action: onStart)
+                        Button("common_start", systemImage: "play.fill", action: onStart)
                     }
-                    Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
+                    Button("common_delete", systemImage: "trash", role: .destructive, action: onDelete)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .frame(width: 36, height: 36)
                 }
-                .accessibilityLabel("\(app.name) 操作")
+                .accessibilityLabel("local_apps_row_actions \(app.name)")
             }
             .contentShape(.rect)
         }
@@ -314,11 +314,11 @@ struct LocalAppTemplatePickerView: View {
         Group {
             if store.templates.isEmpty {
                 ContentUnavailableView {
-                    Label("正在读取模板", systemImage: "square.stack.3d.up")
+                    Label("local_apps_templates_loading", systemImage: "square.stack.3d.up")
                 } description: {
-                    Text("模板结构由 Rust AppService 下发，客户端不会使用内置字段副本。")
+                    Text("local_apps_templates_loading_detail")
                 } actions: {
-                    Button("重试") { Task { await store.refresh() } }
+                    Button("common_retry") { Task { await store.refresh() } }
                 }
             } else {
                 ScrollView {
@@ -341,7 +341,7 @@ struct LocalAppTemplatePickerView: View {
                                             .font(.subheadline)
                                             .foregroundStyle(theme.text3)
                                             .multilineTextAlignment(.leading)
-                                        Text("\(template.orderedSteps.count) 个设计步骤 · v\(template.version)")
+                                        Text("local_apps_template_steps \(template.orderedSteps.count) \(template.version)")
                                             .font(.caption)
                                             .foregroundStyle(theme.text4)
                                     }
@@ -364,7 +364,7 @@ struct LocalAppTemplatePickerView: View {
                 .background(theme.windowBg)
             }
         }
-        .navigationTitle("选择模板")
+        .navigationTitle("local_apps_templates_title")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $selectedTemplate) { template in
             LocalAppCreateSheet(store: store, template: template, path: $path)
@@ -384,28 +384,28 @@ private struct LocalAppCreateSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("应用") {
-                    TextField("应用名称", text: $name)
+                Section("local_apps_title") {
+                    TextField("local_apps_name", text: $name)
                         .textInputAutocapitalization(.never)
-                    LabeledContent("模板", value: template.name)
+                    LabeledContent("local_apps_template", value: template.name)
                     Text(template.description)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    Text("创建后进入五步设计向导。生成只有在你确认设计后才会开始。")
+                    Text("local_apps_create_detail")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("创建应用")
+            .navigationTitle("local_apps_create")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消", action: dismiss.callAsFunction)
+                    Button("common_cancel", action: dismiss.callAsFunction)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(creating ? "创建中…" : "创建") {
+                    Button(creating ? "local_apps_creating" : "local_apps_create") {
                         Task { await create() }
                     }
                     .disabled(creating || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

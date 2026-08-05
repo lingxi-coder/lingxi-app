@@ -8,10 +8,10 @@ enum ConnStatus: String {
 
     var label: String {
         switch self {
-        case .connected: return "已连接"
-        case .idle:      return "未验证"
-        case .testing:   return "检测中…"
-        case .error:     return "连接失败"
+        case .connected: return String(localized: "settings_provider_status_connected")
+        case .idle:      return String(localized: "settings_provider_status_idle")
+        case .testing:   return String(localized: "settings_provider_status_testing")
+        case .error:     return String(localized: "settings_provider_status_failed")
         }
     }
     /// Dot color for a given palette (idle resolves to text4).
@@ -81,7 +81,7 @@ struct DreamConfig: Equatable {
         "reorganize": true, "plan": true, "recap": true, "prefetch": false, "polish": false,
     ]
     var budget: String = "medium"         // low | medium | high
-    let lastRun: String = "今早 03:24 · 整理 7 条记忆 / 草拟今日计划"
+    let lastRun: String = String(localized: "settings_dream_last_run_seed")
 }
 
 struct NotifConfig: Equatable {
@@ -102,10 +102,10 @@ enum LinuxRuntimeAction: Equatable {
 
     var label: String {
         switch self {
-        case .refresh: return "刷新"
-        case .verify: return "校验"
-        case .repair: return "修复"
-        case .reset: return "重置"
+        case .refresh: return String(localized: "settings_linux_refresh_button")
+        case .verify: return String(localized: "settings_linux_action_verify_short")
+        case .repair: return String(localized: "settings_linux_action_repair_short")
+        case .reset: return String(localized: "settings_linux_action_reset_short")
         }
     }
 }
@@ -115,14 +115,14 @@ enum LinuxRuntimeRootfsState: Equatable {
 
     var label: String {
         switch self {
-        case .missing: return "未安装"
-        case .installing: return "安装中"
-        case .ready: return "就绪"
-        case .corrupt: return "损坏"
-        case .repairing: return "修复中"
-        case .resetting: return "重置中"
-        case .unsupported: return "未接入"
-        case .blockedByLicense: return "授权阻塞"
+        case .missing: return String(localized: "settings_linux_not_installed")
+        case .installing: return String(localized: "settings_linux_state_installing")
+        case .ready: return String(localized: "settings_linux_state_ready")
+        case .corrupt: return String(localized: "settings_linux_state_corrupt")
+        case .repairing: return String(localized: "settings_linux_state_repairing")
+        case .resetting: return String(localized: "settings_linux_state_resetting")
+        case .unsupported: return String(localized: "settings_linux_badge_not_linked")
+        case .blockedByLicense: return String(localized: "settings_linux_badge_blocked")
         }
     }
 }
@@ -141,8 +141,8 @@ struct LinuxRuntimeState: Equatable {
     var repairAllowed: Bool = false
     var resetAllowed: Bool = false
     var writableGuestPaths: [String] = []
-    var summary: String = "正在检查设备上的 Alpine Linux 环境"
-    var detail: String = "真机使用 iSH ARM64 + fakefs；首次启动会安装应用内置的 Alpine rootfs。"
+    var summary: String = String(localized: "settings_linux_summary_checking")
+    var detail: String = String(localized: "settings_linux_detail_default")
     var lastAction: LinuxRuntimeAction? = nil
     var lastActionMessage: String? = nil
     var busyAction: LinuxRuntimeAction? = nil
@@ -151,11 +151,11 @@ struct LinuxRuntimeState: Equatable {
     var terminal = LinuxTerminalState()
 
     var badge: String {
-        if selectedMode == .legacy { return "默认" }
+        if selectedMode == .legacy { return String(localized: "settings_badge_default") }
         switch rootfsState {
-        case .blockedByLicense: return "授权阻塞"
-        case .unsupported: return "未接入"
-        default: return available ? "可用" : "不可用"
+        case .blockedByLicense: return String(localized: "settings_linux_badge_blocked")
+        case .unsupported: return String(localized: "settings_linux_badge_not_linked")
+        default: return available ? String(localized: "settings_status_available") : String(localized: "settings_linux_task_unavailable")
         }
     }
 
@@ -171,10 +171,10 @@ enum Presets {
         .init(id: "google",     name: "Google",     sub: "Gemini API",     color: Color(srgb: 0.3503, 0.6649, 0.9741), defaultUrl: "https://generativelanguage.googleapis.com/v1",    keyPrefix: "AIza",     models: ["gemini-2.5-pro", "gemini-2.5-flash"]),
         .init(id: "deepseek",   name: "DeepSeek",   sub: "DeepSeek API",   color: Color(srgb: 0.6451, 0.5662, 1.0000), defaultUrl: "https://api.deepseek.com",                        keyPrefix: "sk-",      models: ["deepseek-v4-flash", "deepseek-v4-pro"]),
         .init(id: "kimi",       name: "Kimi",       sub: "Moonshot AI",    color: Color(srgb: 0.4340, 0.5865, 1.0000), defaultUrl: "https://api.moonshot.cn/v1",                    keyPrefix: "sk-",      models: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"]),
-        .init(id: "kimi-code",  name: "Kimi Code",  sub: "编程会员套餐",      color: Color(srgb: 0.2784, 0.6980, 0.9490), defaultUrl: "https://api.kimi.com/coding/v1",                 keyPrefix: "sk-",      models: ["kimi-for-coding", "k3", "k3-256k", "kimi-for-coding-highspeed"]),
-        .init(id: "qwen",       name: "通义千问",     sub: "DashScope",      color: Color(srgb: 0.8826, 0.6256, 0.2074), defaultUrl: "https://dashscope.aliyuncs.com/v1",               keyPrefix: "sk-",      models: ["qwen-max", "qwen-plus", "qwen-turbo"]),
-        .init(id: "openrouter", name: "OpenRouter", sub: "多模型聚合",      color: Color(srgb: 0.0000, 0.7441, 0.7802), defaultUrl: "https://openrouter.ai/api/v1",                    keyPrefix: "sk-or-",   models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4o", "google/gemini-2.5-pro"]),
-        .init(id: "custom",     name: "自定义",       sub: "OpenAI 兼容端点", color: Color(srgb: 0.5728, 0.6177, 0.7466), defaultUrl: "https://",                                       keyPrefix: "",         models: []),
+        .init(id: "kimi-code",  name: "Kimi Code",  sub: String(localized: "settings_provider_preset_kimi_code_sub"),      color: Color(srgb: 0.2784, 0.6980, 0.9490), defaultUrl: "https://api.kimi.com/coding/v1",                 keyPrefix: "sk-",      models: ["kimi-for-coding", "k3", "k3-256k", "kimi-for-coding-highspeed"]),
+        .init(id: "qwen",       name: String(localized: "settings_provider_preset_qwen_name"),     sub: "DashScope",      color: Color(srgb: 0.8826, 0.6256, 0.2074), defaultUrl: "https://dashscope.aliyuncs.com/v1",               keyPrefix: "sk-",      models: ["qwen-max", "qwen-plus", "qwen-turbo"]),
+        .init(id: "openrouter", name: "OpenRouter", sub: String(localized: "settings_provider_preset_openrouter_sub"),      color: Color(srgb: 0.0000, 0.7441, 0.7802), defaultUrl: "https://openrouter.ai/api/v1",                    keyPrefix: "sk-or-",   models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4o", "google/gemini-2.5-pro"]),
+        .init(id: "custom",     name: String(localized: "settings_provider_preset_custom_name"),       sub: String(localized: "settings_provider_preset_custom_sub"), color: Color(srgb: 0.5728, 0.6177, 0.7466), defaultUrl: "https://",                                       keyPrefix: "",         models: []),
     ]
 
     static let search: [ProviderPreset] = [
@@ -197,7 +197,7 @@ enum Presets {
 // MARK: - Settings store (the prototype's useState block in SettingsSheet)
 
 enum ProviderKind: Hashable { case llm, search, fetch
-    var title: String { self == .llm ? "LLM 提供商" : self == .search ? "联网搜索" : "网页抓取" }
+    var title: String { self == .llm ? String(localized: "settings_llm_providers") : self == .search ? String(localized: "settings_web_search") : String(localized: "settings_web_fetch") }
     var presets: [ProviderPreset] { self == .llm ? Presets.llm : self == .search ? Presets.search : Presets.fetch }
     var idPrefix: String { self == .llm ? "l" : self == .search ? "s" : "f" }
 }
@@ -212,19 +212,19 @@ final class SettingsStore {
     var fetchProviders: [GenericProvider] = []
     var linuxRuntime = LinuxRuntimeState()
     var skills: [Skill] = [
-        .init(id: "sk1", name: "周报生成", author: "官方", desc: "聚合 Linear / GitHub / 日历自动出周报", triggers: ["每周五 17:00", "@周报"], enabled: true, builtin: true),
-        .init(id: "sk2", name: "代码评审", author: "官方", desc: "对粘贴的 diff 给出严格 review", triggers: ["/review", "拖入 .diff"], enabled: true, builtin: true),
-        .init(id: "sk3", name: "会议纪要", author: "官方", desc: "从语音/文本提取要点 + action item", triggers: ["会议结束后"], enabled: true, builtin: true),
-        .init(id: "sk4", name: "论文精读", author: "社区 · @arxiv-fan", desc: "arXiv 链接 → 结构化摘要 + 批注", triggers: ["粘贴 arxiv URL"], enabled: false, builtin: false),
-        .init(id: "sk5", name: "CSS Doctor", author: "社区 · @lin", desc: "诊断布局问题并给出修复", triggers: ["/css"], enabled: false, builtin: false),
-        .init(id: "sk6", name: "英文润色", author: "我", desc: "中→英写作润色，保留原意", triggers: ["/polish"], enabled: true, builtin: false),
+        .init(id: "sk1", name: String(localized: "settings_skill_seed_weekly_report_name"), author: "官方", desc: String(localized: "settings_skill_seed_weekly_report_desc"), triggers: [String(localized: "settings_skill_seed_weekly_report_trigger_1"), String(localized: "settings_skill_seed_weekly_report_trigger_2")], enabled: true, builtin: true),
+        .init(id: "sk2", name: String(localized: "settings_skill_seed_code_review_name"), author: "官方", desc: String(localized: "settings_skill_seed_code_review_desc"), triggers: ["/review", String(localized: "settings_skill_seed_code_review_trigger_2")], enabled: true, builtin: true),
+        .init(id: "sk3", name: String(localized: "settings_skill_seed_meeting_notes_name"), author: "官方", desc: String(localized: "settings_skill_seed_meeting_notes_desc"), triggers: [String(localized: "settings_skill_seed_meeting_notes_trigger_1")], enabled: true, builtin: true),
+        .init(id: "sk4", name: String(localized: "settings_skill_seed_paper_reading_name"), author: "社区 · @arxiv-fan", desc: String(localized: "settings_skill_seed_paper_reading_desc"), triggers: [String(localized: "settings_skill_seed_paper_reading_trigger_1")], enabled: false, builtin: false),
+        .init(id: "sk5", name: "CSS Doctor", author: "社区 · @lin", desc: String(localized: "settings_skill_seed_css_doctor_desc"), triggers: ["/css"], enabled: false, builtin: false),
+        .init(id: "sk6", name: String(localized: "settings_skill_seed_polish_name"), author: "我", desc: String(localized: "settings_skill_seed_polish_desc"), triggers: ["/polish"], enabled: true, builtin: false),
     ]
     var mcpServers: [MCPServer] = [
         .init(id: "mcp1", name: "Filesystem",   url: "stdio://npx -y @modelcontextprotocol/server-filesystem", tools: 8,  status: .connected, enabled: true,  transport: "stdio"),
         .init(id: "mcp2", name: "GitHub",       url: "https://mcp.github.com",  tools: 14, status: .connected, enabled: true,  transport: "sse", auth: "oauth"),
         .init(id: "mcp3", name: "Linear",       url: "https://mcp.linear.app",  tools: 6,  status: .connected, enabled: true,  transport: "sse", auth: "oauth"),
         .init(id: "mcp4", name: "Notion",       url: "https://mcp.notion.com",  tools: 12, status: .idle,      enabled: false, transport: "sse", auth: "oauth"),
-        .init(id: "mcp5", name: "Postgres (本地)", url: "stdio://uvx mcp-server-postgres", tools: 4, status: .error, enabled: true, transport: "stdio"),
+        .init(id: "mcp5", name: String(localized: "settings_mcp_seed_postgres_local_name"), url: "stdio://uvx mcp-server-postgres", tools: 4, status: .error, enabled: true, transport: "stdio"),
     ]
     var dream = DreamConfig()
     var language = "zh-CN"

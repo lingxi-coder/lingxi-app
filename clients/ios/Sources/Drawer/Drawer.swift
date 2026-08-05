@@ -94,7 +94,7 @@ struct Drawer: View {
         ZStack(alignment: .leading) {
             Button(action: onClose) { Color.black.opacity(0.4).ignoresSafeArea() }
                 .buttonStyle(.plain)
-                .accessibilityLabel("关闭抽屉")
+                .accessibilityLabel(String(localized: "drawer_close_a11y"))
 
             panel
                 .frame(width: 330)
@@ -109,13 +109,13 @@ struct Drawer: View {
                     Task { await localAppsStore.refresh() }
                 }
         }
-        .alert("新建本地项目", isPresented: $showCreateAlert) {
-            TextField("项目名称", text: $createProjectName)
-            Button("创建") { createInternalProject() }
+        .alert(String(localized: "drawer_new_local_project"), isPresented: $showCreateAlert) {
+            TextField("drawer_project_name_placeholder", text: $createProjectName)
+            Button("common_create") { createInternalProject() }
                 .disabled(createProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("取消", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: {
-            Text("工作区会保存在 App 管理目录中。")
+            Text("drawer_workspace_saved_note")
         }
         .fileImporter(
             isPresented: $showFolderPicker,
@@ -141,8 +141,8 @@ struct Drawer: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("灵犀").font(.system(size: 17, weight: .bold)).foregroundColor(t.text)
-                Text(projectStore.activeProject?.record.name ?? "全局会话")
+                Text("app_name").font(.system(size: 17, weight: .bold)).foregroundColor(t.text)
+                Text(projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session"))
                     .font(.caption).foregroundColor(t.text4).lineLimit(1)
             }
             Spacer()
@@ -150,7 +150,7 @@ struct Drawer: View {
                 LXIcon(name: .x, size: 20, color: t.text3, stroke: 1.8).frame(width: 36, height: 36)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("关闭抽屉")
+            .accessibilityLabel(String(localized: "drawer_close_a11y"))
         }
         .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 12)
     }
@@ -158,7 +158,7 @@ struct Drawer: View {
     private var scopePills: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                scopePill(id: nil, name: "全局", icon: "◎")
+                scopePill(id: nil, name: String(localized: "common_global"), icon: "◎")
                 ForEach(projectStore.projects) { project in
                     scopePill(id: project.id, name: project.record.name, icon: "◇")
                 }
@@ -183,13 +183,13 @@ struct Drawer: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(id == nil ? "drawer.scope.global" : "drawer.scope.project.\(name)")
-        .accessibilityValue(active ? "当前项目" : "")
+        .accessibilityValue(active ? String(localized: "drawer_current_project_a11y") : "")
     }
 
     private var searchBar: some View {
         HStack(spacing: 8) {
             LXIcon(name: .search, size: 16, color: t.text4, stroke: 2)
-            TextField("搜索会话、项目、定时任务或应用", text: $query)
+            TextField("drawer_search_placeholder", text: $query)
                 .font(.scaledSystem(14, relativeTo: .subheadline))
                 .foregroundColor(t.text)
                 .focused($searchFocused)
@@ -203,7 +203,7 @@ struct Drawer: View {
                     LXIcon(name: .x, size: 14, color: t.text4, stroke: 2).frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("清除搜索")
+                .accessibilityLabel(String(localized: "drawer_clear_search_a11y"))
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
@@ -215,10 +215,10 @@ struct Drawer: View {
 
     private var sectionTabs: some View {
         HStack(spacing: 4) {
-            tab(.chats, .message, "对话", engineSessions.count)
-            tab(.projects, .folder, "项目", projects.count)
-            tab(.crons, .clock, "定时", cronTasks.count)
-            tab(.apps, .skill, "应用", localApps.count)
+            tab(.chats, .message, String(localized: "drawer_tab_chats"), engineSessions.count)
+            tab(.projects, .folder, String(localized: "drawer_tab_projects"), projects.count)
+            tab(.crons, .clock, String(localized: "drawer_tab_crons"), cronTasks.count)
+            tab(.apps, .skill, String(localized: "drawer_tab_apps"), localApps.count)
         }
         .padding(.horizontal, 14).padding(.bottom, 8)
     }
@@ -272,19 +272,19 @@ struct Drawer: View {
         VStack(spacing: 10) {
             LXIcon(name: searching ? .search : section == .projects ? .folder : section == .crons ? .clock : section == .apps ? .skill : .message,
                    size: 24, color: t.text4, stroke: 1.8)
-            Text(searching ? "没有匹配结果" : emptyCopy)
+            Text(searching ? String(localized: "drawer_no_match") : emptyCopy)
                 .font(.system(size: 13)).foregroundColor(t.text4).multilineTextAlignment(.center)
             if !searching, section == .chats { newChatButton(projectID: projectStore.activeProjectId) }
             if !searching, section == .projects {
                 projectCreationMenu
             }
             if !searching, section == .crons {
-                dashedButton("新建定时任务") {
+                dashedButton(String(localized: "cron_new_task_button")) {
                     openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
                 }
             }
             if !searching, section == .apps {
-                dashedButton("创建应用") { openApps(nil) }
+                dashedButton(String(localized: "drawer_create_app")) { openApps(nil) }
             }
         }
         .frame(maxWidth: .infinity).padding(.top, 38).padding(.horizontal, 10)
@@ -292,10 +292,10 @@ struct Drawer: View {
 
     private var emptyCopy: String {
         switch section {
-        case .chats: return "当前作用域暂无会话"
-        case .projects: return "还没有真实项目工作区"
-        case .crons: return "还没有定时任务"
-        case .apps: return "还没有本地应用"
+        case .chats: return String(localized: "drawer_empty_chats")
+        case .projects: return String(localized: "drawer_empty_projects")
+        case .crons: return String(localized: "drawer_empty_crons")
+        case .apps: return String(localized: "drawer_empty_apps")
         }
     }
 
@@ -315,7 +315,7 @@ struct Drawer: View {
         VStack(spacing: 2) {
             if !searching { newChatButton(projectID: projectStore.activeProjectId) }
             ForEach(engineSessions) { session in
-                sessionButton(session.id, title: session.title, subtitle: "\(session.relativeTime) · \(session.messageCount) 条", projectID: projectStore.activeProjectId)
+                sessionButton(session.id, title: session.title, subtitle: String(localized: "drawer_session_subtitle \(session.relativeTime) \(session.messageCount)"), projectID: projectStore.activeProjectId)
             }
         }
     }
@@ -325,7 +325,7 @@ struct Drawer: View {
             onNewChat(projectID)
             onClose()
         } label: {
-            Label("新对话", systemImage: "square.and.pencil")
+            Label("chat_new_conversation", systemImage: "square.and.pencil")
                 .font(.system(size: 13.5, weight: .medium)).foregroundColor(t.accent)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(10)
                 .background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10))
@@ -344,16 +344,16 @@ struct Drawer: View {
 
     private var projectCreationMenu: some View {
         Menu {
-            Button("新建本地项目") {
+            Button("drawer_new_local_project") {
                 createProjectName = ""
                 showCreateAlert = true
             }
-            Button("导入外部文件夹") {
+            Button("drawer_import_folder") {
                 pickerMode = .importProject
                 showFolderPicker = true
             }
         } label: {
-            Label("新建或导入项目", systemImage: "plus")
+            Label("drawer_new_or_import_project", systemImage: "plus")
                 .font(.system(size: 13)).foregroundColor(t.text3)
                 .frame(maxWidth: .infinity).padding(11)
                 .overlay(
@@ -392,13 +392,13 @@ struct Drawer: View {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(project.sessions.filter { matches($0.title, $0.relativeTime) }) { session in
                         sessionButton(session.sessionId, title: session.title,
-                                      subtitle: "\(session.relativeTime) · \(session.messageCount) 条", projectID: project.id)
+                                      subtitle: String(localized: "drawer_session_subtitle \(session.relativeTime) \(session.messageCount)"), projectID: project.id)
                     }
                     Button {
                         onNewChat(project.id)
                         onClose()
                     } label: {
-                        Label("项目新会话", systemImage: "plus").font(.caption).foregroundColor(t.text3).padding(8)
+                        Label("drawer_project_new_session", systemImage: "plus").font(.caption).foregroundColor(t.text3).padding(8)
                     }
                     .buttonStyle(.plain)
                     projectActions(project)
@@ -412,12 +412,12 @@ struct Drawer: View {
     private func projectActions(_ project: ProjectSnapshot) -> some View {
         HStack(spacing: 8) {
             if project.record.storageKind == .externalBookmarkMirror {
-                Button("导入更新") { projectStore.reimport(projectId: project.id) }
+                Button("drawer_reimport") { projectStore.reimport(projectId: project.id) }
                     .buttonStyle(.bordered)
-                Button("同步回目录") { projectStore.export(projectId: project.id) }
+                Button("drawer_export_back") { projectStore.export(projectId: project.id) }
                     .buttonStyle(.bordered)
                 if project.record.syncState == .authorizationLost {
-                    Button("重新授权") {
+                    Button("drawer_reauthorize") {
                         pickerMode = .reauthorize(project.id)
                         showFolderPicker = true
                     }
@@ -431,10 +431,10 @@ struct Drawer: View {
 
     private func conflictActions(_ project: ProjectSnapshot, count: Int) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("\(count) 个文件冲突").font(.caption).foregroundColor(t.danger)
+            Text("drawer_conflicts_count \(count)").font(.caption).foregroundColor(t.danger)
             HStack {
-                Button("保留设备版本") { projectStore.resolveConflicts(projectId: project.id, resolution: .keepInternal) }
-                Button("保留外部版本") { projectStore.resolveConflicts(projectId: project.id, resolution: .keepExternal) }
+                Button("drawer_keep_internal") { projectStore.resolveConflicts(projectId: project.id, resolution: .keepInternal) }
+                Button("drawer_keep_external") { projectStore.resolveConflicts(projectId: project.id, resolution: .keepExternal) }
             }
             .buttonStyle(.bordered)
             .font(.caption)
@@ -474,7 +474,7 @@ struct Drawer: View {
                             Text(scoped.scope.projectName).font(.caption).foregroundColor(t.text4)
                         }
                         Text(scoped.task.human).font(.system(size: 12, design: .monospaced)).foregroundColor(t.text3)
-                        Text(scoped.lastRun.map { "最近：\($0.status.label)" } ?? "尚未运行")
+                        Text(scoped.lastRun.map { String(localized: "cron_last_run \($0.status.label)") } ?? String(localized: "drawer_never_run"))
                             .font(.caption).foregroundColor(t.text4)
                     }
                     .padding(12).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12))
@@ -483,7 +483,7 @@ struct Drawer: View {
                 .buttonStyle(.plain)
             }
             if !searching {
-                dashedButton("新建定时任务") {
+                dashedButton(String(localized: "cron_new_task_button")) {
                     openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
                 }
             }
@@ -502,10 +502,10 @@ struct Drawer: View {
 
     private var shortcuts: some View {
         HStack(spacing: 4) {
-            Button(action: openTerminal) { shortcut(.workflow, "终端") }
+            Button(action: openTerminal) { shortcut(.workflow, String(localized: "settings_linux_section_terminal")) }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("drawer.shortcut.terminal")
-            Button { openCron(nil, nil) } label: { shortcut(.clock, "定时任务") }
+            Button { openCron(nil, nil) } label: { shortcut(.clock, String(localized: "settings_title_cron")) }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("drawer.shortcut.cron")
         }
@@ -527,7 +527,7 @@ struct Drawer: View {
                 Circle().fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
                     .frame(width: 36, height: 36)
                     .overlay(LXIcon(name: .cog, size: 16, color: .white, stroke: 1.8))
-                Text("设置").font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
+                Text("settings_title_main").font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
                 Spacer()
                 LXIcon(name: .chevronR, size: 14, color: t.text4, stroke: 1.7)
             }

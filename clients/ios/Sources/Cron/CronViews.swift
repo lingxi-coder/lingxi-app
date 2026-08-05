@@ -19,7 +19,7 @@ struct CronRootView: View {
         @Bindable var repository = repository
         NavigationStack(path: $repository.routePath) {
             CronListView(repository: repository)
-                .navigationTitle("定时任务")
+                .navigationTitle("settings_title_cron")
                 .navigationDestination(for: CronRoute.self) { route in
                     switch route {
                     case .list:
@@ -33,7 +33,7 @@ struct CronRootView: View {
                 .toolbar {
                     if let onDismiss {
                         ToolbarItem(placement: .topBarLeading) {
-                            Button("关闭", action: onDismiss)
+                            Button("common_close", action: onDismiss)
                         }
                     }
                 }
@@ -73,7 +73,7 @@ private struct CronListView: View {
         }
         .overlay {
             if repository.state.loading {
-                ProgressView("巡检中…")
+                ProgressView("cron_reconciling_progress")
             }
         }
         .refreshable {
@@ -81,7 +81,7 @@ private struct CronListView: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("立即巡检") {
+                Button("cron_reconcile_now_button") {
                     Task { await repository.reconcile(reason: "manual-refresh") }
                 }
             }
@@ -89,11 +89,11 @@ private struct CronListView: View {
     }
 
     private var schedulingSection: some View {
-        Section("调度") {
-            LabeledContent("模式", value: repository.state.diagnostics.schedulingModeTitle)
-            LabeledContent("任务标识", value: repository.state.diagnostics.backgroundTaskIdentifier)
-            LabeledContent("下一次最早执行", value: repository.state.diagnostics.nextEarliestRunText)
-            LabeledContent("最近巡检", value: repository.state.diagnostics.lastReconciledText)
+        Section("cron_section_scheduling") {
+            LabeledContent("cron_mode_label", value: repository.state.diagnostics.schedulingModeTitle)
+            LabeledContent("cron_task_identifier_label", value: repository.state.diagnostics.backgroundTaskIdentifier)
+            LabeledContent("cron_next_earliest_run_label", value: repository.state.diagnostics.nextEarliestRunText)
+            LabeledContent("cron_last_reconciled_label", value: repository.state.diagnostics.lastReconciledText)
             Text(repository.state.diagnostics.schedulingNote)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -101,12 +101,12 @@ private struct CronListView: View {
     }
 
     private var diagnosticsSection: some View {
-        Section("诊断") {
-            LabeledContent("当前作用域", value: repository.state.diagnostics.activeScopeName)
-            LabeledContent("作用域 ID", value: repository.state.diagnostics.activeScopeID)
-            LabeledContent("任务总数", value: "\(repository.state.diagnostics.taskCount)")
-            LabeledContent("历史总数", value: "\(repository.state.diagnostics.historyCount)")
-            LabeledContent("活动运行", value: "\(repository.state.diagnostics.activeRunCount)")
+        Section("settings_linux_diagnose") {
+            LabeledContent("cron_active_scope_label", value: repository.state.diagnostics.activeScopeName)
+            LabeledContent("cron_scope_id_label", value: repository.state.diagnostics.activeScopeID)
+            LabeledContent("cron_task_count_label", value: "\(repository.state.diagnostics.taskCount)")
+            LabeledContent("cron_history_count_label", value: "\(repository.state.diagnostics.historyCount)")
+            LabeledContent("cron_active_runs_label", value: "\(repository.state.diagnostics.activeRunCount)")
             Text(repository.state.diagnostics.activeRunSummary)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -116,7 +116,7 @@ private struct CronListView: View {
     @ViewBuilder
     private var resultCategoriesSection: some View {
         if !repository.state.diagnostics.resultCategories.isEmpty {
-            Section("最近结果分类") {
+            Section("cron_recent_result_categories_section") {
                 ForEach(repository.state.diagnostics.resultCategories) { summary in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(summary.title)
@@ -153,8 +153,8 @@ private struct CronListView: View {
     }
 
     private var tasksSection: some View {
-        Section("任务") {
-            Button("新建定时任务") {
+        Section("settings_linux_section_tasks") {
+            Button("cron_new_task_button") {
                 repository.beginCreate()
             }
             .buttonStyle(.plain)
@@ -164,7 +164,7 @@ private struct CronListView: View {
                     NavigationLink(value: CronRoute.task(scopeID: scope.scopeID, taskID: nil)) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(scope.projectName)
-                            Text("\(tasks.count) 个任务")
+                            Text("cron_scope_task_count \(tasks.count)")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -178,9 +178,9 @@ private struct CronListView: View {
     }
 
     private var historySection: some View {
-        Section("运行历史") {
+        Section("cron_run_history_section") {
             if repository.state.history.isEmpty {
-                Text("暂无运行记录。系统调度不是精确闹钟，但始终可以立即运行。")
+                Text("cron_no_run_history")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -218,7 +218,7 @@ private struct CronListView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(scoped.task.prompt.firstCronLine ?? scoped.task.id)
                     .foregroundStyle(.primary)
-                Text(scoped.task.human + (scoped.task.recurring ? "" : " · 仅一次"))
+                Text(scoped.task.human + (scoped.task.recurring ? "" : " · " + String(localized: "cron_once_only")))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text(runSummary(for: scoped))
@@ -228,26 +228,27 @@ private struct CronListView: View {
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button("立即运行") {
+            Button("cron_run_now_button") {
                 Task { await repository.runNow(scopeID: scopeID, taskID: scoped.task.id) }
             }
             .tint(.blue)
             Button(role: .destructive) {
                 Task { await repository.deleteTask(scopeID: scopeID, taskID: scoped.task.id) }
             } label: {
-                Text("删除")
+                Text("common_delete")
             }
         }
     }
 
     private func runSummary(for task: CronScopedTask) -> String {
+        let nextText = task.task.nextFireMs.map(formatCronEpoch) ?? String(localized: "cron_pending")
         if let active = task.activeRun {
-            return "\(active.status.label) · 下次 \(task.task.nextFireMs.map(formatCronEpoch) ?? "待定")"
+            return String(localized: "cron_run_summary_active \(active.status.label) \(nextText)")
         }
         if let last = task.lastRun {
-            return "最近：\(last.resultCategory.label) · 下次 \(task.task.nextFireMs.map(formatCronEpoch) ?? "待定")"
+            return String(localized: "cron_run_summary_last \(last.resultCategory.label) \(nextText)")
         }
-        return "下次 \(task.task.nextFireMs.map(formatCronEpoch) ?? "待定")"
+        return String(localized: "cron_run_summary_next \(nextText)")
     }
 }
 
@@ -258,19 +259,19 @@ private struct CronTaskEditorView: View {
     var body: some View {
         Form {
             Section {
-                Picker("作用域", selection: $repository.draft.scopeID) {
+                Picker("cron_scope_label", selection: $repository.draft.scopeID) {
                     ForEach(repository.state.scopes) { scope in
                         Text(scope.projectName).tag(scope.scopeID)
                     }
                 }
                 .disabled(repository.draft.isEditing)
-                TextField("提示词 / 任务", text: $repository.draft.prompt, axis: .vertical)
+                TextField("cron_prompt_field_label", text: $repository.draft.prompt, axis: .vertical)
                     .lineLimit(3, reservesSpace: true)
-                TextField("Cron（分 时 日 月 周）", text: $repository.draft.cron)
+                TextField("cron_expression_field_label", text: $repository.draft.cron)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Toggle("重复执行", isOn: $repository.draft.recurring)
-                Text("iOS 只提供“最早不早于”的系统调度，不保证准点启动；也可随时立即运行。")
+                Toggle("cron_recurring_toggle", isOn: $repository.draft.recurring)
+                Text("cron_ios_scheduling_note")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -281,22 +282,22 @@ private struct CronTaskEditorView: View {
                 }
             }
             Section {
-                Button(repository.draft.isEditing ? "保存" : "创建并调度") {
+                Button(repository.draft.isEditing ? "voice_save_button" : "cron_create_and_schedule_button") {
                     Task { await repository.saveDraft() }
                 }
                 .disabled(repository.draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                     repository.draft.cron.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if let taskID = repository.draft.taskID {
-                    Button("立即运行") {
+                    Button("cron_run_now_button") {
                         Task { await repository.runNow(scopeID: repository.draft.scopeID, taskID: taskID) }
                     }
-                    Button("删除", role: .destructive) {
+                    Button("common_delete", role: .destructive) {
                         Task { await repository.deleteTask(scopeID: repository.draft.scopeID, taskID: taskID) }
                     }
                 }
             }
         }
-        .navigationTitle(repository.draft.isEditing ? "编辑任务" : "新建任务")
+        .navigationTitle(repository.draft.isEditing ? "cron_edit_task_title" : "cron_new_task_title")
         .onAppear {
             if repository.draft.scopeID.isEmpty {
                 repository.draft.scopeID = scopeID
@@ -312,42 +313,42 @@ private struct CronRunDetailView: View {
     var body: some View {
         Form {
             if let run = repository.state.history.first(where: { $0.runID == runID }) {
-                Section("概览") {
-                    LabeledContent("项目", value: run.projectName)
-                    LabeledContent("状态", value: run.resultCategory.label)
-                    LabeledContent("计划执行", value: formatCronEpoch(run.scheduledAtMs))
-                    LabeledContent("触发时间", value: formatCronEpoch(run.triggeredAtMs))
+                Section("local_apps_section_overview") {
+                    LabeledContent("cron_run_project_label", value: run.projectName)
+                    LabeledContent("settings_linux_section_status", value: run.resultCategory.label)
+                    LabeledContent("cron_scheduled_at_label", value: formatCronEpoch(run.scheduledAtMs))
+                    LabeledContent("cron_triggered_at_label", value: formatCronEpoch(run.triggeredAtMs))
                     if let startedAt = run.startedAtMs {
-                        LabeledContent("开始时间", value: formatCronEpoch(startedAt))
+                        LabeledContent("cron_started_at_label", value: formatCronEpoch(startedAt))
                     }
                     if let finishedAt = run.finishedAtMs {
-                        LabeledContent("结束时间", value: formatCronEpoch(finishedAt))
+                        LabeledContent("cron_finished_at_label", value: formatCronEpoch(finishedAt))
                     }
-                    LabeledContent("运行 ID", value: run.runID)
+                    LabeledContent("cron_run_id_label", value: run.runID)
                 }
-                Section("任务") {
+                Section("settings_linux_section_tasks") {
                     Text(run.prompt)
                         .textSelection(.enabled)
                 }
                 if let result = run.resultText, !result.isEmpty {
-                    Section("结果") {
+                    Section("cron_result_section") {
                         Text(result)
                             .textSelection(.enabled)
                     }
                 }
                 if let error = run.errorMessage, !error.isEmpty {
-                    Section("错误") {
+                    Section("cron_error_section") {
                         Text(run.errorKind.map { "\($0.label)：\(error)" } ?? error)
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
                     }
                 }
             } else {
-                Text("未找到该次运行记录。")
+                Text("cron_run_not_found")
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("运行详情")
+        .navigationTitle("cron_run_detail_title")
     }
 }
 

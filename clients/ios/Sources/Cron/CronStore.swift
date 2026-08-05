@@ -7,9 +7,9 @@ private enum CronStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidExpression(let value):
-            return "无效 Cron 表达式：\(value)"
+            return String(localized: "cron_invalid_expression \(value)")
         case .missingTask(let id):
-            return "未找到定时任务：\(id)"
+            return String(localized: "cron_missing_task \(id)")
         }
     }
 }
@@ -70,11 +70,11 @@ private struct CronExpression {
 
     func humanDescription() -> String {
         switch raw {
-        case "*/15 * * * *": return "每 15 分钟"
-        case "0 * * * *": return "每小时整点"
-        case "0 9 * * *": return "每天 09:00"
-        case "0 9 * * 1-5": return "工作日 09:00"
-        case "0 9 * * 1": return "每周一 09:00"
+        case "*/15 * * * *": return String(localized: "cron_every_15_minutes")
+        case "0 * * * *": return String(localized: "cron_every_hour")
+        case "0 9 * * *": return String(localized: "cron_daily_9am")
+        case "0 9 * * 1-5": return String(localized: "cron_weekdays_9am")
+        case "0 9 * * 1": return String(localized: "settings_workflow_monday_0900")
         default: return raw
         }
     }

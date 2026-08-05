@@ -20,7 +20,7 @@ struct CronScope: Identifiable, Hashable, Codable, Sendable {
         CronScope(
             scopeID: globalCronScopeID,
             projectID: nil,
-            projectName: "全局",
+            projectName: String(localized: "common_global"),
             projectCwd: nil,
             guestWorkspacePath: appSandboxRoot
         )
@@ -63,13 +63,13 @@ enum CronRunStatus: String, Codable, CaseIterable, Sendable {
 
     var label: String {
         switch self {
-        case .queued: return "已排队"
-        case .running: return "运行中"
-        case .succeeded: return "成功"
-        case .failed: return "失败"
-        case .timedOut: return "超时"
-        case .cancelled: return "已取消"
-        case .skipped: return "已跳过"
+        case .queued: return String(localized: "cron_status_queued")
+        case .running: return String(localized: "chat_status_running")
+        case .succeeded: return String(localized: "cron_status_succeeded")
+        case .failed: return String(localized: "chat_status_failed")
+        case .timedOut: return String(localized: "chat_status_timed_out")
+        case .cancelled: return String(localized: "chat_status_cancelled")
+        case .skipped: return String(localized: "cron_status_skipped")
         }
     }
 }
@@ -85,13 +85,13 @@ enum CronRunErrorKind: String, Codable, CaseIterable, Sendable {
 
     var label: String {
         switch self {
-        case .missingCredentials: return "凭据缺失"
-        case .network: return "网络失败"
-        case .timedOut: return "执行超时"
-        case .cancelled: return "已取消"
-        case .validation: return "参数错误"
-        case .system: return "系统错误"
-        case .unknown: return "未知错误"
+        case .missingCredentials: return String(localized: "cron_error_kind_missing_credentials")
+        case .network: return String(localized: "cron_error_kind_network")
+        case .timedOut: return String(localized: "cron_error_kind_timed_out")
+        case .cancelled: return String(localized: "chat_status_cancelled")
+        case .validation: return String(localized: "cron_error_kind_validation")
+        case .system: return String(localized: "cron_error_kind_system")
+        case .unknown: return String(localized: "common_unknown_error")
         }
     }
 }
@@ -130,9 +130,9 @@ enum CronSchedulingMode: String, Equatable, Sendable {
 
     var title: String {
         switch self {
-        case .bestEffortBackground: return "系统调度"
-        case .foregroundOnly: return "仅前台巡检"
-        case .unavailable: return "不可调度"
+        case .bestEffortBackground: return String(localized: "cron_scheduling_mode_background")
+        case .foregroundOnly: return String(localized: "cron_scheduling_mode_foreground_only")
+        case .unavailable: return String(localized: "cron_scheduling_mode_unavailable")
         }
     }
 }
@@ -146,7 +146,7 @@ struct CronSchedulingSnapshot: Equatable, Sendable {
 
     static func initial(
         mode: CronSchedulingMode = .foregroundOnly,
-        note: String = "系统调度不是精确闹钟；始终可以手动立即运行。",
+        note: String = String(localized: "cron_scheduling_note_default"),
         backgroundTaskIdentifier: String = cronBackgroundTaskIdentifier
     ) -> CronSchedulingSnapshot {
         CronSchedulingSnapshot(
@@ -192,15 +192,15 @@ enum CronResultCategory: String, CaseIterable, Equatable, Sendable {
 
     var label: String {
         switch self {
-        case .success: return "成功"
-        case .missingCredentials: return "凭据缺失"
-        case .network: return "网络失败"
-        case .timedOut: return "超时"
-        case .cancelled: return "已取消"
-        case .skipped: return "已跳过"
-        case .validation: return "参数错误"
-        case .system: return "系统错误"
-        case .unknown: return "未知问题"
+        case .success: return String(localized: "cron_status_succeeded")
+        case .missingCredentials: return String(localized: "cron_error_kind_missing_credentials")
+        case .network: return String(localized: "cron_error_kind_network")
+        case .timedOut: return String(localized: "chat_status_timed_out")
+        case .cancelled: return String(localized: "chat_status_cancelled")
+        case .skipped: return String(localized: "cron_status_skipped")
+        case .validation: return String(localized: "cron_error_kind_validation")
+        case .system: return String(localized: "cron_error_kind_system")
+        case .unknown: return String(localized: "cron_result_unknown")
         }
     }
 }
@@ -215,7 +215,7 @@ struct CronRunCategorySummary: Identifiable, Equatable, Sendable {
     var title: String { category.label }
     var detail: String {
         let latest = latestRun.finishedAtMs ?? latestRun.triggeredAtMs
-        return "\(count) 次 · 最近 \(formatCronEpoch(latest))"
+        return String(localized: "cron_category_summary_detail \(count) \(formatCronEpoch(latest))")
     }
 }
 
@@ -327,7 +327,7 @@ struct UnavailableCronExecutor: CronTaskExecuting {
     func runTaskNow(scope: CronScope, task: CronTaskRecord) async throws -> CronExecutionOutcome {
         throw CronExecutionError(
             kind: .missingCredentials,
-            message: "定时任务执行引擎尚未接入；请先完成 iOS FFI 集成。",
+            message: String(localized: "cron_executor_unavailable"),
             statusOverride: .failed
         )
     }
@@ -347,7 +347,7 @@ struct NoopCronNotifier: CronNotificationDelivering {
 
 struct ForegroundOnlyCronScheduler: CronBackgroundScheduling {
     let mode: CronSchedulingMode = .foregroundOnly
-    let note = "系统调度不是精确闹钟；App 启动、回到前台和后台唤醒时都会巡检，且始终可以立即运行。"
+    let note = String(localized: "cron_scheduler_foreground_note")
 
     func schedule(taskIdentifier: String, earliestAtMs: UInt64?) async throws {}
 
@@ -460,16 +460,18 @@ extension CronRepositoryState {
         return CronDiagnosticsSnapshot(
             backgroundTaskIdentifier: scheduling.backgroundTaskIdentifier,
             schedulingModeTitle: scheduling.mode.title,
-            activeScopeName: activeScope?.projectName ?? "未选择",
+            activeScopeName: activeScope?.projectName ?? String(localized: "settings_cu_not_selected"),
             activeScopeID: activeScope?.scopeID ?? activeScopeID,
             taskCount: taskCount,
             historyCount: historyCount,
             activeRunCount: activeRunCount,
-            nextEarliestRunText: scheduling.nextEarliestAtMs.map(formatCronEpoch) ?? "暂无",
-            lastReconciledText: scheduling.lastReconciledAtMs.map(formatCronEpoch) ?? "尚未巡检",
+            nextEarliestRunText: scheduling.nextEarliestAtMs.map(formatCronEpoch) ?? String(localized: "cron_none_yet"),
+            lastReconciledText: scheduling.lastReconciledAtMs.map(formatCronEpoch) ?? String(localized: "cron_not_checked_yet"),
             schedulingNote: scheduling.note,
             resultCategories: resultCategorySummaries,
-            activeRunSummary: activeRuns.isEmpty ? "当前没有活动运行" : "当前 \(activeRuns.count) 个活动运行"
+            activeRunSummary: activeRuns.isEmpty
+                ? String(localized: "cron_no_active_runs")
+                : String(localized: "cron_active_runs_summary \(activeRuns.count)")
         )
     }
 }

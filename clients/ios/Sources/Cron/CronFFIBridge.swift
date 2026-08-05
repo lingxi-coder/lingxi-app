@@ -113,7 +113,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             return CronExecutionOutcome(
                 status: .failed,
                 resultText: nil,
-                errorMessage: "任务不存在或无法启动",
+                errorMessage: String(localized: "cron_task_unavailable"),
                 errorKind: .validation
             )
         }

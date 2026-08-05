@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import ObjectiveC
+import os
 
 /// Owns the user-selected app language ("" = follow system) and applies it by
 /// swizzling Bundle.main's localizedString(forKey:value:table:) so both
@@ -87,8 +88,8 @@ final class LocalizationManager {
         case "ko-KR": canonical = "ko"
         default:      canonical = ""
         }
-        // Write into the static cache consumed by the swizzled Bundle method (same file).
-        Bundle._lxCurrentLanguageID = canonical
+        // Write into the lock-protected cache consumed by the swizzled Bundle method (same file).
+        Bundle._lxCurrentLanguageID.withLock { $0 = canonical }
         // Persist language preference for UIKit/system framework re-launches.
         if canonical.isEmpty {
             UserDefaults.standard.removeObject(forKey: "AppleLanguages")
@@ -116,9 +117,10 @@ final class LocalizationManager {
 extension Bundle {
     /// Cache of the canonical lproj directory ID currently in effect
     /// (e.g. "zh-Hans", "en"). Empty string means follow-system.
-    /// Written on @MainActor from LocalizationManager.apply();
-    /// read on any thread from lx_localizedString.
-    static var _lxCurrentLanguageID: String = ""
+    /// Protected by an unfair lock: written on @MainActor from LocalizationManager.apply(),
+    /// read on any thread from lx_localizedString (Foundation may call localizedString
+    /// from background queues).
+    static let _lxCurrentLanguageID = OSAllocatedUnfairLock<String>(initialState: "")
 
     /// Saved IMP of the original localizedString(forKey:value:table:) before the
     /// method exchange. Called directly (bypassing the swizzle) to perform the real
@@ -137,7 +139,7 @@ extension Bundle {
             return Bundle._lxCallOriginal(on: self, key: key, value: value, table: tableName)
         }
 
-        let canonicalID = Bundle._lxCurrentLanguageID
+        let canonicalID = Bundle._lxCurrentLanguageID.withLock { $0 }
 
         // Follow-system mode: forward original impl on self (no language override active).
         guard !canonicalID.isEmpty else {

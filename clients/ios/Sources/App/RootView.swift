@@ -138,6 +138,7 @@ struct RootView: View {
                 .navigationDestination(for: AppRoute.self, destination: destination)
                 .id(localization.language)
         }
+        .environment(\.locale, localization.effectiveLocale())
         .onChange(of: scenePhase, handleScenePhase)
         .onChange(of: draft) { _, value in
             scopedPreferences.setDraft(value, projectID: projectStore.activeProjectId)

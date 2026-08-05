@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Lingxi</string>
+    <string name="cron_computer_use_notification_stop">Stop now</string>
+    <string name="cron_computer_use_notification_title">LingXi is controlling this device</string>
     <string name="local_apps_title">Apps</string>
     <string name="local_apps_create">Create App</string>
     <string name="local_apps_refresh">Refresh Apps</string>

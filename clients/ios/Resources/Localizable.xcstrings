@@ -98,6 +98,38 @@
         }
       }
     },
+    "cron_computer_use_notification_stop": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "立即停止"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop now"
+          }
+        }
+      }
+    },
+    "cron_computer_use_notification_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi 正在控制设备"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi is controlling this device"
+          }
+        }
+      }
+    },
     "local_apps_allow_always": {
       "localizations": {
         "zh-Hans": {

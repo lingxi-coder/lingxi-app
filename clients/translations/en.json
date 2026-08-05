@@ -1,5 +1,7 @@
 {
   "app_name": "Lingxi",
+  "cron_computer_use_notification_stop": "Stop now",
+  "cron_computer_use_notification_title": "LingXi is controlling this device",
   "local_apps_title": "Apps",
   "local_apps_create": "Create App",
   "local_apps_refresh": "Refresh Apps",

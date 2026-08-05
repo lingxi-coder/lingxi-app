@@ -1,5 +1,7 @@
 {
   "app_name": "灵犀",
+  "cron_computer_use_notification_stop": "立即停止",
+  "cron_computer_use_notification_title": "LingXi 正在控制设备",
   "local_apps_title": "应用",
   "local_apps_create": "创建应用",
   "local_apps_refresh": "刷新应用",

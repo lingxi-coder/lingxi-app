@@ -1,6 +1,7 @@
 package com.lingxi.code.localapps
 
 import android.content.Context
+import com.lingxi.code.R
 import java.io.File
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
@@ -195,13 +196,17 @@ object LocalAppRuntimeAssets {
      * restart notice to every later LLM or validation failure. There, the notice
      * is attached only to a failure that names the runtime.
      */
-    internal fun generationDetail(detail: String?, failed: Boolean): String? {
+    internal fun generationDetail(
+        detail: String?,
+        failed: Boolean,
+        strings: LocalAppsStrings = DefaultLocalAppsStrings,
+    ): String? {
         if (!failed) return detail
         val status = stagingStatus()
         if (status == LocalAppRuntimeStaging.StagedAfterNullHandout && !namesTheRuntime(detail)) {
             return detail
         }
-        val notice = noticeFor(status) ?: return detail
+        val notice = noticeFor(status, strings) ?: return detail
         return listOfNotNull(detail?.takeIf(String::isNotBlank), notice).joinToString("\n\n")
     }
 
@@ -241,17 +246,29 @@ object LocalAppRuntimeAssets {
      * tightening it back toward a direct claim is a copy decision, and this
      * hedge is over-cautious rather than wrong.
      */
-    internal fun noticeFor(status: LocalAppRuntimeStaging): String? = when (status) {
+    internal fun noticeFor(
+        status: LocalAppRuntimeStaging,
+        strings: LocalAppsStrings = DefaultLocalAppsStrings,
+    ): String? = when (status) {
         LocalAppRuntimeStaging.Ready, LocalAppRuntimeStaging.Idle -> null
         LocalAppRuntimeStaging.Staging ->
-            "本地应用运行时仍在首次准备中。引擎只在启动时读取一次运行时路径，" +
-                "因此准备完成后需要重启 App 才能生成应用。"
+            strings.resolve(
+                R.string.local_apps_runtime_notice_staging,
+                "本地应用运行时仍在首次准备中。引擎只在启动时读取一次运行时路径，" +
+                    "因此准备完成后需要重启 App 才能生成应用。",
+            )
         LocalAppRuntimeStaging.StagedAfterNullHandout ->
-            "本地应用运行时已准备就绪，但本次启动中曾有一次引擎构建没能拿到它。" +
-                "引擎只在启动时读取一次运行时路径：如果失败原因是运行时不可用，" +
-                "请重启 App 后重试；否则本次失败与运行时无关。"
+            strings.resolve(
+                R.string.local_apps_runtime_notice_staged_after_null,
+                "本地应用运行时已准备就绪，但本次启动中曾有一次引擎构建没能拿到它。" +
+                    "引擎只在启动时读取一次运行时路径：如果失败原因是运行时不可用，" +
+                    "请重启 App 后重试；否则本次失败与运行时无关。",
+            )
         LocalAppRuntimeStaging.Unavailable ->
-            "本地应用运行时准备失败（安装包中没有运行时，或解压失败），本次启动无法生成应用。"
+            strings.resolve(
+                R.string.local_apps_runtime_notice_unavailable,
+                "本地应用运行时准备失败（安装包中没有运行时，或解压失败），本次启动无法生成应用。",
+            )
     }
 
     /**

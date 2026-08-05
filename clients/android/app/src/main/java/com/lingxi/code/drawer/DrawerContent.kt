@@ -36,10 +36,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
@@ -179,7 +181,7 @@ fun DrawerContent(
                 )
 
                 DrawerSection.Projects -> when {
-                    projects == null -> DrawerCollectionState("项目数据源尚未接入")
+                    projects == null -> DrawerCollectionState(stringResource(R.string.drawer_projects_unavailable))
                     else -> ProjectsSection(
                         projects = projects,
                         activeSession = ui.activeSession,
@@ -196,7 +198,7 @@ fun DrawerContent(
                 }
 
                 DrawerSection.Crons -> when {
-                    crons == null -> DrawerCollectionState("定时任务数据源尚未接入")
+                    crons == null -> DrawerCollectionState(stringResource(R.string.drawer_crons_unavailable))
                     else -> CronsSection(
                         crons = crons,
                         onOpenCron = onOpenCron,
@@ -228,7 +230,7 @@ private fun DrawerHeader(onClose: () -> Unit) {
             .padding(horizontal = 18.dp)
             .padding(top = 8.dp, bottom = 12.dp),
     ) {
-        Text("灵犀", color = t.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.app_name), color = t.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.weight(1f))
         Box(
             modifier = Modifier
@@ -237,7 +239,13 @@ private fun DrawerHeader(onClose: () -> Unit) {
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 20.dp, color = t.text3, stroke = 1.8f, contentDescription = "关闭侧栏")
+            LXIcon(
+                name = LXIconName.X,
+                size = 20.dp,
+                color = t.text3,
+                stroke = 1.8f,
+                contentDescription = stringResource(R.string.drawer_close_sidebar_a11y),
+            )
         }
     }
 }
@@ -251,11 +259,11 @@ private fun WorkspaceSource(
     onSelect: (String) -> Unit,
 ) {
     if (workspaces == null) {
-        WorkspaceUnavailableMessage("工作区数据源尚未接入")
+        WorkspaceUnavailableMessage(stringResource(R.string.drawer_workspaces_unavailable))
         return
     }
     if (workspaces.isEmpty()) {
-        WorkspaceUnavailableMessage("暂无工作区")
+        WorkspaceUnavailableMessage(stringResource(R.string.drawer_no_workspaces))
         return
     }
     Row(
@@ -332,7 +340,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
         LXIcon(name = LXIconName.Search, size = 16.dp, color = t.text4, stroke = 2f)
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text("搜索会话", color = t.text4, fontSize = 14.sp)
+                Text(stringResource(R.string.drawer_search_chats_placeholder), color = t.text4, fontSize = 14.sp)
             }
             BasicTextField(
                 value = query,
@@ -353,7 +361,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
                     .clickable { onQueryChange("") },
                 contentAlignment = Alignment.Center,
             ) {
-                LXIcon(name = LXIconName.X, size = 13.dp, color = t.text4, stroke = 2f, contentDescription = "清除搜索")
+                LXIcon(name = LXIconName.X, size = 13.dp, color = t.text4, stroke = 2f, contentDescription = stringResource(R.string.drawer_clear_search_a11y))
             }
         }
     }
@@ -377,10 +385,10 @@ private fun SectionTabs(
             .padding(horizontal = 14.dp)
             .padding(bottom = 8.dp),
     ) {
-        SectionTab(DrawerSection.Chats, LXIconName.Message, "对话", chats, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Projects, LXIconName.Folder, "项目", projects, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Crons, LXIconName.Clock, "定时", crons, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Apps, LXIconName.Workflow, "应用", apps, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Chats, LXIconName.Message, stringResource(R.string.drawer_tab_chats), chats, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Projects, LXIconName.Folder, stringResource(R.string.drawer_tab_projects), projects, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Crons, LXIconName.Clock, stringResource(R.string.drawer_tab_crons), crons, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Apps, LXIconName.Workflow, stringResource(R.string.drawer_tab_apps), apps, section, onSelect, Modifier.weight(1f))
     }
 }
 
@@ -396,13 +404,17 @@ private fun AppsSection(appsCount: Int, onOpenApps: () -> Unit) {
     ) {
         LXIcon(name = LXIconName.Workflow, size = 34.dp, color = t.accent, stroke = 1.7f)
         Text(
-            if (appsCount == 0) "还没有本地应用" else "本地应用 $appsCount 个",
+            if (appsCount == 0) {
+                stringResource(R.string.drawer_empty_apps)
+            } else {
+                stringResource(R.string.drawer_apps_count, appsCount)
+            },
             color = t.text,
             fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            "从模板创建、设计、生成并运行本地应用。",
+            stringResource(R.string.drawer_apps_empty_detail),
             color = t.text3,
             fontSize = 12.sp,
         )
@@ -418,7 +430,7 @@ private fun AppsSection(appsCount: Int, onOpenApps: () -> Unit) {
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
             LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.accent, stroke = 1.8f)
-            Text("打开应用库", color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.drawer_open_apps_library), color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -505,7 +517,7 @@ private fun TerminalShortcut(onClick: () -> Unit) {
             )
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text("终端", color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.settings_linux_section_terminal), color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text("Android Shell", color = t.text4, fontSize = 11.5f.sp)
         }
         LXIcon(
@@ -546,9 +558,15 @@ private fun AccountRow(onClick: () -> Unit) {
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text("Yuxin Yang", color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Text("Pro · 5.5 / 8 段", color = t.text4, fontSize = 11.5f.sp)
+                Text(stringResource(R.string.drawer_account_subtitle_mock), color = t.text4, fontSize = 11.5f.sp)
             }
-            LXIcon(name = LXIconName.Cog, size = 18.dp, color = t.text3, stroke = 1.6f, contentDescription = "设置")
+            LXIcon(
+                name = LXIconName.Cog,
+                size = 18.dp,
+                color = t.text3,
+                stroke = 1.6f,
+                contentDescription = stringResource(R.string.settings_title_main),
+            )
         }
     }
 }

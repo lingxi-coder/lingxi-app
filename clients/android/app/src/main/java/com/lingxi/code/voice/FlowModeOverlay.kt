@@ -63,9 +63,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.speech.tts.TextToSpeech
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
@@ -325,7 +327,7 @@ private fun FlowModeContent(
     var userCaption by remember { mutableStateOf("") }
     var didSend by remember { mutableStateOf(false) }
     var listenGeneration by remember { mutableLongStateOf(0L) }
-    val name = assistantName.ifBlank { "灵犀" }
+    val name = assistantName.ifBlank { stringResource(R.string.app_name) }
     // Speak the reply with the OFFLINE sherpa TTS when its pack is downloaded,
     // else the system TextToSpeech.
     val (sysSpeak, sysStop) = rememberTts()
@@ -384,15 +386,15 @@ private fun FlowModeContent(
     val isAi = phase == OrbPhase.Speaking || (phase == OrbPhase.Idle && didSend)
 
     val label = when (phase) {
-        OrbPhase.Idle, OrbPhase.Listening -> "聆听中"
-        OrbPhase.Thinking -> "思考中"
+        OrbPhase.Idle, OrbPhase.Listening -> stringResource(R.string.voice_flow_listening_label)
+        OrbPhase.Thinking -> stringResource(R.string.voice_flow_thinking_label)
         OrbPhase.Speaking -> name
     }
     val sub = when (phase) {
         OrbPhase.Idle -> ""
-        OrbPhase.Listening -> "说完轻点收音 · 或继续"
-        OrbPhase.Thinking -> "正在组织语言…"
-        OrbPhase.Speaking -> "轻点光球可打断"
+        OrbPhase.Listening -> stringResource(R.string.voice_flow_listening_hint)
+        OrbPhase.Thinking -> stringResource(R.string.voice_flow_thinking_hint)
+        OrbPhase.Speaking -> stringResource(R.string.voice_flow_speaking_hint)
     }
 
     Box(
@@ -439,9 +441,14 @@ private fun FlowModeContent(
                     drawCircle(oklch(0.72f, 0.18f, 150f))
                 }
                 Spacer(Modifier.width(8.dp))
-                Text("心流模式", color = Color.White.copy(alpha = 0.88f), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    stringResource(R.string.voice_flow_mode_label),
+                    color = Color.White.copy(alpha = 0.88f),
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
-            CircleGlassButton(LXIconName.X, "退出心流") {
+            CircleGlassButton(LXIconName.X, stringResource(R.string.voice_flow_exit_a11y)) {
                 listenGeneration++
                 cancelActiveOrbVoiceSession()
                 onClose()
@@ -471,7 +478,7 @@ private fun FlowModeContent(
             Box(modifier = Modifier.heightIn(min = 22.dp).widthIn(max = 320.dp), contentAlignment = Alignment.Center) {
                 if (caption.isEmpty()) {
                     Text(
-                        if (inputDialog) "$sub · 可继续使用下方输入框" else sub,
+                        if (inputDialog) stringResource(R.string.voice_flow_hint_with_input, sub) else sub,
                         color = oklch(0.60f, 0.03f, 270f),
                         fontSize = 12.sp,
                         textAlign = TextAlign.Center,
@@ -542,7 +549,12 @@ private fun FlowTextInput(
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)) {
                 LXIcon(LXIconName.Message, size = 14.dp, color = oklch(0.78f, 0.12f, 288f), stroke = 2f)
                 Spacer(Modifier.width(8.dp))
-                Text("文字输入给 $name", color = oklch(0.78f, 0.05f, 285f), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    stringResource(R.string.voice_flow_text_input_label, name),
+                    color = oklch(0.78f, 0.05f, 285f),
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
             BasicTextField(
                 value = value,
@@ -557,7 +569,7 @@ private fun FlowTextInput(
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 decorationBox = { inner ->
                     if (value.isEmpty()) {
-                        Text("输入消息…", color = oklch(0.55f, 0.03f, 280f), fontSize = 15.5.sp)
+                        Text(stringResource(R.string.voice_flow_text_input_placeholder), color = oklch(0.55f, 0.03f, 280f), fontSize = 15.5.sp)
                     }
                     inner()
                 },
@@ -567,7 +579,7 @@ private fun FlowTextInput(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("取消", color = oklch(0.68f, 0.03f, 280f), fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                Text(stringResource(R.string.common_cancel), color = oklch(0.68f, 0.03f, 280f), fontSize = 14.sp, fontWeight = FontWeight.Medium,
                     modifier = Modifier.clickable(onClick = onCancel).padding(horizontal = 16.dp, vertical = 8.dp))
                 Spacer(Modifier.width(10.dp))
                 Row(
@@ -583,7 +595,7 @@ private fun FlowTextInput(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val fg = if (canSend) Color.White else oklch(0.58f, 0.02f, 280f)
-                    Text("发送", color = fg, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.composer_send), color = fg, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.width(6.dp))
                     LXIcon(LXIconName.ArrowUp, size = 15.dp, color = fg)
                 }

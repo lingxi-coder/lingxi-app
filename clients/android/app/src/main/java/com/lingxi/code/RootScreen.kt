@@ -88,6 +88,7 @@ import com.lingxi.code.localapps.LocalAppsAction
 import com.lingxi.code.localapps.LocalAppsDestination
 import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
+import com.lingxi.code.localapps.localAppsStrings
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberOrbVoiceListen
@@ -238,7 +239,7 @@ fun RootScreen(
     val state by chatViewModel.state.collectAsState()
     val localAppsViewModel: LocalAppsViewModel = viewModel(
         key = "local-apps",
-        factory = LocalAppsViewModel.factory(chatViewModel.engineSource),
+        factory = LocalAppsViewModel.factory(chatViewModel.engineSource, strings = localAppsStrings(context)),
     )
     val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
     var showingApps by rememberSaveable { mutableStateOf(false) }

@@ -35,12 +35,14 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.mix
@@ -93,7 +95,7 @@ internal fun ChatsSection(
             Spacer(Modifier.height(8.dp))
         }
         Text(
-            text = "临时对话 30 天后自动归档 · 转为项目",
+            text = stringResource(R.string.drawer_chats_temp_notice),
             color = t.text4,
             fontSize = 11.5f.sp,
             lineHeight = (11.5f + 4f).sp,
@@ -157,7 +159,7 @@ internal fun EngineSessionsSection(
         when {
             state.isLoading -> {
                 Text(
-                    text = "正在加载会话…",
+                    text = stringResource(R.string.drawer_sessions_loading),
                     color = t.text4,
                     fontSize = 12.sp,
                     modifier = Modifier
@@ -168,7 +170,7 @@ internal fun EngineSessionsSection(
             }
             state.isError -> {
                 Text(
-                    text = state.errorMessage ?: "会话列表加载失败",
+                    text = state.errorMessage ?: stringResource(R.string.drawer_sessions_load_failed),
                     color = t.statusError,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
@@ -180,7 +182,7 @@ internal fun EngineSessionsSection(
             }
             state.isEmpty -> {
                 Text(
-                    text = "暂无会话",
+                    text = stringResource(R.string.drawer_no_sessions),
                     color = t.text4,
                     fontSize = 12.sp,
                     modifier = Modifier
@@ -200,7 +202,7 @@ internal fun EngineSessionsSection(
         if (state.rows.isEmpty()) {
             // The catalog was reported but the search filtered everything out.
             Text(
-                text = "无匹配会话",
+                text = stringResource(R.string.drawer_no_matching_sessions),
                 color = t.text4,
                 fontSize = 12.sp,
                 modifier = Modifier
@@ -234,7 +236,7 @@ private fun EngineSessionRow(row: SessionRow, active: Boolean, onClick: () -> Un
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "${row.relativeTime} · ${row.messageCount} 条",
+                text = stringResource(R.string.drawer_session_meta, row.relativeTime, row.messageCount),
                 color = t.text4,
                 fontSize = 12.sp,
                 maxLines = 1,
@@ -305,13 +307,13 @@ internal fun ProjectsSection(
         }
         if (projects.isEmpty()) {
             Text(
-                text = "暂无项目。创建后，工作文件会保存在 Android 应用目录中。",
+                text = stringResource(R.string.drawer_no_projects_detail),
                 color = LingXiTheme.palette.text4,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
             )
         }
-        DashedButton(label = "新建或导入项目", onClick = onCreateProject)
+        DashedButton(label = stringResource(R.string.drawer_new_or_import_project), onClick = onCreateProject)
     }
 }
 
@@ -410,31 +412,35 @@ private fun ProjectRow(
                             .padding(vertical = 7.dp),
                     ) {
                         LXIcon(name = LXIconName.Plus, size = 11.dp, color = t.text4, stroke = 2f)
-                        Text("新会话", color = t.text4, fontSize = 12.5f.sp)
+                        Text(stringResource(R.string.drawer_project_new_session_short), color = t.text4, fontSize = 12.5f.sp)
                     }
                     if (project.storageKind == "saf-mirror") {
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.padding(start = 16.dp, end = 12.dp, bottom = 8.dp),
                         ) {
+                            // `project.syncState` is compared against the untranslated
+                            // enum label `ProjectSyncState.AuthorizationLost.label`
+                            // (project/ProjectModels.kt, outside this task's scope) —
+                            // translating only this side of the comparison would break
+                            // reauthorize/reimport branching in every non-zh locale, so
+                            // the comparison literal stays Chinese; only the rendered
+                            // button text below is localized.
+                            val authorizationLost = project.syncState == "外部目录授权失效"
                             Text(
-                                text = if (project.syncState == "外部目录授权失效") {
-                                    "重新授权"
+                                text = if (authorizationLost) {
+                                    stringResource(R.string.drawer_reauthorize)
                                 } else {
-                                    "重新导入"
+                                    stringResource(R.string.drawer_reimport_short)
                                 },
                                 color = t.accent,
                                 fontSize = 11.5f.sp,
                                 modifier = Modifier.clickable(
-                                    onClick = if (project.syncState == "外部目录授权失效") {
-                                        onReauthorize
-                                    } else {
-                                        onReimport
-                                    },
+                                    onClick = if (authorizationLost) onReauthorize else onReimport,
                                 ),
                             )
                             Text(
-                                text = "同步回外部",
+                                text = stringResource(R.string.drawer_export_back_short),
                                 color = t.accent,
                                 fontSize = 11.5f.sp,
                                 modifier = Modifier.clickable(onClick = onExport),
@@ -495,7 +501,7 @@ private fun SessionRow(
                 )
             }
             Text(
-                text = "${session.activity} · ${session.msgs} 条",
+                text = stringResource(R.string.drawer_project_session_meta, session.activity, session.msgs),
                 color = t.text4,
                 fontSize = 11.5f.sp,
                 maxLines = 1,
@@ -519,7 +525,7 @@ internal fun CronsSection(
     ) {
         if (crons.isEmpty()) {
             Text(
-                text = "暂无定时任务",
+                text = stringResource(R.string.drawer_no_crons),
                 color = LingXiTheme.palette.text4,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
@@ -528,7 +534,7 @@ internal fun CronsSection(
         crons.forEach { cron ->
             CronCard(cron = cron, onClick = { onOpenCron(cron.id) })
         }
-        DashedButton(label = "新建定时任务", onClick = onCreateCron)
+        DashedButton(label = stringResource(R.string.cron_new_task_button), onClick = onCreateCron)
     }
 }
 

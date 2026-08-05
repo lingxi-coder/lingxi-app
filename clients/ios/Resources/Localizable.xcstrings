@@ -2242,6 +2242,22 @@
         }
       }
     },
+    "common_got_it": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "知道了"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Got it"
+          }
+        }
+      }
+    },
     "common_lang_zh_hans": {
       "localizations": {
         "zh-Hans": {
@@ -4322,6 +4338,70 @@
         }
       }
     },
+    "drawer_account_subtitle_mock": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pro · 5.5 / 8 段"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pro · 5.5 / 8 segments"
+          }
+        }
+      }
+    },
+    "drawer_apps_count": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地应用 %1$d 个"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d local apps"
+          }
+        }
+      }
+    },
+    "drawer_apps_empty_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从模板创建、设计、生成并运行本地应用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create from a template, design it, generate it, and run local apps."
+          }
+        }
+      }
+    },
+    "drawer_chats_temp_notice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "临时对话 30 天后自动归档 · 转为项目"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporary chats auto-archive after 30 days · convert to a project"
+          }
+        }
+      }
+    },
     "drawer_clear_search_a11y": {
       "localizations": {
         "zh-Hans": {
@@ -4354,6 +4434,22 @@
         }
       }
     },
+    "drawer_close_sidebar_a11y": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭侧栏"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close sidebar"
+          }
+        }
+      }
+    },
     "drawer_conflicts_count %lld": {
       "localizations": {
         "zh-Hans": {
@@ -4382,6 +4478,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Create App"
+          }
+        }
+      }
+    },
+    "drawer_crons_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务数据源尚未接入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled tasks data source not yet connected"
           }
         }
       }
@@ -4478,6 +4590,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sync Back to Folder"
+          }
+        }
+      }
+    },
+    "drawer_export_back_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步回外部"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync back to external"
           }
         }
       }
@@ -4594,6 +4722,22 @@
         }
       }
     },
+    "drawer_no_crons": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无定时任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No scheduled tasks yet"
+          }
+        }
+      }
+    },
     "drawer_no_match": {
       "localizations": {
         "zh-Hans": {
@@ -4606,6 +4750,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "No matching results"
+          }
+        }
+      }
+    },
+    "drawer_no_matching_sessions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无匹配会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching sessions"
+          }
+        }
+      }
+    },
+    "drawer_no_projects_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无项目。创建后，工作文件会保存在 Android 应用目录中。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No projects yet. Once created, working files are stored in the Android app directory."
+          }
+        }
+      }
+    },
+    "drawer_no_sessions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No sessions yet"
+          }
+        }
+      }
+    },
+    "drawer_no_workspaces": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无工作区"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No workspaces yet"
+          }
+        }
+      }
+    },
+    "drawer_open_apps_library": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开应用库"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open app library"
           }
         }
       }
@@ -4642,6 +4866,54 @@
         }
       }
     },
+    "drawer_project_new_session_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New session"
+          }
+        }
+      }
+    },
+    "drawer_project_session_meta": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d 条"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d messages"
+          }
+        }
+      }
+    },
+    "drawer_projects_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "项目数据源尚未接入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Projects data source not yet connected"
+          }
+        }
+      }
+    },
     "drawer_reauthorize": {
       "localizations": {
         "zh-Hans": {
@@ -4674,6 +4946,38 @@
         }
       }
     },
+    "drawer_reimport_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新导入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reimport"
+          }
+        }
+      }
+    },
+    "drawer_search_chats_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search sessions"
+          }
+        }
+      }
+    },
     "drawer_search_placeholder": {
       "localizations": {
         "zh-Hans": {
@@ -4690,6 +4994,22 @@
         }
       }
     },
+    "drawer_session_meta": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d 条"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · %2$d messages"
+          }
+        }
+      }
+    },
     "drawer_session_subtitle %@ %lld": {
       "localizations": {
         "zh-Hans": {
@@ -4702,6 +5022,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ · %lld messages"
+          }
+        }
+      }
+    },
+    "drawer_sessions_load_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话列表加载失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to load session list"
+          }
+        }
+      }
+    },
+    "drawer_sessions_loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载会话…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading sessions…"
           }
         }
       }
@@ -4782,6 +5134,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "The workspace is saved in the app's managed directory."
+          }
+        }
+      }
+    },
+    "drawer_workspaces_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作区数据源尚未接入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace data source not yet connected"
           }
         }
       }
@@ -5426,6 +5794,54 @@
         }
       }
     },
+    "local_apps_action_failed_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用操作失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App action failed"
+          }
+        }
+      }
+    },
+    "local_apps_add_a11y": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add"
+          }
+        }
+      }
+    },
+    "local_apps_add_item_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加一项"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add an item"
+          }
+        }
+      }
+    },
     "local_apps_agent_suggestion": {
       "localizations": {
         "zh-Hans": {
@@ -5506,6 +5922,22 @@
         }
       }
     },
+    "local_apps_app_deleted_edits_lost": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该应用已被删除，尚未保存的设计修改已丢失，已返回应用列表。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app has been deleted; unsaved design changes were lost, and you've been returned to the app library."
+          }
+        }
+      }
+    },
     "local_apps_apply_suggestion": {
       "localizations": {
         "zh-Hans": {
@@ -5534,6 +5966,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "批准预览"
+          }
+        }
+      }
+    },
+    "local_apps_authorization_app_id": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_authorization_queue_overflow": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用的授权请求过多，已忽略最新一条"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many authorization requests from the app; the latest one was ignored"
+          }
+        }
+      }
+    },
+    "local_apps_awaiting_generation_job": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待生成任务…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the generation job…"
           }
         }
       }
@@ -5570,6 +6050,22 @@
         }
       }
     },
+    "local_apps_browser_error_source_absolute": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已拒绝绝对源码路径。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Absolute source paths are rejected."
+          }
+        }
+      }
+    },
     "local_apps_browser_error_too_large": {
       "localizations": {
         "zh-Hans": {
@@ -5582,6 +6078,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "单个可编辑源码文件不能超过 1 MiB。"
+          }
+        }
+      }
+    },
+    "local_apps_browser_error_workspace_absolute": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已拒绝绝对工作区路径。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Absolute workspace paths are rejected."
+          }
+        }
+      }
+    },
+    "local_apps_browser_error_workspace_invalid": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已拒绝无效工作区路径。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Invalid workspace paths are rejected."
+          }
+        }
+      }
+    },
+    "local_apps_capability_domain_suffix": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\n域名：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\nDomain: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_capability_section_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "首次修改数据、控制 UI 或访问声明域名时，系统会提供允许一次、本次会话或始终允许。未授权请求默认拒绝。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The first time the app modifies data, controls the UI, or accesses a declared domain, you'll be offered allow once, allow this session, or always allow. Unauthorized requests are denied by default."
+          }
+        }
+      }
+    },
+    "local_apps_capability_section_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "能力授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Capability authorization"
+          }
+        }
+      }
+    },
+    "local_apps_card_menu_a11y": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用操作"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App actions"
+          }
+        }
+      }
+    },
+    "local_apps_checkpoint_restore_action": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore"
           }
         }
       }
@@ -5650,6 +6258,22 @@
         }
       }
     },
+    "local_apps_create_and_design": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建并开始设计"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create and start designing"
+          }
+        }
+      }
+    },
     "local_apps_create_detail": {
       "localizations": {
         "zh-Hans": {
@@ -5662,6 +6286,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "创建后进入五步设计向导。生成只有在你确认设计后才会开始。"
+          }
+        }
+      }
+    },
+    "local_apps_create_name_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "稍后可在设计器中继续完善用途和目标用户。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can keep refining the purpose and target users later in the designer."
           }
         }
       }
@@ -5694,6 +6334,182 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前步骤"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "字段名称"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Field name"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_boolean": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "布尔"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Boolean"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_datetime": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "日期时间"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Date & time"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_decimal": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小数"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Decimal"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_enum": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "枚举"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enum"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_image_ref": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "图片引用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Image reference"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_integer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "整数"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Integer"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_long_text": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "长文本"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Long text"
+          }
+        }
+      }
+    },
+    "local_apps_data_field_type_text": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文本"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text"
+          }
+        }
+      }
+    },
+    "local_apps_data_section_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SQLite 由 Rust AppService 独占管理。页面与 Agent 只能使用 collection API；原始 SQL 不会暴露。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SQLite is exclusively managed by the Rust AppService. Pages and the Agent can only use the collection API; raw SQL is never exposed."
+          }
+        }
+      }
+    },
+    "local_apps_data_section_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "受控本地数据"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Managed local data"
           }
         }
       }
@@ -5746,6 +6562,22 @@
         }
       }
     },
+    "local_apps_delete_confirm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除 %1$s？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete %1$s?"
+          }
+        }
+      }
+    },
     "local_apps_delete_confirm %@": {
       "localizations": {
         "zh-Hans": {
@@ -5758,6 +6590,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "删除 %@？"
+          }
+        }
+      }
+    },
+    "local_apps_delete_confirm_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "代码、构建产物、日志和本地 SQLite 数据都会永久删除。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code, build artifacts, logs, and local SQLite data will all be permanently deleted."
           }
         }
       }
@@ -5778,6 +6626,22 @@
         }
       }
     },
+    "local_apps_delete_item_a11y": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete %1$s"
+          }
+        }
+      }
+    },
     "local_apps_deny": {
       "localizations": {
         "zh-Hans": {
@@ -5790,6 +6654,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Deny"
+          }
+        }
+      }
+    },
+    "local_apps_design_conflict_reloaded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设计已在其他位置更新到版本 %1$s，已重新加载，请检查后继续。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The design was updated elsewhere to version %1$s; it has been reloaded — please review before continuing."
+          }
+        }
+      }
+    },
+    "local_apps_design_unsaved_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设计尚未保存完成，请重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The design hasn't finished saving yet; please try again"
           }
         }
       }
@@ -6050,6 +6946,22 @@
         }
       }
     },
+    "local_apps_error_bridge_unsupported_op": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用请求了不支持的 Bridge 操作：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app requested an unsupported Bridge operation: %1$s"
+          }
+        }
+      }
+    },
     "local_apps_error_design_conflict": {
       "localizations": {
         "zh-Hans": {
@@ -6174,6 +7086,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前引擎尚未支持字段 %@ 的结构化值。"
+          }
+        }
+      }
+    },
+    "local_apps_error_load_apps": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法加载应用：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't load apps: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_error_load_templates": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法加载应用模板：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't load app templates: %1$s"
           }
         }
       }
@@ -6434,6 +7378,22 @@
         }
       }
     },
+    "local_apps_field_enabled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已启用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enabled"
+          }
+        }
+      }
+    },
     "local_apps_field_name": {
       "localizations": {
         "zh-Hans": {
@@ -6498,6 +7458,38 @@
         }
       }
     },
+    "local_apps_filter_all": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "全部"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All"
+          }
+        }
+      }
+    },
+    "local_apps_history_notice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复只回退 Git 管理的源码，SQLite 数据不会回滚。恢复前会自动创建 pre_restore 检查点。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restoring only rolls back Git-managed source code; SQLite data is not rolled back. A pre_restore checkpoint is created automatically before restoring."
+          }
+        }
+      }
+    },
     "local_apps_ignore": {
       "localizations": {
         "zh-Hans": {
@@ -6514,6 +7506,38 @@
         }
       }
     },
+    "local_apps_leave_app_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此链接将交给系统浏览器打开：\n%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This link will be opened in the system browser:\n%1$s"
+          }
+        }
+      }
+    },
+    "local_apps_leave_app_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "离开本地应用？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave the local app?"
+          }
+        }
+      }
+    },
     "local_apps_line_per_item": {
       "localizations": {
         "zh-Hans": {
@@ -6526,6 +7550,166 @@
           "stringUnit": {
             "state": "translated",
             "value": "每行一项"
+          }
+        }
+      }
+    },
+    "local_apps_loading_data_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用详情返回后会显示受控 SQLite 集合。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Managed SQLite collections will show once the app details return."
+          }
+        }
+      }
+    },
+    "local_apps_loading_data_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载数据结构"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading data structure"
+          }
+        }
+      }
+    },
+    "local_apps_loading_generic": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加载中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading"
+          }
+        }
+      }
+    },
+    "local_apps_loading_workspace_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用详情返回后会显示可编辑源码。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Editable source code will show once the app details return."
+          }
+        }
+      }
+    },
+    "local_apps_loading_workspace_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载工作区"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading workspace"
+          }
+        }
+      }
+    },
+    "local_apps_manifest_domains_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清单声明的 HTTPS 域名"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTPS domains declared in the manifest"
+          }
+        }
+      }
+    },
+    "local_apps_mode_direct": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct · Next 本地服务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct · Next local service"
+          }
+        }
+      }
+    },
+    "local_apps_mode_direct_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用生产构建，运行实例受设备内存配额控制。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uses a production build; running instances are governed by the device's memory quota."
+          }
+        }
+      }
+    },
+    "local_apps_mode_play": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play · 静态应用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play · Static app"
+          }
+        }
+      }
+    },
+    "local_apps_mode_play_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用已校验的静态导出产物。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uses a verified static export build."
           }
         }
       }
@@ -6562,6 +7746,22 @@
         }
       }
     },
+    "local_apps_new_field_default_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新字段"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New field"
+          }
+        }
+      }
+    },
     "local_apps_next": {
       "localizations": {
         "zh-Hans": {
@@ -6594,6 +7794,54 @@
         }
       }
     },
+    "local_apps_no_checkpoints_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚无检查点。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No checkpoints yet."
+          }
+        }
+      }
+    },
+    "local_apps_no_collections": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此应用未声明持久化集合。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app has not declared any persistent collections."
+          }
+        }
+      }
+    },
+    "local_apps_no_domains_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无（默认 CSP 禁止外网）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "None (the default CSP blocks external network access)"
+          }
+        }
+      }
+    },
     "local_apps_not_found": {
       "localizations": {
         "zh-Hans": {
@@ -6606,6 +7854,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "应用不存在"
+          }
+        }
+      }
+    },
+    "local_apps_not_running_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动后可在此预览。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can preview here once it's started."
+          }
+        }
+      }
+    },
+    "local_apps_not_running_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用尚未运行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app isn't running yet"
           }
         }
       }
@@ -6638,6 +7918,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "允许 Agent 修改应用数据？"
+          }
+        }
+      }
+    },
+    "local_apps_permission_data_mutation_plain": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许修改应用数据？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow modifying app data?"
           }
         }
       }
@@ -6702,6 +7998,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "仅可访问设计清单声明的 HTTPS 域名，每个域名首次访问单独授权。"
+          }
+        }
+      }
+    },
+    "local_apps_permission_network_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用联网？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to access the network?"
           }
         }
       }
@@ -6802,6 +8114,22 @@
         }
       }
     },
+    "local_apps_permissions_reset_confirm_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话授权和持久授权都会清除。下次修改数据、控制界面或访问域名时会重新询问。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Both session and persistent authorizations will be cleared. You'll be asked again the next time the app modifies data, controls the UI, or accesses a domain."
+          }
+        }
+      }
+    },
     "local_apps_permissions_reset_detail": {
       "localizations": {
         "zh-Hans": {
@@ -6898,6 +8226,22 @@
         }
       }
     },
+    "local_apps_preview_not_ready_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预览服务尚未就绪，仍可批准或提交修改。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The preview service isn't ready yet; you can still approve or submit changes."
+          }
+        }
+      }
+    },
     "local_apps_preview_not_running": {
       "localizations": {
         "zh-Hans": {
@@ -6926,6 +8270,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "启动应用后，页面将从 Rust 回环服务加载。"
+          }
+        }
+      }
+    },
+    "local_apps_preview_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用预览"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App preview"
           }
         }
       }
@@ -6978,6 +8338,38 @@
         }
       }
     },
+    "local_apps_request_suggestion": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让 Agent 提出设计建议"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask the Agent for design suggestions"
+          }
+        }
+      }
+    },
+    "local_apps_required_suffix": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · 必填"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · Required"
+          }
+        }
+      }
+    },
     "local_apps_restart": {
       "localizations": {
         "zh-Hans": {
@@ -6990,6 +8382,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "重新启动"
+          }
+        }
+      }
+    },
+    "local_apps_restore_checkpoint_confirm_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将恢复到“%1$s”。当前源码会先保存为 pre_restore，应用数据保持不变。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This will restore to “%1$s”. The current source will first be saved as pre_restore; app data stays unchanged."
+          }
+        }
+      }
+    },
+    "local_apps_restore_checkpoint_confirm_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复源码检查点？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore the source code checkpoint?"
           }
         }
       }
@@ -7058,6 +8482,22 @@
         }
       }
     },
+    "local_apps_revoke_action": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤销"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revoke"
+          }
+        }
+      }
+    },
     "local_apps_row_actions %@": {
       "localizations": {
         "zh-Hans": {
@@ -7106,6 +8546,86 @@
         }
       }
     },
+    "local_apps_runtime_log_mode": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模式：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mode: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_runtime_log_none": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有运行错误。完整构建日志保存在应用 logs 目录，并可由受控 MCP read_logs 查询。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "There are no runtime errors right now. Full build logs are stored in the app's logs directory and can be queried via the managed MCP read_logs tool."
+          }
+        }
+      }
+    },
+    "local_apps_runtime_log_recovery": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_runtime_log_status": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态：%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_runtime_log_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行日志"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runtime log"
+          }
+        }
+      }
+    },
     "local_apps_runtime_mode": {
       "localizations": {
         "zh-Hans": {
@@ -7134,6 +8654,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Next 本地服务"
+          }
+        }
+      }
+    },
+    "local_apps_runtime_notice_staged_after_null": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地应用运行时已准备就绪，但本次启动中曾有一次引擎构建没能拿到它。引擎只在启动时读取一次运行时路径：如果失败原因是运行时不可用，请重启 App 后重试；否则本次失败与运行时无关。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The local-app runtime is ready, but during this launch one engine build failed to pick it up. The engine reads the runtime path only once at launch: if the failure was caused by the runtime being unavailable, restart the app and try again; otherwise this failure is unrelated to the runtime."
+          }
+        }
+      }
+    },
+    "local_apps_runtime_notice_staging": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地应用运行时仍在首次准备中。引擎只在启动时读取一次运行时路径，因此准备完成后需要重启 App 才能生成应用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The local-app runtime is still being prepared for the first time. The engine reads the runtime path only once at launch, so you'll need to restart the app after preparation finishes before you can generate apps."
+          }
+        }
+      }
+    },
+    "local_apps_runtime_notice_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地应用运行时准备失败（安装包中没有运行时，或解压失败），本次启动无法生成应用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The local-app runtime failed to prepare (the install package has no runtime, or extraction failed); apps can't be generated during this launch."
           }
         }
       }
@@ -7426,6 +8994,22 @@
         }
       }
     },
+    "local_apps_section_permissions_logs": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "权限/日志"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permissions/Logs"
+          }
+        }
+      }
+    },
     "local_apps_section_preview": {
       "localizations": {
         "zh-Hans": {
@@ -7454,6 +9038,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "源码"
+          }
+        }
+      }
+    },
+    "local_apps_source_browser_notice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅显示 1 MiB 以内的文本源码；符号链接、构建产物和私有目录已排除。依赖文件可编辑，但不受支持的版本会在构建校验时被拒绝。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only text source under 1 MiB is shown; symlinks, build artifacts, and private directories are excluded. Dependency files are editable, but unsupported versions are rejected during build verification."
           }
         }
       }
@@ -7522,6 +9122,54 @@
         }
       }
     },
+    "local_apps_source_no_editable_files": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无可编辑源码。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No editable source code yet."
+          }
+        }
+      }
+    },
+    "local_apps_source_saved_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存；下次构建会重新校验源码。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved; the source code will be re-verified on the next build."
+          }
+        }
+      }
+    },
+    "local_apps_step_progress": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "步骤 %1$d / %2$d"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Step %1$d / %2$d"
+          }
+        }
+      }
+    },
     "local_apps_submit": {
       "localizations": {
         "zh-Hans": {
@@ -7534,6 +9182,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "提交"
+          }
+        }
+      }
+    },
+    "local_apps_submit_to_agent": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提交给 Agent"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Submit to Agent"
+          }
+        }
+      }
+    },
+    "local_apps_suggestion_default_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建议调整 %1$d 个字段"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Suggests adjusting %1$d fields"
           }
         }
       }
@@ -7634,6 +9314,22 @@
         }
       }
     },
+    "local_apps_template_meta": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 步 · 模板 v%2$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d steps · Template v%2$s"
+          }
+        }
+      }
+    },
     "local_apps_template_steps %lld %llu": {
       "localizations": {
         "zh-Hans": {
@@ -7694,6 +9390,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "模板结构由 Rust AppService 下发，客户端不会使用内置字段副本。"
+          }
+        }
+      }
+    },
+    "local_apps_templates_not_loaded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模板尚未从本地引擎加载"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Templates haven't loaded from the local engine yet"
           }
         }
       }
@@ -7794,6 +9506,22 @@
         }
       }
     },
+    "local_apps_ui_action_missing_target": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "UI 请求缺少有效目标或参数"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The UI request is missing a valid target or parameters"
+          }
+        }
+      }
+    },
     "local_apps_ui_action_navigate": {
       "localizations": {
         "zh-Hans": {
@@ -7806,6 +9534,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "导航"
+          }
+        }
+      }
+    },
+    "local_apps_ui_action_reason": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 请求执行 %1$s 操作。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Agent is requesting to perform a %1$s action."
           }
         }
       }
@@ -7954,6 +9698,22 @@
         }
       }
     },
+    "local_apps_workflow_awaiting_preview_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待批准预览"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Awaiting preview approval"
+          }
+        }
+      }
+    },
     "local_apps_workflow_awaiting_spec": {
       "localizations": {
         "zh-Hans": {
@@ -7966,6 +9726,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "等待确认设计"
+          }
+        }
+      }
+    },
+    "local_apps_workflow_awaiting_spec_confirm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待确认设计"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Awaiting design confirmation"
           }
         }
       }
@@ -8050,6 +9826,22 @@
         }
       }
     },
+    "local_apps_workflow_revising_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修改中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revising"
+          }
+        }
+      }
+    },
     "local_apps_workflow_validating": {
       "localizations": {
         "zh-Hans": {
@@ -8062,6 +9854,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "正在校验"
+          }
+        }
+      }
+    },
+    "local_apps_workflow_validating_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "校验中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Validating"
           }
         }
       }
@@ -8094,6 +9902,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "工作区"
+          }
+        }
+      }
+    },
+    "local_apps_workspace_open_failed_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开工作区"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't open the workspace"
+          }
+        }
+      }
+    },
+    "local_apps_workspace_path_invalid": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作区路径无效。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The workspace path is invalid."
           }
         }
       }
@@ -8514,6 +10354,22 @@
         }
       }
     },
+    "onboarding_assistant_wake_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这会成为它的唤醒词。之后你可以说「嘿，%1$s」随时唤醒它。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This will become its wake word. Afterward you can say “Hey, %1$s” anytime to wake it."
+          }
+        }
+      }
+    },
     "onboarding_back": {
       "localizations": {
         "zh-Hans": {
@@ -8654,6 +10510,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "进入应用后，请在「设置 → LLM 提供商」保存真实凭据并选择默认模型。"
+          }
+        }
+      }
+    },
+    "onboarding_done_subtitle_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "进入应用后，请在「设置 → AI 提供商」保存真实凭据并选择默认模型。模型列表会直接来自当前已配置的提供商。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "After entering the app, save your real credentials and choose a default model under “Settings → AI Providers.” The model list comes directly from your currently configured providers."
           }
         }
       }
@@ -8818,6 +10690,214 @@
         }
       }
     },
+    "onboarding_voice_pack_connecting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在连接 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting %1$s"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_download_action": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载 (%1$s)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download (%1$s)"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_downloading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在下载 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Downloading %1$s"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_extracting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在安装 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installing %1$s"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_extracting_next": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "，完成后继续下载 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": ", then continues downloading %1$s"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载失败（%1$s）：%2$s · 点此重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download failed (%1$s): %2$s · Tap to retry"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_queued": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待下载 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting to download %1$s"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ 已下载到本机"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ Downloaded to this device"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_skip": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不下载"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skip for now"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_skip_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用系统语音 · 可稍后在设置下载"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the system voice · you can download later in Settings"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_subtitle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载离线语音模型后，听写与朗读完全在本机进行、不依赖网络。可稍后在设置里更换或删除。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Once an offline voice model is downloaded, dictation and read-aloud run entirely on-device with no network dependency. You can change or remove it later in Settings."
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择语音包"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a voice pack"
+          }
+        }
+      }
+    },
+    "onboarding_voice_pack_verifying": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在校验 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verifying %1$s"
+          }
+        }
+      }
+    },
     "onboarding_voice_subtitle": {
       "localizations": {
         "zh-Hans": {
@@ -8862,6 +10942,134 @@
           "stringUnit": {
             "state": "translated",
             "value": "系统播报声音"
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_sample_phrase": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "「你好灵犀，我是%1$s。」"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“Hello Lingxi, I'm %1$s.”"
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_self_pronoun": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "me"
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_status_done": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ 声纹已录入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ Voiceprint recorded"
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_status_idle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轻点麦克风，朗读下面这句话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap the microphone and read the sentence below aloud"
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_status_recording": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在聆听你的声音… %1$d%"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listening to your voice… %1$d%"
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_subtitle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让灵犀听声识人，只对你的声音响应、唤起属于你的记忆。可稍后在设置里完成。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let Lingxi recognize you by voice, responding only to your voice and recalling memories that belong to you. You can finish this later in Settings."
+          }
+        }
+      }
+    },
+    "onboarding_voiceprint_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "录入你的声纹"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Record your voiceprint"
+          }
+        }
+      }
+    },
+    "onboarding_wake_word_preview": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "嘿，%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hey, %1$s"
           }
         }
       }
@@ -17602,6 +19810,22 @@
         }
       }
     },
+    "voice_device_unsupported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备不支持语音识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device doesn't support speech recognition"
+          }
+        }
+      }
+    },
     "voice_effective_language": {
       "localizations": {
         "zh-Hans": {
@@ -17614,6 +19838,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "实际语言"
+          }
+        }
+      }
+    },
+    "voice_flow_exit_a11y": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出心流"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exit flow mode"
+          }
+        }
+      }
+    },
+    "voice_flow_hint_with_input": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · 可继续使用下方输入框"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s · You can keep using the input box below"
+          }
+        }
+      }
+    },
+    "voice_flow_listening_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "说完轻点收音 · 或继续"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to stop recording when done · or keep talking"
+          }
+        }
+      }
+    },
+    "voice_flow_listening_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "聆听中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listening"
           }
         }
       }
@@ -17634,6 +19922,150 @@
         }
       }
     },
+    "voice_flow_release_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "松开发送 · 上滑取消"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Release to send · swipe up to cancel"
+          }
+        }
+      }
+    },
+    "voice_flow_speaking_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轻点光球可打断"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap the orb to interrupt"
+          }
+        }
+      }
+    },
+    "voice_flow_text_input_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文字输入给 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text input to %1$s"
+          }
+        }
+      }
+    },
+    "voice_flow_text_input_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入消息…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type a message…"
+          }
+        }
+      }
+    },
+    "voice_flow_thinking_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在组织语言…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Composing a reply…"
+          }
+        }
+      }
+    },
+    "voice_flow_thinking_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "思考中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thinking"
+          }
+        }
+      }
+    },
+    "voice_hold_to_talk_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按住说话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hold to talk"
+          }
+        }
+      }
+    },
+    "voice_listening": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在聆听…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listening…"
+          }
+        }
+      }
+    },
+    "voice_mic_permission_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要麦克风权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone permission required"
+          }
+        }
+      }
+    },
     "voice_microphone": {
       "localizations": {
         "zh-Hans": {
@@ -17646,6 +20078,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "麦克风"
+          }
+        }
+      }
+    },
+    "voice_no_speech_recognized": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未识别到语音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No speech recognized"
           }
         }
       }
@@ -17730,6 +20178,38 @@
         }
       }
     },
+    "voice_recognition_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "识别失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recognition failed"
+          }
+        }
+      }
+    },
+    "voice_recognition_failed_retriable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "识别失败，可重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recognition failed; you can retry"
+          }
+        }
+      }
+    },
     "voice_recognition_language": {
       "localizations": {
         "zh-Hans": {
@@ -17758,6 +20238,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "识别方式"
+          }
+        }
+      }
+    },
+    "voice_recording_cancelled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "录音已取消"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recording cancelled"
           }
         }
       }
@@ -17890,6 +20386,38 @@
         }
       }
     },
+    "voice_start_recognition_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动语音识别失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to start speech recognition"
+          }
+        }
+      }
+    },
+    "voice_starting_mic": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在启动麦克风…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starting the microphone…"
+          }
+        }
+      }
+    },
     "voice_status_fallback": {
       "localizations": {
         "zh-Hans": {
@@ -17934,6 +20462,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "已保存"
+          }
+        }
+      }
+    },
+    "voice_stopping_recording": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在结束录音…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finishing the recording…"
           }
         }
       }

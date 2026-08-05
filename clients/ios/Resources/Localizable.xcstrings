@@ -105,6 +105,12 @@
             "state": "translated",
             "value": "无"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无"
+          }
         }
       }
     },
@@ -147,12 +153,24 @@
             "state": "translated",
             "value": "可叠加，越多越费电与算力。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可叠加，越多越费电与算力。"
+          }
         }
       }
     },
     "dream_activity_plan": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "草拟今日计划"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "草拟今日计划"
@@ -167,12 +185,24 @@
             "state": "translated",
             "value": "基于昨日未完成 + 日历"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "基于昨日未完成 + 日历"
+          }
         }
       }
     },
     "dream_activity_polish": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "润色草稿"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "润色草稿"
@@ -187,12 +217,24 @@
             "state": "translated",
             "value": "为待发邮件/文档生成 2 套候选"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "为待发邮件/文档生成 2 套候选"
+          }
         }
       }
     },
     "dream_activity_prefetch": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预热常用上下文"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "预热常用上下文"
@@ -207,12 +249,24 @@
             "state": "translated",
             "value": "预生成你最常问的回答"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预生成你最常问的回答"
+          }
         }
       }
     },
     "dream_activity_recap": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "总结过去一周"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "总结过去一周"
@@ -227,12 +281,24 @@
             "state": "translated",
             "value": "每周日凌晨生成回顾报告"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周日凌晨生成回顾报告"
+          }
         }
       }
     },
     "dream_activity_reorganize": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "整理记忆"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "整理记忆"
@@ -247,12 +313,24 @@
             "state": "translated",
             "value": "合并相似 / 去重 / 归档过期"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "合并相似 / 去重 / 归档过期"
+          }
         }
       }
     },
     "dream_budget_high": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "高"
@@ -267,12 +345,24 @@
             "state": "translated",
             "value": "推理模型 + 工具 · 最深入"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "推理模型 + 工具 · 最深入"
+          }
         }
       }
     },
     "dream_budget_low": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "低"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "低"
@@ -287,12 +377,24 @@
             "state": "translated",
             "value": "本地模型为主 · 几乎免费"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地模型为主 · 几乎免费"
+          }
         }
       }
     },
     "dream_budget_medium": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "中"
@@ -307,12 +409,24 @@
             "state": "translated",
             "value": "中等模型 · 默认"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中等模型 · 默认"
+          }
         }
       }
     },
     "dream_compute_budget_footer": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高预算会优先调用更强模型（如 Claude Opus），并访问 MCP 工具。低预算只用本地 + 最便宜模型。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "高预算会优先调用更强模型（如 Claude Opus），并访问 MCP 工具。低预算只用本地 + 最便宜模型。"
@@ -327,12 +441,24 @@
             "state": "translated",
             "value": "确保不会影响日常使用：仅在充电 + Wi-Fi 时跑昂贵任务。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确保不会影响日常使用：仅在充电 + Wi-Fi 时跑昂贵任务。"
+          }
         }
       }
     },
     "dream_description_blurb": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当设备闲置时，灵犀在后台运行\n整理、规划、润色 — 醒来即可看到结果"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当设备闲置时，灵犀在后台运行\n整理、规划、润色 — 醒来即可看到结果"
@@ -347,12 +473,24 @@
             "state": "translated",
             "value": "开启 Dream 模式"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启 Dream 模式"
+          }
         }
       }
     },
     "dream_only_charging": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在充电时"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "仅在充电时"
@@ -367,12 +505,24 @@
             "state": "translated",
             "value": "仅在 Wi-Fi 时"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在 Wi-Fi 时"
+          }
         }
       }
     },
     "dream_recap_item_1": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "03:24 - 03:41 · 整理记忆"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "03:24 - 03:41 · 整理记忆"
@@ -387,12 +537,24 @@
             "state": "translated",
             "value": "03:41 - 04:02 · 草拟今日计划"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "03:41 - 04:02 · 草拟今日计划"
+          }
         }
       }
     },
     "dream_recap_item_3": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "04:02 - 04:08 · 润色邮件"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "04:02 - 04:08 · 润色邮件"
@@ -407,12 +569,24 @@
             "state": "translated",
             "value": "合并 12 条 → 7 条，归档 5 条过期"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "合并 12 条 → 7 条，归档 5 条过期"
+          }
         }
       }
     },
     "dream_recap_sub_2": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "基于 8 个未完成事项 + 3 场会议"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "基于 8 个未完成事项 + 3 场会议"
@@ -427,12 +601,24 @@
             "state": "translated",
             "value": "为 2 封草稿各生成 1 套候选"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "为 2 封草稿各生成 1 套候选"
+          }
         }
       }
     },
     "dream_section_activities": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许的活动"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "允许的活动"
@@ -447,12 +633,24 @@
             "state": "translated",
             "value": "算力预算"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "算力预算"
+          }
         }
       }
     },
     "dream_section_conditions": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行条件"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "运行条件"
@@ -467,12 +665,24 @@
             "state": "translated",
             "value": "昨夜 Dream 回顾"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "昨夜 Dream 回顾"
+          }
         }
       }
     },
     "dream_section_time_window": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "时间窗"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "时间窗"
@@ -487,12 +697,24 @@
             "state": "translated",
             "value": "随时"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "随时"
+          }
         }
       }
     },
     "dream_window_always_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只要设备闲置"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "只要设备闲置"
@@ -507,12 +729,24 @@
             "state": "translated",
             "value": "自定义时段"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自定义时段"
+          }
         }
       }
     },
     "dream_window_custom_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置每日时间窗"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "设置每日时间窗"
@@ -527,12 +761,24 @@
             "state": "translated",
             "value": "夜间 (00:00–06:00)"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "夜间 (00:00–06:00)"
+          }
         }
       }
     },
     "dream_window_night_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认，最不打扰"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "默认，最不打扰"
@@ -755,12 +1001,24 @@
             "state": "translated",
             "value": "添加 MCP 服务器"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 MCP 服务器"
+          }
         }
       }
     },
     "mcp_auth": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "鉴权"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "鉴权"
@@ -775,12 +1033,24 @@
             "state": "translated",
             "value": "自动启动"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动启动"
+          }
         }
       }
     },
     "mcp_description_blurb": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP (Model Context Protocol) 是连接外部工具的开放协议。已连接的服务器会向 AI 暴露工具调用能力。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "MCP (Model Context Protocol) 是连接外部工具的开放协议。已连接的服务器会向 AI 暴露工具调用能力。"
@@ -795,12 +1065,24 @@
             "state": "translated",
             "value": "%@ · %lld 工具可用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · %lld 工具可用"
+          }
         }
       }
     },
     "mcp_enable_server": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用服务器"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "启用服务器"
@@ -815,12 +1097,24 @@
             "state": "translated",
             "value": "端点"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "端点"
+          }
         }
       }
     },
     "mcp_endpoint_hint": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持 `stdio://`、`https://`、`sse://`"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "支持 `stdio://`、`https://`、`sse://`"
@@ -835,12 +1129,24 @@
             "state": "translated",
             "value": "重新连接"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新连接"
+          }
         }
       }
     },
     "mcp_remove_server": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除此服务器"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "移除此服务器"
@@ -855,12 +1161,24 @@
             "state": "translated",
             "value": "服务器 · %lld"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务器 · %lld"
+          }
         }
       }
     },
     "mcp_section_tool_permissions": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具权限"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工具权限"
@@ -875,12 +1193,24 @@
             "state": "translated",
             "value": "传输与鉴权"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "传输与鉴权"
+          }
         }
       }
     },
     "mcp_server_status_tools_detail %@ %lld %@": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · %lld 工具 · %@"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%@ · %lld 工具 · %@"
@@ -895,12 +1225,24 @@
             "state": "translated",
             "value": "可用工具"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可用工具"
+          }
         }
       }
     },
     "mcp_stat_connected": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已连接"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "已连接"
@@ -915,12 +1257,24 @@
             "state": "translated",
             "value": "灵犀只会调用你允许的工具。每次首次调用会请求确认。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀只会调用你允许的工具。每次首次调用会请求确认。"
+          }
         }
       }
     },
     "mcp_tool_readonly": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只读"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "只读"
@@ -935,12 +1289,24 @@
             "state": "translated",
             "value": "可写"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可写"
+          }
         }
       }
     },
     "mcp_transport_description_prefix": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。\n浏览公开服务器目录："
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。\n浏览公开服务器目录："
@@ -955,12 +1321,24 @@
             "state": "translated",
             "value": "传输方式"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "传输方式"
+          }
         }
       }
     },
     "provider_add_kind %@": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加%@"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "添加%@"
@@ -975,12 +1353,24 @@
             "state": "translated",
             "value": "抓取网页正文用于阅读、摘要、引用 — 推荐 Jina Reader（免费）。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "抓取网页正文用于阅读、摘要、引用 — 推荐 Jina Reader（免费）。"
+          }
         }
       }
     },
     "provider_llm_blurb": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀本身不调用云端 LLM — 由你添加的提供商完成推理。密钥仅本机加密。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "灵犀本身不调用云端 LLM — 由你添加的提供商完成推理。密钥仅本机加密。"
@@ -995,12 +1385,24 @@
             "state": "translated",
             "value": "尚未添加任何提供商"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未添加任何提供商"
+          }
         }
       }
     },
     "provider_search_blurb": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用\"联网\"模式。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用\"联网\"模式。"
@@ -1015,6 +1417,12 @@
             "state": "translated",
             "value": "账户"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户"
+          }
         }
       }
     },
@@ -1025,12 +1433,40 @@
             "state": "translated",
             "value": "Pro · 续费日 2026-09-30"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pro · 续费日 2026-09-30"
+          }
+        }
+      }
+    },
+    "settings_account_usage_hours": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5.5 / 8 小时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5.5 / 8 小时"
+          }
         }
       }
     },
     "settings_api_url": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 地址"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "API 地址"
@@ -1045,12 +1481,24 @@
             "state": "translated",
             "value": "向灵犀提问"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "向灵犀提问"
+          }
         }
       }
     },
     "settings_app_ask_question_detail": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接收 Siri 或其他 App 传入的文本"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "接收 Siri 或其他 App 传入的文本"
@@ -1065,12 +1513,24 @@
             "state": "translated",
             "value": "应用接入"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用接入"
+          }
         }
       }
     },
     "settings_app_integration_actions": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3 个动作"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "3 个动作"
@@ -1085,12 +1545,24 @@
             "state": "translated",
             "value": "Siri · 快捷指令 · 自动化"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Siri · 快捷指令 · 自动化"
+          }
         }
       }
     },
     "settings_app_integration_system_footer": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这些动作由 iOS App Intents 提供，可在 Siri、快捷指令和个人自动化中直接使用。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "这些动作由 iOS App Intents 提供，可在 Siri、快捷指令和个人自动化中直接使用。"
@@ -1105,12 +1577,24 @@
             "state": "translated",
             "value": "新建对话"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建对话"
+          }
         }
       }
     },
     "settings_app_new_conversation_detail": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在当前项目创建空白对话"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "在当前项目创建空白对话"
@@ -1125,12 +1609,24 @@
             "state": "translated",
             "value": "打开灵犀"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开灵犀"
+          }
         }
       }
     },
     "settings_app_open_app_detail": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "回到当前项目与会话"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "回到当前项目与会话"
@@ -1145,12 +1641,24 @@
             "state": "translated",
             "value": "打开终端"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开终端"
+          }
         }
       }
     },
     "settings_app_open_terminal_detail": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持快捷指令与 lingxi://open_terminal 深链"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "支持快捷指令与 lingxi://open_terminal 深链"
@@ -1165,12 +1673,24 @@
             "state": "translated",
             "value": "外观"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外观"
+          }
         }
       }
     },
     "settings_appearance_dark": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "深色"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "深色"
@@ -1185,12 +1705,24 @@
             "state": "translated",
             "value": "午夜紫 + 低饱和"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "午夜紫 + 低饱和"
+          }
         }
       }
     },
     "settings_appearance_light": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "浅色"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "浅色"
@@ -1205,12 +1737,24 @@
             "state": "translated",
             "value": "暖白纸感 + 半透卡片"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暖白纸感 + 半透卡片"
+          }
         }
       }
     },
     "settings_auto": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "自动"
@@ -1225,12 +1769,24 @@
             "state": "translated",
             "value": "自动检索"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动检索"
+          }
         }
       }
     },
     "settings_auto_recall_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每次提问自动召回相关片段"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "每次提问自动召回相关片段"
@@ -1245,12 +1801,24 @@
             "state": "translated",
             "value": "松开后自动发送"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "松开后自动发送"
+          }
         }
       }
     },
     "settings_auto_update": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动更新"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "自动更新"
@@ -1265,12 +1833,24 @@
             "state": "translated",
             "value": "默认"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认"
+          }
         }
       }
     },
     "settings_badge_disabled": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停用"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "停用"
@@ -1285,12 +1865,24 @@
             "state": "translated",
             "value": "生物识别锁"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生物识别锁"
+          }
         }
       }
     },
     "settings_clear_all_memory": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除全部记忆"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "清除全部记忆"
@@ -1305,12 +1897,24 @@
             "state": "translated",
             "value": "关闭设置"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭设置"
+          }
         }
       }
     },
     "settings_contribute_training": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用数据贡献训练"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "使用数据贡献训练"
@@ -1325,12 +1929,24 @@
             "state": "translated",
             "value": "对话次数"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话次数"
+          }
         }
       }
     },
     "settings_copyright": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "© 2026 灵犀 AI · 用户偏好仅在本地"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "© 2026 灵犀 AI · 用户偏好仅在本地"
@@ -1345,12 +1961,24 @@
             "state": "translated",
             "value": "%lld 项"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 项"
+          }
         }
       }
     },
     "settings_crash_report": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "崩溃报告"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "崩溃报告"
@@ -1365,12 +1993,24 @@
             "state": "translated",
             "value": "数据与隐私"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据与隐私"
+          }
         }
       }
     },
     "settings_data_privacy_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出 · 删除 · 透明度报告"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "导出 · 删除 · 透明度报告"
@@ -1385,12 +2025,24 @@
             "state": "translated",
             "value": "日期格式"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "日期格式"
+          }
         }
       }
     },
     "settings_delete_account": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除账号与数据"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "删除账号与数据"
@@ -1405,12 +2057,24 @@
             "state": "translated",
             "value": "舒适"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "舒适"
+          }
         }
       }
     },
     "settings_density_comfortable_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认，平衡"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "默认，平衡"
@@ -1425,12 +2089,24 @@
             "state": "translated",
             "value": "紧凑"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "紧凑"
+          }
         }
       }
     },
     "settings_density_compact_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一屏显示更多内容"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "一屏显示更多内容"
@@ -1445,12 +2121,24 @@
             "state": "translated",
             "value": "宽松"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "宽松"
+          }
         }
       }
     },
     "settings_density_spacious_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更大间距，更易读"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "更大间距，更易读"
@@ -1465,12 +2153,24 @@
             "state": "translated",
             "value": "显示名称"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示名称"
+          }
         }
       }
     },
     "settings_done": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "完成"
@@ -1485,12 +2185,24 @@
             "state": "translated",
             "value": "Dream 模式"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dream 模式"
+          }
         }
       }
     },
     "settings_dream_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台离线思考与整理"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "后台离线思考与整理"
@@ -1505,12 +2217,24 @@
             "state": "translated",
             "value": "导出我的所有数据"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出我的所有数据"
+          }
         }
       }
     },
     "settings_feedback": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "反馈与建议"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "反馈与建议"
@@ -1525,12 +2249,24 @@
             "state": "translated",
             "value": "文件数"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件数"
+          }
         }
       }
     },
     "settings_follow_interface": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跟随界面"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "跟随界面"
@@ -1545,12 +2281,24 @@
             "state": "translated",
             "value": "灵犀根据你的输入语言自动判断"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀根据你的输入语言自动判断"
+          }
         }
       }
     },
     "settings_font_size_footer %lld": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 %lldpt · 影响对话与列表正文"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前 %lldpt · 影响对话与列表正文"
@@ -1565,12 +2313,24 @@
             "state": "translated",
             "value": "\"灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。\""
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\"灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。\""
+          }
         }
       }
     },
     "settings_help_center": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帮助中心"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "帮助中心"
@@ -1585,12 +2345,24 @@
             "state": "translated",
             "value": "索引模型"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "索引模型"
+          }
         }
       }
     },
     "settings_inference_duration": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "推理时长"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "推理时长"
@@ -1605,12 +2377,24 @@
             "state": "translated",
             "value": "5.5 / 8 小时"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5.5 / 8 小时"
+          }
         }
       }
     },
     "settings_keyboard_input": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "键盘与输入"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "键盘与输入"
@@ -1625,12 +2409,24 @@
             "state": "translated",
             "value": "语音输入 · 候选词"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音输入 · 候选词"
+          }
         }
       }
     },
     "settings_knowledge": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "知识库"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "知识库"
@@ -1645,12 +2441,24 @@
             "state": "translated",
             "value": "知识库内容会被嵌入并附加到 AI 上下文。所有索引在本机完成。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "知识库内容会被嵌入并附加到 AI 上下文。所有索引在本机完成。"
+          }
         }
       }
     },
     "settings_knowledge_file_count": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "24 个"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "24 个"
@@ -1665,12 +2473,24 @@
             "state": "translated",
             "value": "24 项"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "24 项"
+          }
         }
       }
     },
     "settings_language_footer": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换语言后将重新加载界面。AI 对话语言独立配置。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "切换语言后将重新加载界面。AI 对话语言独立配置。"
@@ -1685,12 +2505,24 @@
             "state": "translated",
             "value": "语言"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语言"
+          }
         }
       }
     },
     "settings_linux_action_refresh": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新状态"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "刷新状态"
@@ -1705,12 +2537,24 @@
             "state": "translated",
             "value": "修复 rootfs"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修复 rootfs"
+          }
         }
       }
     },
     "settings_linux_action_reset": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置 rootfs"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "重置 rootfs"
@@ -1725,12 +2569,24 @@
             "state": "translated",
             "value": "当前构建未开放该操作"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前构建未开放该操作"
+          }
         }
       }
     },
     "settings_linux_action_verify": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "校验 rootfs"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "校验 rootfs"
@@ -1745,12 +2601,24 @@
             "state": "translated",
             "value": "真机内置 iSH ARM64 与 Alpine Linux，可运行 shell、Python、包管理器和项目文件；Simulator 继续使用明确的 unavailable stub。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "真机内置 iSH ARM64 与 Alpine Linux，可运行 shell、Python、包管理器和项目文件；Simulator 继续使用明确的 unavailable stub。"
+          }
         }
       }
     },
     "settings_linux_command_placeholder": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "例如：python3 --version"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "例如：python3 --version"
@@ -1765,12 +2633,24 @@
             "state": "translated",
             "value": "命令预览"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命令预览"
+          }
         }
       }
     },
     "settings_linux_current_backend": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前后端"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前后端"
@@ -1785,12 +2665,40 @@
             "state": "translated",
             "value": "诊断"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "诊断"
+          }
+        }
+      }
+    },
+    "settings_linux_dir_not_created": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未创建"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未创建"
+          }
         }
       }
     },
     "settings_linux_execution_boundary": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行边界"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "执行边界"
@@ -1805,12 +2713,24 @@
             "state": "translated",
             "value": "iSH / fakefs 不是安全边界；真实边界仍是 iOS App 沙箱与宿主策略"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iSH / fakefs 不是安全边界；真实边界仍是 iOS App 沙箱与宿主策略"
+          }
         }
       }
     },
     "settings_linux_external_mounts": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部目录挂载"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "外部目录挂载"
@@ -1825,12 +2745,24 @@
             "state": "translated",
             "value": "空闲"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空闲"
+          }
         }
       }
     },
     "settings_linux_initial_command": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "初始命令"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "初始命令"
@@ -1845,12 +2777,24 @@
             "state": "translated",
             "value": "交互 shell"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "交互 shell"
+          }
         }
       }
     },
     "settings_linux_legacy_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "禁用 Linux 后端并保留 unavailable shell stub"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "禁用 Linux 后端并保留 unavailable shell stub"
@@ -1865,12 +2809,24 @@
             "state": "translated",
             "value": "校验会检查 fakefs 元数据与基础命令；修复会从应用内置归档恢复缺失文件；重置只重建托管 rootfs，不会删除项目、会话或密钥。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "校验会检查 fakefs 元数据与基础命令；修复会从应用内置归档恢复缺失文件；重置只重建托管 rootfs，不会删除项目、会话或密钥。"
+          }
         }
       }
     },
     "settings_linux_managed_dir": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "托管目录"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "托管目录"
@@ -1885,12 +2841,24 @@
             "state": "translated",
             "value": "iSH ARM64 + fakefs + Alpine（真机）"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iSH ARM64 + fakefs + Alpine（真机）"
+          }
         }
       }
     },
     "settings_linux_mounts_label": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "挂载目录"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "挂载目录"
@@ -1905,12 +2873,24 @@
             "state": "translated",
             "value": "未设置；打开后进入交互 shell"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未设置；打开后进入交互 shell"
+          }
         }
       }
     },
     "settings_linux_no_guest_tasks": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有 guest 后台任务"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前没有 guest 后台任务"
@@ -1925,6 +2905,12 @@
             "state": "translated",
             "value": "当前无额外挂载；未来仅按目录授权开放"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前无额外挂载；未来仅按目录授权开放"
+          }
         }
       }
     },
@@ -1935,12 +2921,40 @@
             "state": "translated",
             "value": "当前无挂载；真实 runtime 接入后这里展示 workspace / memory / skills / shared"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前无挂载；真实 runtime 接入后这里展示 workspace / memory / skills / shared"
+          }
+        }
+      }
+    },
+    "settings_linux_no_stoppable_tasks": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可停止的 Mobile Linux 任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可停止的 Mobile Linux 任务"
+          }
         }
       }
     },
     "settings_linux_not_installed": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未安装"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "未安装"
@@ -1955,12 +2969,24 @@
             "state": "translated",
             "value": "仍可打开并查看不可用原因与修复入口"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍可打开并查看不可用原因与修复入口"
+          }
         }
       }
     },
     "settings_linux_open_fullscreen_terminal": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开全屏终端"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "打开全屏终端"
@@ -1975,12 +3001,24 @@
             "state": "translated",
             "value": "可创建 PTY 终端会话"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可创建 PTY 终端会话"
+          }
         }
       }
     },
     "settings_linux_pty_unavailable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前构建未提供可用 PTY 运行时"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前构建未提供可用 PTY 运行时"
@@ -1995,12 +3033,24 @@
             "state": "translated",
             "value": "只读"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只读"
+          }
         }
       }
     },
     "settings_linux_refresh_button": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "刷新"
@@ -2015,12 +3065,24 @@
             "state": "translated",
             "value": "刷新任务列表"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新任务列表"
+          }
         }
       }
     },
     "settings_linux_running": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行中…"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "执行中…"
@@ -2035,12 +3097,24 @@
             "state": "translated",
             "value": "Linux 运行时"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux 运行时"
+          }
         }
       }
     },
     "settings_linux_section_backend": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后端选择"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "后端选择"
@@ -2055,12 +3129,24 @@
             "state": "translated",
             "value": "维护"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "维护"
+          }
         }
       }
     },
     "settings_linux_section_mounts": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "挂载骨架"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "挂载骨架"
@@ -2075,12 +3161,24 @@
             "state": "translated",
             "value": "安全说明"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全说明"
+          }
         }
       }
     },
     "settings_linux_section_status": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "状态"
@@ -2095,12 +3193,24 @@
             "state": "translated",
             "value": "任务"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务"
+          }
         }
       }
     },
     "settings_linux_section_terminal": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "终端"
@@ -2115,12 +3225,40 @@
             "state": "translated",
             "value": "工作区与终端"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作区与终端"
+          }
+        }
+      }
+    },
+    "settings_linux_simulator_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS Simulator 不提供 Mobile Linux 运行时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS Simulator 不提供 Mobile Linux 运行时"
+          }
         }
       }
     },
     "settings_linux_size": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "体积"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "体积"
@@ -2135,12 +3273,24 @@
             "state": "translated",
             "value": "停止当前任务"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止当前任务"
+          }
         }
       }
     },
     "settings_linux_stop_task": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "停止"
@@ -2155,12 +3305,24 @@
             "state": "translated",
             "value": "仅停止 runtime 当前报告的 guest 进程组；不会影响 iOS App 内其他任务"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅停止 runtime 当前报告的 guest 进程组；不会影响 iOS App 内其他任务"
+          }
         }
       }
     },
     "settings_linux_stop_task_sub_unavailable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前原生桥未提供可靠的后台进程终止能力"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前原生桥未提供可靠的后台进程终止能力"
@@ -2175,12 +3337,24 @@
             "state": "translated",
             "value": "完成"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
+          }
         }
       }
     },
     "settings_linux_task_current": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前任务"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前任务"
@@ -2195,12 +3369,24 @@
             "state": "translated",
             "value": "执行任务"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行任务"
+          }
         }
       }
     },
     "settings_linux_task_failed": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "失败"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "失败"
@@ -2215,12 +3401,24 @@
             "state": "translated",
             "value": "运行中"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行中"
+          }
         }
       }
     },
     "settings_linux_task_stopped": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "已停止"
@@ -2235,12 +3433,24 @@
             "state": "translated",
             "value": "不可用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不可用"
+          }
         }
       }
     },
     "settings_linux_terminal_entry": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端入口"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "终端入口"
@@ -2255,12 +3465,24 @@
             "state": "translated",
             "value": "终端使用当前项目的 guest workspace；运行时或 PTY 不可用时会显示修复入口，不会回退到其他目录。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端使用当前项目的 guest workspace；运行时或 PTY 不可用时会显示修复入口，不会回退到其他目录。"
+          }
         }
       }
     },
     "settings_linux_unavailable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前不可用"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前不可用"
@@ -2275,12 +3497,24 @@
             "state": "translated",
             "value": "使用当前项目工作区"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用当前项目工作区"
+          }
         }
       }
     },
     "settings_linux_version": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "版本"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "版本"
@@ -2295,12 +3529,24 @@
             "state": "translated",
             "value": "将自动执行"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将自动执行"
+          }
         }
       }
     },
     "settings_linux_writable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可写"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "可写"
@@ -2315,12 +3561,24 @@
             "state": "translated",
             "value": "LLM 提供商"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LLM 提供商"
+          }
         }
       }
     },
     "settings_logout": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出登录"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "退出登录"
@@ -2335,12 +3593,24 @@
             "state": "translated",
             "value": "管理订阅"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理订阅"
+          }
         }
       }
     },
     "settings_mcp_connections_count %lld": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 连接"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld 连接"
@@ -2355,12 +3625,24 @@
             "state": "translated",
             "value": "MCP 服务器"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP 服务器"
+          }
         }
       }
     },
     "settings_memory": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "记忆"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "记忆"
@@ -2375,12 +3657,24 @@
             "state": "translated",
             "value": "灵犀根据对话自动提取关于你的偏好、习惯、关系。你可以随时编辑或删除。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀根据对话自动提取关于你的偏好、习惯、关系。你可以随时编辑或删除。"
+          }
         }
       }
     },
     "settings_memory_items": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "42 条"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "42 条"
@@ -2395,12 +3689,24 @@
             "state": "translated",
             "value": "偏好深色 + 中文"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "偏好深色 + 中文"
+          }
         }
       }
     },
     "settings_memory_mock_item_2": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作日 8:30 倾向收到晨报"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工作日 8:30 倾向收到晨报"
@@ -2415,12 +3721,24 @@
             "state": "translated",
             "value": "正在做 AxieLix 灵犀项目"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在做 AxieLix 灵犀项目"
+          }
         }
       }
     },
     "settings_memory_mock_sub_1": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2026-05-12 形成"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "2026-05-12 形成"
@@ -2435,12 +3753,24 @@
             "state": "translated",
             "value": "2026-05-10 形成"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2026-05-10 形成"
+          }
         }
       }
     },
     "settings_memory_mock_sub_3": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2026-05-08 形成"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "2026-05-08 形成"
@@ -2455,12 +3785,24 @@
             "state": "translated",
             "value": "灵犀记住的关于你的事实"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀记住的关于你的事实"
+          }
         }
       }
     },
     "settings_notif_cron_report": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务报告"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "定时任务报告"
@@ -2475,12 +3817,24 @@
             "state": "translated",
             "value": "cron 触发执行后"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cron 触发执行后"
+          }
         }
       }
     },
     "settings_notif_mention": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我被 @"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "我被 @"
@@ -2495,12 +3849,24 @@
             "state": "translated",
             "value": "会话内有人提到你"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话内有人提到你"
+          }
         }
       }
     },
     "settings_notif_product_update": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "产品更新"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "产品更新"
@@ -2515,12 +3881,24 @@
             "state": "translated",
             "value": "新功能与重要变更"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新功能与重要变更"
+          }
         }
       }
     },
     "settings_notif_workflow_complete": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作流完成"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工作流完成"
@@ -2535,12 +3913,24 @@
             "state": "translated",
             "value": "AI 跑完多步任务时"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 跑完多步任务时"
+          }
         }
       }
     },
     "settings_notifications": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通知"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "通知"
@@ -2555,12 +3945,24 @@
             "state": "translated",
             "value": "所有通知通过系统通知中心，灵犀不会单独打扰你。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "所有通知通过系统通知中心，灵犀不会单独打扰你。"
+          }
         }
       }
     },
     "settings_notifs_enabled_count %lld": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 项开启"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld 项开启"
@@ -2575,12 +3977,24 @@
             "state": "translated",
             "value": "打开快捷指令"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开快捷指令"
+          }
         }
       }
     },
     "settings_open_source": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开源许可"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "开源许可"
@@ -2595,12 +4009,24 @@
             "state": "translated",
             "value": "使用 iOS 公共 API，动作会由系统展示和授权。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 iOS 公共 API，动作会由系统展示和授权。"
+          }
         }
       }
     },
     "settings_platform_note_2": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不会读取、点击或控制其他 App 的界面。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "不会读取、点击或控制其他 App 的界面。"
@@ -2615,12 +4041,24 @@
             "state": "translated",
             "value": "跨 App 数据通过快捷指令输入或系统分享完成。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跨 App 数据通过快捷指令输入或系统分享完成。"
+          }
         }
       }
     },
     "settings_privacy_footer": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。"
@@ -2635,12 +4073,24 @@
             "state": "translated",
             "value": "应用并重连"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用并重连"
+          }
         }
       }
     },
     "settings_provider_apply_routing": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用路由并重连"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "应用路由并重连"
@@ -2655,12 +4105,24 @@
             "state": "translated",
             "value": "退避毫秒"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退避毫秒"
+          }
         }
       }
     },
     "settings_provider_clear_key": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "清除"
@@ -2675,12 +4137,24 @@
             "state": "translated",
             "value": "可直接输入未列出的模型 ID；上方预设选择器会写回这个字段。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可直接输入未列出的模型 ID；上方预设选择器会写回这个字段。"
+          }
         }
       }
     },
     "settings_provider_custom_model_id": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自定义模型 ID"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "自定义模型 ID"
@@ -2695,6 +4169,12 @@
             "state": "translated",
             "value": "默认: %@"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认: %@"
+          }
         }
       }
     },
@@ -2705,12 +4185,40 @@
             "state": "translated",
             "value": "默认模型"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认模型"
+          }
+        }
+      }
+    },
+    "settings_provider_default_model_not_set": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未配置默认模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未配置默认模型"
+          }
         }
       }
     },
     "settings_provider_edit_unavailable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此类别尚未开放编辑。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "此类别尚未开放编辑。"
@@ -2725,12 +4233,24 @@
             "state": "translated",
             "value": "为了移除模拟卡片，这里不再读取任何预置 Provider 状态。等待对应真实后端接入后再开放编辑。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "为了移除模拟卡片，这里不再读取任何预置 Provider 状态。等待对应真实后端接入后再开放编辑。"
+          }
         }
       }
     },
     "settings_provider_enable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "启用"
@@ -2745,12 +4265,24 @@
             "state": "translated",
             "value": "启用至少一个非默认 Provider 并设置模型后，才能为默认模型配置 fallback。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用至少一个非默认 Provider 并设置模型后，才能为默认模型配置 fallback。"
+          }
         }
       }
     },
     "settings_provider_fallback_order": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认模型 fallback 顺序"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "默认模型 fallback 顺序"
@@ -2765,12 +4297,24 @@
             "state": "translated",
             "value": "隐藏 API Key"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隐藏 API Key"
+          }
         }
       }
     },
     "settings_provider_hide_key": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隐藏"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "隐藏"
@@ -2785,12 +4329,24 @@
             "state": "translated",
             "value": "保留"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留"
+          }
         }
       }
     },
     "settings_provider_key_hint_suffix": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · 密钥永不写入普通偏好。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": " · 密钥永不写入普通偏好。"
@@ -2805,12 +4361,24 @@
             "state": "translated",
             "value": "已保存于安全存储"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存于安全存储"
+          }
         }
       }
     },
     "settings_provider_key_will_be_deleted": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将在应用后删除"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "将在应用后删除"
@@ -2825,12 +4393,24 @@
             "state": "translated",
             "value": "最大重试次数"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最大重试次数"
+          }
         }
       }
     },
     "settings_provider_model_id": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型 ID"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "模型 ID"
@@ -2845,12 +4425,24 @@
             "state": "translated",
             "value": " · %lld 模型"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · %lld 模型"
+          }
         }
       }
     },
     "settings_provider_not_connected": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未接入真实配置仓储"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "尚未接入真实配置仓储"
@@ -2865,12 +4457,24 @@
             "state": "translated",
             "value": "选择一个预设 — 灵犀会自动预填 API 地址、Key 前缀和可用模型。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择一个预设 — 灵犀会自动预填 API 地址、Key 前缀和可用模型。"
+          }
         }
       }
     },
     "settings_provider_picker_unavailable": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此类别尚未开放新增。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "此类别尚未开放新增。"
@@ -2885,12 +4489,24 @@
             "state": "translated",
             "value": "联网搜索与网页抓取的真实 Provider 仓储还未在 iOS 侧接通，因此这里只保留空状态，不再提供原型预设卡片。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "联网搜索与网页抓取的真实 Provider 仓储还未在 iOS 侧接通，因此这里只保留空状态，不再提供原型预设卡片。"
+          }
         }
       }
     },
     "settings_provider_remove": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除此提供商"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "移除此提供商"
@@ -2905,12 +4521,24 @@
             "state": "translated",
             "value": "仅对默认模型生效。最大重试次数限制为 %lld-%lld，退避范围为 %lld-%lld ms。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅对默认模型生效。最大重试次数限制为 %lld-%lld，退避范围为 %lld-%lld ms。"
+          }
         }
       }
     },
     "settings_provider_section_added_count %lld": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已添加 · %lld"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "已添加 · %lld"
@@ -2925,12 +4553,24 @@
             "state": "translated",
             "value": "路由与重试"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "路由与重试"
+          }
         }
       }
     },
     "settings_provider_set_default": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设为默认"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "设为默认"
@@ -2945,12 +4585,24 @@
             "state": "translated",
             "value": "显示 API Key"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示 API Key"
+          }
         }
       }
     },
     "settings_provider_show_key": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "显示"
@@ -2965,12 +4617,24 @@
             "state": "translated",
             "value": "测试连接"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "测试连接"
+          }
         }
       }
     },
     "settings_provider_unconfigured": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未配置"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "未配置"
@@ -2985,12 +4649,24 @@
             "state": "translated",
             "value": "撤销清除"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤销清除"
+          }
         }
       }
     },
     "settings_provider_unsupported_notice %@": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 当前版本只移除了原型卡片；%@ 会显示真实空状态，待对应后端与会话重连链路接入后再开放新增与编辑。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "iOS 当前版本只移除了原型卡片；%@ 会显示真实空状态，待对应后端与会话重连链路接入后再开放新增与编辑。"
@@ -3005,12 +4681,24 @@
             "state": "translated",
             "value": "默认 `%@` · 可填代理 / 镜像"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认 `%@` · 可填代理 / 镜像"
+          }
         }
       }
     },
     "settings_providers_enabled_count %lld": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 个启用"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld 个启用"
@@ -3025,12 +4713,24 @@
             "state": "translated",
             "value": "按住说话识别语言"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按住说话识别语言"
+          }
         }
       }
     },
     "settings_recall_limit": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "召回数量上限"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "召回数量上限"
@@ -3045,12 +4745,24 @@
             "state": "translated",
             "value": "8 段"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "8 段"
+          }
         }
       }
     },
     "settings_rewatch_onboarding": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新观看引导"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "重新观看引导"
@@ -3065,12 +4777,24 @@
             "state": "translated",
             "value": "再过一遍首次设置向导"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "再过一遍首次设置向导"
+          }
         }
       }
     },
     "settings_section_about": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关于"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "关于"
@@ -3085,12 +4809,24 @@
             "state": "translated",
             "value": "强调色"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "强调色"
+          }
         }
       }
     },
     "settings_section_ai_reply_language": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 回复语言"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "AI 回复语言"
@@ -3105,12 +4841,24 @@
             "state": "translated",
             "value": "应用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用"
+          }
         }
       }
     },
     "settings_section_automation": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动化"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "自动化"
@@ -3125,12 +4873,24 @@
             "state": "translated",
             "value": "行为"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "行为"
+          }
         }
       }
     },
     "settings_section_capabilities": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "能力扩展"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "能力扩展"
@@ -3145,12 +4905,24 @@
             "state": "translated",
             "value": "Skills 是可复用的 AI 行为包；MCP 是接入外部工具的标准协议；Dream 让灵犀在你休息时主动整理与规划。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skills 是可复用的 AI 行为包；MCP 是接入外部工具的标准协议；Dream 让灵犀在你休息时主动整理与规划。"
+          }
         }
       }
     },
     "settings_section_data": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "数据"
@@ -3165,12 +4937,24 @@
             "state": "translated",
             "value": "密度"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密度"
+          }
         }
       }
     },
     "settings_section_font_size": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "字号"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "字号"
@@ -3185,12 +4969,24 @@
             "state": "translated",
             "value": "智能"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "智能"
+          }
         }
       }
     },
     "settings_section_memory_knowledge": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "记忆与知识"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "记忆与知识"
@@ -3205,12 +5001,24 @@
             "state": "translated",
             "value": "本月用量"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本月用量"
+          }
         }
       }
     },
     "settings_section_notification_type": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通知类型"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "通知类型"
@@ -3225,12 +5033,24 @@
             "state": "translated",
             "value": "平台边界"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "平台边界"
+          }
         }
       }
     },
     "settings_section_privacy_security": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隐私与安全"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "隐私与安全"
@@ -3245,12 +5065,24 @@
             "state": "translated",
             "value": "近期记忆"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "近期记忆"
+          }
         }
       }
     },
     "settings_section_region": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "区域"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "区域"
@@ -3265,12 +5097,24 @@
             "state": "translated",
             "value": "快捷指令"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "快捷指令"
+          }
         }
       }
     },
     "settings_section_storage": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存储"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "存储"
@@ -3285,12 +5129,24 @@
             "state": "translated",
             "value": "候选词"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "候选词"
+          }
         }
       }
     },
     "settings_section_system_integration": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统接入"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "系统接入"
@@ -3305,12 +5161,24 @@
             "state": "translated",
             "value": "主题"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主题"
+          }
         }
       }
     },
     "settings_section_visibility": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可见性"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "可见性"
@@ -3325,12 +5193,24 @@
             "state": "translated",
             "value": "语音输入"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音输入"
+          }
         }
       }
     },
     "settings_shortcuts_actions_count": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4 个动作"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "4 个动作"
@@ -3345,12 +5225,24 @@
             "state": "translated",
             "value": "可在系统快捷指令中组合分享表单、剪贴板、文件或其他 App 的输出，再交给灵犀。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可在系统快捷指令中组合分享表单、剪贴板、文件或其他 App 的输出，再交给灵犀。"
+          }
         }
       }
     },
     "settings_shortcuts_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看灵犀提供的动作"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "查看灵犀提供的动作"
@@ -3365,12 +5257,24 @@
             "state": "translated",
             "value": "%lld / %lld 启用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld / %lld 启用"
+          }
         }
       }
     },
     "settings_skills_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "技能包 · 提示词 · 操作流"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "技能包 · 提示词 · 操作流"
@@ -3385,12 +5289,24 @@
             "state": "translated",
             "value": "启用智能候选"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用智能候选"
+          }
         }
       }
     },
     "settings_status_available": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可用"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "可用"
@@ -3405,12 +5321,24 @@
             "state": "translated",
             "value": "已禁用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已禁用"
+          }
         }
       }
     },
     "settings_status_needs_check": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需检查"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "需检查"
@@ -3425,12 +5353,24 @@
             "state": "translated",
             "value": "未启用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未启用"
+          }
         }
       }
     },
     "settings_status_not_supported": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未支持"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "未支持"
@@ -3445,12 +5385,24 @@
             "state": "translated",
             "value": "关闭"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭"
+          }
         }
       }
     },
     "settings_status_on": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "开启"
@@ -3465,12 +5417,24 @@
             "state": "translated",
             "value": "已暂停"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
         }
       }
     },
     "settings_storage": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存储"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "存储"
@@ -3485,12 +5449,24 @@
             "state": "translated",
             "value": "基于历史会话"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "基于历史会话"
+          }
         }
       }
     },
     "settings_sync_devices": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步设备"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "同步设备"
@@ -3505,12 +5481,24 @@
             "state": "translated",
             "value": "3 台设备已连接"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3 台设备已连接"
+          }
         }
       }
     },
     "settings_title_account": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "账户"
@@ -3525,12 +5513,24 @@
             "state": "translated",
             "value": "添加 抓取"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 抓取"
+          }
         }
       }
     },
     "settings_title_add_llm": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 LLM"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "添加 LLM"
@@ -3545,12 +5545,24 @@
             "state": "translated",
             "value": "添加 搜索"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 搜索"
+          }
         }
       }
     },
     "settings_title_edit": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "编辑"
@@ -3565,12 +5577,24 @@
             "state": "translated",
             "value": "设置"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置"
+          }
         }
       }
     },
     "settings_title_workflows": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作流"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工作流"
@@ -3585,12 +5609,24 @@
             "state": "translated",
             "value": "使用诊断"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用诊断"
+          }
         }
       }
     },
     "settings_used_space": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用空间"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "使用空间"
@@ -3605,12 +5641,24 @@
             "state": "translated",
             "value": "iOS 系统语音"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 系统语音"
+          }
         }
       }
     },
     "settings_voice_tts": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音 TTS"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "语音 TTS"
@@ -3625,12 +5673,24 @@
             "state": "translated",
             "value": "网页抓取"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网页抓取"
+          }
         }
       }
     },
     "settings_web_search": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "联网搜索"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "联网搜索"
@@ -3645,12 +5705,24 @@
             "state": "translated",
             "value": "客户反馈周聚合"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "客户反馈周聚合"
+          }
         }
       }
     },
     "settings_workflow_daily_brief": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每日晨报"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "每日晨报"
@@ -3665,12 +5737,24 @@
             "state": "translated",
             "value": "每周五 17:00"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周五 17:00"
+          }
         }
       }
     },
     "settings_workflow_midnight_log": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "凌晨日志巡检"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "凌晨日志巡检"
@@ -3685,12 +5769,24 @@
             "state": "translated",
             "value": "每周一 09:00"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周一 09:00"
+          }
         }
       }
     },
     "settings_workflow_weekday_0830": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作日 08:30"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工作日 08:30"
@@ -3705,12 +5801,24 @@
             "state": "translated",
             "value": "周报自动生成"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "周报自动生成"
+          }
         }
       }
     },
     "settings_workflows_automation": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作流与自动化"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工作流与自动化"
@@ -3725,12 +5833,24 @@
             "state": "translated",
             "value": "3 启用"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3 启用"
+          }
         }
       }
     },
     "settings_workflows_footer": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作流由 cron 表达式或事件触发。在主界面侧栏 → 定时 可创建。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "工作流由 cron 表达式或事件触发。在主界面侧栏 → 定时 可创建。"
@@ -3745,12 +5865,24 @@
             "state": "translated",
             "value": "自动建议"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动建议"
+          }
         }
       }
     },
     "skills_auto_suggest_sub": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到匹配场景时主动提示"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "检测到匹配场景时主动提示"
@@ -3765,12 +5897,24 @@
             "state": "translated",
             "value": "浏览 Skills 商店"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "浏览 Skills 商店"
+          }
         }
       }
     },
     "skills_create_custom": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建自定义 Skill"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "创建自定义 Skill"
@@ -3785,12 +5929,24 @@
             "state": "translated",
             "value": "删除此 Skill"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除此 Skill"
+          }
         }
       }
     },
     "skills_description_blurb": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skills 是可复用的 AI 行为包，封装了系统提示词、工具调用与触发条件。启用后会出现在对应触发器或斜杠菜单。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Skills 是可复用的 AI 行为包，封装了系统提示词、工具调用与触发条件。启用后会出现在对应触发器或斜杠菜单。"
@@ -3805,12 +5961,24 @@
             "state": "translated",
             "value": "编辑提示词"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑提示词"
+          }
         }
       }
     },
     "skills_enable_this": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用此 Skill"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "启用此 Skill"
@@ -3825,12 +5993,24 @@
             "state": "translated",
             "value": "此 Skill 由官方维护"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Skill 由官方维护"
+          }
         }
       }
     },
     "skills_perm_access_mcp_github": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "访问 MCP · GitHub"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "访问 MCP · GitHub"
@@ -3845,12 +6025,24 @@
             "state": "translated",
             "value": "调用 LLM"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "调用 LLM"
+          }
         }
       }
     },
     "skills_perm_read_knowledge": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取知识库"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "读取知识库"
@@ -3865,12 +6057,24 @@
             "state": "translated",
             "value": "所需权限"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "所需权限"
+          }
         }
       }
     },
     "skills_section_triggers": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "触发"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "触发"
@@ -3885,12 +6089,24 @@
             "state": "translated",
             "value": "生效方式"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生效方式"
+          }
         }
       }
     },
     "voice_auto_play": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动播放回复"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "自动播放回复"
@@ -3905,12 +6121,24 @@
             "state": "translated",
             "value": "检查权限"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检查权限"
+          }
         }
       }
     },
     "voice_current_selection": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前选择"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "当前选择"
@@ -3925,12 +6153,24 @@
             "state": "translated",
             "value": "实际语言"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "实际语言"
+          }
         }
       }
     },
     "voice_microphone": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "麦克风"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "麦克风"
@@ -3945,12 +6185,24 @@
             "state": "translated",
             "value": "在线回退原因"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在线回退原因"
+          }
         }
       }
     },
     "voice_permissions_footer": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别与麦克风权限都会影响设备端和系统在线识别。"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "语音识别与麦克风权限都会影响设备端和系统在线识别。"
@@ -3965,12 +6217,24 @@
             "state": "translated",
             "value": "播放示例"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "播放示例"
+          }
         }
       }
     },
     "voice_playing": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "播放中…"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "播放中…"
@@ -3985,12 +6249,24 @@
             "state": "translated",
             "value": "试听"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "试听"
+          }
         }
       }
     },
     "voice_recognition_language": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "识别语言"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "识别语言"
@@ -4005,12 +6281,24 @@
             "state": "translated",
             "value": "识别方式"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "识别方式"
+          }
         }
       }
     },
     "voice_save_button": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "保存"
@@ -4025,12 +6313,24 @@
             "state": "translated",
             "value": "保存语音配置"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存语音配置"
+          }
         }
       }
     },
     "voice_section_config_status": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置状态"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "配置状态"
@@ -4045,12 +6345,24 @@
             "state": "translated",
             "value": "权限"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "权限"
+          }
         }
       }
     },
     "voice_section_system_tts": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统语音 TTS"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "系统语音 TTS"
@@ -4065,12 +6377,24 @@
             "state": "translated",
             "value": "语音播报"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音播报"
+          }
         }
       }
     },
     "voice_speech_rate": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语速"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "语速"
@@ -4085,12 +6409,24 @@
             "state": "translated",
             "value": "语音识别"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别"
+          }
         }
       }
     },
     "voice_status_fallback": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已回退"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "已回退"
@@ -4105,12 +6441,24 @@
             "state": "translated",
             "value": "待保存"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待保存"
+          }
         }
       }
     },
     "voice_status_saved": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "已保存"
@@ -4125,6 +6473,12 @@
             "state": "translated",
             "value": "系统设置"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统设置"
+          }
         }
       }
     },
@@ -4135,12 +6489,24 @@
             "state": "translated",
             "value": "语音由 iOS 管理，不下载或模拟 Android 模型包。"
           }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音由 iOS 管理，不下载或模拟 Android 模型包。"
+          }
         }
       }
     },
     "voice_voice_name": {
       "localizations": {
         "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "声音"
+          }
+        },
+        "en": {
           "stringUnit": {
             "state": "translated",
             "value": "声音"

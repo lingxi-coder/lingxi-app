@@ -399,6 +399,7 @@
   "settings_account_usage_hours": "5.5 / 8 小时",
   "settings_linux_no_stoppable_tasks": "当前没有可停止的 Mobile Linux 任务",
   "settings_linux_dir_not_created": "未创建",
+  "settings_linux_simulator_unavailable": "iOS Simulator 不提供 Mobile Linux 运行时",
   "settings_provider_default_model_not_set": "未配置默认模型",
   "__info_plist__": {
     "CFBundleDisplayName": "灵犀",

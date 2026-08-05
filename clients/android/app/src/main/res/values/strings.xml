@@ -399,4 +399,9 @@
     <string name="settings_platform_note_1">使用 iOS 公共 API，动作会由系统展示和授权。</string>
     <string name="settings_platform_note_2">不会读取、点击或控制其他 App 的界面。</string>
     <string name="settings_platform_note_3">跨 App 数据通过快捷指令输入或系统分享完成。</string>
+    <string name="settings_account_usage_hours">5.5 / 8 小时</string>
+    <string name="settings_linux_no_stoppable_tasks">当前没有可停止的 Mobile Linux 任务</string>
+    <string name="settings_linux_dir_not_created">未创建</string>
+    <string name="settings_linux_simulator_unavailable">iOS Simulator 不提供 Mobile Linux 运行时</string>
+    <string name="settings_provider_default_model_not_set">未配置默认模型</string>
 </resources>

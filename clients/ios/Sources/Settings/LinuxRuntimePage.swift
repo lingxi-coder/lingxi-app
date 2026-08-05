@@ -194,7 +194,7 @@ private enum LinuxRuntimeBridge {
     ) async -> Result<LinuxTerminalLine, LinuxRuntimeCommandFailure> {
         #if targetEnvironment(simulator)
             return .failure(
-                LinuxRuntimeCommandFailure(message: "iOS Simulator 不提供 Mobile Linux 运行时")
+                LinuxRuntimeCommandFailure(message: String(localized: "settings_linux_simulator_unavailable"))
             )
         #else
         let cfg = config(for: mode)
@@ -231,7 +231,7 @@ private enum LinuxRuntimeBridge {
 
     static func refreshTasks(mode: LinuxRuntimeMode) async -> Result<LinuxRuntimeTaskOperationResult, LinuxRuntimeTaskOperationFailure> {
         #if targetEnvironment(simulator)
-            return .failure(LinuxRuntimeTaskOperationFailure(message: "iOS Simulator 不提供 Mobile Linux 运行时"))
+            return .failure(LinuxRuntimeTaskOperationFailure(message: String(localized: "settings_linux_simulator_unavailable")))
         #else
         let cfg = config(for: mode)
         do {
@@ -250,7 +250,7 @@ private enum LinuxRuntimeBridge {
         taskID: String
     ) async -> Result<LinuxRuntimeTaskOperationResult, LinuxRuntimeTaskOperationFailure> {
         #if targetEnvironment(simulator)
-            return .failure(LinuxRuntimeTaskOperationFailure(message: "iOS Simulator 不提供 Mobile Linux 运行时"))
+            return .failure(LinuxRuntimeTaskOperationFailure(message: String(localized: "settings_linux_simulator_unavailable")))
         #else
         let cfg = config(for: mode)
         do {
@@ -345,7 +345,7 @@ private enum LinuxRuntimeBridge {
         var state = LinuxRuntimeState(selectedMode: mode)
         state.backend = mode == .legacy ? "ios-posix" : "ios-ish"
         state.rootfsState = .unsupported
-        state.summary = "iOS Simulator 不提供 Mobile Linux 运行时"
+        state.summary = String(localized: "settings_linux_simulator_unavailable")
         state.detail = "完整运行时只在 arm64 真机启用；Simulator 始终返回 unavailable stub。"
         state.lastAction = action
         state.lastActionMessage = state.detail

@@ -1,6 +1,6 @@
 import json, subprocess, tempfile, os, sys
 sys.path.insert(0, os.path.dirname(__file__))
-from generate import load_locales, validate_consistency, write_android
+from generate import load_locales, validate_consistency, write_android, write_ios, stale_problems
 
 def test_consistency_ok():
     locales = load_locales(os.path.dirname(__file__))
@@ -55,13 +55,65 @@ def test_android_resources(tmp_path):
 
 def test_android_escaping(tmp_path):
     locales = {
-        "zh-Hans": {"k": "It's 5% sure", "n": "共 %1$d 个"},
-        "en": {"k": "x", "n": "y"},
+        "zh-Hans": {
+            "k": "It's 5% sure",
+            "n": "共 %1$d 个",
+            "q": 'a "b"',
+            "a": "a <b> & c",
+            "p": "100%x",
+        },
+        "en": {"k": "x", "n": "y", "q": "z", "a": "w", "p": "v"},
     }
     write_android(locales, tmp_path)
     xml = open(tmp_path / "values" / "strings.xml").read()
     assert '<string name="k">It\\\'s 5%% sure</string>' in xml
     assert '<string name="n">共 %1$d 个</string>' in xml
+    assert '<string name="q">a \\"b\\"</string>' in xml
+    assert '<string name="a">a &lt;b&gt; &amp; c</string>' in xml
+    assert '<string name="p">100%x</string>' in xml
+
+def _gate_sandbox(tmp_path):
+    """Write canonical locales into a tmp dir and return (locales, ios_out, android_out)."""
+    src = tmp_path / "locales"
+    src.mkdir()
+    (src / "zh-Hans.json").write_text(
+        json.dumps({"app_name": "灵犀", "__info_plist__": {"CFBundleDisplayName": "灵犀"}}, ensure_ascii=False), encoding="utf-8"
+    )
+    (src / "en.json").write_text(
+        json.dumps({"app_name": "Lingxi", "__info_plist__": {"CFBundleDisplayName": "灵犀"}}, ensure_ascii=False), encoding="utf-8"
+    )
+    locales = load_locales(src)
+    return locales, tmp_path / "ios-out", tmp_path / "android-out"
+
+def test_stale_gate_clean(tmp_path):
+    locales, ios_out, android_out = _gate_sandbox(tmp_path)
+    write_ios(locales, ios_out)
+    write_android(locales, android_out)
+    assert stale_problems(locales, ios_out, android_out) == []
+
+def test_stale_gate_out_of_date(tmp_path):
+    locales, ios_out, android_out = _gate_sandbox(tmp_path)
+    write_ios(locales, ios_out)
+    write_android(locales, android_out)
+    cat = ios_out / "Localizable.xcstrings"
+    cat.write_text(cat.read_text().replace("Lingxi", "LingxiX"), encoding="utf-8")
+    problems = stale_problems(locales, ios_out, android_out)
+    assert any("Localizable.xcstrings" in p and "out of date" in p for p in problems)
+
+def test_stale_gate_orphan(tmp_path):
+    locales, ios_out, android_out = _gate_sandbox(tmp_path)
+    write_ios(locales, ios_out)
+    write_android(locales, android_out)
+    orphan = android_out / "values-ja" / "strings.xml"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("<resources></resources>", encoding="utf-8")
+    problems = stale_problems(locales, ios_out, android_out)
+    assert any("orphaned" in p and "values-ja" in p for p in problems)
+
+def test_generate_check_clean_repo_gate():
+    result = subprocess.run([sys.executable, "generate.py", "--check"], cwd=os.path.dirname(__file__), capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "OK:" in result.stdout
 
 if __name__ == "__main__":
     import pytest

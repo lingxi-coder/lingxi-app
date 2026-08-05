@@ -23,6 +23,20 @@ ANDROID_VALUES_DIRS = {
 _ANDROID_PLACEHOLDER = re.compile(r"%(\d+\$)?[-+#0,]*\d*(\.\d+)?[a-zA-Z]")
 
 
+def _mkdir(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"error: cannot write {path}: {exc}")
+
+
+def _write_text(path: Path, text: str) -> None:
+    try:
+        path.write_text(text, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        raise ValueError(f"error: cannot write {path}: {exc}")
+
+
 def load_locales(directory: Path | str) -> dict[str, dict]:
     directory = Path(directory)
     locales: dict[str, dict] = {}
@@ -98,7 +112,7 @@ def _localizations_for(locales: dict[str, dict], scope: str | None, key: str) ->
 def write_ios(locales: dict[str, dict], out_dir: Path | str) -> None:
     """Emit Localizable.xcstrings into out_dir."""
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir(out_dir)
     base = locales.get(BASE_LOCALE, {})
     strings = {}
     for key in base:
@@ -119,9 +133,7 @@ def write_ios(locales: dict[str, dict], out_dir: Path | str) -> None:
         "version": "1.0",
         "strings": dict(sorted(strings.items())),
     }
-    (out_dir / "Localizable.xcstrings").write_text(
-        json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    _write_text(out_dir / "Localizable.xcstrings", json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
 
 
 def _xml_escape_text(s: str) -> str:
@@ -136,7 +148,15 @@ def _xml_escape_text(s: str) -> str:
 
 
 def _android_escape(value: str) -> str:
-    """Escape a string for Android strings.xml: double literal '%', escape quotes/apostrophes."""
+    """Escape a string for Android strings.xml.
+
+    Source values are plain text. A literal '%' is doubled to '%%' so Android
+    renders it literally. Exception: '%' followed by an optional argument index,
+    flags, width/precision, and a letter is treated as a format placeholder and
+    left intact (e.g. "%1$d", "%s"). A literal percent directly before a letter
+    (e.g. "100%x") therefore stays "100%x" and would be formatted at runtime —
+    author such literals as "100%%x" in the source JSON instead.
+    """
     out = []
     last = 0
     for m in _ANDROID_PLACEHOLDER.finditer(value):
@@ -150,7 +170,7 @@ def _android_escape(value: str) -> str:
 def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
     """Emit strings.xml variants into out_dir (only for non-empty locales)."""
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir(out_dir)
     base = locales.get(BASE_LOCALE, {})
     keys = [k for k in base if k != "__info_plist__"]
     for locale in LOCALES:
@@ -163,34 +183,59 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
         if not values:
             continue
         target = out_dir / ANDROID_VALUES_DIRS.get(locale, f"values-{locale}")
-        target.mkdir(parents=True, exist_ok=True)
+        _mkdir(target)
         lines = ['<?xml version="1.0" encoding="utf-8"?>', "<resources>"]
         for key, value in values.items():
             lines.append(f'    <string name="{key}">{_android_escape(value)}</string>')
         lines.append("</resources>")
-        (target / "strings.xml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _write_text(target / "strings.xml", "\n".join(lines) + "\n")
 
 
-def _stale_problems(locales: dict[str, dict], ios_out: Path, android_out: Path) -> list:
+def _generator_produced_files(out_dir: Path, kind: str) -> list[Path]:
+    """Relative paths under out_dir that the generator owns (for the orphan scan)."""
+    if kind == "ios":
+        path = out_dir / "Localizable.xcstrings"
+        return [Path("Localizable.xcstrings")] if path.exists() else []
+    produced = []
+    for dir_path in sorted(out_dir.glob("values*")):
+        if not dir_path.is_dir():
+            continue
+        path = dir_path / "strings.xml"
+        if path.exists():
+            produced.append(path.relative_to(out_dir))
+    return produced
+
+
+def stale_problems(locales: dict[str, dict], ios_out: Path, android_out: Path) -> list:
     """Regenerate into a temp dir and byte-diff against the committed outputs."""
     problems = []
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         write_ios(locales, tmp_dir / "ios")
         write_android(locales, tmp_dir / "android")
-        generated = tmp_dir / "ios" / "Localizable.xcstrings"
-        committed = ios_out / "Localizable.xcstrings"
-        if not committed.exists():
-            problems.append(f"error: missing generated file {committed}; run generate.py")
-        elif generated.read_bytes() != committed.read_bytes():
-            problems.append(f"error: {committed} is out of date; run generate.py")
+        generated_ios = {Path("Localizable.xcstrings")}
+        for rel in generated_ios:
+            committed = ios_out / rel
+            generated = tmp_dir / "ios" / rel
+            if not committed.exists():
+                problems.append(f"error: missing generated file {committed}; run generate.py")
+            elif generated.read_bytes() != committed.read_bytes():
+                problems.append(f"error: {committed} is out of date; run generate.py")
+        generated_android = set()
         for xml in sorted((tmp_dir / "android").rglob("*.xml")):
             rel = xml.relative_to(tmp_dir / "android")
+            generated_android.add(rel)
             committed = android_out / rel
             if not committed.exists():
                 problems.append(f"error: missing generated file {committed}; run generate.py")
             elif xml.read_bytes() != committed.read_bytes():
                 problems.append(f"error: {committed} is out of date; run generate.py")
+        for rel in _generator_produced_files(ios_out, "ios"):
+            if rel not in generated_ios:
+                problems.append(f"error: unexpected file (orphaned?): {ios_out / rel}; run generate.py")
+        for rel in _generator_produced_files(android_out, "android"):
+            if rel not in generated_android:
+                problems.append(f"error: unexpected file (orphaned?): {android_out / rel}; run generate.py")
     return problems
 
 
@@ -213,20 +258,28 @@ def main(argv=None):
         print(f"INCONSISTENT: {error}", file=sys.stderr)
         return 1
 
+    if not locales.get(BASE_LOCALE):
+        print("error: zh-Hans.json has no keys; refusing to write empty resources", file=sys.stderr)
+        return 1
+
     ios_out = Path(args.ios_out) if args.ios_out else repo_root / "clients" / "ios" / "Resources"
     android_out = (
         Path(args.android_out) if args.android_out else repo_root / "clients" / "android" / "app" / "src" / "main" / "res"
     )
 
-    if args.check:
-        if not args.ios_out and not args.android_out:
-            problems = _stale_problems(locales, ios_out, android_out)
-            if problems:
-                print("\n".join(problems), file=sys.stderr)
-                return 1
-    else:
-        write_ios(locales, ios_out)
-        write_android(locales, android_out)
+    try:
+        if args.check:
+            if not args.ios_out and not args.android_out:
+                problems = stale_problems(locales, ios_out, android_out)
+                if problems:
+                    print("\n".join(problems), file=sys.stderr)
+                    return 1
+        else:
+            write_ios(locales, ios_out)
+            write_android(locales, android_out)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
     n_keys = len(locales.get(BASE_LOCALE, {}))
     print(f"OK: {n_keys} keys, {len(LOCALES)} locales")

@@ -20,6 +20,7 @@ struct LingxiCodeApp: App {
         WindowGroup {
             RootView()
                 .environment(app)
+                .environment(LocalizationManager.shared)
                 .environment(\.theme, app.palette)
                 .preferredColorScheme(app.colorScheme)
                 .tint(app.palette.accent)

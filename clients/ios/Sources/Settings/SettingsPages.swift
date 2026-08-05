@@ -19,7 +19,7 @@ struct SettingsPages: View {
         case .memory:                     MemoryPage()
         case .workflows:                  WorkflowsPage()
         case .appearance:                 AppearancePage()
-        case .language:                   LanguagePage(store: store)
+        case .language:                   LanguagePage()
         case .notifications:              NotificationsPage(store: store)
         case .input:                      InputPage()
         case .appIntegration:             AppIntegrationPage()
@@ -36,12 +36,11 @@ struct SettingsPages: View {
 // MARK: - Main settings list
 struct MainSettingsPage: View {
     @Environment(AppState.self) private var app
+    @Environment(LocalizationManager.self) private var localization
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
     let host: SettingsHost
     @State private var voiceCapability = VoiceCapabilityModel()
-
-    private let langMap = ["zh-CN": "简体中文", "zh-TW": "繁體中文", "en-US": "English", "ja-JP": "日本語"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,7 +99,7 @@ struct MainSettingsPage: View {
                 SettingsRow(icon: .sun, iconColor: Color(srgb: 0.896,0.6013,0), label: "外观",
                             value: app.isDark ? "深色" : "浅色", onTap: { host.push(.appearance) })
                 SettingsRow(icon: .message, iconColor: Color(srgb: 0.3503,0.6649,0.9741), label: "语言",
-                            value: langMap[store.language], onTap: { host.push(.language) })
+                            value: LocalizationManager.label(for: localization.language), onTap: { host.push(.language) })
                 SettingsRow(icon: .cog, iconColor: t.text3, label: "通知",
                             value: "\(store.notifs.enabledCount) 项开启", onTap: { host.push(.notifications) })
                 SettingsRow(icon: .workflow, iconColor: t.accent, label: "应用接入",

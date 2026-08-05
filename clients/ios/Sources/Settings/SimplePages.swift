@@ -139,17 +139,16 @@ struct PrivacyPage: View {
 
 // MARK: - Language
 struct LanguagePage: View {
-    @Bindable var store: SettingsStore
+    @Environment(LocalizationManager.self) private var localization
     @State private var follow = true
     var body: some View {
+        @Bindable var l10n = localization
         VStack(spacing: 0) {
             SettingsSection(label: "语言", footer: "切换语言后将重新加载界面。AI 对话语言独立配置。") {
-                RadioList(options: [
-                    .init(value: "zh-CN", label: "简体中文"),
-                    .init(value: "zh-TW", label: "繁體中文"),
-                    .init(value: "en-US", label: "English (US)"),
-                    .init(value: "ja-JP", label: "日本語"),
-                ], value: $store.language)
+                RadioList(
+                    options: LocalizationManager.supported.map { .init(value: $0.code, label: $0.label) },
+                    value: $l10n.language
+                )
             }
             SettingsSection(label: "区域") {
                 SettingsRow(label: "日期格式", value: "2026/5/14", isLast: true, onTap: {})

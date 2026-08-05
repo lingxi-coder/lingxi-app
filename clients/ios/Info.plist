@@ -6,6 +6,8 @@
 	<array>
 		<string>com.lingxi.code.cron.reconcile</string>
 	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
 	<key>CFBundleDisplayName</key>
 	<string>灵犀</string>
 	<key>CFBundleExecutable</key>

@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 struct RootView: View {
     @Environment(AppState.self) private var app
+    @Environment(LocalizationManager.self) private var localization
     @Environment(\.theme) private var theme
     @Environment(\.scenePhase) private var scenePhase
 
@@ -135,6 +136,7 @@ struct RootView: View {
         NavigationStack(path: $navigation.path) {
             rootSurface
                 .navigationDestination(for: AppRoute.self, destination: destination)
+                .id(localization.language)
         }
         .onChange(of: scenePhase, handleScenePhase)
         .onChange(of: draft) { _, value in

@@ -1,5 +1,6 @@
 package com.lingxi.code.settings
 
+import com.lingxi.code.R
 import com.lingxi.code.bindings.MobileLinuxCapabilityFfi
 import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
 import com.lingxi.code.bindings.MobileLinuxTaskStateFfi
@@ -81,9 +82,9 @@ class LinuxRuntimeStateTest {
 
         assertEquals("android-proot", ui.backend)
         assertEquals(MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE, ui.rootfsState)
-        assertEquals("授权阻塞", ui.badge)
+        assertEquals(R.string.settings_linux_badge_blocked, ui.badgeRes)
         assertFalse(ui.canOpenTerminal)
-        assertTrue(ui.detail.contains("authorization"))
+        assertTrue(ui.detail.orEmpty().contains("authorization"))
         assertEquals(2, ui.mounts.size)
         assertEquals(LinuxRuntimeTerminalStatus.Disabled, ui.terminal.status)
     }
@@ -189,6 +190,7 @@ class LinuxRuntimeStateTest {
         assertFalse(ui.installAllowed)
         assertEquals(1, ui.tasks.size)
         assertTrue(ui.tasks.first().stoppable)
-        assertTrue(ui.tasks.first().state.contains("运行中"))
+        assertEquals(R.string.settings_linux_task_running, ui.tasks.first().stateRes)
+        assertEquals("serving /workspace/default", ui.tasks.first().stateDetail)
     }
 }

@@ -14,9 +14,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.CancellationException
@@ -46,13 +48,21 @@ fun LinuxRuntimePage(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        Blurb("Mobile Linux 使用受管 Alpine rootfs 与 Android PRoot 后端。选择该模式后，运行时错误会直接显示，不会静默回退到 Legacy。")
+        Blurb(stringResource(R.string.settings_linux_blurb_android))
 
-        SettingsSection(label = "后端选择") {
+        SettingsSection(label = stringResource(R.string.settings_linux_section_backend)) {
             RadioList(
                 options = listOf(
-                    RadioOption(LinuxRuntimeMode.Legacy.name, "Legacy", "继续使用现有 Minijail + shell 执行层"),
-                    RadioOption(LinuxRuntimeMode.MobileLinux.name, "Mobile Linux", "使用 Android PRoot + Alpine 运行时"),
+                    RadioOption(
+                        LinuxRuntimeMode.Legacy.name,
+                        "Legacy",
+                        stringResource(R.string.settings_linux_legacy_sub_android),
+                    ),
+                    RadioOption(
+                        LinuxRuntimeMode.MobileLinux.name,
+                        "Mobile Linux",
+                        stringResource(R.string.settings_linux_mobile_linux_sub_android),
+                    ),
                 ),
                 selected = runtime.selectedMode.name,
                 onSelect = { next ->
@@ -62,44 +72,44 @@ fun LinuxRuntimePage(
             )
         }
 
-        SettingsSection(label = "状态") {
+        SettingsSection(label = stringResource(R.string.settings_linux_section_status)) {
             SettingsRow(
                 icon = LXIconName.Workflow,
-                label = "当前后端",
+                label = stringResource(R.string.settings_linux_current_backend),
                 value = runtime.backend,
                 chevron = false,
             )
             SettingsRow(
                 label = "Rootfs",
-                sub = runtime.detail,
-                value = linuxRuntimeStateLabel(runtime.rootfsState),
+                sub = runtime.detail ?: stringResource(runtime.detailRes),
+                value = stringResource(linuxRuntimeStateLabel(runtime.rootfsState)),
                 chevron = false,
             )
             SettingsRow(
-                label = "版本",
-                value = runtime.version ?: "未安装",
+                label = stringResource(R.string.settings_linux_version),
+                value = runtime.version ?: stringResource(R.string.settings_linux_not_installed),
                 chevron = false,
             )
             SettingsRow(
-                label = "体积",
+                label = stringResource(R.string.settings_linux_size),
                 value = runtime.installedSizeBytes?.let(::formatBytes) ?: "—",
                 chevron = false,
             )
             SettingsRow(
-                label = "托管目录",
-                sub = runtime.managedRoot ?: "未创建",
-                value = runtime.badge,
+                label = stringResource(R.string.settings_linux_managed_dir),
+                sub = runtime.managedRoot ?: stringResource(R.string.settings_linux_not_created),
+                value = stringResource(runtime.badgeRes),
                 chevron = false,
                 isLast = true,
             )
         }
 
         SettingsSection(
-            label = "维护",
-            footer = "安装、修复和重置只作用于受管 rootfs；外部工作区、会话与密钥不会被删除。",
+            label = stringResource(R.string.settings_linux_section_maintenance),
+            footer = stringResource(R.string.settings_linux_maintenance_footer_android),
         ) {
             ActionRow(
-                title = "安装 rootfs",
+                title = stringResource(R.string.settings_linux_action_install),
                 action = LinuxRuntimeAction.Install,
                 busy = runtime.busyAction == LinuxRuntimeAction.Install,
                 enabled = runtime.installAllowed && runtime.busyAction == null,
@@ -110,7 +120,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "启动 runtime",
+                title = stringResource(R.string.settings_linux_action_boot),
                 action = LinuxRuntimeAction.Boot,
                 busy = runtime.busyAction == LinuxRuntimeAction.Boot,
                 enabled = runtime.available && runtime.busyAction == null,
@@ -121,7 +131,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "关闭 runtime",
+                title = stringResource(R.string.settings_linux_action_shutdown),
                 action = LinuxRuntimeAction.Shutdown,
                 busy = runtime.busyAction == LinuxRuntimeAction.Shutdown,
                 enabled = runtime.available && runtime.busyAction == null,
@@ -132,7 +142,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "刷新状态",
+                title = stringResource(R.string.settings_linux_action_refresh),
                 action = LinuxRuntimeAction.Refresh,
                 busy = runtime.busyAction == LinuxRuntimeAction.Refresh,
                 enabled = runtime.busyAction == null,
@@ -143,7 +153,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "校验 rootfs",
+                title = stringResource(R.string.settings_linux_action_verify),
                 action = LinuxRuntimeAction.Verify,
                 busy = runtime.busyAction == LinuxRuntimeAction.Verify,
                 enabled = runtime.verifyAllowed && runtime.busyAction == null,
@@ -154,7 +164,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "修复 rootfs",
+                title = stringResource(R.string.settings_linux_action_repair),
                 action = LinuxRuntimeAction.Repair,
                 busy = runtime.busyAction == LinuxRuntimeAction.Repair,
                 enabled = runtime.repairAllowed && runtime.busyAction == null,
@@ -165,7 +175,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "重置 rootfs",
+                title = stringResource(R.string.settings_linux_action_reset),
                 action = LinuxRuntimeAction.Reset,
                 busy = runtime.busyAction == LinuxRuntimeAction.Reset,
                 enabled = runtime.resetAllowed && runtime.busyAction == null,
@@ -178,26 +188,37 @@ fun LinuxRuntimePage(
             )
         }
 
-        SettingsSection(label = "工作区与终端") {
+        SettingsSection(label = stringResource(R.string.settings_linux_section_workspace)) {
             SettingsRow(
-                label = "终端入口",
+                label = stringResource(R.string.settings_linux_terminal_entry),
                 sub = when (runtime.terminal.status) {
-                    LinuxRuntimeTerminalStatus.Disabled -> "当前构建未提供可用 PTY 运行时"
-                    LinuxRuntimeTerminalStatus.Idle -> "可创建 PTY 终端会话"
-                    LinuxRuntimeTerminalStatus.Starting -> "终端会话启动中"
-                    LinuxRuntimeTerminalStatus.Active -> "存在运行中的 PTY 会话"
+                    LinuxRuntimeTerminalStatus.Disabled -> stringResource(R.string.settings_linux_pty_unavailable)
+                    LinuxRuntimeTerminalStatus.Idle -> stringResource(R.string.settings_linux_pty_available)
+                    LinuxRuntimeTerminalStatus.Starting -> stringResource(R.string.settings_linux_terminal_starting)
+                    LinuxRuntimeTerminalStatus.Active -> stringResource(R.string.settings_linux_terminal_active)
                 },
-                value = if (runtime.canOpenTerminal) "可用" else "已禁用",
+                value = if (runtime.canOpenTerminal) {
+                    stringResource(R.string.settings_status_available)
+                } else {
+                    stringResource(R.string.settings_status_disabled)
+                },
                 chevron = false,
             )
             SettingsRow(
-                label = "命令草稿",
-                sub = runtime.terminal.transcript.firstOrNull() ?: "暂无输出",
+                label = stringResource(R.string.settings_linux_command_draft),
+                sub = runtime.terminal.transcript.firstOrNull()
+                    ?: stringResource(
+                        if (runtime.terminal.status == LinuxRuntimeTerminalStatus.Disabled) {
+                            R.string.settings_linux_terminal_not_linked
+                        } else {
+                            R.string.settings_linux_terminal_ready
+                        },
+                    ),
                 value = runtime.terminal.commandDraft,
                 chevron = false,
             )
             ActionRow(
-                title = "新建终端",
+                title = stringResource(R.string.settings_linux_open_terminal),
                 action = LinuxRuntimeAction.OpenTerminal,
                 busy = runtime.busyAction == LinuxRuntimeAction.OpenTerminal,
                 enabled = runtime.canOpenTerminal && onOpenTerminal != null && runtime.busyAction == null,
@@ -211,36 +232,42 @@ fun LinuxRuntimePage(
                 },
             )
             SettingsRow(
-                label = "外部目录挂载",
+                label = stringResource(R.string.settings_linux_external_mounts),
                 sub = if (runtime.mounts.isEmpty()) {
-                    runtime.mountDraft.pickerSummary
+                    stringResource(runtime.mountDraft.pickerSummaryRes)
                 } else {
                     runtime.mounts.joinToString(limit = 2, truncated = "…") {
-                        "${it.guestPath} ${it.access.label}"
+                        "${it.guestPath} ${context.getString(it.access.labelRes)}"
                     }
                 },
-                value = "${runtime.mounts.size} 项",
+                value = stringResource(R.string.settings_linux_mounts_count_fmt, runtime.mounts.size),
                 chevron = false,
             )
             SettingsRow(
-                label = "目录授权模式",
-                sub = runtime.mountDraft.pickerSummary,
-                value = runtime.mountDraft.access.label,
+                label = stringResource(R.string.settings_linux_mount_auth_mode),
+                sub = stringResource(runtime.mountDraft.pickerSummaryRes),
+                value = stringResource(runtime.mountDraft.access.labelRes),
                 chevron = false,
             )
             SettingsRow(
-                label = "执行任务",
-                sub = runtime.tasks.firstOrNull()?.state ?: "当前没有可停止的 Mobile Linux 任务",
-                value = if (runtime.tasks.isEmpty()) "空闲" else "${runtime.tasks.size} 个",
+                label = stringResource(R.string.settings_linux_task_execution),
+                sub = runtime.tasks.firstOrNull()?.let { task ->
+                    stringResource(task.stateRes) + (task.stateDetail?.let { " · $it" } ?: "")
+                } ?: stringResource(R.string.settings_linux_no_stoppable_tasks),
+                value = if (runtime.tasks.isEmpty()) {
+                    stringResource(R.string.settings_linux_idle)
+                } else {
+                    stringResource(R.string.settings_linux_tasks_count_fmt, runtime.tasks.size)
+                },
                 chevron = false,
                 isLast = true,
             )
         }
 
-        SettingsSection(label = "后台任务与挂载") {
+        SettingsSection(label = stringResource(R.string.settings_linux_section_background)) {
             runtime.tasks.firstOrNull { it.stoppable }?.let { task ->
                 ActionRow(
-                    title = "停止 ${task.label}",
+                    title = stringResource(R.string.settings_linux_stop_task_fmt, task.label),
                     action = LinuxRuntimeAction.StopTask,
                     busy = runtime.busyAction == LinuxRuntimeAction.StopTask,
                     enabled = runtime.busyAction == null,
@@ -252,7 +279,7 @@ fun LinuxRuntimePage(
                 )
             }
             ActionRow(
-                title = "刷新任务",
+                title = stringResource(R.string.settings_linux_refresh_tasks_short),
                 action = LinuxRuntimeAction.RefreshTasks,
                 busy = runtime.busyAction == LinuxRuntimeAction.RefreshTasks,
                 enabled = runtime.canInspectTasks && runtime.busyAction == null,
@@ -263,7 +290,7 @@ fun LinuxRuntimePage(
                 },
             )
             ActionRow(
-                title = "刷新挂载视图",
+                title = stringResource(R.string.settings_linux_refresh_mounts_view),
                 action = LinuxRuntimeAction.RefreshMounts,
                 busy = runtime.busyAction == LinuxRuntimeAction.RefreshMounts,
                 enabled = runtime.canManageMounts && runtime.busyAction == null,
@@ -276,18 +303,18 @@ fun LinuxRuntimePage(
             )
         }
 
-        SettingsSection(label = "安全说明") {
+        SettingsSection(label = stringResource(R.string.settings_linux_section_safety)) {
             SettingsRow(
                 icon = LXIconName.Pin,
-                label = "执行边界",
-                sub = "PRoot 不是安全边界；真实边界仍是 Android App 沙箱与外层 Minijail 策略",
+                label = stringResource(R.string.settings_linux_execution_boundary),
+                sub = stringResource(R.string.settings_linux_execution_boundary_sub_android),
                 chevron = false,
             )
             SettingsRow(
                 icon = LXIconName.X,
-                label = "停止当前任务",
-                sub = "未授权或 runtime 未链接时必须 fail-closed；不会静默回退到 legacy shell",
-                value = "未启用",
+                label = stringResource(R.string.settings_linux_stop_current_task),
+                sub = stringResource(R.string.settings_linux_stop_task_sub_android),
+                value = stringResource(R.string.settings_status_not_enabled),
                 chevron = false,
                 isLast = true,
             )
@@ -308,9 +335,9 @@ private fun ActionRow(
     SettingsRow(
         label = title,
         sub = when {
-            busy -> "执行中…"
-            enabled -> action.label
-            else -> "当前构建未开放该操作"
+            busy -> stringResource(R.string.settings_linux_running)
+            enabled -> stringResource(action.labelRes)
+            else -> stringResource(R.string.settings_linux_action_unavailable)
         },
         chevron = false,
         isLast = isLast,
@@ -324,10 +351,10 @@ private fun ActionRow(
                     onClick = onClick,
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                 ) {
-                    Text(action.label, fontSize = 12.sp)
+                    Text(stringResource(action.labelRes), fontSize = 12.sp)
                 }
                 else -> Text(
-                    text = "未启用",
+                    text = stringResource(R.string.settings_status_not_enabled),
                     color = t.text4,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,

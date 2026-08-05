@@ -3,6 +3,7 @@ package com.lingxi.code.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.R
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
 import com.lingxi.code.model.GenericProvider
@@ -72,6 +73,12 @@ data class SettingsUiState(
 class SettingsStore(
     private val providerRepo: ProviderSettingsRepository? = null,
     private val voiceRepo: VoiceSettingsRepository? = null,
+    /**
+     * Resolves a string resource id to its localized text. The production
+     * factory wires the application context's `getString`; unit tests keep the
+     * empty default (they never assert on these user-facing messages).
+     */
+    private val resolveString: (Int) -> String = { _ -> "" },
 ) : ViewModel() {
     private val _state = MutableStateFlow(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
@@ -158,7 +165,7 @@ class SettingsStore(
         }
         _state.value = current.copy(
             linuxRuntime = current.linuxRuntime.copy(
-                summary = "Mobile Linux 操作失败",
+                summaryRes = R.string.settings_linux_op_failed,
                 detail = message,
                 lastAction = action,
                 lastActionMessage = message,
@@ -301,7 +308,7 @@ class SettingsStore(
                     modelAvailable = false,
                     httpStatus = null,
                     latencyMs = 0,
-                    message = "Provider 连接服务不可用",
+                    message = resolveString(R.string.settings_provider_conn_service_unavailable),
                     usedStoredCredential = credentialOverride.isNullOrBlank(),
                 ),
             )
@@ -314,7 +321,7 @@ class SettingsStore(
                     modelAvailable = false,
                     httpStatus = null,
                     latencyMs = 0,
-                    message = "Provider 不存在",
+                    message = resolveString(R.string.settings_provider_not_found),
                     usedStoredCredential = credentialOverride.isNullOrBlank(),
                 ),
             )
@@ -327,7 +334,7 @@ class SettingsStore(
                     modelAvailable = false,
                     httpStatus = null,
                     latencyMs = 0,
-                    message = "当前仅支持测试 LLM Provider",
+                    message = resolveString(R.string.settings_provider_test_llm_only),
                     usedStoredCredential = credentialOverride.isNullOrBlank(),
                 ),
             )
@@ -368,7 +375,7 @@ class SettingsStore(
                 onDone(
                     result.copy(
                         connected = false,
-                        message = "配置已在测试期间变化，请重新测试",
+                        message = resolveString(R.string.settings_provider_config_changed_retest),
                     ),
                 )
             }
@@ -480,6 +487,7 @@ class SettingsStore(
                     return SettingsStore(
                         providerRepo = ProviderSettingsRepository(appContext),
                         voiceRepo = VoiceSettingsRepository(appContext),
+                        resolveString = appContext::getString,
                     ) as T
                 }
             }

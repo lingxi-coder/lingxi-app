@@ -2,6 +2,7 @@ package com.lingxi.code.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.lingxi.code.R
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ProviderCredentialSecretDto
@@ -160,12 +161,12 @@ class EngineProviderCredentialClient(
                 usedStoredCredential = result.usedStoredCredential,
             )
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-            unavailableConnectionResult("连接测试超时")
+            unavailableConnectionResult(appContext.getString(R.string.settings_provider_test_timeout))
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (_: Throwable) {
             unavailableConnectionResult(
-                "连接测试暂不可用",
+                appContext.getString(R.string.settings_provider_test_unavailable),
             )
         }
     }
@@ -327,7 +328,7 @@ class ProviderSettingsRepository(
                 modelAvailable = false,
                 httpStatus = null,
                 latencyMs = 0,
-                message = "该 Provider 尚未接入 Android 内建连接测试",
+                message = appContext.getString(R.string.settings_provider_test_not_supported),
                 usedStoredCredential = credentialOverride.isNullOrBlank(),
             )
         return credentialClient.test(

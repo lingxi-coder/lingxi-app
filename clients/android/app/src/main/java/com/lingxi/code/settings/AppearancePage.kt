@@ -24,10 +24,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lingxi.code.R
 import com.lingxi.code.theme.Accents
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
@@ -61,11 +63,19 @@ fun AppearancePage(
 
     Column(Modifier.fillMaxWidth()) {
         // 主题 ---------------------------------------------------------------
-        SettingsSection(label = "主题") {
+        SettingsSection(label = stringResource(R.string.settings_section_theme)) {
             RadioList(
                 options = listOf(
-                    RadioOption("light", "浅色", "暖白纸感 + 半透卡片"),
-                    RadioOption("dark", "深色", "午夜紫 + 低饱和"),
+                    RadioOption(
+                        "light",
+                        stringResource(R.string.settings_appearance_light),
+                        stringResource(R.string.settings_appearance_light_sub),
+                    ),
+                    RadioOption(
+                        "dark",
+                        stringResource(R.string.settings_appearance_dark),
+                        stringResource(R.string.settings_appearance_dark_sub),
+                    ),
                 ),
                 selected = if (isDark) "dark" else "light",
                 onSelect = { v ->
@@ -75,7 +85,7 @@ fun AppearancePage(
         }
 
         // 强调色 -------------------------------------------------------------
-        SettingsSection(label = "强调色") {
+        SettingsSection(label = stringResource(R.string.settings_section_accent_color)) {
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -91,12 +101,24 @@ fun AppearancePage(
         }
 
         // 密度 ---------------------------------------------------------------
-        SettingsSection(label = "密度") {
+        SettingsSection(label = stringResource(R.string.settings_section_density)) {
             RadioList(
                 options = listOf(
-                    RadioOption(Density.Compact.raw, "紧凑", "一屏显示更多内容"),
-                    RadioOption(Density.Comfortable.raw, "舒适", "默认，平衡"),
-                    RadioOption(Density.Spacious.raw, "宽松", "更大间距，更易读"),
+                    RadioOption(
+                        Density.Compact.raw,
+                        stringResource(R.string.settings_density_compact),
+                        stringResource(R.string.settings_density_compact_sub),
+                    ),
+                    RadioOption(
+                        Density.Comfortable.raw,
+                        stringResource(R.string.settings_density_comfortable),
+                        stringResource(R.string.settings_density_comfortable_sub),
+                    ),
+                    RadioOption(
+                        Density.Spacious.raw,
+                        stringResource(R.string.settings_density_spacious),
+                        stringResource(R.string.settings_density_spacious_sub),
+                    ),
                 ),
                 selected = prefs.density.raw,
                 onSelect = { v -> scope.launch { store.setDensity(Density.from(v)) } },
@@ -105,7 +127,10 @@ fun AppearancePage(
 
         // 字号 (live preview) -------------------------------------------------
         val fontSize = prefs.fontSize
-        SettingsSection(label = "字号", footer = "当前 ${fontSize.roundToInt()}pt · 影响对话与列表正文") {
+        SettingsSection(
+            label = stringResource(R.string.settings_section_font_size),
+            footer = stringResource(R.string.settings_font_size_footer_fmt, fontSize.roundToInt()),
+        ) {
             Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
@@ -127,7 +152,7 @@ fun AppearancePage(
                     Text("A", color = t.text4, fontSize = 17.sp)
                 }
                 Text(
-                    text = "“灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。”",
+                    text = stringResource(R.string.settings_font_size_preview_android),
                     color = t.text,
                     fontSize = fontSize.sp,
                     lineHeight = (fontSize * 1.5f).sp,

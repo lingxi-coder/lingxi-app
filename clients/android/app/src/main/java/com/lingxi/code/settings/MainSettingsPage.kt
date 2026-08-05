@@ -120,8 +120,8 @@ fun MainSettingsPage(
             SettingsRow(
                 icon = LXIconName.Workflow, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
                 label = stringResource(R.string.settings_linux_runtime),
-                sub = state.linuxRuntime.summary,
-                value = state.linuxRuntime.badge,
+                sub = stringResource(state.linuxRuntime.summaryRes),
+                value = stringResource(state.linuxRuntime.badgeRes),
                 onTap = { navController.navigate(SettingsRoutes.LINUX_RUNTIME) },
             )
             if (ComputerUseFeatureProvider.available) {

@@ -45,8 +45,21 @@ import com.lingxi.code.theme.LingXiTheme
 private val SkillSky = Color(red = 0f, green = 0.7601f, blue = 0.7664f)   // oklch(72% 0.16 195)
 private val SkillAmber = Color(red = 0.896f, green = 0.6013f, blue = 0f)  // oklch(75% 0.17 75)
 
-// The order authors appear in (matches the iOS `authorOrder`).
+// The order authors appear in (matches the iOS `authorOrder`). These are raw
+// data constants; UI rendering maps them through [authorLabel].
 private val AuthorOrder = listOf("官方", "我", "社区 · @arxiv-fan", "社区 · @lin")
+
+private const val CommunityAuthorPrefix = "社区 · "
+
+@Composable
+private fun authorLabel(author: String): String = when (author) {
+    "官方" -> stringResource(R.string.skills_author_official)
+    "我" -> stringResource(R.string.skills_author_mine)
+    else -> stringResource(
+        R.string.skills_author_community_fmt,
+        author.removePrefix(CommunityAuthorPrefix),
+    )
+}
 
 @Composable
 fun SkillsPage(
@@ -62,7 +75,7 @@ fun SkillsPage(
         AuthorOrder.forEach { author ->
             val arr = state.skills.filter { it.author == author }
             if (arr.isNotEmpty()) {
-                SettingsSection(label = author) {
+                SettingsSection(label = authorLabel(author)) {
                     arr.forEachIndexed { i, s ->
                         SettingsRow(
                             icon = LXIconName.Skill,
@@ -147,7 +160,7 @@ fun SkillDetailPage(
                 modifier = Modifier.padding(top = 12.dp),
             )
             Text(
-                "${s.author} · v1.2.0",
+                "${authorLabel(s.author)} · v1.2.0",
                 color = t.text4,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 4.dp),

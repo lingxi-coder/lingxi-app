@@ -5826,6 +5826,102 @@
         }
       }
     },
+    "oss_android_bundle_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本 Android 组合产品按 GNU GPLv3 分发。原有 MIT、Apache、LGPL 及 Alpine 软件包继续保留各自声明。构建产物同时携带 NOTICE、SPDX SBOM、固定摘要和对应源码信息。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本 Android 组合产品按 GNU GPLv3 分发。原有 MIT、Apache、LGPL 及 Alpine 软件包继续保留各自声明。构建产物同时携带 NOTICE、SPDX SBOM、固定摘要和对应源码信息。"
+          }
+        }
+      }
+    },
+    "oss_android_bundle_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 组合发行物"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android 组合发行物"
+          }
+        }
+      }
+    },
+    "oss_license_alpine_packages": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "各软件包许可证（清单和 SBOM 随发行物提供）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "各软件包许可证（清单和 SBOM 随发行物提供）"
+          }
+        }
+      }
+    },
+    "oss_license_proot": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GPL-2.0-or-later（本组合选择 GPLv3）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GPL-2.0-or-later（本组合选择 GPLv3）"
+          }
+        }
+      }
+    },
+    "oss_offer_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "若应用内链接暂时不可用，请以发行包内 NOTICE 与 SBOM 所列固定版本、哈希和源码地址为准。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "若应用内链接暂时不可用，请以发行包内 NOTICE 与 SBOM 所列固定版本、哈希和源码地址为准。"
+          }
+        }
+      }
+    },
+    "oss_view_source": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看对应源码"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看对应源码"
+          }
+        }
+      }
+    },
     "permission_allow": {
       "localizations": {
         "zh-Hans": {
@@ -7698,6 +7794,22 @@
         }
       }
     },
+    "settings_font_size_footer_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 %1$dpt · 影响对话与列表正文"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 %1$dpt · 影响对话与列表正文"
+          }
+        }
+      }
+    },
     "settings_font_size_preview": {
       "localizations": {
         "zh-Hans": {
@@ -7710,6 +7822,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "\"灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。\""
+          }
+        }
+      }
+    },
+    "settings_font_size_preview_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。”"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。”"
           }
         }
       }
@@ -7906,6 +8034,54 @@
         }
       }
     },
+    "settings_linux_action_boot": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动 runtime"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动 runtime"
+          }
+        }
+      }
+    },
+    "settings_linux_action_install": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装 rootfs"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装 rootfs"
+          }
+        }
+      }
+    },
+    "settings_linux_action_install_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装"
+          }
+        }
+      }
+    },
     "settings_linux_action_refresh": {
       "localizations": {
         "zh-Hans": {
@@ -7938,6 +8114,22 @@
         }
       }
     },
+    "settings_linux_action_repair_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修复"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修复"
+          }
+        }
+      }
+    },
     "settings_linux_action_reset": {
       "localizations": {
         "zh-Hans": {
@@ -7950,6 +8142,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "重置 rootfs"
+          }
+        }
+      }
+    },
+    "settings_linux_action_reset_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置"
+          }
+        }
+      }
+    },
+    "settings_linux_action_shutdown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭 runtime"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭 runtime"
           }
         }
       }
@@ -7986,6 +8210,54 @@
         }
       }
     },
+    "settings_linux_action_verify_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "校验"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "校验"
+          }
+        }
+      }
+    },
+    "settings_linux_badge_blocked": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权阻塞"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权阻塞"
+          }
+        }
+      }
+    },
+    "settings_linux_badge_not_linked": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未接入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未接入"
+          }
+        }
+      }
+    },
     "settings_linux_blurb": {
       "localizations": {
         "zh-Hans": {
@@ -7998,6 +8270,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "真机内置 iSH ARM64 与 Alpine Linux，可运行 shell、Python、包管理器和项目文件；Simulator 继续使用明确的 unavailable stub。"
+          }
+        }
+      }
+    },
+    "settings_linux_blurb_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 使用受管 Alpine rootfs 与 Android PRoot 后端。选择该模式后，运行时错误会直接显示，不会静默回退到 Legacy。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 使用受管 Alpine rootfs 与 Android PRoot 后端。选择该模式后，运行时错误会直接显示，不会静默回退到 Legacy。"
+          }
+        }
+      }
+    },
+    "settings_linux_command_draft": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命令草稿"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命令草稿"
           }
         }
       }
@@ -8050,6 +8354,22 @@
         }
       }
     },
+    "settings_linux_detail_legacy_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minijail + 现有 shell 路径保持不变；Mobile Linux 迁移仅接入到 phase-1 管理面板。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minijail + 现有 shell 路径保持不变；Mobile Linux 迁移仅接入到 phase-1 管理面板。"
+          }
+        }
+      }
+    },
     "settings_linux_diagnose": {
       "localizations": {
         "zh-Hans": {
@@ -8094,6 +8414,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "iSH / fakefs 不是安全边界；真实边界仍是 iOS App 沙箱与宿主策略"
+          }
+        }
+      }
+    },
+    "settings_linux_execution_boundary_sub_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PRoot 不是安全边界；真实边界仍是 Android App 沙箱与外层 Minijail 策略"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PRoot 不是安全边界；真实边界仍是 Android App 沙箱与外层 Minijail 策略"
+          }
+        }
+      }
+    },
+    "settings_linux_external_dir": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部目录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部目录"
           }
         }
       }
@@ -8178,6 +8530,22 @@
         }
       }
     },
+    "settings_linux_legacy_sub_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续使用现有 Minijail + shell 执行层"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续使用现有 Minijail + shell 执行层"
+          }
+        }
+      }
+    },
     "settings_linux_maintenance_footer": {
       "localizations": {
         "zh-Hans": {
@@ -8190,6 +8558,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "校验会检查 fakefs 元数据与基础命令；修复会从应用内置归档恢复缺失文件；重置只重建托管 rootfs，不会删除项目、会话或密钥。"
+          }
+        }
+      }
+    },
+    "settings_linux_maintenance_footer_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装、修复和重置只作用于受管 rootfs；外部工作区、会话与密钥不会被删除。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装、修复和重置只作用于受管 rootfs；外部工作区、会话与密钥不会被删除。"
           }
         }
       }
@@ -8222,6 +8606,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "iSH ARM64 + fakefs + Alpine（真机）"
+          }
+        }
+      }
+    },
+    "settings_linux_mobile_linux_sub_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Android PRoot + Alpine 运行时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Android PRoot + Alpine 运行时"
+          }
+        }
+      }
+    },
+    "settings_linux_mount_auth_mode": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目录授权模式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目录授权模式"
+          }
+        }
+      }
+    },
+    "settings_linux_mount_managed_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "rootfs 受管写路径"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "rootfs 受管写路径"
+          }
+        }
+      }
+    },
+    "settings_linux_mount_workspace_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作区映射；外部目录将通过 SAF 单独授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作区映射；外部目录将通过 SAF 单独授权"
+          }
+        }
+      }
+    },
+    "settings_linux_mounts_count_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项"
           }
         }
       }
@@ -8338,6 +8802,38 @@
         }
       }
     },
+    "settings_linux_no_stoppable_tasks": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可停止的 Mobile Linux 任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可停止的 Mobile Linux 任务"
+          }
+        }
+      }
+    },
+    "settings_linux_not_created": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未创建"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未创建"
+          }
+        }
+      }
+    },
     "settings_linux_not_installed": {
       "localizations": {
         "zh-Hans": {
@@ -8350,6 +8846,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "未安装"
+          }
+        }
+      }
+    },
+    "settings_linux_op_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 操作失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mobile Linux 操作失败"
           }
         }
       }
@@ -8382,6 +8894,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "打开全屏终端"
+          }
+        }
+      }
+    },
+    "settings_linux_open_terminal": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建终端"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建终端"
           }
         }
       }
@@ -8434,6 +8962,22 @@
         }
       }
     },
+    "settings_linux_read_write": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读写"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读写"
+          }
+        }
+      }
+    },
     "settings_linux_refresh_button": {
       "localizations": {
         "zh-Hans": {
@@ -8450,6 +8994,38 @@
         }
       }
     },
+    "settings_linux_refresh_mounts_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新挂载"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新挂载"
+          }
+        }
+      }
+    },
+    "settings_linux_refresh_mounts_view": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新挂载视图"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新挂载视图"
+          }
+        }
+      }
+    },
     "settings_linux_refresh_tasks": {
       "localizations": {
         "zh-Hans": {
@@ -8462,6 +9038,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "刷新任务列表"
+          }
+        }
+      }
+    },
+    "settings_linux_refresh_tasks_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新任务"
           }
         }
       }
@@ -8498,6 +9090,22 @@
         }
       }
     },
+    "settings_linux_saf_picker_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将通过系统目录选择器（SAF）逐目录授权，不暴露任意宿主路径"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将通过系统目录选择器（SAF）逐目录授权，不暴露任意宿主路径"
+          }
+        }
+      }
+    },
     "settings_linux_section_backend": {
       "localizations": {
         "zh-Hans": {
@@ -8510,6 +9118,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "后端选择"
+          }
+        }
+      }
+    },
+    "settings_linux_section_background": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务与挂载"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务与挂载"
           }
         }
       }
@@ -8658,6 +9282,86 @@
         }
       }
     },
+    "settings_linux_state_corrupt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "损坏"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "损坏"
+          }
+        }
+      }
+    },
+    "settings_linux_state_installing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装中"
+          }
+        }
+      }
+    },
+    "settings_linux_state_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就绪"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就绪"
+          }
+        }
+      }
+    },
+    "settings_linux_state_repairing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修复中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修复中"
+          }
+        }
+      }
+    },
+    "settings_linux_state_resetting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置中"
+          }
+        }
+      }
+    },
     "settings_linux_stop_current_task": {
       "localizations": {
         "zh-Hans": {
@@ -8686,6 +9390,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "停止"
+          }
+        }
+      }
+    },
+    "settings_linux_stop_task_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止 %1$s"
+          }
+        }
+      }
+    },
+    "settings_linux_stop_task_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止任务"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止任务"
+          }
+        }
+      }
+    },
+    "settings_linux_stop_task_sub_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未授权或 runtime 未链接时必须 fail-closed；不会静默回退到 legacy shell"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未授权或 runtime 未链接时必须 fail-closed；不会静默回退到 legacy shell"
           }
         }
       }
@@ -8754,6 +9506,22 @@
         }
       }
     },
+    "settings_linux_summary_blocked_license_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缺少额外书面授权，Mobile Linux 后端被显式阻塞"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缺少额外书面授权，Mobile Linux 后端被显式阻塞"
+          }
+        }
+      }
+    },
     "settings_linux_summary_ish_not_linked": {
       "localizations": {
         "zh-Hans": {
@@ -8770,6 +9538,38 @@
         }
       }
     },
+    "settings_linux_summary_legacy_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仍使用 legacy Android 执行层"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仍使用 legacy Android 执行层"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_legacy_minijail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仍使用 legacy Minijail + 现有 shell 执行层"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仍使用 legacy Minijail + 现有 shell 执行层"
+          }
+        }
+      }
+    },
     "settings_linux_summary_legacy_shell_stub": {
       "localizations": {
         "zh-Hans": {
@@ -8782,6 +9582,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前仍使用 iOS unavailable shell stub"
+          }
+        }
+      }
+    },
+    "settings_linux_summary_not_linked_android": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权存在或模式已选中，但当前构建未链接 Android PRoot 运行时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权存在或模式已选中，但当前构建未链接 Android PRoot 运行时"
           }
         }
       }
@@ -8814,6 +9630,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mobile Linux 运行时暂不可用"
+          }
+        }
+      }
+    },
+    "settings_linux_task_backgrounded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台运行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台运行"
           }
         }
       }
@@ -8882,6 +9714,22 @@
         }
       }
     },
+    "settings_linux_task_queued": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "排队中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "排队中"
+          }
+        }
+      }
+    },
     "settings_linux_task_running": {
       "localizations": {
         "zh-Hans": {
@@ -8930,6 +9778,22 @@
         }
       }
     },
+    "settings_linux_task_timed_out": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已超时"
+          }
+        }
+      }
+    },
     "settings_linux_task_unavailable": {
       "localizations": {
         "zh-Hans": {
@@ -8942,6 +9806,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "不可用"
+          }
+        }
+      }
+    },
+    "settings_linux_tasks_count_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 个"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 个"
+          }
+        }
+      }
+    },
+    "settings_linux_terminal_active": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在运行中的 PTY 会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在运行中的 PTY 会话"
           }
         }
       }
@@ -8974,6 +9870,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "终端使用当前项目的 guest workspace；运行时或 PTY 不可用时会显示修复入口，不会回退到其他目录。"
+          }
+        }
+      }
+    },
+    "settings_linux_terminal_not_linked": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前构建未接入可用 PTY 运行时。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前构建未接入可用 PTY 运行时。"
+          }
+        }
+      }
+    },
+    "settings_linux_terminal_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端入口已就绪。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端入口已就绪。"
+          }
+        }
+      }
+    },
+    "settings_linux_terminal_starting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端会话启动中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端会话启动中"
           }
         }
       }
@@ -9906,6 +10850,38 @@
         }
       }
     },
+    "settings_provider_config_changed_retest": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置已在测试期间变化，请重新测试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配置已在测试期间变化，请重新测试"
+          }
+        }
+      }
+    },
+    "settings_provider_conn_service_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider 连接服务不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider 连接服务不可用"
+          }
+        }
+      }
+    },
     "settings_provider_connecting": {
       "localizations": {
         "zh-Hans": {
@@ -10690,6 +11666,22 @@
         }
       }
     },
+    "settings_provider_not_found": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider 不存在"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider 不存在"
+          }
+        }
+      }
+    },
     "settings_provider_not_wired_mobile": {
       "localizations": {
         "zh-Hans": {
@@ -11330,6 +12322,38 @@
         }
       }
     },
+    "settings_provider_test_llm_only": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仅支持测试 LLM Provider"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仅支持测试 LLM Provider"
+          }
+        }
+      }
+    },
+    "settings_provider_test_not_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该 Provider 尚未接入 Android 内建连接测试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该 Provider 尚未接入 Android 内建连接测试"
+          }
+        }
+      }
+    },
     "settings_provider_test_success": {
       "localizations": {
         "zh-Hans": {
@@ -11342,6 +12366,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "连接测试成功。"
+          }
+        }
+      }
+    },
+    "settings_provider_test_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接测试超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接测试超时"
+          }
+        }
+      }
+    },
+    "settings_provider_test_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接测试暂不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接测试暂不可用"
           }
         }
       }
@@ -12958,6 +14014,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "社区 · %@"
+          }
+        }
+      }
+    },
+    "skills_author_community_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "社区 · %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "社区 · %1$s"
           }
         }
       }

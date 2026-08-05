@@ -210,6 +210,14 @@ schemes:
         - LingxiCodeTests
         - LingxiCodeUITests
       gatherCoverageData: false
+      # Unit tests assert business logic that now returns catalog-resolved
+      # copy (String(localized:)), not the pre-i18n Chinese literal — without
+      # this, results depend on whatever language the host Mac/simulator
+      # happens to be set to. Pinning to the catalog's source language keeps
+      # the suite deterministic and matches every test's existing zh-Hans
+      # expected values, which were never rewritten for i18n.
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
     run:
       config: StoreDebug
 
@@ -224,6 +232,8 @@ schemes:
       targets:
         - LingxiCodeTests
         - LingxiCodeUITests
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
     run:
       config: StoreDebug
     archive:
@@ -240,6 +250,8 @@ schemes:
       targets:
         - LingxiCodeTests
         - LingxiCodeUITests
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
     run:
       config: FullDebug
     archive:

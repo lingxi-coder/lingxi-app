@@ -96,6 +96,11 @@ struct SetupWizardView: View {
                         .background(.white.opacity(0.06), in: Circle())
                         .overlay(Circle().stroke(.white.opacity(0.12), lineWidth: 0.5))
                 }
+                // The label already draws its own circle; without `.plain` the
+                // system default style paints a second, rounded-rect plate
+                // behind it. Every other button in this app that supplies a
+                // background declares `.plain` — these two were the omissions.
+                .buttonStyle(.plain)
                 .accessibilityLabel("返回")
             } else {
                 Color.clear.frame(width: 36, height: 36)
@@ -135,6 +140,11 @@ struct SetupWizardView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .shadow(color: ctaDisabled ? .clear : Color(okl: 0.66, 0.20, 290, 0.4), radius: 12, y: 8)
             }
+            // Same omission as the back chevron: the gradient/opacity fill and
+            // the 16pt clip are the button's own, so the default style's plate
+            // shows through around them. `.plain` also drops the automatic
+            // disabled dimming, which is already expressed explicitly above.
+            .buttonStyle(.plain)
             .disabled(ctaDisabled)
             .accessibilityIdentifier("onboarding.primaryAction")
 

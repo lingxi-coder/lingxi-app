@@ -7,11 +7,11 @@ enum VoiceRecognitionMode: String, CaseIterable, Identifiable {
     case automatic
 
     var id: String { rawValue }
-    var title: String { self == .onDevice ? "优先设备端" : "系统自动" }
+    var title: String { self == .onDevice ? String(localized: "voice_mode_on_device_title") : String(localized: "voice_mode_automatic_title") }
     var detail: String {
         self == .onDevice
-            ? "支持时强制在设备上识别；不支持的语言会明确回退。"
-            : "允许系统根据设备、语言和网络选择识别方式。"
+            ? String(localized: "voice_mode_on_device_detail")
+            : String(localized: "voice_mode_automatic_detail")
     }
 }
 
@@ -140,18 +140,18 @@ final class VoiceCapabilityModel {
         [
             .init(
                 id: Self.automaticLanguageIdentifier,
-                title: "跟随系统",
-                detail: "当前：\(effectiveLanguageLabel)"
+                title: String(localized: "onboarding_voice_language_system"),
+                detail: String(localized: "voice_lang_option_current \(effectiveLanguageLabel)")
             ),
-            .init(id: "zh-CN", title: "简体中文", detail: nil),
+            .init(id: "zh-CN", title: String(localized: "common_lang_zh_hans"), detail: nil),
             .init(id: "en-US", title: "English (US)", detail: nil),
-            .init(id: "ja-JP", title: "日本語", detail: nil),
+            .init(id: "ja-JP", title: String(localized: "onboarding_voice_language_ja"), detail: nil),
         ]
     }
 
     var selectedLanguageLabel: String {
         if language == Self.automaticLanguageIdentifier {
-            return "跟随系统"
+            return String(localized: "onboarding_voice_language_system")
         }
         return Self.displayName(for: language)
     }
@@ -334,14 +334,14 @@ final class VoiceCapabilityModel {
         errorMessage = permissionMessage
     }
 
-    func preview(_ text: String = "你好，我是灵犀。语音设置已经生效。") async {
+    func preview(_ text: String = String(localized: "voice_preview_default_text")) async {
         guard !isPreviewing else { return }
         isPreviewing = true
         errorMessage = nil
         defer { isPreviewing = false }
         do {
             guard let voice = selectedVoice else {
-                errorMessage = "系统当前没有可用的播报声音"
+                errorMessage = String(localized: "voice_no_playback_voice_available")
                 return
             }
             let request = VoiceSpeechRequest(
@@ -352,7 +352,7 @@ final class VoiceCapabilityModel {
             )
             let outcome = try await previewPlayback.play(request)
             if outcome == .interrupted {
-                errorMessage = "试听被系统音频中断，请重试"
+                errorMessage = String(localized: "voice_preview_interrupted")
             }
         } catch is CancellationError {
             return
@@ -370,15 +370,15 @@ final class VoiceCapabilityModel {
         for readiness: VoiceConfigurationReadiness
     ) -> String {
         if readiness.isReadyForFlow {
-            return "语音识别和系统播报声音已保存并可用。"
+            return String(localized: "voice_config_saved_ready")
         }
         if let issue = readiness.issues.first {
-            return "语音配置已保存；\(issue.message)"
+            return String(localized: "voice_config_saved_with_issue \(issue.message)")
         }
         if readiness.speechConfigured {
-            return "语音识别已保存，但当前没有可用的系统播报声音。"
+            return String(localized: "voice_config_saved_no_voice")
         }
-        return "语音配置尚未完成。"
+        return String(localized: "voice_config_not_finished")
     }
 
     private var permissionMessage: String? {
@@ -414,7 +414,7 @@ final class VoiceCapabilityModel {
     nonisolated static func displayName(for identifier: String, currentLocale: Locale = .autoupdatingCurrent) -> String {
         let normalized = normalizedLocaleIdentifier(identifier)
         if normalized == automaticLanguageIdentifier {
-            return "跟随系统"
+            return String(localized: "onboarding_voice_language_system")
         }
         let locale = Locale(identifier: normalized)
         let localized = currentLocale.localizedString(forIdentifier: normalized)
@@ -445,31 +445,31 @@ final class VoiceCapabilityModel {
         switch mode {
         case .automatic:
             fallbackReason = nil
-            modeLabel = "系统自动"
+            modeLabel = String(localized: "voice_mode_automatic_title")
             if !recognizerAvailable {
-                detail = "当前语言识别器暂不可用，系统请求可能失败"
+                detail = String(localized: "voice_recognizer_unavailable_request_may_fail")
             } else if onDeviceAvailable {
-                detail = "系统可按条件选择设备端或在线识别；当前语言支持设备端"
+                detail = String(localized: "voice_automatic_supports_on_device")
             } else {
-                detail = "系统将自动选择识别方式；当前语言通常会使用在线识别"
+                detail = String(localized: "voice_automatic_uses_online")
             }
         case .onDevice:
             if permissionBlocked {
-                fallbackReason = "权限未满足，无法开始语音识别"
-                modeLabel = "等待权限"
-                detail = "需要先完成语音识别与麦克风授权"
+                fallbackReason = String(localized: "voice_permission_not_met")
+                modeLabel = String(localized: "voice_waiting_permission")
+                detail = String(localized: "voice_needs_permission_setup")
             } else if !recognizerAvailable {
-                fallbackReason = "当前系统语言的识别器暂不可用"
-                modeLabel = "暂不可用"
-                detail = "系统识别器当前不可用，请稍后重试或切换语言"
+                fallbackReason = String(localized: "voice_recognizer_unavailable_for_language")
+                modeLabel = String(localized: "voice_temporarily_unavailable")
+                detail = String(localized: "voice_recognizer_unavailable_retry")
             } else if onDeviceAvailable {
                 fallbackReason = nil
-                modeLabel = "设备端识别"
-                detail = "当前语言支持设备端识别，将优先在本机完成"
+                modeLabel = String(localized: "voice_on_device_recognition_title")
+                detail = String(localized: "voice_on_device_supported_detail")
             } else {
-                fallbackReason = "当前语言不支持设备端识别"
-                modeLabel = "系统在线回退"
-                detail = "设备端不可用，将回退到系统在线识别"
+                fallbackReason = String(localized: "voice_on_device_not_supported")
+                modeLabel = String(localized: "voice_online_fallback_title")
+                detail = String(localized: "voice_online_fallback_detail")
             }
         }
 
@@ -487,22 +487,22 @@ final class VoiceCapabilityModel {
     ) -> VoicePermissionDiagnostic {
         switch status {
         case .authorized:
-            return .init(label: "已授权", detail: "语音识别权限正常")
+            return .init(label: String(localized: "voice_permission_authorized_label"), detail: String(localized: "voice_speech_permission_ok"))
         case .denied:
-            return .init(label: "已拒绝", detail: "请在系统设置中开启“语音识别”权限")
+            return .init(label: String(localized: "voice_permission_denied_label"), detail: String(localized: "voice_speech_permission_denied_detail"))
         case .restricted:
-            return .init(label: "受限制", detail: "设备或家长控制限制了语音识别")
+            return .init(label: String(localized: "voice_permission_restricted_label"), detail: String(localized: "voice_speech_restricted_detail"))
         case .notDetermined:
-            return .init(label: "待授权", detail: "首次使用时会请求语音识别权限")
+            return .init(label: String(localized: "voice_permission_pending_label"), detail: String(localized: "voice_speech_permission_first_use"))
         @unknown default:
-            return .init(label: "未知", detail: "系统未返回明确的语音识别权限状态")
+            return .init(label: String(localized: "voice_permission_unknown_label"), detail: String(localized: "voice_speech_permission_unknown_detail"))
         }
     }
 
     nonisolated static func microphonePermissionDiagnostic(_ granted: Bool) -> VoicePermissionDiagnostic {
         granted
-            ? .init(label: "已授权", detail: "麦克风权限正常")
-            : .init(label: "待授权", detail: "请在系统设置中允许麦克风访问")
+            ? .init(label: String(localized: "voice_permission_authorized_label"), detail: String(localized: "voice_mic_permission_ok"))
+            : .init(label: String(localized: "voice_permission_pending_label"), detail: String(localized: "voice_mic_permission_allow_hint"))
     }
 
     nonisolated static func microphonePermissionDiagnostic(
@@ -510,13 +510,13 @@ final class VoiceCapabilityModel {
     ) -> VoicePermissionDiagnostic {
         switch status {
         case .granted:
-            return .init(label: "已授权", detail: "麦克风权限正常")
+            return .init(label: String(localized: "voice_permission_authorized_label"), detail: String(localized: "voice_mic_permission_ok"))
         case .denied:
-            return .init(label: "已拒绝", detail: "请在系统设置中开启麦克风权限")
+            return .init(label: String(localized: "voice_permission_denied_label"), detail: String(localized: "voice_mic_permission_enable_hint"))
         case .undetermined:
-            return .init(label: "待授权", detail: "首次使用时会请求麦克风权限")
+            return .init(label: String(localized: "voice_permission_pending_label"), detail: String(localized: "voice_mic_permission_first_use"))
         case .unknown:
-            return .init(label: "未知", detail: "系统未返回明确的麦克风权限状态")
+            return .init(label: String(localized: "voice_permission_unknown_label"), detail: String(localized: "voice_mic_permission_unknown_detail"))
         }
     }
 
@@ -553,7 +553,7 @@ final class VoiceCapabilityModel {
             issues.append(.init(
                 component: .speech,
                 kind: .unconfigured,
-                message: "请先保存语音识别语言和识别方式"
+                message: String(localized: "voice_issue_save_language_mode")
             ))
         }
 
@@ -564,25 +564,25 @@ final class VoiceCapabilityModel {
             issues.append(.init(
                 component: .speech,
                 kind: .permissionUndetermined,
-                message: "需要授予语音识别权限"
+                message: String(localized: "voice_issue_need_speech_permission")
             ))
         case .denied:
             issues.append(.init(
                 component: .speech,
                 kind: .permissionDenied,
-                message: "语音识别权限已关闭，请前往系统设置开启"
+                message: String(localized: "voice_issue_speech_permission_off")
             ))
         case .restricted:
             issues.append(.init(
                 component: .speech,
                 kind: .restricted,
-                message: "当前设备限制了语音识别"
+                message: String(localized: "voice_issue_device_restricted")
             ))
         @unknown default:
             issues.append(.init(
                 component: .speech,
                 kind: .unavailable,
-                message: "无法确认语音识别权限状态"
+                message: String(localized: "voice_issue_speech_permission_unknown")
             ))
         }
 
@@ -593,19 +593,19 @@ final class VoiceCapabilityModel {
             issues.append(.init(
                 component: .microphone,
                 kind: .permissionUndetermined,
-                message: "需要授予麦克风权限"
+                message: String(localized: "voice_issue_need_mic_permission")
             ))
         case .denied:
             issues.append(.init(
                 component: .microphone,
                 kind: .permissionDenied,
-                message: "麦克风权限已关闭，请前往系统设置开启"
+                message: String(localized: "voice_issue_mic_permission_off")
             ))
         case .unknown:
             issues.append(.init(
                 component: .microphone,
                 kind: .unavailable,
-                message: "无法确认麦克风权限状态"
+                message: String(localized: "voice_issue_mic_permission_unknown")
             ))
         }
 
@@ -613,7 +613,7 @@ final class VoiceCapabilityModel {
             issues.append(.init(
                 component: .speech,
                 kind: .unavailable,
-                message: "当前语言的系统识别器暂不可用"
+                message: String(localized: "voice_recognizer_unavailable_for_language")
             ))
         }
 
@@ -621,19 +621,19 @@ final class VoiceCapabilityModel {
             issues.append(.init(
                 component: .tts,
                 kind: .unconfigured,
-                message: "请先选择并保存系统播报声音"
+                message: String(localized: "voice_issue_save_voice")
             ))
         } else if !systemVoicesAvailable {
             issues.append(.init(
                 component: .tts,
                 kind: .unavailable,
-                message: "系统当前没有可用的播报声音"
+                message: String(localized: "voice_no_playback_voice_available")
             ))
         } else if !hasConfiguredVoice {
             issues.append(.init(
                 component: .tts,
                 kind: .unavailable,
-                message: "已配置的系统声音不可用，请重新选择"
+                message: String(localized: "voice_issue_voice_not_available")
             ))
         }
 

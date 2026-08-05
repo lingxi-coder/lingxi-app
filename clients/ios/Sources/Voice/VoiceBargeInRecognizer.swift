@@ -29,11 +29,11 @@ enum VoiceBargeInError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .permissionDenied:
-            return "语音识别或麦克风权限不可用"
+            return String(localized: "voice_bargein_permission_unavailable")
         case .unavailable:
-            return "当前语言的语音识别暂不可用"
+            return String(localized: "voice_bargein_language_unavailable")
         case let .voiceProcessingUnavailable(message):
-            return "当前音频路线不支持免手打断：\(message)"
+            return String(localized: "voice_bargein_route_unsupported \(message)")
         }
     }
 }
@@ -280,7 +280,7 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
         recognitionTask = task
         recognitionTimeoutTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(30)) } catch { return }
-            self?.finishRecognition(forceFailure: "语音打断识别超时")
+            self?.finishRecognition(forceFailure: String(localized: "voice_bargein_timeout"))
         }
         lock.unlock()
     }
@@ -458,7 +458,7 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
         ) { [weak self] notification in
             let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-            self?.finish(.failed("音频会话被系统中断"))
+            self?.finish(.failed(String(localized: "voice_audio_session_interrupted")))
         })
         // Route changes are reapplied by VoiceAudioSessionCoordinator while the
         // same duplex lease remains active. Ending this stream here would leave

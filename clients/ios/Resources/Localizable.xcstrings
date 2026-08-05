@@ -82,6 +82,166 @@
         }
       }
     },
+    "app_intent_ask_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把来自 Siri、快捷指令或其他 App 的文本带入新对话。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bring text from Siri, Shortcuts, or another app into a new conversation."
+          }
+        }
+      }
+    },
+    "app_intent_ask_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "向灵犀提问"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask Lingxi"
+          }
+        }
+      }
+    },
+    "app_intent_initial_command_param_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预填命令"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pre-filled Command"
+          }
+        }
+      }
+    },
+    "app_intent_new_conversation_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在当前项目中新建一个灵犀对话。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start a new Lingxi conversation in the current project."
+          }
+        }
+      }
+    },
+    "app_intent_new_conversation_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建灵犀对话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Lingxi Conversation"
+          }
+        }
+      }
+    },
+    "app_intent_open_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开灵犀并回到当前会话。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Lingxi and return to the current conversation."
+          }
+        }
+      }
+    },
+    "app_intent_open_terminal_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开当前项目的终端，可选择预填一条命令。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the current project's terminal, optionally pre-filled with a command."
+          }
+        }
+      }
+    },
+    "app_intent_open_terminal_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开灵犀终端"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Lingxi Terminal"
+          }
+        }
+      }
+    },
+    "app_intent_open_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开灵犀"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Lingxi"
+          }
+        }
+      }
+    },
+    "app_intent_question_param_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "问题"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Question"
+          }
+        }
+      }
+    },
     "app_name": {
       "localizations": {
         "zh-Hans": {
@@ -12370,6 +12530,150 @@
         }
       }
     },
+    "project_switch_failed_message %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "项目切换失败：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to switch project: %@"
+          }
+        }
+      }
+    },
+    "project_switching_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在切换项目…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switching project…"
+          }
+        }
+      }
+    },
+    "project_sync_state_auth_lost": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部目录授权失效"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "External folder authorization lost"
+          }
+        }
+      }
+    },
+    "project_sync_state_conflict": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存在同步冲突"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync conflict"
+          }
+        }
+      }
+    },
+    "project_sync_state_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync failed"
+          }
+        }
+      }
+    },
+    "project_sync_state_local": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local only"
+          }
+        }
+      }
+    },
+    "project_sync_state_pending": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有待同步更改"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Changes pending sync"
+          }
+        }
+      }
+    },
+    "project_sync_state_synced": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已同步"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synced"
+          }
+        }
+      }
+    },
+    "project_sync_state_syncing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Syncing"
+          }
+        }
+      }
+    },
     "provider_add_kind %@": {
       "localizations": {
         "zh-Hans": {
@@ -12462,6 +12766,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用\"联网\"模式。"
+          }
+        }
+      }
+    },
+    "settings_accent_amber": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "琥珀"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Amber"
+          }
+        }
+      }
+    },
+    "settings_accent_brick": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "砖红"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Brick Red"
+          }
+        }
+      }
+    },
+    "settings_accent_cyan": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "青蓝"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cyan"
+          }
+        }
+      }
+    },
+    "settings_accent_indigo": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靛紫"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Indigo"
+          }
+        }
+      }
+    },
+    "settings_accent_rose": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "玫红"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rose"
+          }
+        }
+      }
+    },
+    "settings_accent_teal": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "青绿"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teal"
           }
         }
       }
@@ -13986,6 +14386,22 @@
         }
       }
     },
+    "settings_dream_last_run_seed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今早 03:24 · 整理 7 条记忆 / 草拟今日计划"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This morning 03:24 · Organized 7 memories / Drafted today's plan"
+          }
+        }
+      }
+    },
     "settings_dream_mode": {
       "localizations": {
         "zh-Hans": {
@@ -14670,6 +15086,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前后端"
+          }
+        }
+      }
+    },
+    "settings_linux_detail_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "真机使用 iSH ARM64 + fakefs；首次启动会安装应用内置的 Alpine rootfs。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On real devices this uses iSH ARM64 + fakefs; the first launch installs the bundled Alpine rootfs."
           }
         }
       }
@@ -15842,6 +16274,22 @@
         }
       }
     },
+    "settings_linux_summary_checking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在检查设备上的 Alpine Linux 环境"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking the on-device Alpine Linux environment"
+          }
+        }
+      }
+    },
     "settings_linux_summary_ish_not_linked": {
       "localizations": {
         "zh-Hans": {
@@ -16398,6 +16846,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%1$d 连接"
+          }
+        }
+      }
+    },
+    "settings_mcp_seed_postgres_local_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Postgres (本地)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Postgres (Local)"
           }
         }
       }
@@ -18098,6 +18562,54 @@
         }
       }
     },
+    "settings_provider_preset_custom_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自定义"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_custom_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenAI 兼容端点"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenAI-compatible endpoint"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_kimi_code_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编程会员套餐"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Coding membership plan"
+          }
+        }
+      }
+    },
     "settings_provider_preset_not_in_catalog": {
       "localizations": {
         "zh-Hans": {
@@ -18110,6 +18622,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前预设未接入 Android 内建 provider catalog"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_openrouter_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "多模型聚合"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Multi-model aggregator"
+          }
+        }
+      }
+    },
+    "settings_provider_preset_qwen_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通义千问"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Qwen"
           }
         }
       }
@@ -18542,6 +19086,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "连接失败"
+          }
+        }
+      }
+    },
+    "settings_provider_status_idle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未验证"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unverified"
           }
         }
       }
@@ -19438,6 +19998,262 @@
           "stringUnit": {
             "state": "translated",
             "value": "查看灵犀提供的动作"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_code_review_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对粘贴的 diff 给出严格 review"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gives a strict review of a pasted diff"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_code_review_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "代码评审"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code Review"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_code_review_trigger_2": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拖入 .diff"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Drop a .diff file"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_css_doctor_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "诊断布局问题并给出修复"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnoses layout issues and provides fixes"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_meeting_notes_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从语音/文本提取要点 + action item"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Extracts key points and action items from voice/text"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_meeting_notes_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会议纪要"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meeting Notes"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_meeting_notes_trigger_1": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会议结束后"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "After the meeting ends"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_paper_reading_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "arXiv 链接 → 结构化摘要 + 批注"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "arXiv link → structured summary + annotations"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_paper_reading_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "论文精读"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paper Deep Read"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_paper_reading_trigger_1": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "粘贴 arxiv URL"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste an arXiv URL"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_polish_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中→英写作润色，保留原意"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chinese-to-English writing polish that preserves the original meaning"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_polish_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "英文润色"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English Polishing"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_weekly_report_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "聚合 Linear / GitHub / 日历自动出周报"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aggregates Linear / GitHub / Calendar to auto-generate weekly reports"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_weekly_report_name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "周报生成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weekly Report Generator"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_weekly_report_trigger_1": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周五 17:00"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Every Friday 17:00"
+          }
+        }
+      }
+    },
+    "settings_skill_seed_weekly_report_trigger_2": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "@周报"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "@weekly-report"
           }
         }
       }
@@ -20610,6 +21426,38 @@
         }
       }
     },
+    "terminal_authorization_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行时授权未通过"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runtime authorization failed"
+          }
+        }
+      }
+    },
+    "terminal_copied_lines %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已复制 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copied %lld lines"
+          }
+        }
+      }
+    },
     "terminal_copy_button": {
       "localizations": {
         "zh-Hans": {
@@ -20622,6 +21470,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Copy"
+          }
+        }
+      }
+    },
+    "terminal_cwd_outside_workspace %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求的 cwd 超出 workspace：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The requested cwd is outside the workspace: %@"
+          }
+        }
+      }
+    },
+    "terminal_cwd_requires_open_project %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求的 cwd 需要一个已打开的项目：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The requested cwd requires an open project: %@"
+          }
+        }
+      }
+    },
+    "terminal_guest_workspace_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "guest workspace 不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guest workspace unavailable"
           }
         }
       }
@@ -20642,6 +21538,54 @@
         }
       }
     },
+    "terminal_integrity_check_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行时完整性校验失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runtime integrity check failed"
+          }
+        }
+      }
+    },
+    "terminal_launch_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端启动失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal failed to start"
+          }
+        }
+      }
+    },
+    "terminal_mobile_linux_not_connected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前环境未接入 Mobile Linux"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This environment is not connected to Mobile Linux"
+          }
+        }
+      }
+    },
     "terminal_open_runtime_settings": {
       "localizations": {
         "zh-Hans": {
@@ -20654,6 +21598,198 @@
           "stringUnit": {
             "state": "translated",
             "value": "Open Runtime Settings"
+          }
+        }
+      }
+    },
+    "terminal_operation_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端操作超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal operation timed out"
+          }
+        }
+      }
+    },
+    "terminal_polling_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端轮询失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal polling failed"
+          }
+        }
+      }
+    },
+    "terminal_pty_not_available_build": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前构建未提供 PTY 终端"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This build does not provide a PTY terminal"
+          }
+        }
+      }
+    },
+    "terminal_pty_not_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前构建未提供 PTY 能力"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This build does not support PTY"
+          }
+        }
+      }
+    },
+    "terminal_pty_session_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法创建 PTY 终端会话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to create a PTY terminal session"
+          }
+        }
+      }
+    },
+    "terminal_recovery_none_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal Unavailable"
+          }
+        }
+      }
+    },
+    "terminal_recovery_repair_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行时文件损坏"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runtime Files Corrupted"
+          }
+        }
+      }
+    },
+    "terminal_recovery_runtime_unavailable_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux 运行时不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux Runtime Unavailable"
+          }
+        }
+      }
+    },
+    "terminal_recovery_workspace_unavailable_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作目录不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace Unavailable"
+          }
+        }
+      }
+    },
+    "terminal_relative_cwd_invalid %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求的相对 cwd 非法：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The requested relative cwd is invalid: %@"
+          }
+        }
+      }
+    },
+    "terminal_run_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终端运行失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal run failed"
+          }
+        }
+      }
+    },
+    "terminal_runtime_environment_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行环境不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runtime environment unavailable"
           }
         }
       }
@@ -20690,6 +21826,22 @@
         }
       }
     },
+    "terminal_workspace_not_mounted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作目录未挂载到 guest，已拒绝回退到错误目录"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The working directory is not mounted into the guest; refusing to fall back to the wrong directory"
+          }
+        }
+      }
+    },
     "voice_active_mode": {
       "localizations": {
         "zh-Hans": {
@@ -20706,6 +21858,38 @@
         }
       }
     },
+    "voice_audio_session_busy %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音频会话正由 %@ 使用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The audio session is currently in use by %@"
+          }
+        }
+      }
+    },
+    "voice_audio_session_interrupted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音频会话被系统中断"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The audio session was interrupted by the system"
+          }
+        }
+      }
+    },
     "voice_auto_play": {
       "localizations": {
         "zh-Hans": {
@@ -20718,6 +21902,134 @@
           "stringUnit": {
             "state": "translated",
             "value": "自动播放回复"
+          }
+        }
+      }
+    },
+    "voice_automatic_supports_on_device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统可按条件选择设备端或在线识别；当前语言支持设备端"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system can choose on-device or online recognition as conditions allow; the current language supports on-device"
+          }
+        }
+      }
+    },
+    "voice_automatic_uses_online": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统将自动选择识别方式；当前语言通常会使用在线识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system will automatically choose a recognition method; the current language usually uses online recognition"
+          }
+        }
+      }
+    },
+    "voice_bargein_failed_message %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音打断识别失败：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Barge-in recognition failed: %@"
+          }
+        }
+      }
+    },
+    "voice_bargein_language_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前语言的语音识别暂不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition for the current language is unavailable"
+          }
+        }
+      }
+    },
+    "voice_bargein_permission_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别或麦克风权限不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition or microphone permission is unavailable"
+          }
+        }
+      }
+    },
+    "voice_bargein_route_unsupported %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前音频路线不支持免手打断：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current audio route does not support hands-free interruption: %@"
+          }
+        }
+      }
+    },
+    "voice_bargein_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音打断识别超时"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Barge-in recognition timed out"
+          }
+        }
+      }
+    },
+    "voice_bargein_unavailable_tap_orb": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "免手打断不可用，轻点光球后说话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hands-free interruption unavailable; tap the orb and then speak"
           }
         }
       }
@@ -20770,6 +22082,22 @@
         }
       }
     },
+    "voice_config_not_finished": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音配置尚未完成。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voice configuration is not yet complete."
+          }
+        }
+      }
+    },
     "voice_config_required_title": {
       "localizations": {
         "zh-Hans": {
@@ -20786,6 +22114,54 @@
         }
       }
     },
+    "voice_config_saved_no_voice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别已保存，但当前没有可用的系统播报声音。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition is saved, but no system playback voice is currently available."
+          }
+        }
+      }
+    },
+    "voice_config_saved_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别和系统播报声音已保存并可用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition and the system playback voice are saved and ready."
+          }
+        }
+      }
+    },
+    "voice_config_saved_with_issue %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音配置已保存；%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voice configuration saved; %@"
+          }
+        }
+      }
+    },
     "voice_current_selection": {
       "localizations": {
         "zh-Hans": {
@@ -20798,6 +22174,166 @@
           "stringUnit": {
             "state": "translated",
             "value": "当前选择"
+          }
+        }
+      }
+    },
+    "voice_detail_config_required_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先完成语音识别与系统声音设置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please complete speech recognition and system voice setup first"
+          }
+        }
+      }
+    },
+    "voice_detail_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请检查设置后重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please check settings and try again"
+          }
+        }
+      }
+    },
+    "voice_detail_interrupting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在识别打断内容…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recognizing your interruption…"
+          }
+        }
+      }
+    },
+    "voice_detail_listening_dictation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "说完后松开或再次点击"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Release or tap again when finished speaking"
+          }
+        }
+      }
+    },
+    "voice_detail_listening_flow": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到说话停顿后会自动发送"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sends automatically once a pause in speech is detected"
+          }
+        }
+      }
+    },
+    "voice_detail_paused": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轻点重试恢复语音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap retry to resume voice"
+          }
+        }
+      }
+    },
+    "voice_detail_recognizing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理刚才的语音…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Processing what you just said…"
+          }
+        }
+      }
+    },
+    "voice_detail_speaking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可以直接说话打断，或轻点光球重新监听"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can interrupt by speaking, or tap the orb to listen again"
+          }
+        }
+      }
+    },
+    "voice_detail_thinking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自然短句生成后会立即播报，也可以直接说话打断"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Natural sentences are spoken as soon as they're generated; you can also interrupt by speaking"
+          }
+        }
+      }
+    },
+    "voice_detecting_speech": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到你在说话，正在识别…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detected you speaking, recognizing…"
           }
         }
       }
@@ -20830,6 +22366,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "实际语言"
+          }
+        }
+      }
+    },
+    "voice_flow_busy_wait_to_open": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请等待当前回复或会话切换完成后再开启心流模式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please wait for the current reply or conversation switch to finish before starting flow mode"
+          }
+        }
+      }
+    },
+    "voice_flow_busy_wait_to_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请等待当前回复或会话切换完成后重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please wait for the current reply or conversation switch to finish before retrying"
           }
         }
       }
@@ -21010,6 +22578,102 @@
         }
       }
     },
+    "voice_hint_interrupting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在听取新的问题"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listening for your new question"
+          }
+        }
+      }
+    },
+    "voice_hint_listening_dictation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轻点结束收音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to end recording"
+          }
+        }
+      }
+    },
+    "voice_hint_listening_flow": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停顿后自动发送，也可轻点立即结束收音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sends automatically after a pause, or tap to end recording immediately"
+          }
+        }
+      }
+    },
+    "voice_hint_paused_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轻点重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to Retry"
+          }
+        }
+      }
+    },
+    "voice_hint_speaking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可以直接说话打断；轻点会停止当前回复并重新监听"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can interrupt by speaking; tapping stops the current reply and listens again"
+          }
+        }
+      }
+    },
+    "voice_hint_thinking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可以直接说话打断；轻点会取消当前回复并重新监听"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can interrupt by speaking; tapping cancels the current reply and listens again"
+          }
+        }
+      }
+    },
     "voice_hold_to_talk_hint": {
       "localizations": {
         "zh-Hans": {
@@ -21022,6 +22686,230 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hold to talk"
+          }
+        }
+      }
+    },
+    "voice_issue_device_restricted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前设备限制了语音识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device restricts speech recognition"
+          }
+        }
+      }
+    },
+    "voice_issue_mic_permission_off": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "麦克风权限已关闭，请前往系统设置开启"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone permission is off; please turn it on in system settings"
+          }
+        }
+      }
+    },
+    "voice_issue_mic_permission_unknown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法确认麦克风权限状态"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to confirm the microphone permission status"
+          }
+        }
+      }
+    },
+    "voice_issue_need_mic_permission": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要授予麦克风权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone permission is required"
+          }
+        }
+      }
+    },
+    "voice_issue_need_speech_permission": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要授予语音识别权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition permission is required"
+          }
+        }
+      }
+    },
+    "voice_issue_need_speech_permission_short": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要语音识别权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition permission required"
+          }
+        }
+      }
+    },
+    "voice_issue_save_language_mode": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先保存语音识别语言和识别方式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please save the speech recognition language and mode first"
+          }
+        }
+      }
+    },
+    "voice_issue_save_voice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先选择并保存系统播报声音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please choose and save a system playback voice first"
+          }
+        }
+      }
+    },
+    "voice_issue_speech_config_unsaved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未保存语音识别配置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition configuration not saved"
+          }
+        }
+      }
+    },
+    "voice_issue_speech_permission_off": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别权限已关闭，请前往系统设置开启"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition permission is off; please turn it on in system settings"
+          }
+        }
+      }
+    },
+    "voice_issue_speech_permission_unknown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法确认语音识别权限状态"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to confirm the speech recognition permission status"
+          }
+        }
+      }
+    },
+    "voice_issue_voice_not_available": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已配置的系统声音不可用，请重新选择"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The configured system voice is unavailable; please choose again"
+          }
+        }
+      }
+    },
+    "voice_issue_voice_not_selected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未选择系统播报声音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No system playback voice selected"
+          }
+        }
+      }
+    },
+    "voice_lang_option_current %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current: %@"
           }
         }
       }
@@ -21042,6 +22930,70 @@
         }
       }
     },
+    "voice_mic_permission_allow_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在系统设置中允许麦克风访问"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please allow microphone access in system settings"
+          }
+        }
+      }
+    },
+    "voice_mic_permission_enable_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在系统设置中开启麦克风权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please enable microphone permission in system settings"
+          }
+        }
+      }
+    },
+    "voice_mic_permission_first_use": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "首次使用时会请求麦克风权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone permission will be requested on first use"
+          }
+        }
+      }
+    },
+    "voice_mic_permission_ok": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "麦克风权限正常"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone permission is normal"
+          }
+        }
+      }
+    },
     "voice_mic_permission_required": {
       "localizations": {
         "zh-Hans": {
@@ -21054,6 +23006,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Microphone permission required"
+          }
+        }
+      }
+    },
+    "voice_mic_permission_unknown_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统未返回明确的麦克风权限状态"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system did not return a clear microphone permission status"
           }
         }
       }
@@ -21074,6 +23042,102 @@
         }
       }
     },
+    "voice_mode_automatic_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许系统根据设备、语言和网络选择识别方式。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lets the system choose the recognition method based on device, language, and network."
+          }
+        }
+      }
+    },
+    "voice_mode_automatic_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统自动"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System Automatic"
+          }
+        }
+      }
+    },
+    "voice_mode_on_device_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持时强制在设备上识别；不支持的语言会明确回退。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forces on-device recognition when supported; unsupported languages fall back explicitly."
+          }
+        }
+      }
+    },
+    "voice_mode_on_device_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "优先设备端"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prefer On-Device"
+          }
+        }
+      }
+    },
+    "voice_needs_permission_setup": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要先完成语音识别与麦克风授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition and microphone authorization must be completed first"
+          }
+        }
+      }
+    },
+    "voice_no_playback_voice_available": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统当前没有可用的播报声音"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No system playback voice is currently available"
+          }
+        }
+      }
+    },
     "voice_no_speech_recognized": {
       "localizations": {
         "zh-Hans": {
@@ -21090,6 +23154,86 @@
         }
       }
     },
+    "voice_nothing_recognized_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未识别到语音，请轻点重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No speech recognized; please tap to retry"
+          }
+        }
+      }
+    },
+    "voice_on_device_not_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前语言不支持设备端识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current language does not support on-device recognition"
+          }
+        }
+      }
+    },
+    "voice_on_device_recognition_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备端识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-Device Recognition"
+          }
+        }
+      }
+    },
+    "voice_on_device_supported_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前语言支持设备端识别，将优先在本机完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current language supports on-device recognition and will be completed locally first"
+          }
+        }
+      }
+    },
+    "voice_online_fallback_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备端不可用，将回退到系统在线识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-device is unavailable; falling back to system online recognition"
+          }
+        }
+      }
+    },
     "voice_online_fallback_reason": {
       "localizations": {
         "zh-Hans": {
@@ -21102,6 +23246,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "在线回退原因"
+          }
+        }
+      }
+    },
+    "voice_online_fallback_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统在线回退"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System Online Fallback"
+          }
+        }
+      }
+    },
+    "voice_permission_authorized_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorized"
+          }
+        }
+      }
+    },
+    "voice_permission_denied_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已拒绝"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Denied"
+          }
+        }
+      }
+    },
+    "voice_permission_not_met": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "权限未满足，无法开始语音识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permissions not granted; unable to start speech recognition"
+          }
+        }
+      }
+    },
+    "voice_permission_pending_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pending Authorization"
+          }
+        }
+      }
+    },
+    "voice_permission_restricted_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "受限制"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restricted"
+          }
+        }
+      }
+    },
+    "voice_permission_unknown_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未知"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown"
           }
         }
       }
@@ -21138,6 +23394,38 @@
         }
       }
     },
+    "voice_playback_failed_message %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音播报失败：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voice playback failed: %@"
+          }
+        }
+      }
+    },
+    "voice_playback_interrupted_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音播报被系统中断，轻点重试继续心流"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voice playback was interrupted by the system; tap retry to continue flow mode"
+          }
+        }
+      }
+    },
     "voice_playing": {
       "localizations": {
         "zh-Hans": {
@@ -21170,6 +23458,54 @@
         }
       }
     },
+    "voice_preview_default_text": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你好，我是灵犀。语音设置已经生效。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hello, I'm Lingxi. Voice settings are now active."
+          }
+        }
+      }
+    },
+    "voice_preview_interrupted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "试听被系统音频中断，请重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preview was interrupted by system audio; please try again"
+          }
+        }
+      }
+    },
+    "voice_previous_turn_not_finished": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一轮尚未结束，请稍后重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previous turn hasn't finished; please try again later"
+          }
+        }
+      }
+    },
     "voice_recognition_failed": {
       "localizations": {
         "zh-Hans": {
@@ -21182,6 +23518,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Recognition failed"
+          }
+        }
+      }
+    },
+    "voice_recognition_failed_message %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别失败：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition failed: %@"
           }
         }
       }
@@ -21234,6 +23586,54 @@
         }
       }
     },
+    "voice_recognizer_unavailable_for_language": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前系统语言的识别器暂不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The recognizer for the current system language is unavailable"
+          }
+        }
+      }
+    },
+    "voice_recognizer_unavailable_request_may_fail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前语言识别器暂不可用，系统请求可能失败"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The recognizer for the current language is unavailable; the system request may fail"
+          }
+        }
+      }
+    },
+    "voice_recognizer_unavailable_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统识别器当前不可用，请稍后重试或切换语言"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system recognizer is currently unavailable; please retry later or switch languages"
+          }
+        }
+      }
+    },
     "voice_recording_cancelled": {
       "localizations": {
         "zh-Hans": {
@@ -21246,6 +23646,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Recording cancelled"
+          }
+        }
+      }
+    },
+    "voice_relistening_unclear": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未听清，正在重新监听…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Didn't catch that, listening again…"
+          }
+        }
+      }
+    },
+    "voice_resuming_no_new_question": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未识别到新的问题，正在恢复回复…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No new question recognized; resuming the reply…"
           }
         }
       }
@@ -21330,6 +23762,118 @@
         }
       }
     },
+    "voice_session_busy_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话正忙，请稍后重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current session is busy; please try again later"
+          }
+        }
+      }
+    },
+    "voice_session_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current session is unavailable"
+          }
+        }
+      }
+    },
+    "voice_setup_required_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先完成语音设置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please complete voice setup first"
+          }
+        }
+      }
+    },
+    "voice_speech_permission_denied_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在系统设置中开启“语音识别”权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please enable the “Speech Recognition” permission in system settings"
+          }
+        }
+      }
+    },
+    "voice_speech_permission_first_use": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "首次使用时会请求语音识别权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition permission will be requested on first use"
+          }
+        }
+      }
+    },
+    "voice_speech_permission_ok": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音识别权限正常"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition permission is normal"
+          }
+        }
+      }
+    },
+    "voice_speech_permission_unknown_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统未返回明确的语音识别权限状态"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system did not return a clear speech recognition permission status"
+          }
+        }
+      }
+    },
     "voice_speech_playback": {
       "localizations": {
         "zh-Hans": {
@@ -21378,6 +23922,22 @@
         }
       }
     },
+    "voice_speech_restricted_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备或家长控制限制了语音识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Device or parental controls restrict speech recognition"
+          }
+        }
+      }
+    },
     "voice_start_recognition_failed": {
       "localizations": {
         "zh-Hans": {
@@ -21410,6 +23970,38 @@
         }
       }
     },
+    "voice_status_config_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待配置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for Configuration"
+          }
+        }
+      }
+    },
+    "voice_status_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "语音暂不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voice temporarily unavailable"
+          }
+        }
+      }
+    },
     "voice_status_fallback": {
       "localizations": {
         "zh-Hans": {
@@ -21422,6 +24014,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "已回退"
+          }
+        }
+      }
+    },
+    "voice_status_interrupting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到你在说话"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detected you speaking"
+          }
+        }
+      }
+    },
+    "voice_status_listening": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在聆听"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listening"
           }
         }
       }
@@ -21442,6 +24066,22 @@
         }
       }
     },
+    "voice_status_recognizing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在识别"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recognizing"
+          }
+        }
+      }
+    },
     "voice_status_saved": {
       "localizations": {
         "zh-Hans": {
@@ -21454,6 +24094,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "已保存"
+          }
+        }
+      }
+    },
+    "voice_status_speaking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在播报"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speaking"
+          }
+        }
+      }
+    },
+    "voice_status_thinking": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 正在思考"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent is thinking"
+          }
+        }
+      }
+    },
+    "voice_stop_failed_message %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止失败：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop failed: %@"
+          }
+        }
+      }
+    },
+    "voice_stop_previous_failed %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止上一轮失败：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed to stop the previous turn: %@"
+          }
+        }
+      }
+    },
+    "voice_stopped_in_background": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已在后台停止收音，轻点重试恢复"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recording stopped in the background; tap retry to resume"
+          }
+        }
+      }
+    },
+    "voice_stopping_current_reply": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在停止当前回复…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopping the current reply…"
+          }
+        }
+      }
+    },
+    "voice_stopping_previous_sending_new": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在停止上一轮并发送新问题…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopping the previous turn and sending the new question…"
           }
         }
       }
@@ -21490,6 +24242,22 @@
         }
       }
     },
+    "voice_temporarily_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不可用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporarily Unavailable"
+          }
+        }
+      }
+    },
     "voice_tts_footer": {
       "localizations": {
         "zh-Hans": {
@@ -21506,6 +24274,54 @@
         }
       }
     },
+    "voice_turn_cancelled_retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本轮已取消，轻点重试继续心流"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This turn was cancelled; tap retry to continue flow mode"
+          }
+        }
+      }
+    },
+    "voice_turn_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 回复失败，请检查网络或 Provider 后重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The agent's reply failed; please check your network or provider and try again"
+          }
+        }
+      }
+    },
+    "voice_turn_max_turns": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent 已达到最大轮数，请轻点重试"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The agent reached the maximum number of turns; please tap retry"
+          }
+        }
+      }
+    },
     "voice_voice_name": {
       "localizations": {
         "zh-Hans": {
@@ -21518,6 +24334,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "声音"
+          }
+        }
+      }
+    },
+    "voice_waiting_permission": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待权限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for Permission"
           }
         }
       }

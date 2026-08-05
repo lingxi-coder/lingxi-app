@@ -80,8 +80,8 @@ actor LingxiAppActionStore {
 }
 
 struct OpenLingxiIntent: AppIntent {
-    static let title: LocalizedStringResource = "打开灵犀"
-    static let description = IntentDescription("打开灵犀并回到当前会话。")
+    static let title: LocalizedStringResource = "app_intent_open_title"
+    static let description = IntentDescription("app_intent_open_description")
     static let openAppWhenRun = true
 
     func perform() async throws -> some IntentResult {
@@ -91,8 +91,8 @@ struct OpenLingxiIntent: AppIntent {
 }
 
 struct NewLingxiConversationIntent: AppIntent {
-    static let title: LocalizedStringResource = "新建灵犀对话"
-    static let description = IntentDescription("在当前项目中新建一个灵犀对话。")
+    static let title: LocalizedStringResource = "app_intent_new_conversation_title"
+    static let description = IntentDescription("app_intent_new_conversation_description")
     static let openAppWhenRun = true
 
     func perform() async throws -> some IntentResult {
@@ -102,11 +102,11 @@ struct NewLingxiConversationIntent: AppIntent {
 }
 
 struct AskLingxiIntent: AppIntent {
-    static let title: LocalizedStringResource = "向灵犀提问"
-    static let description = IntentDescription("把来自 Siri、快捷指令或其他 App 的文本带入新对话。")
+    static let title: LocalizedStringResource = "app_intent_ask_title"
+    static let description = IntentDescription("app_intent_ask_description")
     static let openAppWhenRun = true
 
-    @Parameter(title: "问题")
+    @Parameter(title: "app_intent_question_param_title")
     var question: String
 
     static var parameterSummary: some ParameterSummary {
@@ -120,11 +120,11 @@ struct AskLingxiIntent: AppIntent {
 }
 
 struct OpenLingxiTerminalIntent: AppIntent {
-    static let title: LocalizedStringResource = "打开灵犀终端"
-    static let description = IntentDescription("打开当前项目的终端，可选择预填一条命令。")
+    static let title: LocalizedStringResource = "app_intent_open_terminal_title"
+    static let description = IntentDescription("app_intent_open_terminal_description")
     static let openAppWhenRun = true
 
-    @Parameter(title: "预填命令", default: "")
+    @Parameter(title: "app_intent_initial_command_param_title", default: "")
     var initialCommand: String
 
     static var parameterSummary: some ParameterSummary {
@@ -149,25 +149,25 @@ struct LingxiAppShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: OpenLingxiIntent(),
             phrases: ["打开 \(.applicationName)"],
-            shortTitle: "打开灵犀",
+            shortTitle: "app_intent_open_title",
             systemImageName: "sparkles"
         )
         AppShortcut(
             intent: NewLingxiConversationIntent(),
             phrases: ["在 \(.applicationName) 新建对话"],
-            shortTitle: "新建对话",
+            shortTitle: "settings_app_new_conversation",
             systemImageName: "square.and.pencil"
         )
         AppShortcut(
             intent: AskLingxiIntent(),
             phrases: ["用 \(.applicationName) 提问", "让 \(.applicationName) 回答"],
-            shortTitle: "向灵犀提问",
+            shortTitle: "app_intent_ask_title",
             systemImageName: "text.bubble"
         )
         AppShortcut(
             intent: OpenLingxiTerminalIntent(),
             phrases: ["打开 \(.applicationName) 终端"],
-            shortTitle: "打开终端",
+            shortTitle: "settings_app_open_terminal",
             systemImageName: "terminal"
         )
     }

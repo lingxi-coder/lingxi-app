@@ -115,7 +115,9 @@ final class ProjectRepository: @unchecked Sendable {
             activeProjectId: active,
             globalSessions: readSessions(at: projectsRoot.appendingPathComponent(globalSessionIndexFileName)),
             loading: false,
-            errorMessage: corruptCount > 0 ? "\(corruptCount) 个项目数据损坏或路径异常，已隔离；其他项目仍可使用。" : nil
+            errorMessage: corruptCount > 0
+                ? String(format: String(localized: "project_corrupt_projects_message_fmt"), corruptCount)
+                : nil
         )
     }
 
@@ -181,9 +183,9 @@ final class ProjectRepository: @unchecked Sendable {
         let existing = sessions.first(where: { $0.sessionId == canonicalID })
         let started = ProjectSessionSummary(
             sessionId: canonicalID,
-            title: title.isEmpty ? (existing?.title ?? "新对话") : title,
+            title: title.isEmpty ? (existing?.title ?? String(localized: "chat_new_conversation")) : title,
             messageCount: existing?.messageCount ?? 0,
-            relativeTime: "刚刚",
+            relativeTime: String(localized: "project_relative_time_just_now"),
             updatedAt: timestamp
         )
         let updated = ([started] + sessions.filter { $0.sessionId != canonicalID })

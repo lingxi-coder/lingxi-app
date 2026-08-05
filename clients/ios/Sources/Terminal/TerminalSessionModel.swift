@@ -29,10 +29,10 @@ enum TerminalRecovery: Equatable {
     /// fixed from the runtime page, but confusing them wastes the reader's time.
     var title: String {
         switch self {
-        case .workspaceNotMounted: "工作目录不可用"
-        case .runtimeUnavailable: "Linux 运行时不可用"
-        case .repairRuntime: "运行时文件损坏"
-        case .none: "终端不可用"
+        case .workspaceNotMounted: String(localized: "terminal_recovery_workspace_unavailable_title")
+        case .runtimeUnavailable: String(localized: "terminal_recovery_runtime_unavailable_title")
+        case .repairRuntime: String(localized: "terminal_recovery_repair_title")
+        case .none: String(localized: "terminal_recovery_none_title")
         }
     }
 
@@ -152,7 +152,7 @@ final class TerminalSessionModel {
                 )
             )
             guard session.available else {
-                availability = .unavailable(session.detail ?? "无法创建 PTY 终端会话")
+                availability = .unavailable(session.detail ?? String(localized: "terminal_pty_session_unavailable"))
                 return
             }
             activeSessionID = session.id
@@ -166,7 +166,7 @@ final class TerminalSessionModel {
             }
         } catch {
             let runtimeError = TerminalRuntimeError(error)
-            availability = .failed(runtimeError.errorDescription ?? "终端启动失败")
+            availability = .failed(runtimeError.errorDescription ?? String(localized: "terminal_launch_failed"))
             lastError = runtimeError.errorDescription
         }
     }
@@ -249,7 +249,7 @@ final class TerminalSessionModel {
     func copyTranscript() {
         let transcript = buffer.plainText
         guard !transcript.isEmpty else { return }
-        selectionSummary = "已复制 \(buffer.lines.count) 行"
+        selectionSummary = String(localized: "terminal_copied_lines \(buffer.lines.count)")
         copyToSystemPasteboard(transcript)
     }
 
@@ -291,7 +291,7 @@ final class TerminalSessionModel {
                     await MainActor.run {
                         guard self.activeSessionID == streamID else { return }
                         self.lastError = TerminalRuntimeError(error).errorDescription
-                        self.availability = .failed(self.lastError ?? "终端轮询失败")
+                        self.availability = .failed(self.lastError ?? String(localized: "terminal_polling_failed"))
                     }
                     break
                 }
@@ -329,7 +329,7 @@ final class TerminalSessionModel {
                     parser.consume(text: text, buffer: &buffer)
                 }
             case .error:
-                let message = event.text ?? "终端运行失败"
+                let message = event.text ?? String(localized: "terminal_run_failed")
                 lastError = message
                 availability = .failed(message)
             case .exit:
@@ -352,29 +352,29 @@ final class TerminalSessionModel {
         // Reachable only if the descriptor was built without the runtime's own
         // home fallback; a shell no longer requires a project to have a cwd.
         if descriptor.workspace.guestPath.isEmpty {
-            return .workspaceUnavailable("guest workspace 不可用")
+            return .workspaceUnavailable(String(localized: "terminal_guest_workspace_unavailable"))
         }
         if !capability.available {
-            return .unavailable(capability.reason ?? "运行环境不可用")
+            return .unavailable(capability.reason ?? String(localized: "terminal_runtime_environment_unavailable"))
         }
         if !capability.pty {
-            return .unavailable("当前构建未提供 PTY 能力")
+            return .unavailable(String(localized: "terminal_pty_not_supported"))
         }
         if status.state == .corrupt {
-            return .integrityFailure(status.lastError ?? "运行时完整性校验失败")
+            return .integrityFailure(status.lastError ?? String(localized: "terminal_integrity_check_failed"))
         }
         if status.state == .blockedByLicense {
-            return .unavailable(status.lastError ?? "运行时授权未通过")
+            return .unavailable(status.lastError ?? String(localized: "terminal_authorization_failed"))
         }
         if status.state == .unsupported {
-            return .unavailable(status.lastError ?? "当前环境未接入 Mobile Linux")
+            return .unavailable(status.lastError ?? String(localized: "terminal_mobile_linux_not_connected"))
         }
         let workspacePath = descriptor.launchCwd ?? descriptor.workspace.guestPath
         let matches = status.writableGuestPaths.contains { candidate in
             workspacePath == candidate || workspacePath.hasPrefix(candidate + "/")
         }
         guard matches else {
-            return .workspaceUnavailable("工作目录未挂载到 guest，已拒绝回退到错误目录")
+            return .workspaceUnavailable(String(localized: "terminal_workspace_not_mounted"))
         }
         return .ready
     }

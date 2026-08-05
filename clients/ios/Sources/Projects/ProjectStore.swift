@@ -47,7 +47,7 @@ final class ProjectStore {
     }
 
     func reloadAsync() async {
-        await runOperation(.refreshSessions, message: "正在读取项目…") {
+        await runOperation(.refreshSessions, message: String(localized: "project_loading_message")) {
             let repository = self.repository
             let executionDomain = self.executionDomain
             return try await executionDomain.async {
@@ -60,7 +60,7 @@ final class ProjectStore {
 
     @discardableResult
     func createInternal(name: String) async throws -> ProjectSnapshot {
-        try await runThrowingOperation(.create, message: "正在创建项目…") {
+        try await runThrowingOperation(.create, message: String(localized: "project_creating_message")) {
             let repository = self.repository
             let executionDomain = self.executionDomain
             return try await executionDomain.async {
@@ -75,7 +75,7 @@ final class ProjectStore {
 
     @discardableResult
     func importExternal(name: String, directoryURL: URL) async throws -> ProjectSnapshot {
-        try await runThrowingOperation(.import, message: "正在导入外部目录…") {
+        try await runThrowingOperation(.import, message: String(localized: "project_importing_message")) {
             let repository = self.repository
             let synchronizer = self.synchronizer
             let bookmarkResolver = self.bookmarkResolver
@@ -157,7 +157,7 @@ final class ProjectStore {
     }
 
     func reimportAsync(projectId: String) async {
-        await runOperation(.reimport, projectId: projectId, message: "正在从外部目录重新导入…") {
+        await runOperation(.reimport, projectId: projectId, message: String(localized: "project_reimporting_message")) {
             let repository = self.repository
             let synchronizer = self.synchronizer
             let executionDomain = self.executionDomain
@@ -176,7 +176,7 @@ final class ProjectStore {
     }
 
     func reauthorizeAsync(projectId: String, directoryURL: URL) async {
-        await runOperation(.reimport, projectId: projectId, message: "正在重新授权并导入…") {
+        await runOperation(.reimport, projectId: projectId, message: String(localized: "project_reauthorizing_message")) {
             let repository = self.repository
             let synchronizer = self.synchronizer
             let bookmarkResolver = self.bookmarkResolver
@@ -210,7 +210,7 @@ final class ProjectStore {
     }
 
     func exportAsync(projectId: String) async {
-        await runOperation(.export, projectId: projectId, message: "正在同步回外部目录…") {
+        await runOperation(.export, projectId: projectId, message: String(localized: "project_exporting_message")) {
             let repository = self.repository
             let synchronizer = self.synchronizer
             let executionDomain = self.executionDomain
@@ -229,7 +229,7 @@ final class ProjectStore {
     }
 
     func resolveConflictsAsync(projectId: String, resolution: ProjectConflictResolution) async {
-        await runOperation(.resolveConflicts, projectId: projectId, message: "正在解决同步冲突…") {
+        await runOperation(.resolveConflicts, projectId: projectId, message: String(localized: "project_resolving_conflicts_message")) {
             let repository = self.repository
             let synchronizer = self.synchronizer
             let executionDomain = self.executionDomain

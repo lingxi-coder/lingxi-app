@@ -23,7 +23,7 @@ actor VoiceAudioSessionCoordinator {
         var errorDescription: String? {
             switch self {
             case .busy(let owner):
-                return "音频会话正由 \(owner) 使用"
+                return String(localized: "voice_audio_session_busy \(String(describing: owner))")
             }
         }
     }

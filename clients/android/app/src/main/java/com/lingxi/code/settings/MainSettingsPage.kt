@@ -34,6 +34,7 @@ import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.model.Presets
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.Accents
+import com.lingxi.code.theme.AppLanguage
 import com.lingxi.code.theme.LingXiTheme
 
 /**
@@ -51,7 +52,6 @@ fun MainSettingsPage(
     onReplayOnboarding: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
-    val langMap = mapOf("zh-CN" to "简体中文", "zh-TW" to "繁體中文", "en-US" to "English", "ja-JP" to "日本語")
 
     Column(Modifier.fillMaxWidth()) {
         AccountCard(onAccount = { navController.navigate(SettingsRoutes.ACCOUNT) })
@@ -146,7 +146,7 @@ fun MainSettingsPage(
             )
             SettingsRow(
                 icon = LXIconName.Message, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
-                label = "语言", value = langMap[state.language],
+                label = "语言", value = AppLanguage.label(state.language),
                 onTap = { navController.navigate(SettingsRoutes.LANGUAGE) },
             )
             SettingsRow(

@@ -1,5 +1,8 @@
 package com.lingxi.code.settings
 
+import android.content.Context
+import android.content.ContextWrapper
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,15 +21,18 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,7 +42,10 @@ import com.lingxi.code.components.tint
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.Presets
 import com.lingxi.code.model.VoiceConfig
+import com.lingxi.code.theme.AppLanguage
+import com.lingxi.code.theme.AppLanguageStore
 import com.lingxi.code.theme.LingXiTheme
+import kotlinx.coroutines.launch
 
 /**
  * The "simple" settings pages owned by A6 — account, notifications, input,
@@ -152,20 +161,27 @@ fun PrivacyPage() {
 @Composable
 fun LanguagePage(language: String, onSelect: (String) -> Unit) {
     var follow by remember { mutableStateOf(true) }
+    val context = LocalContext.current
+    val store = remember { AppLanguageStore(context.applicationContext) }
+    val current by store.language.collectAsState(
+        initial = AppLanguageStore.currentLanguage(context.applicationContext),
+    )
+    val scope = rememberCoroutineScope()
+    val activity = context.findComponentActivity()
     Column(Modifier.fillMaxWidth()) {
         SettingsSection(
             label = "语言",
             footer = "切换语言后将重新加载界面。AI 对话语言独立配置。",
         ) {
             RadioList(
-                options = listOf(
-                    RadioOption("zh-CN", "简体中文"),
-                    RadioOption("zh-TW", "繁體中文"),
-                    RadioOption("en-US", "English (US)"),
-                    RadioOption("ja-JP", "日本語"),
-                ),
-                selected = language,
-                onSelect = onSelect,
+                options = AppLanguage.SUPPORTED.map { (code, label) -> RadioOption(code, label) },
+                selected = current,
+                onSelect = { code ->
+                    scope.launch {
+                        store.setLanguage(code)
+                        activity?.recreate()
+                    }
+                },
             )
         }
         SettingsSection(label = "区域") {
@@ -177,6 +193,13 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
             }
         }
     }
+}
+
+/** Unwraps [ContextWrapper] chains to the hosting [ComponentActivity] (or null). */
+private tailrec fun Context.findComponentActivity(): ComponentActivity? = when (this) {
+    is ComponentActivity -> this
+    is ContextWrapper -> baseContext.findComponentActivity()
+    else -> null
 }
 
 // MARK: - Voice input and output --------------------------------------------

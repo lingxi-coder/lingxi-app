@@ -5570,6 +5570,22 @@
         }
       }
     },
+    "onboarding_voice_language_en": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English"
+          }
+        }
+      }
+    },
     "onboarding_voice_language_ja": {
       "localizations": {
         "zh-Hans": {

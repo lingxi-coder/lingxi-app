@@ -723,6 +723,7 @@
   "onboarding_voice_language_ja": "日本語",
   "onboarding_voice_language_system": "跟随系统",
   "onboarding_voice_language_zh": "中文",
+  "onboarding_voice_language_en": "English",
   "onboarding_voice_later": "稍后配置",
   "onboarding_voice_no_voices": "没有可用声音",
   "onboarding_voice_subtitle": "选择识别方式和系统播报声音；心流模式会自动听取并朗读回复。",

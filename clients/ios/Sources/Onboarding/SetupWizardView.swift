@@ -233,7 +233,7 @@ struct SetupWizardView: View {
                         value: VoiceCapabilityModel.automaticLanguageIdentifier
                     )
                     voiceLanguageButton(String(localized: "onboarding_voice_language_zh"), value: "zh-CN")
-                    voiceLanguageButton("English", value: "en-US")
+                    voiceLanguageButton(String(localized: "onboarding_voice_language_en"), value: "en-US")
                     voiceLanguageButton(String(localized: "onboarding_voice_language_ja"), value: "ja-JP")
                 }
                 Text("voice_recognition_mode")

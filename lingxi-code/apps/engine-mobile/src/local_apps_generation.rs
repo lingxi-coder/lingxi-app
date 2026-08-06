@@ -7,9 +7,9 @@ use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto};
 use local_apps::{
     load_manifest, save_manifest, AppDataStore, AppError, AppGenerationExecutor, AppLayout,
-    AppManifest, AppService, DataCollectionSchema, DataFieldKind, DataFieldSchema, DesignValue,
-    GenerationJob, GenerationJobObserver, GenerationJobStatus, GenerationRequest,
-    GenerationRequestKind, WorkspaceSourcePolicy,
+    AppManifest, AppService, DataCollectionSchema, DesignValue, GenerationJob,
+    GenerationJobObserver, GenerationJobStatus, GenerationRequest, GenerationRequestKind,
+    WorkspaceSourcePolicy,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -85,1288 +85,6 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     ("public/.gitkeep", b""),
 ];
 
-const APP_SHELL_TEMPLATE: &str = r####""use client";
-
-import { useEffect, useMemo, useState } from "react";
-import {
-  getLingXiBridge,
-  mutateCollection,
-  queryCollection,
-  requestNetwork,
-  requestRuntimeStatus,
-} from "../lib/lingxi-bridge";
-
-const APP_NAME = __APP_NAME__;
-const TEMPLATE = __TEMPLATE__;
-const DESIGN = __SPEC__;
-const TEMPLATE_LABEL = TEMPLATE.replaceAll("_", " ");
-const COLLECTION_ID = {
-  dashboard: "records",
-  crud_tracker: "items",
-  content_showcase: "entries",
-  form_utility: "submissions",
-}[TEMPLATE] ?? "records";
-const COLLECTION_FIELDS = readFieldList("collection_fields");
-const PRIMARY_COLOR = readScalar("primary_color", "#3366FF");
-const DENSITY = readScalar("density", "comfortable");
-const PAGES = readList("pages");
-const FEATURES = readList("features");
-const NETWORK_DOMAINS = readList("network_domains");
-const DASHBOARD_REFRESH = readScalar("refresh_policy", "manual");
-const CRUD_ENTITY_NAME = readScalar("entity_name", "Item");
-const CRUD_ALLOW_ARCHIVE = readBoolean("allow_archive", true);
-const CRUD_STATUS_FIELD =
-  COLLECTION_FIELDS.find((field) => field.id === "status") ??
-  COLLECTION_FIELDS.find(
-    (field) => field.kind === "enum" && Array.isArray(field.options) && field.options.length
-  ) ??
-  null;
-const CONTENT_TYPE = readScalar("content_type", "Entry");
-const CONTENT_PRESENTATION = readScalar("presentation", "grid");
-const CONTENT_SEARCH_ENABLED = readBoolean("enable_search", true);
-const CONTENT_CATEGORY_SUGGESTIONS = readList("categories");
-const FORM_BEHAVIOR = readScalar("behavior", "save");
-const FORM_RESULT_DESCRIPTION = readScalar(
-  "result_description",
-  "Describe the result shown after submission."
-);
-const FORM_HISTORY_ENABLED = readBoolean("save_history", false);
-const FORM_INPUT_FIELDS = COLLECTION_FIELDS.filter(
-  (field) => field.id !== "result" && field.id !== "submitted_at"
-);
-
-export function AppShell() {
-  const [bridgeReady, setBridgeReady] = useState(false);
-  const [records, setRecords] = useState([]);
-  const [loadState, setLoadState] = useState({ status: "idle", error: "" });
-  const [runtimeState, setRuntimeState] = useState({
-    status: "idle",
-    payload: null,
-    error: "",
-  });
-  const [networkState, setNetworkState] = useState({
-    status: "idle",
-    message: "",
-  });
-  const [crudSearch, setCrudSearch] = useState("");
-  const [crudStatus, setCrudStatus] = useState("all");
-  const [selectedRecordId, setSelectedRecordId] = useState("");
-  const [formDraft, setFormDraft] = useState(() =>
-    createEmptyFormState(activeEditorFields())
-  );
-  const [formMessage, setFormMessage] = useState("");
-  const [formResult, setFormResult] = useState("");
-  const [contentSearch, setContentSearch] = useState("");
-  const [contentCategory, setContentCategory] = useState("all");
-
-  useEffect(() => {
-    setBridgeReady(getLingXiBridge() !== null);
-  }, []);
-
-  useEffect(() => {
-    if (!bridgeReady) {
-      return;
-    }
-    void reloadRecords();
-    void reloadRuntime();
-  }, [bridgeReady]);
-
-  useEffect(() => {
-    if (TEMPLATE !== "crud_tracker") {
-      return;
-    }
-    const currentRecord = records.find((record) => record.recordId === selectedRecordId);
-    setFormDraft(
-      currentRecord
-        ? documentToFormState(currentRecord.document, COLLECTION_FIELDS)
-        : createEmptyFormState(COLLECTION_FIELDS)
-    );
-  }, [records, selectedRecordId]);
-
-  useEffect(() => {
-    if (TEMPLATE !== "form_utility") {
-      return;
-    }
-    const latestRecord = records[0];
-    if (FORM_HISTORY_ENABLED || !latestRecord) {
-      setFormDraft(createEmptyFormState(FORM_INPUT_FIELDS));
-      return;
-    }
-    setFormDraft(documentToFormState(latestRecord.document, FORM_INPUT_FIELDS));
-    const persistedResult = latestRecord.document?.result;
-    if (persistedResult != null) {
-      setFormResult(String(persistedResult));
-    }
-  }, [records]);
-
-  const dashboardMetrics = useMemo(
-    () => buildDashboardMetrics(records, COLLECTION_FIELDS),
-    [records]
-  );
-  const filteredCrudRecords = useMemo(
-    () => filterCrudRecords(records, crudSearch, crudStatus),
-    [records, crudSearch, crudStatus]
-  );
-  const contentCategories = useMemo(
-    () => collectContentCategories(records, CONTENT_CATEGORY_SUGGESTIONS),
-    [records]
-  );
-  const filteredContentRecords = useMemo(
-    () => filterContentRecords(records, contentSearch, contentCategory),
-    [records, contentSearch, contentCategory]
-  );
-
-  async function reloadRecords() {
-    if (!COLLECTION_FIELDS.length) {
-      setRecords([]);
-      setLoadState({ status: "ready", error: "" });
-      return;
-    }
-    setLoadState({ status: "loading", error: "" });
-    try {
-      const page = await queryCollection({
-        collection: COLLECTION_ID,
-        sortKey: { kind: "updated_at" },
-        sortDirection: "descending",
-        limit: 100,
-      });
-      setRecords(Array.isArray(page?.records) ? page.records : []);
-      setLoadState({ status: "ready", error: "" });
-    } catch (error) {
-      setLoadState({
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  async function reloadRuntime() {
-    setRuntimeState({ status: "loading", payload: null, error: "" });
-    try {
-      const payload = await requestRuntimeStatus();
-      setRuntimeState({ status: "ready", payload, error: "" });
-    } catch (error) {
-      setRuntimeState({
-        status: "error",
-        payload: null,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  async function handleNetworkCheck() {
-    if (!NETWORK_DOMAINS.length) {
-      return;
-    }
-    setNetworkState({ status: "loading", message: "" });
-    try {
-      const domain = NETWORK_DOMAINS[0];
-      const response = await requestNetwork({
-        url: `https://${domain}`,
-        method: "GET",
-        headers: {
-          accept: "application/json, text/plain;q=0.9, */*;q=0.1",
-        },
-      });
-      const status =
-        response?.status ??
-        response?.status_code ??
-        response?.statusCode ??
-        "ok";
-      setNetworkState({
-        status: "ready",
-        message: `HTTPS bridge reached ${domain} (${status}).`,
-      });
-    } catch (error) {
-      setNetworkState({
-        status: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  function updateDraftField(fieldId, value) {
-    setFormDraft((current) => ({ ...current, [fieldId]: value }));
-  }
-
-  async function handleCrudSave(event) {
-    event.preventDefault();
-    const currentRecord = records.find((record) => record.recordId === selectedRecordId);
-    const recordId = selectedRecordId || buildRecordId(CRUD_ENTITY_NAME);
-    const document = formStateToDocument(formDraft, COLLECTION_FIELDS);
-    await mutateCollection({
-      collection: COLLECTION_ID,
-      operations: [
-        {
-          kind: "upsert",
-          recordId: recordId,
-          document,
-          expectedRevision: currentRecord?.revision ?? null,
-        },
-      ],
-    });
-    setSelectedRecordId(recordId);
-    await reloadRecords();
-  }
-
-  async function handleCrudDelete(record) {
-    await mutateCollection({
-      collection: COLLECTION_ID,
-      operations: [
-        {
-          kind: "delete",
-          recordId: record.recordId,
-          expectedRevision: record.revision ?? null,
-        },
-      ],
-    });
-    if (record.recordId === selectedRecordId) {
-      setSelectedRecordId("");
-      setFormDraft(createEmptyFormState(COLLECTION_FIELDS));
-    }
-    await reloadRecords();
-  }
-
-  async function handleCrudArchive(record) {
-    if (!CRUD_STATUS_FIELD?.options?.includes("archived")) {
-      return;
-    }
-    const nextDocument = {
-      ...record.document,
-      [CRUD_STATUS_FIELD.id]: "archived",
-    };
-    await mutateCollection({
-      collection: COLLECTION_ID,
-      operations: [
-        {
-          kind: "upsert",
-          recordId: record.recordId,
-          document: nextDocument,
-          expectedRevision: record.revision ?? null,
-        },
-      ],
-    });
-    await reloadRecords();
-  }
-
-  async function handleFormSubmit(event) {
-    event.preventDefault();
-    const document = formStateToDocument(formDraft, FORM_INPUT_FIELDS);
-    const computedResult = buildFormResult(document);
-    if (hasField(COLLECTION_FIELDS, "result")) {
-      document.result = computedResult;
-    }
-    if (hasField(COLLECTION_FIELDS, "submitted_at")) {
-      document.submitted_at = new Date().toISOString();
-    }
-    const recordId = FORM_HISTORY_ENABLED
-      ? buildRecordId("submission")
-      : records[0]?.recordId || "latest-submission";
-    const expectedRevision = FORM_HISTORY_ENABLED ? null : records[0]?.revision ?? null;
-    await mutateCollection({
-      collection: COLLECTION_ID,
-      operations: [
-        {
-          kind: "upsert",
-          recordId: recordId,
-          document,
-          expectedRevision: expectedRevision,
-        },
-      ],
-    });
-    setFormResult(computedResult);
-    setFormMessage(
-      FORM_HISTORY_ENABLED
-        ? "Submission saved to history."
-        : "Latest submission saved."
-    );
-    if (!FORM_HISTORY_ENABLED) {
-      setFormDraft(documentToFormState(document, FORM_INPUT_FIELDS));
-    }
-    await reloadRecords();
-  }
-
-  async function handleFormDelete(record) {
-    await mutateCollection({
-      collection: COLLECTION_ID,
-      operations: [
-        {
-          kind: "delete",
-          recordId: record.recordId,
-          expectedRevision: record.revision ?? null,
-        },
-      ],
-    });
-    await reloadRecords();
-  }
-
-  function resetActiveForm() {
-    const fields = activeEditorFields();
-    setFormDraft(createEmptyFormState(fields));
-    if (TEMPLATE === "crud_tracker") {
-      setSelectedRecordId("");
-    }
-  }
-
-  function activeEditorFields() {
-    return TEMPLATE === "form_utility" ? FORM_INPUT_FIELDS : COLLECTION_FIELDS;
-  }
-
-  return (
-    <main
-      className={`app-shell density-${DENSITY}`}
-      data-template={TEMPLATE}
-      style={{ "--accent": PRIMARY_COLOR }}
-    >
-      <div className="app-frame">
-        <header className="app-header">
-          <div>
-            <p className="eyebrow">LingXi Local App · {TEMPLATE_LABEL}</p>
-            <h1 id="app-title">{APP_NAME}</h1>
-            <p className="lede">{summarizePurpose()}</p>
-          </div>
-          <div className="status-stack" role="status" aria-live="polite">
-            <span className="status-pill" data-ready={bridgeReady}>
-              {bridgeReady ? "Bridge connected" : "Waiting for bridge"}
-            </span>
-            <span className="status-pill" data-ready={loadState.status === "ready"}>
-              {loadState.status === "loading"
-                ? "Loading records"
-                : `${records.length} records loaded`}
-            </span>
-            <span className="status-pill" data-ready={runtimeState.status === "ready"}>
-              {runtimeState.status === "error"
-                ? "Runtime unavailable"
-                : "Runtime status ready"}
-            </span>
-          </div>
-        </header>
-
-        <section className="meta-strip" aria-label="Configured pages and features">
-          <MetaList title="Pages" items={PAGES} emptyLabel="No pages configured" />
-          <MetaList title="Features" items={FEATURES} emptyLabel="No extra features configured" />
-        </section>
-
-        {loadState.status === "error" ? (
-          <section className="section-card danger" role="alert">
-            <h2>Record bridge error</h2>
-            <p>{loadState.error}</p>
-          </section>
-        ) : null}
-
-        {renderTemplateView({
-          records,
-          dashboardMetrics,
-          filteredCrudRecords,
-          filteredContentRecords,
-          contentCategories,
-          crudSearch,
-          crudStatus,
-          selectedRecordId,
-          formDraft,
-          formMessage,
-          formResult,
-          contentSearch,
-          contentCategory,
-          runtimeState,
-          onCrudSearchChange: setCrudSearch,
-          onCrudStatusChange: setCrudStatus,
-          onRecordSelect: setSelectedRecordId,
-          onDraftFieldChange: updateDraftField,
-          onCrudSave: handleCrudSave,
-          onCrudDelete: handleCrudDelete,
-          onCrudArchive: handleCrudArchive,
-          onFormSubmit: handleFormSubmit,
-          onFormDelete: handleFormDelete,
-          onReset: resetActiveForm,
-          onContentSearchChange: setContentSearch,
-          onContentCategoryChange: setContentCategory,
-          onReloadRecords: reloadRecords,
-          onReloadRuntime: reloadRuntime,
-        })}
-
-        <section className="section-card network-panel">
-          <div className="section-heading">
-            <div>
-              <h2>Configured bridge access</h2>
-              <p>All runtime behavior stays inside the versioned LingXi bridge.</p>
-            </div>
-            <button
-              id="app-network-check"
-              type="button"
-              className="secondary-button"
-              onClick={handleNetworkCheck}
-              disabled={!NETWORK_DOMAINS.length || networkState.status === "loading"}
-              aria-label="Check configured network domain"
-            >
-              {networkState.status === "loading" ? "Checking…" : "Check network bridge"}
-            </button>
-          </div>
-          <dl className="definition-grid">
-            <div>
-              <dt>Collection</dt>
-              <dd>{COLLECTION_ID}</dd>
-            </div>
-            <div>
-              <dt>Fields</dt>
-              <dd>{COLLECTION_FIELDS.length || 0}</dd>
-            </div>
-            <div>
-              <dt>Domains</dt>
-              <dd>{NETWORK_DOMAINS.join(", ") || "None declared"}</dd>
-            </div>
-          </dl>
-          {networkState.message ? (
-            <p
-              className={`status-copy ${networkState.status === "error" ? "danger-text" : ""}`}
-            >
-              {networkState.message}
-            </p>
-          ) : null}
-        </section>
-      </div>
-    </main>
-  );
-}
-
-function renderTemplateView(props) {
-  switch (TEMPLATE) {
-    case "dashboard":
-      return <DashboardView {...props} />;
-    case "crud_tracker":
-      return <CrudTrackerView {...props} />;
-    case "content_showcase":
-      return <ContentShowcaseView {...props} />;
-    case "form_utility":
-      return <FormUtilityView {...props} />;
-    default:
-      return (
-        <section className="section-card">
-          <h2>Unsupported template</h2>
-          <p>{TEMPLATE}</p>
-        </section>
-      );
-  }
-}
-
-function DashboardView({ records, dashboardMetrics, runtimeState, onReloadRecords, onReloadRuntime }) {
-  const recentFields = COLLECTION_FIELDS.slice(0, 3);
-
-  return (
-    <section className="stack-layout">
-      <div className="section-card">
-        <div className="section-heading">
-          <div>
-            <h2>Dashboard overview</h2>
-            <p>Refresh metrics and inspect the latest records from the native store.</p>
-          </div>
-          <div className="toolbar">
-            <button
-              id="dashboard-refresh"
-              type="button"
-              className="primary-button"
-              onClick={onReloadRecords}
-              aria-label="Refresh dashboard records"
-            >
-              Refresh data
-            </button>
-            <button
-              id="dashboard-runtime-refresh"
-              type="button"
-              className="secondary-button"
-              onClick={onReloadRuntime}
-              aria-label="Refresh runtime status"
-            >
-              Refresh runtime
-            </button>
-          </div>
-        </div>
-
-        <div className="metric-grid" role="list" aria-label="Dashboard metrics">
-          {dashboardMetrics.map((metric) => (
-            <article key={metric.label} className="metric-card" role="listitem">
-              <p>{metric.label}</p>
-              <strong>{metric.value}</strong>
-              <span>{metric.detail}</span>
-            </article>
-          ))}
-        </div>
-      </div>
-
-      <div className="section-card">
-        <div className="section-heading">
-          <div>
-            <h2>Runtime status</h2>
-            <p>
-              {DASHBOARD_REFRESH === "on_open"
-                ? "This dashboard is configured to refresh on open."
-                : "This dashboard refreshes when you explicitly request it."}
-            </p>
-          </div>
-        </div>
-        {runtimeState.status === "error" ? (
-          <p className="danger-text">{runtimeState.error}</p>
-        ) : (
-          <pre className="runtime-panel" id="dashboard-runtime-status">
-            {JSON.stringify(runtimeState.payload ?? { status: "pending" }, null, 2)}
-          </pre>
-        )}
-      </div>
-
-      <div className="section-card">
-        <div className="section-heading">
-          <div>
-            <h2>Recent records</h2>
-            <p>Latest values in the declared collection.</p>
-          </div>
-        </div>
-        {records.length ? (
-          <div className="table-wrap">
-            <table id="dashboard-record-table">
-              <thead>
-                <tr>
-                  <th scope="col">Record</th>
-                  {recentFields.map((field) => (
-                    <th key={field.id} scope="col">
-                      {field.label}
-                    </th>
-                  ))}
-                  <th scope="col">Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {records.slice(0, 6).map((record) => (
-                  <tr key={record.recordId}>
-                    <th scope="row">{record.recordId}</th>
-                    {recentFields.map((field) => (
-                      <td key={field.id}>{presentFieldValue(field, record.document?.[field.id])}</td>
-                    ))}
-                    <td>{formatTimestamp(record.updatedAtMs)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="empty-state">No records yet. Add records through the app data bridge.</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function CrudTrackerView({
-  filteredCrudRecords,
-  crudSearch,
-  crudStatus,
-  selectedRecordId,
-  formDraft,
-  onCrudSearchChange,
-  onCrudStatusChange,
-  onRecordSelect,
-  onDraftFieldChange,
-  onCrudSave,
-  onCrudDelete,
-  onCrudArchive,
-  onReset,
-}) {
-  return (
-    <section className="split-layout">
-      <div className="section-card">
-        <div className="section-heading">
-          <div>
-            <h2>{CRUD_ENTITY_NAME} records</h2>
-            <p>Query, filter, edit, archive, and delete through the native collection bridge.</p>
-          </div>
-          <button
-            id="crud-new-record"
-            type="button"
-            className="secondary-button"
-            onClick={onReset}
-            aria-label={`Create a new ${CRUD_ENTITY_NAME}`}
-          >
-            New {CRUD_ENTITY_NAME}
-          </button>
-        </div>
-
-        <div className="toolbar" role="search">
-          <label className="field">
-            <span>Search</span>
-            <input
-              id="crud-search-input"
-              type="search"
-              value={crudSearch}
-              onChange={(event) => onCrudSearchChange(event.target.value)}
-              placeholder={`Search ${CRUD_ENTITY_NAME.toLowerCase()}s`}
-            />
-          </label>
-          {CRUD_STATUS_FIELD ? (
-            <label className="field">
-              <span>Status</span>
-              <select
-                id="crud-status-filter"
-                value={crudStatus}
-                onChange={(event) => onCrudStatusChange(event.target.value)}
-              >
-                <option value="all">All statuses</option>
-                {CRUD_STATUS_FIELD.options.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-        </div>
-
-        <ul id="crud-record-list" className="record-list" aria-label={`${CRUD_ENTITY_NAME} records`}>
-          {filteredCrudRecords.map((record) => (
-            <li key={record.recordId} className="record-item">
-              <button
-                type="button"
-                className={`record-select ${record.recordId === selectedRecordId ? "active" : ""}`}
-                onClick={() => onRecordSelect(record.recordId)}
-                aria-label={`Edit ${recordSummary(record)}`}
-              >
-                <strong>{recordSummary(record)}</strong>
-                <span>{formatTimestamp(record.updatedAtMs)}</span>
-              </button>
-              <div className="record-actions">
-                {CRUD_ALLOW_ARCHIVE && CRUD_STATUS_FIELD?.options?.includes("archived") ? (
-                  <button
-                    id={`crud-archive-${record.recordId}`}
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => onCrudArchive(record)}
-                    aria-label={`Archive ${recordSummary(record)}`}
-                  >
-                    Archive
-                  </button>
-                ) : null}
-                <button
-                  id={`crud-delete-${record.recordId}`}
-                  type="button"
-                  className="ghost-button danger-button"
-                  onClick={() => onCrudDelete(record)}
-                  aria-label={`Delete ${recordSummary(record)}`}
-                >
-                  Delete
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-
-        {!filteredCrudRecords.length ? (
-          <p className="empty-state">No matching records. Create one from the editor panel.</p>
-        ) : null}
-      </div>
-
-      <form className="section-card" onSubmit={onCrudSave}>
-        <div className="section-heading">
-          <div>
-            <h2>{selectedRecordId ? `Edit ${CRUD_ENTITY_NAME}` : `New ${CRUD_ENTITY_NAME}`}</h2>
-            <p>Every save becomes a structured bridge mutation with optimistic revision checks.</p>
-          </div>
-        </div>
-        <div className="field-grid">
-          {COLLECTION_FIELDS.map((field) => (
-            <FieldEditor
-              key={field.id}
-              field={field}
-              prefix="crud"
-              value={formDraft[field.id] ?? emptyFieldValue(field)}
-              onChange={(value) => onDraftFieldChange(field.id, value)}
-            />
-          ))}
-        </div>
-        <div className="toolbar">
-          <button
-            id="crud-save-record"
-            type="submit"
-            className="primary-button"
-            aria-label={`Save ${CRUD_ENTITY_NAME}`}
-          >
-            Save {CRUD_ENTITY_NAME}
-          </button>
-          <button
-            id="crud-reset-editor"
-            type="button"
-            className="secondary-button"
-            onClick={onReset}
-            aria-label="Reset CRUD editor"
-          >
-            Reset
-          </button>
-        </div>
-      </form>
-    </section>
-  );
-}
-
-function ContentShowcaseView({
-  filteredContentRecords,
-  contentCategories,
-  contentSearch,
-  contentCategory,
-  onContentSearchChange,
-  onContentCategoryChange,
-}) {
-  return (
-    <section className="stack-layout">
-      <div className="section-card">
-        <div className="section-heading">
-          <div>
-            <h2>{CONTENT_TYPE} showcase</h2>
-            <p>Browse the declared collection in a searchable {CONTENT_PRESENTATION} presentation.</p>
-          </div>
-        </div>
-        <div className="toolbar">
-          {CONTENT_SEARCH_ENABLED ? (
-            <label className="field grow">
-              <span>Search</span>
-              <input
-                id="content-search-input"
-                type="search"
-                value={contentSearch}
-                onChange={(event) => onContentSearchChange(event.target.value)}
-                placeholder={`Search ${CONTENT_TYPE.toLowerCase()} content`}
-              />
-            </label>
-          ) : null}
-          <label className="field">
-            <span>Category</span>
-            <select
-              id="content-category-filter"
-              value={contentCategory}
-              onChange={(event) => onContentCategoryChange(event.target.value)}
-            >
-              <option value="all">All categories</option>
-              {contentCategories.map((category) => (
-                <option key={category} value={category}>
-                  {category}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </div>
-
-      <div
-        id="content-results"
-        className={CONTENT_PRESENTATION === "grid" ? "content-grid" : "content-list"}
-        aria-label={`${CONTENT_TYPE} results`}
-      >
-        {filteredContentRecords.map((record) => {
-          const titleField = COLLECTION_FIELDS.find((field) => field.id === "title") ?? COLLECTION_FIELDS[0];
-          const categoryField = COLLECTION_FIELDS.find((field) => field.id === "category");
-          const bodyField = COLLECTION_FIELDS.find((field) => field.id === "body");
-          const imageField = COLLECTION_FIELDS.find((field) => field.id === "image");
-          const title = presentFieldValue(titleField, record.document?.[titleField?.id]);
-          const category = categoryField ? presentFieldValue(categoryField, record.document?.[categoryField.id]) : "Uncategorized";
-          const body = bodyField ? presentFieldValue(bodyField, record.document?.[bodyField.id]) : "";
-          const image = imageField ? record.document?.[imageField.id] : "";
-
-          return (
-            <article key={record.recordId} className="content-card">
-              {typeof image === "string" && image ? (
-                <img
-                  className="content-image"
-                  src={image}
-                  alt={`${title} image`}
-                />
-              ) : null}
-              <div className="content-copy">
-                <p className="pill">{category || "Uncategorized"}</p>
-                <h3>{title}</h3>
-                <p>{body || "No body content has been saved for this entry yet."}</p>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-
-      {!filteredContentRecords.length ? (
-        <section className="section-card">
-          <p className="empty-state">No content matches the current filters.</p>
-        </section>
-      ) : null}
-    </section>
-  );
-}
-
-function FormUtilityView({
-  records,
-  formDraft,
-  formMessage,
-  formResult,
-  onDraftFieldChange,
-  onFormSubmit,
-  onFormDelete,
-  onReset,
-}) {
-  return (
-    <section className="split-layout">
-      <form className="section-card" onSubmit={onFormSubmit}>
-        <div className="section-heading">
-          <div>
-            <h2>Form utility</h2>
-            <p>
-              {FORM_BEHAVIOR === "calculate"
-                ? "Calculate a result from the submitted values."
-                : FORM_BEHAVIOR === "generate"
-                  ? "Generate a formatted result from the submitted values."
-                  : "Save a result and keep the latest submission available in-app."}
-            </p>
-          </div>
-        </div>
-        <div className="field-grid">
-          {FORM_INPUT_FIELDS.map((field) => (
-            <FieldEditor
-              key={field.id}
-              field={field}
-              prefix="form"
-              value={formDraft[field.id] ?? emptyFieldValue(field)}
-              onChange={(value) => onDraftFieldChange(field.id, value)}
-            />
-          ))}
-        </div>
-        <div className="toolbar">
-          <button
-            id="form-submit"
-            type="submit"
-            className="primary-button"
-            aria-label="Submit form utility"
-          >
-            {FORM_BEHAVIOR === "save" ? "Save result" : "Run utility"}
-          </button>
-          <button
-            id="form-reset"
-            type="button"
-            className="secondary-button"
-            onClick={onReset}
-            aria-label="Reset form utility"
-          >
-            Reset
-          </button>
-        </div>
-        {formMessage ? <p className="status-copy">{formMessage}</p> : null}
-      </form>
-
-      <div className="stack-layout">
-        <section className="section-card result-panel">
-          <div className="section-heading">
-            <div>
-              <h2>Computed result</h2>
-              <p>{FORM_RESULT_DESCRIPTION}</p>
-            </div>
-          </div>
-          <output id="form-result-output">{formResult || "Submit the form to compute a result."}</output>
-        </section>
-
-        <section className="section-card">
-          <div className="section-heading">
-            <div>
-              <h2>Saved submissions</h2>
-              <p>{FORM_HISTORY_ENABLED ? "Each submission is kept as a separate record." : "The latest submission is kept in place for fast editing."}</p>
-            </div>
-          </div>
-          <ul id="form-history" className="record-list" aria-label="Saved submissions">
-            {records.map((record) => (
-              <li key={record.recordId} className="record-item">
-                <div>
-                  <strong>{record.recordId}</strong>
-                  <span>{formatTimestamp(record.updatedAtMs)}</span>
-                </div>
-                <button
-                  id={`form-delete-${record.recordId}`}
-                  type="button"
-                  className="ghost-button danger-button"
-                  onClick={() => onFormDelete(record)}
-                  aria-label={`Delete submission ${record.recordId}`}
-                >
-                  Delete
-                </button>
-              </li>
-            ))}
-          </ul>
-          {!records.length ? (
-            <p className="empty-state">No submissions saved yet.</p>
-          ) : null}
-        </section>
-      </div>
-    </section>
-  );
-}
-
-function MetaList({ title, items, emptyLabel }) {
-  return (
-    <div className="meta-group">
-      <span>{title}</span>
-      <div className="pill-row">
-        {items.length ? items.map((item) => <span key={item} className="pill">{item}</span>) : <span className="subtle-copy">{emptyLabel}</span>}
-      </div>
-    </div>
-  );
-}
-
-function FieldEditor({ field, prefix, value, onChange }) {
-  const fieldId = `${prefix}-field-${field.id}`;
-
-  if (field.kind === "long_text") {
-    return (
-      <label className="field wide" htmlFor={fieldId}>
-        <span>{field.label}</span>
-        <textarea
-          id={fieldId}
-          rows={4}
-          required={field.required}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      </label>
-    );
-  }
-
-  if (field.kind === "boolean") {
-    return (
-      <label className="toggle-field" htmlFor={fieldId}>
-        <input
-          id={fieldId}
-          type="checkbox"
-          checked={Boolean(value)}
-          onChange={(event) => onChange(event.target.checked)}
-        />
-        <span>{field.label}</span>
-      </label>
-    );
-  }
-
-  if (field.kind === "enum") {
-    return (
-      <label className="field" htmlFor={fieldId}>
-        <span>{field.label}</span>
-        <select
-          id={fieldId}
-          required={field.required}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        >
-          {!field.required ? <option value="">Select one</option> : null}
-          {field.options.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      </label>
-    );
-  }
-
-  return (
-    <label className="field" htmlFor={fieldId}>
-      <span>{field.label}</span>
-      <input
-        id={fieldId}
-        type={inputType(field.kind)}
-        required={field.required}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        step={field.kind === "decimal" ? "0.01" : undefined}
-      />
-    </label>
-  );
-}
-
-function buildDashboardMetrics(records, fields) {
-  const numericField = fields.find((field) => field.kind === "integer" || field.kind === "decimal");
-  const dateField = fields.find((field) => field.kind === "date_time");
-  const numericTotal = numericField
-    ? records.reduce((total, record) => total + Number(record.document?.[numericField.id] ?? 0), 0)
-    : null;
-  const latestValue = dateField
-    ? records
-        .map((record) => record.document?.[dateField.id])
-        .filter(Boolean)
-        .sort()
-        .at(-1)
-    : null;
-
-  return [
-    {
-      label: "Total records",
-      value: String(records.length),
-      detail: "Counted through queryCollection",
-    },
-    {
-      label: numericField ? numericField.label : "Configured fields",
-      value: numericField ? formatNumber(numericTotal) : String(fields.length),
-      detail: numericField ? "Summed from numeric records" : "Declared collection fields",
-    },
-    {
-      label: dateField ? dateField.label : "Last updated",
-      value: dateField && latestValue ? String(latestValue) : formatTimestamp(records[0]?.updatedAtMs),
-      detail: dateField ? "Latest timestamp in the collection" : "Newest stored record",
-    },
-  ];
-}
-
-function filterCrudRecords(records, search, status) {
-  return records.filter((record) => {
-    if (status !== "all" && CRUD_STATUS_FIELD) {
-      if (String(record.document?.[CRUD_STATUS_FIELD.id] ?? "") !== status) {
-        return false;
-      }
-    }
-    if (!search.trim()) {
-      return true;
-    }
-    const haystack = JSON.stringify(record.document ?? {}).toLowerCase();
-    return haystack.includes(search.trim().toLowerCase());
-  });
-}
-
-function collectContentCategories(records, suggestions) {
-  const values = new Set(suggestions.filter(Boolean));
-  const categoryField = COLLECTION_FIELDS.find((field) => field.id === "category");
-  if (categoryField) {
-    records.forEach((record) => {
-      const value = record.document?.[categoryField.id];
-      if (typeof value === "string" && value) {
-        values.add(value);
-      }
-    });
-  }
-  return [...values];
-}
-
-function filterContentRecords(records, search, category) {
-  return records.filter((record) => {
-    if (category !== "all") {
-      const recordCategory = String(record.document?.category ?? "");
-      if (recordCategory !== category) {
-        return false;
-      }
-    }
-    if (!search.trim()) {
-      return true;
-    }
-    return JSON.stringify(record.document ?? {})
-      .toLowerCase()
-      .includes(search.trim().toLowerCase());
-  });
-}
-
-function buildFormResult(document) {
-  const summary = FORM_INPUT_FIELDS.map((field) => {
-    const value = document[field.id];
-    if (value == null || value === "") {
-      return null;
-    }
-    return `${field.label}: ${presentFieldValue(field, value)}`;
-  }).filter(Boolean);
-
-  if (FORM_BEHAVIOR === "calculate") {
-    const total = FORM_INPUT_FIELDS.reduce((sum, field) => {
-      if (field.kind !== "integer" && field.kind !== "decimal") {
-        return sum;
-      }
-      const value = Number(document[field.id] ?? 0);
-      return Number.isFinite(value) ? sum + value : sum;
-    }, 0);
-    return `${FORM_RESULT_DESCRIPTION} Total: ${formatNumber(total)}.`;
-  }
-
-  if (FORM_BEHAVIOR === "generate") {
-    return [FORM_RESULT_DESCRIPTION, ...summary].filter(Boolean).join("\n");
-  }
-
-  const timestamp = new Date().toLocaleString();
-  return summary.length
-    ? `${FORM_RESULT_DESCRIPTION} Saved at ${timestamp}: ${summary.join(" • ")}`
-    : `${FORM_RESULT_DESCRIPTION} Saved at ${timestamp}.`;
-}
-
-function summarizePurpose() {
-  const purpose = unwrapDesignValue(DESIGN.purpose);
-  if (typeof purpose === "string" && purpose.trim()) {
-    return purpose;
-  }
-  return "This static-export app renders data, runtime, and optional network checks exclusively through the LingXi bridge.";
-}
-
-function recordSummary(record) {
-  const titleField =
-    COLLECTION_FIELDS.find((field) => field.id === "title" || field.id === "label") ??
-    COLLECTION_FIELDS[0];
-  const label = titleField
-    ? presentFieldValue(titleField, record.document?.[titleField.id])
-    : record.recordId;
-  return label || record.recordId;
-}
-
-function inputType(kind) {
-  switch (kind) {
-    case "integer":
-    case "decimal":
-      return "number";
-    case "date_time":
-      return "datetime-local";
-    default:
-      return "text";
-  }
-}
-
-function emptyFieldValue(field) {
-  switch (field.kind) {
-    case "boolean":
-      return false;
-    default:
-      return "";
-  }
-}
-
-function createEmptyFormState(fields) {
-  return Object.fromEntries(fields.map((field) => [field.id, emptyFieldValue(field)]));
-}
-
-function documentToFormState(document, fields) {
-  return Object.fromEntries(
-    fields.map((field) => {
-      const value = document?.[field.id];
-      if (value == null) {
-        return [field.id, emptyFieldValue(field)];
-      }
-      if (field.kind === "date_time" && typeof value === "string") {
-        return [field.id, value.slice(0, 16)];
-      }
-      return [field.id, value];
-    })
-  );
-}
-
-function formStateToDocument(state, fields) {
-  return Object.fromEntries(
-    fields.map((field) => [field.id, normalizeFieldValue(field, state[field.id])])
-  );
-}
-
-function normalizeFieldValue(field, rawValue) {
-  if (field.kind === "boolean") {
-    return Boolean(rawValue);
-  }
-  if (field.kind === "integer") {
-    const parsed = Number.parseInt(String(rawValue || "0"), 10);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  if (field.kind === "decimal") {
-    const parsed = Number.parseFloat(String(rawValue || "0"));
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  if (field.kind === "date_time") {
-    if (!rawValue) {
-      return "";
-    }
-    const date = new Date(rawValue);
-    return Number.isNaN(date.valueOf()) ? String(rawValue) : date.toISOString();
-  }
-  return String(rawValue ?? "");
-}
-
-function presentFieldValue(field, value) {
-  if (value == null || value === "") {
-    return "—";
-  }
-  if (field?.kind === "boolean") {
-    return value ? "Yes" : "No";
-  }
-  if (field?.kind === "date_time") {
-    return formatTimestamp(Date.parse(value));
-  }
-  return String(value);
-}
-
-function formatTimestamp(value) {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
-    return String(value);
-  }
-  return date.toLocaleString();
-}
-
-function formatNumber(value) {
-  if (value == null || Number.isNaN(value)) {
-    return "—";
-  }
-  return new Intl.NumberFormat().format(value);
-}
-
-function buildRecordId(prefix) {
-  return `${slugify(prefix)}-${Date.now().toString(36)}`;
-}
-
-function slugify(value) {
-  return String(value || "record")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "record";
-}
-
-function hasField(fields, fieldId) {
-  return fields.some((field) => field.id === fieldId);
-}
-
-function readDesignValue(fieldId) {
-  return DESIGN[fieldId];
-}
-
-function unwrapDesignValue(value) {
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-  if ("value" in value) {
-    return value.value;
-  }
-  return value;
-}
-
-function readScalar(fieldId, fallback) {
-  const value = unwrapDesignValue(readDesignValue(fieldId));
-  return typeof value === "string" && value.length ? value : fallback;
-}
-
-function readBoolean(fieldId, fallback) {
-  const value = unwrapDesignValue(readDesignValue(fieldId));
-  return typeof value === "boolean" ? value : fallback;
-}
-
-function readList(fieldId) {
-  const value = unwrapDesignValue(readDesignValue(fieldId));
-  return Array.isArray(value) ? value.filter(Boolean).map(String) : [];
-}
-
-function readFieldList(fieldId) {
-  const value = unwrapDesignValue(readDesignValue(fieldId));
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.map((field) => ({
-    id: String(field.id),
-    label: String(field.label),
-    kind: String(field.kind ?? field.field_type ?? "text"),
-    required: Boolean(field.required),
-    options: Array.isArray(field.enumOptions)
-      ? field.enumOptions.map(String)
-      : Array.isArray(field.options)
-        ? field.options.map(String)
-        : [],
-  }));
-}
-"####;
-
 pub(crate) struct MobileAppGenerationExecutor {
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     host: Arc<LocalAppsHostBroker>,
@@ -1409,14 +127,17 @@ impl MobileAppGenerationExecutor {
         manifest.revision = request.key.revision;
         if let Some(DesignValue::DataFieldList(fields)) = draft.fields.get("collection_fields") {
             if manifest.collections.is_empty() {
+                // TODO(local-apps#questionnaire, Task 9): the per-template
+                // collection id ("records"/"items"/"entries"/"submissions")
+                // this used to pick lost its input — `AppRecord` no longer
+                // carries a template — and `AppManifest::for_new_app` now
+                // starts every app with zero collections regardless (Task 2).
+                // Task 9 replaces this whole reconciliation with the real
+                // `AppPlan.collections` the LLM plan step authors (validated
+                // by `questionnaire::validate_plan`); until then a single
+                // fixed id keeps this path a legal, non-fabricated manifest.
                 manifest.collections.push(DataCollectionSchema {
-                    id: match record.template {
-                        local_apps::AppTemplateKind::Dashboard => "records",
-                        local_apps::AppTemplateKind::CrudTracker => "items",
-                        local_apps::AppTemplateKind::ContentShowcase => "entries",
-                        local_apps::AppTemplateKind::FormUtility => "submissions",
-                    }
-                    .into(),
+                    id: "records".into(),
                     name: "App Data".into(),
                     fields: fields.clone(),
                 });
@@ -1607,22 +328,26 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
     async fn generate_source(
         &self,
         request: &GenerationRequest,
-        layout: &AppLayout,
+        _layout: &AppLayout,
     ) -> Result<(), AppError> {
         if request.kind == GenerationRequestKind::Restore {
             return Ok(());
         }
-        let service = self.service()?;
-        let record = service.record(&request.key.app_id).await?;
-        let draft = service.draft(&request.key.app_id).await?;
-        let component = render_app_shell_source(&record.name, record.template, &draft.fields)?;
-        let workspace = layout.root().join(layout.workspace_rel());
-        write_file(
-            &workspace,
-            "components/AppShell.jsx",
-            component.as_bytes(),
-            true,
-        )
+        // TODO(local-apps#questionnaire, Task 9): this used to render
+        // `components/AppShell.jsx` from a fixed per-`AppTemplateKind`
+        // scaffold (`render_app_shell_source` / `APP_SHELL_TEMPLATE` /
+        // `default_collection_fields`, deleted in Task 2 along with the core
+        // `AppTemplateKind` they switched on). Task 9 replaces this step with
+        // the real LLM source-writing call. Failing loudly here — instead of
+        // either a silent no-op (a `generating` app that never leaves that
+        // state) or a fabricated scaffold — makes the gap self-describing:
+        // any generation job now fails typed at this stage until Task 9
+        // lands.
+        Err(AppError::NotYetAvailable(
+            "local-app source generation is not yet wired to the LLM (Task 9 replaces the \
+             deleted template-driven AppShell scaffold with a real generation call)"
+                .into(),
+        ))
     }
 
     async fn source_policy(
@@ -1860,118 +585,6 @@ fn bounded_log(value: &str) -> String {
     value.chars().take(4_000).collect()
 }
 
-fn render_app_shell_source(
-    app_name: &str,
-    template: local_apps::AppTemplateKind,
-    design_fields: &BTreeMap<String, DesignValue>,
-) -> Result<String, AppError> {
-    let mut design = design_fields.clone();
-    design
-        .entry("collection_fields".into())
-        .or_insert_with(|| DesignValue::DataFieldList(default_collection_fields(template)));
-
-    let app_name = embed_json_value(
-        serde_json::to_value(app_name)
-            .map_err(|error| AppError::Io(format!("serialize app name: {error}")))?,
-        "app name",
-    )?;
-    let template = embed_json_value(
-        serde_json::to_value(template.as_str())
-            .map_err(|error| AppError::Io(format!("serialize template: {error}")))?,
-        "template",
-    )?;
-    let spec = embed_json_value(
-        serde_json::to_value(&design)
-            .map_err(|error| AppError::Io(format!("serialize design spec: {error}")))?,
-        "design spec",
-    )?;
-
-    // One pass over the fixed template: chained `replace`s rescan text inserted
-    // by an earlier call, so an app name containing `__SPEC__` is expanded into
-    // the design object and terminates the emitted JS string literal early.
-    let (head, rest) = APP_SHELL_TEMPLATE
-        .split_once("__APP_NAME__")
-        .expect("app shell template declares __APP_NAME__");
-    let (after_name, rest) = rest
-        .split_once("__TEMPLATE__")
-        .expect("app shell template declares __TEMPLATE__ after __APP_NAME__");
-    let (after_template, tail) = rest
-        .split_once("__SPEC__")
-        .expect("app shell template declares __SPEC__ after __TEMPLATE__");
-    Ok(format!(
-        "{head}{app_name}{after_name}{template}{after_template}{spec}{tail}"
-    ))
-}
-
-fn embed_json_value(value: serde_json::Value, label: &str) -> Result<String, AppError> {
-    serde_json::to_string(&value)
-        .map(|json| json.replace('<', "\\u003c").replace('>', "\\u003e"))
-        .map_err(|error| AppError::Io(format!("serialize {label}: {error}")))
-}
-
-fn default_collection_fields(template: local_apps::AppTemplateKind) -> Vec<DataFieldSchema> {
-    match template {
-        local_apps::AppTemplateKind::Dashboard => vec![
-            data_field_schema("label", "Label", DataFieldKind::Text, true, &[]),
-            data_field_schema("value", "Value", DataFieldKind::Decimal, true, &[]),
-            data_field_schema(
-                "recorded_at",
-                "Recorded at",
-                DataFieldKind::DateTime,
-                true,
-                &[],
-            ),
-        ],
-        local_apps::AppTemplateKind::CrudTracker => vec![
-            data_field_schema("title", "Title", DataFieldKind::Text, true, &[]),
-            data_field_schema("notes", "Notes", DataFieldKind::LongText, false, &[]),
-            data_field_schema(
-                "status",
-                "Status",
-                DataFieldKind::Enum,
-                true,
-                &["todo", "done"],
-            ),
-        ],
-        local_apps::AppTemplateKind::ContentShowcase => vec![
-            data_field_schema("title", "Title", DataFieldKind::Text, true, &[]),
-            data_field_schema("category", "Category", DataFieldKind::Text, false, &[]),
-            data_field_schema("body", "Body", DataFieldKind::LongText, true, &[]),
-            data_field_schema("image", "Image", DataFieldKind::ImageRef, false, &[]),
-        ],
-        local_apps::AppTemplateKind::FormUtility => vec![
-            data_field_schema("input", "Input", DataFieldKind::LongText, true, &[]),
-            data_field_schema("result", "Result", DataFieldKind::LongText, false, &[]),
-            data_field_schema(
-                "submitted_at",
-                "Submitted at",
-                DataFieldKind::DateTime,
-                true,
-                &[],
-            ),
-        ],
-    }
-}
-
-fn data_field_schema(
-    id: &str,
-    label: &str,
-    kind: DataFieldKind,
-    required: bool,
-    enum_options: &[&str],
-) -> DataFieldSchema {
-    DataFieldSchema {
-        id: id.into(),
-        label: label.into(),
-        kind,
-        required,
-        enum_options: enum_options
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1980,7 +593,7 @@ mod tests {
     use client_protocol::local_apps::{
         AppAuthorizationDecisionDto, AppCapabilityKindDto, AppEventDto,
     };
-    use local_apps::{load_permissions, AppTemplateKind};
+    use local_apps::load_permissions;
     use std::sync::Mutex as StdMutex;
     use tokio::time::{sleep, Duration};
     use traits::{
@@ -2189,16 +802,6 @@ mod tests {
     }
 
     #[test]
-    fn app_name_containing_a_template_marker_does_not_corrupt_the_shell() {
-        let source =
-            render_app_shell_source("__SPEC__", AppTemplateKind::Dashboard, &BTreeMap::new())
-                .unwrap();
-
-        assert!(source.contains("const APP_NAME = \"__SPEC__\";"));
-        assert!(source.contains("const DESIGN = {"));
-    }
-
-    #[test]
     fn bundled_policy_locks_dependency_files() {
         let policy = LOCKED_FILES
             .iter()
@@ -2208,84 +811,86 @@ mod tests {
         assert!(policy.contains_key(Path::new("package-lock.json")));
     }
 
-    #[test]
-    fn generated_dashboard_source_uses_runtime_and_data_bridge() {
-        let source = render_app_shell_source(
-            "Executive Metrics",
-            AppTemplateKind::Dashboard,
-            &BTreeMap::from([(
-                "collection_fields".into(),
-                DesignValue::DataFieldList(default_collection_fields(AppTemplateKind::Dashboard)),
-            )]),
-        )
-        .unwrap();
+    // The five tests that used to live here (`*_does_not_corrupt_the_shell`,
+    // `generated_{dashboard,crud,content,form}_source_uses_*`) exercised
+    // `render_app_shell_source` / `default_collection_fields` directly — the
+    // per-`AppTemplateKind` scaffold renderer deleted in Task 2 (fix-forward
+    // for the engine-mobile build) alongside the core `AppTemplateKind` it
+    // switched on. There is no smaller-scope replacement to assert against:
+    // Task 9 owns writing the real (LLM-driven) equivalent and its tests.
+    // `generate_source_reports_not_yet_available_until_task_9_wires_the_llm`
+    // below covers the NEW behavior at the level that still exists —
+    // `generate_source` failing typed — so app creation exercised by other
+    // tests fails loudly instead of silently wedging.
 
-        assert!(source.contains("requestRuntimeStatus"));
-        assert!(source.contains("queryCollection({"));
-        assert!(source.contains("sortKey: { kind: \"updated_at\" }"));
-        assert!(source.contains("record.recordId"));
-        assert!(source.contains("id=\"dashboard-refresh\""));
-        assert!(!source.contains("应用设计摘要"));
-    }
+    /// `generate_source` (the `AppGenerationExecutor` step that used to
+    /// render `components/AppShell.jsx` from the deleted template scaffold)
+    /// now fails typed `NotYetAvailable` for every non-restore job, since
+    /// Task 9 has not wired the real LLM source-writing call yet.
+    #[tokio::test]
+    async fn generate_source_reports_not_yet_available_until_task_9_wires_the_llm() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            AppService::load(
+                root.path(),
+                Arc::new(local_apps::test_support::FixedClock::new(1)),
+                Arc::new(local_apps::NoopContinuationSink),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("load service"),
+        );
+        let record = service
+            .create_app("Habits", "a habit tracker", None)
+            .await
+            .expect("create app");
+        let interaction = service
+            .open_designer(&record.id)
+            .await
+            .expect("open designer");
+        service
+            .confirm_design(&record.id, &interaction.interaction_id, 0)
+            .await
+            .expect("confirm design");
 
-    #[test]
-    fn generated_crud_source_uses_query_upsert_and_delete_controls() {
-        let source = render_app_shell_source(
-            "Issue Tracker",
-            AppTemplateKind::CrudTracker,
-            &BTreeMap::from([(
-                "collection_fields".into(),
-                DesignValue::DataFieldList(default_collection_fields(AppTemplateKind::CrudTracker)),
-            )]),
-        )
-        .unwrap();
+        let host =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), MockSink::arc(), None, false, None);
+        let executor = MobileAppGenerationExecutor::new(None, host);
+        executor
+            .attach_service(service.clone())
+            .map_err(|_| "service already attached")
+            .unwrap();
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).unwrap();
+        let key = local_apps::GenerationJobKey {
+            app_id: record.id.clone(),
+            revision: 0,
+            continuation_seq: 1,
+        };
+        let request = GenerationRequest {
+            key: key.clone(),
+            kind: GenerationRequestKind::Initial,
+            prompt: None,
+        };
+        let error = executor
+            .generate_source(&request, &layout)
+            .await
+            .expect_err("generate_source must fail until Task 9 wires the LLM");
+        assert_eq!(error.code(), local_apps::AppErrorCode::NotYetAvailable);
+        assert!(
+            format!("{error}").contains("Task 9"),
+            "the failure must name the task that fills the gap: {error}"
+        );
 
-        assert!(source.contains("id=\"crud-search-input\""));
-        assert!(source.contains("id=\"crud-save-record\""));
-        assert!(source.contains("kind: \"upsert\""));
-        assert!(source.contains("kind: \"delete\""));
-        assert!(source.contains("recordId: recordId"));
-        assert!(source.contains("expectedRevision"));
-    }
-
-    #[test]
-    fn generated_content_source_uses_search_and_presentation_filters() {
-        let source = render_app_shell_source(
-            "Knowledge Base",
-            AppTemplateKind::ContentShowcase,
-            &BTreeMap::from([(
-                "collection_fields".into(),
-                DesignValue::DataFieldList(default_collection_fields(
-                    AppTemplateKind::ContentShowcase,
-                )),
-            )]),
-        )
-        .unwrap();
-
-        assert!(source.contains("id=\"content-search-input\""));
-        assert!(source.contains("CONTENT_PRESENTATION === \"grid\""));
-        assert!(source.contains("filterContentRecords"));
-        assert!(source.contains("record.recordId"));
-    }
-
-    #[test]
-    fn generated_form_source_saves_records_and_history_controls() {
-        let source = render_app_shell_source(
-            "Lead Intake",
-            AppTemplateKind::FormUtility,
-            &BTreeMap::from([(
-                "collection_fields".into(),
-                DesignValue::DataFieldList(default_collection_fields(AppTemplateKind::FormUtility)),
-            )]),
-        )
-        .unwrap();
-
-        assert!(source.contains("id=\"form-submit\""));
-        assert!(source.contains("latest-submission"));
-        assert!(source.contains("FORM_HISTORY_ENABLED"));
-        assert!(source.contains("mutateCollection({"));
-        assert!(source.contains("id=\"form-history\""));
-        assert!(source.contains("recordId: recordId"));
+        // A restore job is NOT source generation — it must stay a no-op.
+        let restore_request = GenerationRequest {
+            key,
+            kind: GenerationRequestKind::Restore,
+            prompt: None,
+        };
+        executor
+            .generate_source(&restore_request, &layout)
+            .await
+            .expect("a restore job must not hit the not-yet-available gate");
     }
 
     #[tokio::test]
@@ -2452,7 +1057,6 @@ mod tests {
             app_id: "abcd1234".into(),
             revision: 1,
             name: "Habits".into(),
-            template: AppTemplateKind::CrudTracker,
             collections: vec![local_apps::DataCollectionSchema {
                 id: "items".into(),
                 name: "Items".into(),

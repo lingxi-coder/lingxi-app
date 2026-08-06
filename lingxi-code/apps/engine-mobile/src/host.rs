@@ -47,10 +47,7 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::local_apps::{
-    AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppEventDto, AppTemplateKindDto,
-    DesignValueDto,
-};
+use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppEventDto, AppTemplateKindDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -2723,68 +2720,6 @@ impl MobileEngineHandle {
             .enqueue_engine(ClientEvent::AppEvent { event });
     }
 
-    fn suggested_template_kind(template: local_apps::AppTemplateKind) -> AppTemplateKindDto {
-        match template {
-            local_apps::AppTemplateKind::Dashboard => AppTemplateKindDto::Dashboard,
-            local_apps::AppTemplateKind::CrudTracker => AppTemplateKindDto::CrudTracker,
-            local_apps::AppTemplateKind::ContentShowcase => AppTemplateKindDto::ContentShowcase,
-            local_apps::AppTemplateKind::FormUtility => AppTemplateKindDto::FormUtility,
-        }
-    }
-
-    fn build_design_suggestion(
-        record: &local_apps::AppRecord,
-        draft: &local_apps::AppDesignDraft,
-        prompt: Option<&str>,
-    ) -> AppDesignPatchDto {
-        let mut ops = Vec::new();
-        let template = crate::local_apps_bridge::builtin_templates()
-            .into_iter()
-            .find(|template| template.kind == Self::suggested_template_kind(record.template));
-
-        if let Some(template) = template {
-            for field in template
-                .steps
-                .into_iter()
-                .flat_map(|step| step.fields.into_iter())
-            {
-                if draft.fields.contains_key(&field.id) {
-                    continue;
-                }
-                let value = match field.id.as_str() {
-                    "name" => Some(DesignValueDto::ShortText {
-                        value: record.name.clone(),
-                    }),
-                    "purpose" => prompt
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| DesignValueDto::LongText {
-                            value: value.trim().to_string(),
-                        }),
-                    "final_summary" => {
-                        let summary = prompt
-                            .filter(|value| !value.trim().is_empty())
-                            .map(str::trim)
-                            .map(ToOwned::to_owned)
-                            .unwrap_or_else(|| format!("{} for local use", record.name));
-                        Some(DesignValueDto::LongText { value: summary })
-                    }
-                    _ => field.default_value,
-                };
-                if let Some(value) = value {
-                    ops.push(AppDesignPatchOpDto::Set {
-                        field_id: field.id,
-                        value,
-                    });
-                }
-            }
-        }
-
-        AppDesignPatchDto {
-            ops,
-            note: Some("Suggested defaults based on the selected template.".into()),
-        }
-    }
-
     /// Post-mutation `AppsChanged` snapshot: every successful mutation
     /// announces the full record set (records carry `workflow_state` /
     /// `updated_at_ms`, so any mutation changes the set). Delegated to
@@ -2863,19 +2798,12 @@ impl MobileEngineHandle {
     async fn handle_create_app(
         &self,
         name: &str,
-        template: AppTemplateKindDto,
+        _template: AppTemplateKindDto,
         origin: AppCreateOriginDto,
         conversation_id: Option<String>,
     ) {
         let Some(service) = self.local_apps_or_report(None).await else {
             return;
-        };
-        let template = match crate::local_apps_bridge::raise_template(template) {
-            Ok(template) => template,
-            Err(error) => {
-                self.emit_app_failure(None, &error).await;
-                return;
-            }
         };
         // Raising the origin is fallible like every other inbound DTO raise
         // (W1): an unknown `#[non_exhaustive]` future origin must fail typed
@@ -2892,9 +2820,17 @@ impl MobileEngineHandle {
         // never binds one. Derived from the RAISED origin (an exhaustive
         // match — see `AppCreateOrigin::conversation_binding`).
         let conversation_id = origin.conversation_binding(conversation_id);
+        // TODO(local-apps#questionnaire, Task 11): `ClientCommand::CreateApp`
+        // still carries the template-era `template` field (now ignored — the
+        // core `AppRecord`/`AppService::create_app` no longer have a template
+        // concept, Task 2) and has no `brief` field yet. Task 11 replaces this
+        // wire shape with the conversational-design one. Until then `name`
+        // doubles as the brief: a real, user-supplied string (not a
+        // fabricated placeholder), so `create` keeps working for the ~14
+        // existing tests that exercise `ClientCommand::CreateApp` end to end.
         // Success needs no extra emit: `create_app` announces the new record
         // set via its own `AppsChanged` domain event.
-        if let Err(error) = service.create_app(name, template, conversation_id).await {
+        if let Err(error) = service.create_app(name, name, conversation_id).await {
             self.emit_app_failure(None, &error).await;
         }
     }
@@ -2989,56 +2925,31 @@ impl MobileEngineHandle {
     async fn handle_request_app_design_suggestion(
         &self,
         app_id: String,
-        expected_revision: u64,
-        prompt: Option<String>,
+        _expected_revision: u64,
+        _prompt: Option<String>,
     ) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let record = match service.record(&app_id).await {
-            Ok(record) => record,
-            Err(error) => {
-                self.emit_app_failure(Some(app_id), &error).await;
-                return;
-            }
-        };
-        let draft = match service.draft(&app_id).await {
-            Ok(draft) => draft,
-            Err(error) => {
-                self.emit_app_failure(Some(app_id), &error).await;
-                return;
-            }
-        };
-        if draft.revision != expected_revision {
-            self.emit_app_failure(
-                Some(app_id),
-                &AppError::RevisionConflict {
-                    expected: expected_revision,
-                    actual: draft.revision,
-                },
-            )
-            .await;
+        // TODO(local-apps#questionnaire, Task 8): this used to build a
+        // suggested patch (`build_design_suggestion`, deleted here) by
+        // looking up the app's `AppTemplateKind` in the static built-in
+        // template catalog — the core no longer has a per-app template at
+        // all (Task 2), so that lookup has no input anymore. Task 8 replaces
+        // it with a real LLM-driven suggestion call. No existing test
+        // exercises this command (`RequestAppDesignSuggestion` is dispatched
+        // only from here; the design-suggestion tests in this file drive
+        // `AppService::store_suggestion` directly, bypassing this handler
+        // entirely), so failing loudly here is a pure gap-close, not a
+        // behavior regression.
+        if self.local_apps_or_report(Some(&app_id)).await.is_none() {
             return;
         }
-        let patch_dto = Self::build_design_suggestion(&record, &draft, prompt.as_deref());
-        let patch = match crate::local_apps_bridge::raise_patch(patch_dto) {
-            Ok(patch) => patch,
-            Err(error) => {
-                self.emit_app_failure(Some(app_id), &error).await;
-                return;
-            }
-        };
-        let emissions = self.app_emissions.clone();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.store_suggestion(&app_id, patch).await {
-                Ok(_suggestion) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
+        self.emit_app_failure(
+            Some(app_id),
+            &AppError::NotYetAvailable(
+                "agent design suggestions are not yet wired to the LLM (Task 8 replaces the \
+                 template-driven suggester)"
+                    .into(),
+            ),
+        )
         .await;
     }
 
@@ -8951,7 +8862,7 @@ mod tests {
                 .await
                 .expect("seed service");
                 let record = service
-                    .create_app("Queued", local_apps::AppTemplateKind::Dashboard, None)
+                    .create_app("Queued", "a test app", None)
                     .await
                     .expect("create app");
                 let gate = service

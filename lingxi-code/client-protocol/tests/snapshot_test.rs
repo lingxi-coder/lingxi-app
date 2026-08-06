@@ -1341,7 +1341,6 @@ fn canonical_app_record() -> AppRecordDto {
     AppRecordDto {
         id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
-        template: AppTemplateKindDto::Dashboard,
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
         workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1376,7 +1375,6 @@ fn canonical_app_manifest() -> AppManifestDto {
         schema_version: 1,
         app_id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
-        template: AppTemplateKindDto::Dashboard,
         design_revision: 4,
         collections: vec![AppDataCollectionDto {
             id: "records".to_string(),

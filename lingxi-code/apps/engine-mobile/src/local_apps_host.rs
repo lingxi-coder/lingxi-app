@@ -2501,9 +2501,7 @@ mod tests {
     use client_adapter::{ClientEventSink, MockSink};
     use futures_util::stream;
     use local_apps::test_support::FixedClock;
-    use local_apps::{
-        storage, AppState, AppTemplateKind, NoopAppEventObserver, NoopContinuationSink,
-    };
+    use local_apps::{storage, AppState, NoopAppEventObserver, NoopContinuationSink};
     use serde_json::json;
     use std::fs;
     use std::future::Future;
@@ -2857,7 +2855,7 @@ mod tests {
 
     async fn create_app_fixture(root: &TempDir, service: &Arc<AppService>, name: &str) -> String {
         let record = service
-            .create_app(name, AppTemplateKind::Dashboard, None)
+            .create_app(name, "a test app", None)
             .await
             .expect("create app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
@@ -2899,7 +2897,7 @@ mod tests {
         let app = AppState::create(
             app_id.to_string(),
             name.to_string(),
-            AppTemplateKind::Dashboard,
+            "a test app".to_string(),
             None,
             1,
         );

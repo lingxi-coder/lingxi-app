@@ -989,6 +989,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppErrorCodeDto::StorageCorrupt", "storage_corrupt");
     put("AppErrorCodeDto::InvalidRequest", "invalid_request");
     put("AppErrorCodeDto::Io", "io");
+    put("AppErrorCodeDto::LlmUnavailable", "llm_unavailable");
+    put("AppErrorCodeDto::LlmOutputRejected", "llm_output_rejected");
 
     put("AppCheckpointKindDto::ScaffoldCreated", "scaffold_created");
     put(
@@ -1060,7 +1062,6 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
-    put("AppRecordDto.template", "AppTemplateKindDto");
     put("AppRecordDto.created_at_ms", "u64");
     put("AppRecordDto.updated_at_ms", "u64");
     put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
@@ -1163,7 +1164,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.schema_version", "u32");
     put("AppManifestDto.app_id", "String");
     put("AppManifestDto.name", "String");
-    put("AppManifestDto.template", "AppTemplateKindDto");
     put("AppManifestDto.design_revision", "u64");
     put("AppManifestDto.collections", "Vec<AppDataCollectionDto>");
     put("AppManifestDto.allowed_domains", "Vec<String>");
@@ -1706,7 +1706,6 @@ fn contract_index_covers_every_dto() {
         AppRecordDto {
             id: String::new(),
             name: String::new(),
-            template: AppTemplateKindDto::Dashboard,
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1805,7 +1804,6 @@ fn contract_index_covers_every_dto() {
         schema_version: 0,
         app_id: String::new(),
         name: String::new(),
-        template: AppTemplateKindDto::ContentShowcase,
         design_revision: 0,
         collections: Vec::new(),
         allowed_domains: Vec::new(),
@@ -1826,7 +1824,6 @@ fn contract_index_covers_every_dto() {
         app: AppRecordDto {
             id: String::new(),
             name: String::new(),
-            template: AppTemplateKindDto::FormUtility,
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,

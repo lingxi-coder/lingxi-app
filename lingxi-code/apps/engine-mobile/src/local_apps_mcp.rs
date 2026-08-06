@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use client_protocol::local_apps::builtin_app_templates;
-use local_apps::{AppService, AppTemplateKind};
+use local_apps::AppService;
 use protocol::McpConnectionId;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -347,14 +347,21 @@ impl LocalAppsMcpTransport {
             }
             "create" => {
                 let name = Self::required_string(&input, "name")?;
-                let template: AppTemplateKind =
-                    serde_json::from_value(input.get("template").cloned().unwrap_or(Value::Null))
-                        .map_err(|_| McpError::Internal("unsupported app template".into()))?;
+                // TODO(local-apps#questionnaire, Task 10): the tool schema
+                // below still advertises/requires a `template` enum for
+                // backward input compatibility, but the core no longer has a
+                // template concept — `AppRecord`/`AppService::create_app` now
+                // take a free-text `brief` instead. Task 10 rewrites this
+                // schema (and the request shape) around the conversational
+                // design flow. Until then `template` (if sent) is accepted
+                // and ignored, and `name` doubles as the brief — a real,
+                // user-supplied string, not a fabricated one — so `create`
+                // keeps working for existing callers/tests.
                 let conversation_id = input
                     .get("conversation_id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
-                let record = match service.create_app(name, template, conversation_id).await {
+                let record = match service.create_app(name, name, conversation_id).await {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };

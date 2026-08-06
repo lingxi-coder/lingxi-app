@@ -37,9 +37,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which scaffold template an app is designed from — mirrors the core
-/// `AppTemplateKind`. A bare wire STRING (`"dashboard"`, …; see the module
-/// doc). `#[non_exhaustive]` so a future template is additive.
+/// Which built-in [`AppTemplateDto`] a designer suggestion is keyed off.
+/// NOTE (local-apps#questionnaire, Task 2): the core `local_apps::AppRecord`
+/// no longer carries a template — apps are now designed from a free-text
+/// `brief` — so this no longer "mirrors" a core type. It survives only as the
+/// tag on the static [`builtin_app_templates`] catalog `handle_list_app_templates`
+/// still serves; Task 8/9 replace that catalog-driven suggestion path with a
+/// real LLM call, at which point this type is expected to go away entirely.
+/// A bare wire STRING (`"dashboard"`, …; see the module doc).
+/// `#[non_exhaustive]` so a future template is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
@@ -145,6 +151,10 @@ pub enum AppErrorCodeDto {
     InvalidRequest,
     /// Underlying I/O failure.
     Io,
+    /// The model is unreachable: offline, unauthenticated, or timed out.
+    LlmUnavailable,
+    /// The model's output failed validation (bad shape or over a limit).
+    LlmOutputRejected,
 }
 
 /// Why a checkpoint was recorded — mirrors the core `AppCheckpointKind` (git
@@ -295,8 +305,6 @@ pub struct AppRecordDto {
     pub id: String,
     /// User-facing display name.
     pub name: String,
-    /// Template the app is designed from.
-    pub template: AppTemplateKindDto,
     /// Creation time, epoch milliseconds.
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
@@ -508,7 +516,6 @@ pub struct AppManifestDto {
     pub schema_version: u32,
     pub app_id: String,
     pub name: String,
-    pub template: AppTemplateKindDto,
     pub design_revision: u64,
     pub collections: Vec<AppDataCollectionDto>,
     pub allowed_domains: Vec<String>,

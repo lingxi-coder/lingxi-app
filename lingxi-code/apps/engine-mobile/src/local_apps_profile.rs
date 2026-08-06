@@ -221,7 +221,7 @@ mod tests {
                 .expect("profile");
             let record = profile
                 .service
-                .create_app("Survivor", local_apps::AppTemplateKind::Dashboard, None)
+                .create_app("Survivor", "a test app", None)
                 .await
                 .expect("create app");
             (profile, record.id)

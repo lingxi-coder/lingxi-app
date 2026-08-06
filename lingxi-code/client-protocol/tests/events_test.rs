@@ -15,7 +15,7 @@ use client_protocol::local_apps::{
     AppCheckpointDto, AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto,
     AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto,
     AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
+    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
     AppWorkflowStateDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -274,14 +274,13 @@ fn usage_update_round_trips() {
 }
 
 /// `AppsChanged` — carries the full local-app record set (bare-string
-/// template/state enums; an absent `conversation_id` skipped).
+/// state enum; an absent `conversation_id` skipped).
 #[test]
 fn apps_changed_round_trips() {
     let ev = ClientEvent::AppsChanged {
         apps: vec![AppRecordDto {
             id: "habits-1a2b".to_string(),
             name: "Habits".to_string(),
-            template: AppTemplateKindDto::Dashboard,
             created_at_ms: 1_750_000_000_000,
             updated_at_ms: 1_750_000_000_001,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -292,7 +291,6 @@ fn apps_changed_round_trips() {
     let json = serde_json::to_value(&ev).expect("serialize AppsChanged");
     assert_eq!(json["type"], "apps_changed");
     assert_eq!(json["apps"][0]["id"], "habits-1a2b");
-    assert_eq!(json["apps"][0]["template"], "dashboard");
     assert_eq!(json["apps"][0]["workflow_state"], "collecting_spec");
     assert!(
         json["apps"][0].get("conversation_id").is_none(),

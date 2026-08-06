@@ -4,7 +4,6 @@
     {
       "id": "habits-1a2b",
       "name": "Habits",
-      "template": "dashboard",
       "created_at_ms": 1750000000000,
       "updated_at_ms": 1750000000001,
       "workflow_state": "collecting_spec",

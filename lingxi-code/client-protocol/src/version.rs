@@ -9,4 +9,10 @@
 
 /// The client-protocol contract version, pinned for the M10 foundation
 /// (decision §0.10). A change here is a deliberate, reviewed bump.
-pub const CLIENT_PROTOCOL_VERSION: &str = "1.2.0";
+///
+/// Bumped to 2.0.0 (local-apps#questionnaire, Task 2 fix-forward): removing
+/// `AppRecordDto.template` / `AppManifestDto.template` (the core
+/// `local_apps::AppRecord`/`AppManifest` no longer carry a template — apps
+/// are now designed from a free-text `brief`) is a BREAKING structural
+/// change per the F1-09 guard.
+pub const CLIENT_PROTOCOL_VERSION: &str = "2.0.0";

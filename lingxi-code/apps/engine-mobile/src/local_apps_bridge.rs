@@ -34,12 +34,12 @@ use client_protocol::local_apps::{
     AppDataFieldDto, AppDataFieldTypeDto, AppDesignFieldValueDto, AppDesignPatchDto,
     AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto, AppManifestDto, AppRecordDto,
     AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppTemplateDto, AppTemplateKindDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    AppTemplateDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use local_apps::{
     load_manifest, AppCheckpoint, AppCheckpointKind, AppDesignDraft, AppDesignPatch,
     AppDesignPatchOp, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest,
-    AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppTemplateKind, AppWorkflowState,
+    AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppWorkflowState,
     DataCollectionSchema, DataFieldKind, DataFieldSchema, DensityLevel, DesignValue,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -277,7 +277,6 @@ pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
     AppRecordDto {
         id: record.id.clone(),
         name: record.name.clone(),
-        template: lower_template(record.template),
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
         workflow_state: lower_workflow_state(record.workflow_state),
@@ -298,15 +297,8 @@ pub(crate) fn lower_error_code(code: AppErrorCode) -> AppErrorCodeDto {
         AppErrorCode::StorageCorrupt => AppErrorCodeDto::StorageCorrupt,
         AppErrorCode::InvalidRequest => AppErrorCodeDto::InvalidRequest,
         AppErrorCode::Io => AppErrorCodeDto::Io,
-    }
-}
-
-fn lower_template(template: AppTemplateKind) -> AppTemplateKindDto {
-    match template {
-        AppTemplateKind::Dashboard => AppTemplateKindDto::Dashboard,
-        AppTemplateKind::CrudTracker => AppTemplateKindDto::CrudTracker,
-        AppTemplateKind::ContentShowcase => AppTemplateKindDto::ContentShowcase,
-        AppTemplateKind::FormUtility => AppTemplateKindDto::FormUtility,
+        AppErrorCode::LlmUnavailable => AppErrorCodeDto::LlmUnavailable,
+        AppErrorCode::LlmOutputRejected => AppErrorCodeDto::LlmOutputRejected,
     }
 }
 
@@ -458,7 +450,6 @@ pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
         schema_version: manifest.schema_version,
         app_id: manifest.app_id,
         name: manifest.name,
-        template: lower_template(manifest.template),
         design_revision: manifest.revision,
         collections: manifest
             .collections
@@ -538,26 +529,6 @@ pub(crate) fn lower_patch(patch: AppDesignPatch) -> AppDesignPatchDto {
             .collect(),
         note: patch.note,
     }
-}
-
-/// Raise an inbound template DTO to the core kind.
-///
-/// # Errors
-///
-/// `invalid_request` for a `#[non_exhaustive]` template this engine version
-/// does not know.
-pub(crate) fn raise_template(template: AppTemplateKindDto) -> Result<AppTemplateKind, AppError> {
-    Ok(match template {
-        AppTemplateKindDto::Dashboard => AppTemplateKind::Dashboard,
-        AppTemplateKindDto::CrudTracker => AppTemplateKind::CrudTracker,
-        AppTemplateKindDto::ContentShowcase => AppTemplateKind::ContentShowcase,
-        AppTemplateKindDto::FormUtility => AppTemplateKind::FormUtility,
-        other => {
-            return Err(AppError::InvalidRequest(format!(
-                "unsupported app template: {other:?}"
-            )))
-        }
-    })
 }
 
 /// Engine-side raised form of [`AppCreateOriginDto`]. The core deliberately
@@ -748,10 +719,6 @@ mod tests {
         // serde output guards against either side drifting.
         for (core, dto) in [
             (
-                serde_json::to_string(&AppTemplateKind::CrudTracker).unwrap(),
-                serde_json::to_string(&lower_template(AppTemplateKind::CrudTracker)).unwrap(),
-            ),
-            (
                 serde_json::to_string(&AppWorkflowState::AwaitingPreviewConfirmation).unwrap(),
                 serde_json::to_string(&lower_workflow_state(
                     AppWorkflowState::AwaitingPreviewConfirmation,
@@ -788,6 +755,8 @@ mod tests {
             AppErrorCode::StorageCorrupt,
             AppErrorCode::InvalidRequest,
             AppErrorCode::Io,
+            AppErrorCode::LlmUnavailable,
+            AppErrorCode::LlmOutputRejected,
         ] {
             assert_eq!(
                 serde_json::to_string(&code).unwrap(),
@@ -853,7 +822,7 @@ mod tests {
         let record = AppRecord {
             id: "app00001".into(),
             name: "Habits".into(),
-            template: AppTemplateKind::CrudTracker,
+            brief: "a habit tracker".into(),
             created_at_ms: 11,
             updated_at_ms: 22,
             workflow_state: AppWorkflowState::Ready,
@@ -863,7 +832,6 @@ mod tests {
         let record_dto = AppRecordDto {
             id: "app00001".into(),
             name: "Habits".into(),
-            template: AppTemplateKindDto::CrudTracker,
             created_at_ms: 11,
             updated_at_ms: 22,
             workflow_state: AppWorkflowStateDto::Ready,

@@ -32,9 +32,12 @@ fn version_is_semver() {
     }
 }
 
-/// The local-app bridge result expansion pins the contract at `1.2.0`. A change here is a
-/// deliberate, reviewed bump — this test makes an accidental edit visible.
+/// Task 2's engine-mobile fix-forward pins the contract at `2.0.0` (a MAJOR
+/// bump: `AppRecordDto.template` / `AppManifestDto.template` were removed —
+/// see `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
+/// change here is a deliberate, reviewed bump — this test makes an accidental
+/// edit visible.
 #[test]
-fn version_is_one_two_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "1.2.0");
+fn version_is_two_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "2.0.0");
 }

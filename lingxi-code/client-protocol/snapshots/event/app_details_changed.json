@@ -6,7 +6,6 @@
       "app": {
         "id": "habits-1a2b",
         "name": "Habits",
-        "template": "dashboard",
         "created_at_ms": 1750000000000,
         "updated_at_ms": 1750000000001,
         "workflow_state": "collecting_spec",
@@ -19,7 +18,6 @@
         "schema_version": 1,
         "app_id": "habits-1a2b",
         "name": "Habits",
-        "template": "dashboard",
         "design_revision": 4,
         "collections": [
           {

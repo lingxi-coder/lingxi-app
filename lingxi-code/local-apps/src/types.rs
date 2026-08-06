@@ -13,42 +13,6 @@ use std::fmt;
 /// Schema version stamped on every persisted local-apps file.
 pub const APPS_SCHEMA_VERSION: u32 = 1;
 
-/// Which scaffold template an app is designed from.
-///
-/// Per-template design-schema content (and validation against it) is phase 3;
-/// in phase 1 the template is an opaque tag on the record and draft.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AppTemplateKind {
-    /// Read-mostly metric/dashboard app.
-    Dashboard,
-    /// Create/read/update/delete tracker.
-    CrudTracker,
-    /// Content/gallery showcase.
-    ContentShowcase,
-    /// Single-purpose form utility.
-    FormUtility,
-}
-
-impl AppTemplateKind {
-    /// Canonical `snake_case` name (the persisted/wire value).
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Dashboard => "dashboard",
-            Self::CrudTracker => "crud_tracker",
-            Self::ContentShowcase => "content_showcase",
-            Self::FormUtility => "form_utility",
-        }
-    }
-}
-
-impl fmt::Display for AppTemplateKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// Designer/generation workflow state of an app (spec §B state machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -145,8 +109,13 @@ pub struct AppRecord {
     pub id: String,
     /// User-facing display name.
     pub name: String,
-    /// Template the app is designed from.
-    pub template: AppTemplateKind,
+    /// One-line description the user gave at creation time. All three LLM
+    /// stages (authoring the questionnaire, planning, writing source) read
+    /// it. Stored ONCE — the list page displays it, a failed questionnaire
+    /// authoring retries from it, and `generate_source` already calls
+    /// `service.record()` to reach it. Storing a second copy would
+    /// inevitably drift.
+    pub brief: String,
     /// Creation time, epoch milliseconds.
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
@@ -258,13 +227,23 @@ pub struct AppDesignSuggestion {
 pub struct AppDesignDraft {
     /// Persisted schema version ([`APPS_SCHEMA_VERSION`]).
     pub schema_version: u32,
-    /// Template the draft belongs to.
-    pub template: AppTemplateKind,
     /// Monotonic edit counter; bumped by every applied field change.
     pub revision: u64,
-    /// Schema-agnostic field map (validated against the template in phase 3).
+    /// The questionnaire the LLM authored. Immutable once authoring
+    /// succeeds.
+    #[serde(default)]
+    pub questionnaire: Vec<crate::questionnaire::AppDesignStep>,
+    /// Schema-agnostic answer map, keyed by [`crate::questionnaire::AppDesignField::id`].
     #[serde(default)]
     pub fields: BTreeMap<String, DesignValue>,
+    /// The "will create" summary shown on the confirmation page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::questionnaire::AppPlan>,
+    /// Which revision `plan` was computed against. Any further answer edit
+    /// invalidates it — the same staleness guard
+    /// [`AppDesignSuggestion::based_on_revision`] uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_for_revision: Option<u64>,
     /// At most one agent suggestion awaiting application.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_suggestion: Option<AppDesignSuggestion>,
@@ -518,10 +497,6 @@ mod tests {
     #[test]
     fn enums_serialize_to_spec_snake_case_strings() {
         assert_eq!(
-            serde_json::to_string(&AppTemplateKind::CrudTracker).unwrap(),
-            "\"crud_tracker\""
-        );
-        assert_eq!(
             serde_json::to_string(&AppWorkflowState::AwaitingSpecConfirmation).unwrap(),
             "\"awaiting_spec_confirmation\""
         );
@@ -596,7 +571,7 @@ mod tests {
         let record = AppRecord {
             id: "abc123".into(),
             name: "Habits".into(),
-            template: AppTemplateKind::Dashboard,
+            brief: "Track daily habits".into(),
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
             workflow_state: AppWorkflowState::CollectingSpec,
@@ -607,6 +582,7 @@ mod tests {
         assert!(json.contains("\"createdAtMs\":1700000000000"));
         assert!(json.contains("\"workflowState\":\"collecting_spec\""));
         assert!(json.contains("\"workspaceRel\":\"apps/abc123/workspace\""));
+        assert!(json.contains("\"brief\":\"Track daily habits\""));
         assert!(!json.contains("conversationId"));
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
@@ -618,9 +594,11 @@ mod tests {
         fields.insert("title".to_string(), DesignValue::ShortText("T".into()));
         let draft = AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
-            template: AppTemplateKind::FormUtility,
             revision: 4,
+            questionnaire: Vec::new(),
             fields,
+            plan: None,
+            plan_for_revision: None,
             pending_suggestion: Some(AppDesignSuggestion {
                 suggestion_id: "sugg-1".into(),
                 patch: AppDesignPatch {
@@ -635,6 +613,8 @@ mod tests {
         assert!(json.contains("\"schemaVersion\":1"));
         assert!(json.contains("\"basedOnRevision\":4"));
         assert!(!json.contains("confirmedRevision"));
+        assert!(!json.contains("\"plan\""));
+        assert!(!json.contains("planForRevision"));
         let back: AppDesignDraft = serde_json::from_str(&json).unwrap();
         assert_eq!(back, draft);
 

@@ -11,8 +11,7 @@ use crate::storage;
 use crate::types::{
     AppContinuation, AppContinuationKind, AppDesignDraft, AppDesignPatch, AppDesignPatchOp,
     AppDesignSuggestion, AppInteractionKind, AppInteractionRequest, AppInteractions, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState,
-    APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, APPS_SCHEMA_VERSION,
 };
 use std::collections::BTreeMap;
 
@@ -129,7 +128,7 @@ impl AppState {
     pub fn create(
         id: String,
         name: String,
-        template: AppTemplateKind,
+        brief: String,
         conversation_id: Option<String>,
         now_ms: u64,
     ) -> Self {
@@ -138,7 +137,7 @@ impl AppState {
             record: AppRecord {
                 id: id.clone(),
                 name,
-                template,
+                brief,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 workflow_state: AppWorkflowState::CollectingSpec,
@@ -147,9 +146,11 @@ impl AppState {
             },
             draft: AppDesignDraft {
                 schema_version: APPS_SCHEMA_VERSION,
-                template,
                 revision: 0,
+                questionnaire: Vec::new(),
                 fields: BTreeMap::new(),
+                plan: None,
+                plan_for_revision: None,
                 pending_suggestion: None,
                 confirmed_revision: None,
             },
@@ -645,7 +646,7 @@ mod tests {
         AppState::create(
             "abc123".into(),
             "Test".into(),
-            AppTemplateKind::Dashboard,
+            "a test app".into(),
             None,
             10,
         )

@@ -79,6 +79,6 @@ pub use types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppContinuationKind, AppDesignDraft,
     AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress,
     AppInteractionKind, AppInteractionRequest, AppInteractions, AppPreview, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState,
-    DensityLevel, DesignValue, APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, DensityLevel,
+    DesignValue, APPS_SCHEMA_VERSION,
 };

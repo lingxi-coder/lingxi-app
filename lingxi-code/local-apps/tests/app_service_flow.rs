@@ -5,7 +5,7 @@
 use local_apps::test_support::FixedClock;
 use local_apps::{
     AppDesignPatch, AppDesignPatchOp, AppErrorCode, AppEvent, AppEventObserver, AppRuntimeState,
-    AppService, AppTemplateKind, AppWorkflowState, ContinuationSink, DesignValue,
+    AppService, AppWorkflowState, ContinuationSink, DesignValue,
     RecordingAppEventObserver, RecordingContinuationSink,
 };
 use std::path::Path;
@@ -72,7 +72,7 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
         .service
         .create_app(
             "Habit Tracker",
-            AppTemplateKind::CrudTracker,
+            "a test app",
             Some("conv-42".into()),
         )
         .await

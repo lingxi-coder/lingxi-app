@@ -3,13 +3,6 @@
   "appId": "bbbb2222",
   "revision": 0,
   "name": "Fixture Minimal",
-  "template": "dashboard",
-  "collections": [
-    {
-      "id": "records",
-      "name": "Records",
-      "fields": []
-    }
-  ],
+  "collections": [],
   "allowedDomains": []
 }

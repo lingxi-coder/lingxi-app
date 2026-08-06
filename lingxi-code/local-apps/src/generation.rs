@@ -958,7 +958,7 @@ mod tests {
     use crate::events::NoopAppEventObserver;
     use crate::storage;
     use crate::test_support::FixedClock;
-    use crate::types::{AppDesignPatch, AppDesignPatchOp, AppTemplateKind, DesignValue};
+    use crate::types::{AppDesignPatch, AppDesignPatchOp, DesignValue};
     use sha2::Digest;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1083,7 +1083,7 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", AppTemplateKind::CrudTracker, None)
+            .create_app("Tasks", "a test app", None)
             .await
             .unwrap();
         service
@@ -1144,7 +1144,7 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", AppTemplateKind::CrudTracker, None)
+            .create_app("Tasks", "a test app", None)
             .await
             .unwrap();
         let gate = service.open_designer(&app.id).await.unwrap();
@@ -1212,7 +1212,7 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", AppTemplateKind::CrudTracker, None)
+            .create_app("Tasks", "a test app", None)
             .await
             .unwrap();
         let gate = service.open_designer(&app.id).await.unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
             .unwrap(),
         );
         let app = service
-            .create_app("Interrupted", AppTemplateKind::Dashboard, None)
+            .create_app("Interrupted", "a test app", None)
             .await
             .unwrap();
         service

@@ -310,6 +310,21 @@ fn ensure_schema_version(rel: &Path, found: u32) -> Result<(), AppError> {
 // `engine-mobile` relies on this check to make its own `Deferred` arm
 // unreachable.
 //
+// EXHAUSTIVENESS (Task 2): every location `AppDesignDraft` can carry a
+// `DesignValue` is covered — `fields` (answers), `pending_suggestion`'s patch
+// ops, AND `questionnaire[*].fields[*].default_value` (a `Deferred` default
+// added by the LLM authoring step, distinct from a `Deferred` ANSWER). The
+// third is checked here even though `validate_questionnaire` already refuses
+// a `default_value` whose variant doesn't match its `field_type` (and
+// `AppDesignFieldType::accepts` has no arm for `Deferred`, so a validated
+// questionnaire can never carry one): nothing on this LOAD path calls
+// `validate_questionnaire` yet, so a hand-edited or newer-build document could
+// still smuggle one past `serde_json::from_str` alone, straight into the same
+// `lower_design_value` `unreachable!()` this function exists to keep
+// unreachable. When a future task wires `validate_questionnaire` into the
+// load path itself, this arm becomes redundant with it (not wrong) — leave it
+// as the defense-in-depth layer.
+//
 // Task 3 makes `Deferred` a legitimate, persisted value inside
 // `AppDesignDraft::fields` (the "let the model decide" answer). The MOMENT
 // that lands, this function must be relaxed to match — otherwise a
@@ -322,6 +337,18 @@ fn ensure_no_deferred_design_values(draft_rel: &Path, draft: &AppDesignDraft) ->
     if draft.fields.values().any(is_deferred) {
         return Err(AppError::StorageCorrupt(format!(
             "{}: field value is deferred, which is not yet a supported persisted value",
+            draft_rel.display()
+        )));
+    }
+    let has_deferred_default = draft.questionnaire.iter().any(|step| {
+        step.fields
+            .iter()
+            .any(|field| field.default_value.as_ref().is_some_and(is_deferred))
+    });
+    if has_deferred_default {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: a questionnaire field default value is deferred, which is not yet a supported \
+             persisted value",
             draft_rel.display()
         )));
     }
@@ -369,8 +396,25 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         Err(FsError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(load_read_error(&index_rel, &error)),
     };
-    let index: AppIndexFile = serde_json::from_str(&body)
-        .map_err(|error| AppError::StorageCorrupt(format!("apps/index.json: {error}")))?;
+    let index: AppIndexFile = serde_json::from_str(&body).map_err(|error| {
+        // A template-era `apps/index.json` fails to parse (it lacks the
+        // now-required `brief` field) like any other shape drift — but unlike
+        // an ordinary corruption, this ISN'T a bug to report, it's an
+        // intentionally unreadable legacy format: give a message that says so
+        // instead of leaking the raw serde path. The check is on the raw
+        // bytes, not the (already-failed) typed value, so it fires
+        // regardless of where in the document the old `"template"` field
+        // happened to sit.
+        if body.as_bytes().windows(10).any(|w| w == b"\"template\"") {
+            AppError::StorageCorrupt(
+                "此版本不再支持模版时代的 app 记录（apps/index.json 含 template 字段）；\
+                 请删除 apps/ 目录后重新创建应用 / no longer supports template-era app records"
+                    .into(),
+            )
+        } else {
+            AppError::StorageCorrupt(format!("apps/index.json: {error}"))
+        }
+    })?;
     ensure_schema_version(&index_rel, index.schema_version)?;
 
     let mut apps = Vec::with_capacity(index.apps.len());
@@ -1086,13 +1130,12 @@ fn sweep_trash(root: &Path) {
 mod tests {
     use super::*;
     use crate::error::AppErrorCode;
-    use crate::types::AppTemplateKind;
 
     fn new_app(id: &str) -> AppState {
         AppState::create(
             id.into(),
             format!("App {id}"),
-            AppTemplateKind::CrudTracker,
+            "a test app".into(),
             Some("conv-9".into()),
             1_700_000_000_000,
         )
@@ -1155,6 +1198,33 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
     }
 
+    // The brief's Step-1 pseudocode drives this through a
+    // `crate::test_support::memory_fs()` / `load_index` seam that does not
+    // exist in this codebase (there is no injected-fs test double here, and
+    // the loader is `load_all(root: &Path)`, not `load_index`). Adapted to
+    // the ACTUAL harness the rest of this module already uses (a real
+    // tempdir + `std::fs::write` + `load_all`), which is the same pattern
+    // `corrupt_index_is_storage_corrupt_not_silent_reset` above uses — the
+    // behavior under test (a readable error instead of a raw serde path) is
+    // unchanged.
+    #[test]
+    fn a_template_era_index_reports_a_readable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("apps")).unwrap();
+        std::fs::write(
+            dir.path().join("apps/index.json"),
+            br#"{"schemaVersion":1,"apps":[{"id":"old","name":"Old","template":"dashboard","createdAtMs":1,"updatedAtMs":1,"workflowState":"ready","workspaceRel":"apps/old/workspace"}]}"#,
+        )
+        .unwrap();
+
+        let error = load_all(dir.path()).expect_err("a template-era index is not loadable");
+        let message = format!("{error}");
+        assert!(
+            message.contains("不再支持") || message.contains("no longer supports"),
+            "the error explains WHY rather than leaking a serde path: {message}"
+        );
+    }
+
     #[test]
     fn unsupported_schema_version_is_storage_corrupt() {
         let dir = tempfile::tempdir().unwrap();
@@ -1177,7 +1247,7 @@ mod tests {
             "apps": [{
                 "id": "../../escape",
                 "name": "evil",
-                "template": "dashboard",
+                "brief": "an evil app",
                 "createdAtMs": 1,
                 "updatedAtMs": 1,
                 "workflowState": "collecting_spec",
@@ -1209,7 +1279,7 @@ mod tests {
                 "apps": [{
                     "id": "aaaa1111",
                     "name": "sneaky",
-                    "template": "dashboard",
+                    "brief": "a sneaky app",
                     "createdAtMs": 1,
                     "updatedAtMs": 1,
                     "workflowState": "collecting_spec",
@@ -1549,9 +1619,11 @@ mod tests {
     fn a_deferred_value_in_a_pending_suggestion_patch_is_storage_corrupt_at_load() {
         let draft = AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
-            template: AppTemplateKind::CrudTracker,
             revision: 1,
+            questionnaire: Vec::new(),
             fields: std::collections::BTreeMap::new(),
+            plan: None,
+            plan_for_revision: None,
             pending_suggestion: Some(crate::types::AppDesignSuggestion {
                 suggestion_id: "sugg-1".into(),
                 patch: crate::types::AppDesignPatch {
@@ -1571,18 +1643,57 @@ mod tests {
         assert!(err.to_string().contains("pending suggestion"), "{err}");
     }
 
+    /// The THIRD `DesignValue`-bearing location `AppDesignDraft` grew in Task
+    /// 2 — a questionnaire field's `default_value` — is covered by the same
+    /// guard, not just `fields` and the pending suggestion.
+    #[test]
+    fn a_deferred_questionnaire_default_value_is_storage_corrupt_at_load() {
+        let draft = AppDesignDraft {
+            schema_version: APPS_SCHEMA_VERSION,
+            revision: 0,
+            questionnaire: vec![crate::questionnaire::AppDesignStep {
+                id: "basics".into(),
+                order: 0,
+                title: "Basics".into(),
+                description: None,
+                fields: vec![crate::questionnaire::AppDesignField {
+                    id: "tone".into(),
+                    label: "Tone".into(),
+                    description: None,
+                    field_type: crate::questionnaire::AppDesignFieldType::ShortText,
+                    required: false,
+                    allows_custom: false,
+                    allows_defer: true,
+                    default_value: Some(DesignValue::Deferred),
+                    options: Vec::new(),
+                }],
+            }],
+            fields: std::collections::BTreeMap::new(),
+            plan: None,
+            plan_for_revision: None,
+            pending_suggestion: None,
+            confirmed_revision: None,
+        };
+        let err =
+            ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
+        assert!(err.to_string().contains("questionnaire"), "{err}");
+    }
+
     /// A draft with no `Deferred` value anywhere (the common case, including
     /// an empty `fields` map and no pending suggestion) is unaffected.
     #[test]
     fn a_draft_without_any_deferred_value_passes_the_guard() {
         let draft = AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
-            template: AppTemplateKind::CrudTracker,
             revision: 1,
+            questionnaire: Vec::new(),
             fields: std::collections::BTreeMap::from([(
                 "tone".to_string(),
                 DesignValue::ShortText("playful".into()),
             )]),
+            plan: None,
+            plan_for_revision: None,
             pending_suggestion: None,
             confirmed_revision: None,
         };

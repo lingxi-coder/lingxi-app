@@ -16,7 +16,7 @@ use local_apps::storage::{
 use local_apps::test_support::FixedClock;
 use local_apps::{
     AppContinuationKind, AppEventObserver, AppInteractionKind, AppInteractions, AppService,
-    AppState, AppTemplateKind, AppWorkflowState, ContinuationSink, RecordingAppEventObserver,
+    AppState, AppWorkflowState, ContinuationSink, RecordingAppEventObserver,
     RecordingContinuationSink, APPS_SCHEMA_VERSION,
 };
 use std::path::Path;
@@ -28,7 +28,7 @@ fn fresh_app(id: &str) -> AppState {
     AppState::create(
         id.into(),
         format!("App {id}"),
-        AppTemplateKind::Dashboard,
+        "a test app".into(),
         None,
         T0,
     )

@@ -38,7 +38,7 @@ use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppDesignDraft, AppDesignPatch,
     AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress, AppInteractionKind,
     AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeMode, AppRuntimeRecord,
-    AppRuntimeState, AppTemplateKind, DesignValue,
+    AppRuntimeState, DesignValue,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -70,6 +70,10 @@ const MAX_ID_MINT_ATTEMPTS: usize = 32;
 
 /// Maximum app name length in bytes (after trimming).
 pub const MAX_NAME_BYTES: usize = 200;
+/// Maximum app `brief` length in bytes (after trimming). Generous relative to
+/// [`MAX_NAME_BYTES`] — the brief is prose the LLM reads for context in all
+/// three stages, not a label.
+pub const MAX_BRIEF_BYTES: usize = 4_000;
 /// Maximum `conversation_id` length in bytes.
 pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
 /// Maximum operations in one design patch.
@@ -872,7 +876,7 @@ impl AppService {
     pub async fn create_app(
         &self,
         name: &str,
-        template: AppTemplateKind,
+        brief: &str,
         conversation_id: Option<String>,
     ) -> Result<AppRecord, AppError> {
         let trimmed = name.trim();
@@ -882,6 +886,13 @@ impl AppService {
             ));
         }
         ensure_within("app name", trimmed.len(), MAX_NAME_BYTES)?;
+        let trimmed_brief = brief.trim();
+        if trimmed_brief.is_empty() {
+            return Err(AppError::InvalidRequest(
+                "app brief must not be empty".into(),
+            ));
+        }
+        ensure_within("app brief", trimmed_brief.len(), MAX_BRIEF_BYTES)?;
         if let Some(conversation_id) = &conversation_id {
             ensure_within(
                 "conversation id",
@@ -890,6 +901,7 @@ impl AppService {
             )?;
         }
         let name = trimmed.to_string();
+        let brief = trimmed_brief.to_string();
         let order = self.acquire_emit_order().await;
         // After the queue join, for commit-order-monotonic timestamps (see
         // `with_app`).
@@ -905,16 +917,13 @@ impl AppService {
         let completion = tokio::spawn(async move {
             let persisted = Self::run_blocking(move || {
                 let id = Self::mint_app_id(&root, &existing_ids)?;
-                let app = AppState::create(id, name, template, conversation_id, now);
+                let app = AppState::create(id, name, brief, conversation_id, now);
                 // Per-app files first; the index entry is the commit point.
                 storage::save_app_files(&root, &app)?;
                 let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
                 layout.initialize()?;
-                let manifest = AppManifest::for_new_app(
-                    app.record.id.clone(),
-                    app.record.name.clone(),
-                    app.record.template,
-                );
+                let manifest =
+                    AppManifest::for_new_app(app.record.id.clone(), app.record.name.clone());
                 save_manifest(&layout, &manifest)?;
                 save_permissions(&layout, &AppPermissions::default())?;
                 let mut records = existing_records;
@@ -1732,7 +1741,7 @@ mod tests {
             .service
             .create_app(
                 "  Habit Tracker  ",
-                AppTemplateKind::CrudTracker,
+                "a test app",
                 Some("conv-1".into()),
             )
             .await
@@ -1765,7 +1774,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let err = h
             .service
-            .create_app("   ", AppTemplateKind::Dashboard, None)
+            .create_app("   ", "a test app", None)
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
@@ -1821,7 +1830,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("A", AppTemplateKind::Dashboard, None)
+            .create_app("A", "a test app", None)
             .await
             .unwrap();
         h.service
@@ -1862,7 +1871,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("A", AppTemplateKind::Dashboard, None)
+            .create_app("A", "a test app", None)
             .await
             .unwrap();
         let interaction = h.service.open_designer(&record.id).await.unwrap();
@@ -1919,12 +1928,12 @@ mod tests {
         let h = harness(dir.path()).await;
         let keep = h
             .service
-            .create_app("Keep", AppTemplateKind::Dashboard, None)
+            .create_app("Keep", "a test app", None)
             .await
             .unwrap();
         let gone = h
             .service
-            .create_app("Gone", AppTemplateKind::FormUtility, None)
+            .create_app("Gone", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -1949,7 +1958,7 @@ mod tests {
 
         let record = h
             .service
-            .create_app("Busy", AppTemplateKind::Dashboard, None)
+            .create_app("Busy", "a test app", None)
             .await
             .unwrap();
         h.service
@@ -1993,7 +2002,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Stuck", AppTemplateKind::Dashboard, None)
+            .create_app("Stuck", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -2026,7 +2035,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Race", AppTemplateKind::Dashboard, None)
+            .create_app("Race", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -2076,7 +2085,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("R", AppTemplateKind::Dashboard, None)
+            .create_app("R", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -2133,7 +2142,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("Q", AppTemplateKind::Dashboard, None)
+            .create_app("Q", "a test app", None)
             .await
             .unwrap();
         let interaction = h.service.open_designer(&record.id).await.unwrap();
@@ -2179,7 +2188,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("D", AppTemplateKind::Dashboard, None)
+            .create_app("D", "a test app", None)
             .await
             .unwrap();
         let interaction = h.service.open_designer(&record.id).await.unwrap();
@@ -2228,7 +2237,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("M", AppTemplateKind::Dashboard, None)
+            .create_app("M", "a test app", None)
             .await
             .unwrap();
         // Two continuations: cancel then confirm.
@@ -2287,7 +2296,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("C", AppTemplateKind::ContentShowcase, None)
+            .create_app("C", "a test app", None)
             .await
             .unwrap();
         assert!(h
@@ -2310,7 +2319,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Restorable", AppTemplateKind::Dashboard, None)
+            .create_app("Restorable", "a test app", None)
             .await
             .unwrap();
         h.service
@@ -2361,7 +2370,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Legacy", AppTemplateKind::Dashboard, None)
+            .create_app("Legacy", "a test app", None)
             .await
             .unwrap();
         h.service
@@ -2398,7 +2407,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("P", AppTemplateKind::Dashboard, None)
+            .create_app("P", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -2437,12 +2446,12 @@ mod tests {
         h.sink.set_fail(true);
         let a = h
             .service
-            .create_app("A", AppTemplateKind::Dashboard, None)
+            .create_app("A", "a test app", None)
             .await
             .unwrap();
         let b = h
             .service
-            .create_app("B", AppTemplateKind::Dashboard, None)
+            .create_app("B", "a test app", None)
             .await
             .unwrap();
         for record in [&a, &b] {
@@ -2493,7 +2502,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("F", AppTemplateKind::Dashboard, None)
+            .create_app("F", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -2543,7 +2552,7 @@ mod tests {
             .service
             .create_app(
                 &"x".repeat(MAX_NAME_BYTES + 1),
-                AppTemplateKind::Dashboard,
+                "a test app",
                 None,
             )
             .await
@@ -2553,7 +2562,7 @@ mod tests {
             .service
             .create_app(
                 "A",
-                AppTemplateKind::Dashboard,
+                "a test app",
                 Some("c".repeat(MAX_CONVERSATION_ID_BYTES + 1)),
             )
             .await
@@ -2567,7 +2576,7 @@ mod tests {
         h.service
             .create_app(
                 &"x".repeat(MAX_NAME_BYTES),
-                AppTemplateKind::Dashboard,
+                "a test app",
                 Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
             )
             .await
@@ -2580,7 +2589,7 @@ mod tests {
         let h = harness(dir.path()).await;
         for i in 0..101 {
             h.service
-                .create_app(&format!("App {i}"), AppTemplateKind::Dashboard, None)
+                .create_app(&format!("App {i}"), "a test app", None)
                 .await
                 .unwrap();
         }
@@ -2593,7 +2602,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Suggestion", AppTemplateKind::Dashboard, None)
+            .create_app("Suggestion", "a test app", None)
             .await
             .unwrap();
         h.take_events().await;
@@ -2637,7 +2646,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Caps", AppTemplateKind::Dashboard, None)
+            .create_app("Caps", "a test app", None)
             .await
             .unwrap();
         let set_op = |field: &str, text: &str| AppDesignPatchOp::Set {
@@ -2720,7 +2729,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Contract", AppTemplateKind::CrudTracker, None)
+            .create_app("Contract", "a test app", None)
             .await
             .unwrap();
         let data_fields = |id: &str| AppDesignPatch {
@@ -2794,7 +2803,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Fields", AppTemplateKind::Dashboard, None)
+            .create_app("Fields", "a test app", None)
             .await
             .unwrap();
         // Fill to the cap across several max-size patches.
@@ -2856,7 +2865,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Prompt", AppTemplateKind::Dashboard, None)
+            .create_app("Prompt", "a test app", None)
             .await
             .unwrap();
         // Oversized prompt: rejected as invalid_request even though the state
@@ -2889,7 +2898,7 @@ mod tests {
         .await
         .unwrap();
         let record = service
-            .create_app("N", AppTemplateKind::Dashboard, None)
+            .create_app("N", "a test app", None)
             .await
             .unwrap();
         service.open_designer(&record.id).await.unwrap();
@@ -2910,7 +2919,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Big", AppTemplateKind::Dashboard, None)
+            .create_app("Big", "a test app", None)
             .await
             .unwrap();
         let value = "\u{1}".repeat(MAX_TEXT_VALUE_BYTES); // in caps; escapes 6x
@@ -2961,7 +2970,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Roll", AppTemplateKind::Dashboard, None)
+            .create_app("Roll", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -3083,7 +3092,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("MidBatch", AppTemplateKind::Dashboard, None)
+            .create_app("MidBatch", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -3190,7 +3199,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("Merge", AppTemplateKind::Dashboard, None)
+            .create_app("Merge", "a test app", None)
             .await
             .unwrap();
         h.service.open_designer(&record.id).await.unwrap();
@@ -3301,7 +3310,7 @@ mod tests {
         .unwrap();
         recording.set_fail(true);
         let record = service
-            .create_app("Race", AppTemplateKind::Dashboard, None)
+            .create_app("Race", "a test app", None)
             .await
             .unwrap();
         service.open_designer(&record.id).await.unwrap();
@@ -3343,7 +3352,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Proof", AppTemplateKind::Dashboard, None)
+            .create_app("Proof", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -3431,7 +3440,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Err", AppTemplateKind::Dashboard, None)
+            .create_app("Err", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -3507,7 +3516,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Sugg", AppTemplateKind::Dashboard, None)
+            .create_app("Sugg", "a test app", None)
             .await
             .unwrap();
         h.service
@@ -3579,7 +3588,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("P", AppTemplateKind::Dashboard, None)
+            .create_app("P", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -3631,13 +3640,13 @@ mod tests {
         let h = harness(dir.path()).await;
         let a = h
             .service
-            .create_app("GateA", AppTemplateKind::Dashboard, None)
+            .create_app("GateA", "a test app", None)
             .await
             .unwrap();
         let designer_gate = h.service.open_designer(&a.id).await.unwrap();
         let b = h
             .service
-            .create_app("GateB", AppTemplateKind::Dashboard, None)
+            .create_app("GateB", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&b.id).await.unwrap();
@@ -3681,7 +3690,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let a = h
             .service
-            .create_app("LateSub", AppTemplateKind::Dashboard, None)
+            .create_app("LateSub", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&a.id).await.unwrap();
@@ -3714,7 +3723,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Order", AppTemplateKind::Dashboard, None)
+            .create_app("Order", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -3771,7 +3780,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Busy2", AppTemplateKind::Dashboard, None)
+            .create_app("Busy2", "a test app", None)
             .await
             .unwrap();
         h.service
@@ -3807,7 +3816,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Lean", AppTemplateKind::Dashboard, None)
+            .create_app("Lean", "a test app", None)
             .await
             .unwrap();
         let index_path = dir.path().join("apps/index.json");
@@ -3883,7 +3892,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Hybrid", AppTemplateKind::Dashboard, None)
+            .create_app("Hybrid", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -3941,7 +3950,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Hybrid2", AppTemplateKind::Dashboard, None)
+            .create_app("Hybrid2", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -4042,7 +4051,7 @@ mod tests {
         .await
         .unwrap();
         let record = service
-            .create_app("Plant", AppTemplateKind::Dashboard, None)
+            .create_app("Plant", "a test app", None)
             .await
             .unwrap();
         service.open_designer(&record.id).await.unwrap();
@@ -4080,7 +4089,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("HornB", AppTemplateKind::Dashboard, None)
+            .create_app("HornB", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -4163,7 +4172,7 @@ mod tests {
         h.sink.set_fail(true); // continuations stay queued
         let record = h
             .service
-            .create_app("Big", AppTemplateKind::Dashboard, None)
+            .create_app("Big", "a test app", None)
             .await
             .unwrap();
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -4223,7 +4232,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Stale", AppTemplateKind::Dashboard, None)
+            .create_app("Stale", "a test app", None)
             .await
             .unwrap();
         // Suggestion computed against revision 0…
@@ -4315,13 +4324,13 @@ mod tests {
         let b = harness(dir.path()).await; // loaded before app1 exists
         let app1 = a
             .service
-            .create_app("From A", AppTemplateKind::Dashboard, None)
+            .create_app("From A", "a test app", None)
             .await
             .unwrap();
         // B has never seen app1; its index write must preserve it.
         let app2 = b
             .service
-            .create_app("From B", AppTemplateKind::FormUtility, None)
+            .create_app("From B", "a test app", None)
             .await
             .unwrap();
         let on_disk = storage::load_all(dir.path()).unwrap();
@@ -4340,7 +4349,7 @@ mod tests {
         // …and stays deleted across A's next index write.
         let app3 = a
             .service
-            .create_app("A again", AppTemplateKind::Dashboard, None)
+            .create_app("A again", "a test app", None)
             .await
             .unwrap();
         let final_state = storage::load_all(dir.path()).unwrap();
@@ -4430,7 +4439,7 @@ mod tests {
 
         // The create's emission triggers the observer's reentrant call.
         service
-            .create_app("Reenter", AppTemplateKind::Dashboard, None)
+            .create_app("Reenter", "a test app", None)
             .await
             .unwrap();
         service.flush_events().await; // completes — the queue is NOT deadlocked
@@ -4455,7 +4464,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Drop", AppTemplateKind::Dashboard, None)
+            .create_app("Drop", "a test app", None)
             .await
             .unwrap();
         let _ = h.take_events().await;

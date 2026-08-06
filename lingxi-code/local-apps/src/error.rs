@@ -34,6 +34,10 @@ pub enum AppErrorCode {
     InvalidRequest,
     /// Underlying I/O failure.
     Io,
+    /// The model is unreachable: offline, unauthenticated, or timed out.
+    LlmUnavailable,
+    /// The model's output failed validation (bad shape or over a limit).
+    LlmOutputRejected,
 }
 
 /// Error type for every fallible local-apps operation.
@@ -72,6 +76,13 @@ pub enum AppError {
     /// Underlying I/O failure.
     #[error("io error: {0}")]
     Io(String),
+    /// The model is unreachable. There is no template to fall back to —
+    /// this design deliberately leaves no silent degradation path.
+    #[error("llm unavailable: {0}")]
+    LlmUnavailable(String),
+    /// The model's output was rejected by a validator.
+    #[error("llm output rejected: {0}")]
+    LlmOutputRejected(String),
 }
 
 impl AppError {
@@ -88,6 +99,8 @@ impl AppError {
             Self::StorageCorrupt(_) => AppErrorCode::StorageCorrupt,
             Self::InvalidRequest(_) => AppErrorCode::InvalidRequest,
             Self::Io(_) => AppErrorCode::Io,
+            Self::LlmUnavailable(_) => AppErrorCode::LlmUnavailable,
+            Self::LlmOutputRejected(_) => AppErrorCode::LlmOutputRejected,
         }
     }
 
@@ -149,6 +162,14 @@ mod tests {
             AppErrorCode::InvalidRequest
         );
         assert_eq!(AppError::Io("x".into()).code(), AppErrorCode::Io);
+        assert_eq!(
+            AppError::LlmUnavailable("x".into()).code(),
+            AppErrorCode::LlmUnavailable
+        );
+        assert_eq!(
+            AppError::LlmOutputRejected("x".into()).code(),
+            AppErrorCode::LlmOutputRejected
+        );
     }
 
     #[test]
@@ -164,6 +185,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AppErrorCode::WorkflowStateInvalid).unwrap(),
             "\"workflow_state_invalid\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppErrorCode::LlmUnavailable).unwrap(),
+            "\"llm_unavailable\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppErrorCode::LlmOutputRejected).unwrap(),
+            "\"llm_output_rejected\""
         );
     }
 

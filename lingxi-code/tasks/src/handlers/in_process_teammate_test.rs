@@ -899,3 +899,284 @@ fn idle_fire_payload_shape() {
     assert_eq!(fire.teammate_name, "buddy");
     assert_eq!(fire.team_name, "alpha");
 }
+
+// ---- Swarm auto-claim (oracle 2.1.223 zvb / Vvb / rIp) -------------------
+
+/// Serializes the env-mutating auto-claim tests (`LINGXI_CONFIG_DIR`).
+static CLAIM_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+/// Point the todo store at a throwaway config dir; restore on drop.
+struct ClaimEnvGuard {
+    prev_config: Option<std::ffi::OsString>,
+    prev_list: Option<std::ffi::OsString>,
+    dir: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+impl ClaimEnvGuard {
+    fn new() -> Self {
+        let lock = CLAIM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "lingxi-teammate-claim-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let guard = Self {
+            prev_config: std::env::var_os(branding::CONFIG_DIR_ENV),
+            prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
+            dir: dir.clone(),
+            _lock: lock,
+        };
+        std::env::set_var(branding::CONFIG_DIR_ENV, &dir);
+        std::env::remove_var("LINGXI_TASK_LIST_ID");
+        guard
+    }
+}
+impl Drop for ClaimEnvGuard {
+    fn drop(&mut self) {
+        match &self.prev_config {
+            Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+        }
+        match &self.prev_list {
+            Some(v) => std::env::set_var("LINGXI_TASK_LIST_ID", v),
+            None => std::env::remove_var("LINGXI_TASK_LIST_ID"),
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn todo(subject: &str, status: engine::TodoState, owner: Option<&str>) -> task_store::TodoTask {
+    let mut t = task_store::TodoTask::new(
+        subject.into(),
+        "desc".into(),
+        None,
+        serde_json::Map::new(),
+    );
+    t.status = status;
+    t.owner = owner.map(str::to_string);
+    t
+}
+
+#[test]
+fn pick_next_task_skips_owned_blocked_and_non_pending() {
+    use engine::TodoState::{Completed, InProgress, Pending};
+    let mut blocked = todo("blocked", Pending, None);
+    blocked.id = "4".into();
+    blocked.blocked_by = vec!["2".into()];
+    let mut done_blocked = todo("blocked by done", Pending, None);
+    done_blocked.id = "5".into();
+    done_blocked.blocked_by = vec!["1".into()];
+    let tasks = vec![
+        {
+            let mut t = todo("done", Completed, None);
+            t.id = "1".into();
+            t
+        },
+        {
+            let mut t = todo("busy", InProgress, None);
+            t.id = "2".into();
+            t
+        },
+        {
+            let mut t = todo("owned", Pending, Some("other"));
+            t.id = "3".into();
+            t
+        },
+        blocked,
+        done_blocked,
+    ];
+    // #1 completed, #2 in_progress, #3 owned, #4 blocked by open #2 —
+    // #5's only blocker (#1) is completed, so #5 is the pick.
+    assert_eq!(pick_next_task(&tasks).unwrap().id, "5");
+
+    // Empty-string owner is unowned (JS falsy) — flips #3 into the pick.
+    let mut tasks2 = tasks;
+    tasks2[2].owner = Some(String::new());
+    assert_eq!(pick_next_task(&tasks2).unwrap().id, "3");
+
+    assert!(pick_next_task(&[]).is_none());
+}
+
+#[test]
+fn claimed_task_prompt_is_byte_exact() {
+    // Oracle Vvb (2.1.223 @251672219) segment table: `": \n\n "` — a SPACE
+    // after the colon at end-of-line and a space before the subject.
+    let mut t = todo("Fix the parser", engine::TodoState::Pending, None);
+    t.id = "7".into();
+    t.description = String::new();
+    assert_eq!(
+        claimed_task_prompt(&t),
+        "Complete all open tasks. Start with task #7: \n\n Fix the parser"
+    );
+    t.description = "Details here".into();
+    assert_eq!(
+        claimed_task_prompt(&t),
+        "Complete all open tasks. Start with task #7: \n\n Fix the parser\n\nDetails here"
+    );
+}
+
+#[test]
+fn teammate_envelope_wraps_task_list_sender() {
+    assert_eq!(
+        teammate_message_envelope("task-list", "do it"),
+        "<teammate-message teammate_id=\"task-list\">\ndo it\n</teammate-message>"
+    );
+}
+
+#[test]
+fn resolve_list_id_env_overrides_then_team_then_none() {
+    let _guard = ClaimEnvGuard::new();
+    std::env::set_var("LINGXI_TASK_LIST_ID", "forced-list");
+    assert_eq!(
+        resolve_teammate_list_id("alpha").as_deref(),
+        Some("forced-list")
+    );
+    std::env::remove_var("LINGXI_TASK_LIST_ID");
+    assert_eq!(resolve_teammate_list_id("alpha").as_deref(), Some("alpha"));
+    // Teamless spawn = the oracle's `standalone` analogue: no auto-claim.
+    assert_eq!(resolve_teammate_list_id(""), None);
+}
+
+/// Startup auto-claim (oracle `if(!standalone) await rIp(...)`): spawning a
+/// teammate claims the next available task as a side effect — owner set,
+/// status in_progress — while the FIRST message stays the description (the
+/// returned prompt is discarded at startup).
+#[tokio::test]
+async fn spawn_auto_claims_next_available_task() {
+    let _guard = ClaimEnvGuard::new();
+    let team = "claim-team-startup";
+    let store = task_store::TodoStore::for_list(team);
+    let tid = store
+        .create(todo("Startup work", engine::TodoState::Pending, None))
+        .await
+        .unwrap();
+
+    let api = ScriptedApiClient::new(vec!["answer one"]);
+    let (_d, fs, rt, handler) = make_handler(api);
+    let c = ctx(fs, rt);
+    let h = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: team.into(),
+                description: "seeded description".into(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+
+    // The claim is synchronous inside spawn (before the worker starts).
+    let t = store.get(&tid).await.unwrap();
+    assert_eq!(t.owner.as_deref(), Some("buddy"), "claimed at startup");
+    assert_eq!(t.status, engine::TodoState::InProgress);
+
+    handler.kill(&h.task_id, c).await.unwrap();
+}
+
+/// Idle auto-claim (oracle poll loop @251675509): a task created AFTER the
+/// teammate parks is claimed by the 500ms idle tick and its Vvb prompt is
+/// self-injected as the next user message, driving turn-set 2.
+#[tokio::test]
+async fn idle_poll_claims_late_task_and_drives_next_turn_set() {
+    let _guard = ClaimEnvGuard::new();
+    let team = "claim-team-idle";
+    let store = task_store::TodoStore::for_list(team);
+
+    let api = ScriptedApiClient::new(vec!["answer one", "answer two"]);
+    let api_handle = api.clone();
+    let (dir, fs, rt, handler) = make_handler(api);
+    let c = ctx(fs.clone(), rt);
+    let h = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: team.into(),
+                description: String::new(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+    let spool = dir.path().join(format!("{}.output", h.task_id));
+    let spool_str = spool.to_str().unwrap().to_string();
+
+    // Turn-set 1 completes and the teammate parks (idle window opens).
+    let body = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
+    assert!(body.contains("completed:"), "turn-set 1 parked: {body:?}");
+
+    // NOW a task appears on the shared list.
+    let tid = store
+        .create(todo("Late work", engine::TodoState::Pending, None))
+        .await
+        .unwrap();
+
+    // Within a few ticks the idle poller claims it and injects the prompt,
+    // waking the runner into turn-set 2.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let t = store.get(&tid).await.unwrap();
+        if t.owner.as_deref() == Some("buddy")
+            && t.status == engine::TodoState::InProgress
+            && api_handle.call_count() >= 2
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "idle poller never claimed the late task: owner={:?} status={:?} calls={}",
+            t.owner,
+            t.status,
+            api_handle.call_count()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let body = await_spool(&fs, &spool_str, |b| b.contains("answer two")).await;
+    assert!(body.contains("answer two"), "turn-set 2 ran: {body:?}");
+
+    handler.kill(&h.task_id, c).await.unwrap();
+}
+
+/// After kill the idle poller stops: a task seeded post-kill stays unclaimed.
+#[tokio::test]
+async fn killed_teammate_stops_claiming() {
+    let _guard = ClaimEnvGuard::new();
+    let team = "claim-team-killed";
+    let store = task_store::TodoStore::for_list(team);
+
+    let api = ScriptedApiClient::new(vec!["answer one"]);
+    let (dir, fs, rt, handler) = make_handler(api);
+    let c = ctx(fs.clone(), rt);
+    let h = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: team.into(),
+                description: String::new(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+    let spool = dir.path().join(format!("{}.output", h.task_id));
+    let spool_str = spool.to_str().unwrap().to_string();
+    let _ = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
+
+    handler.kill(&h.task_id, c).await.unwrap();
+
+    let tid = store
+        .create(todo("Post-kill work", engine::TodoState::Pending, None))
+        .await
+        .unwrap();
+    // Two full tick intervals: a live poller would have claimed by now.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let t = store.get(&tid).await.unwrap();
+    assert_eq!(t.owner, None, "killed teammate must not claim");
+    assert_eq!(t.status, engine::TodoState::Pending);
+}

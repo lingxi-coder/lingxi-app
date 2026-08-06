@@ -30,6 +30,26 @@
 //! hard-cancels the slot via [`agent::StateMachinePool::deallocate`]. This
 //! matches the TS `requestTeammateShutdown` (cooperative) → `kill` (hard)
 //! ordering.
+//!
+//! ## Swarm auto-claim (oracle 2.1.223 `zvb`/`Vvb`/`rIp`)
+//!
+//! A teammate auto-claims work from the shared task list at two moments,
+//! mirroring the oracle's in-process runner:
+//!
+//! 1. **Startup** (`if(!standalone) await rIp(...)` before the loop): the
+//!    claim's side effect only — the returned prompt is discarded because the
+//!    TeamCreate description already seeded the first message.
+//! 2. **While parked**: a 500ms tick (active only between turn-sets) runs
+//!    [`check_and_claim_next_task`]; a claimed task's [`claimed_task_prompt`]
+//!    is self-injected as the next user message wearing the
+//!    `<teammate-message teammate_id="task-list">` envelope.
+//!
+//! Bounded ordering divergence vs the oracle: the oracle's poll loop checks
+//! the mailbox STRICTLY BEFORE the task list in each 500ms iteration; the
+//! port's mailbox pump injects independently of this worker, so a mailbox
+//! message and a claimed-task prompt can land back-to-back in either order.
+//! The runner queues both, so the worst case is one turn of delay for the
+//! claimed prompt — accepted, not worth serializing two independent pumps.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -59,6 +79,119 @@ use agent::SubagentApiClient;
 /// Handler name reported by [`Task::name`] and used as the runtime task-name
 /// prefix.
 const HANDLER_NAME: &str = "in_process_teammate";
+
+/// The idle-poll cadence of the oracle's in-process runner (2.1.223 `Kvb`
+/// polls its mailbox + task list every 500ms while the teammate is parked).
+const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+// ── Swarm auto-claim (oracle 2.1.223 `zvb` / `Vvb` / `rIp`, in-process runner) ──
+
+/// Pick the next auto-claimable task: the FIRST (the list is id-ascending)
+/// task that is `pending`, unowned, and whose every blocker is completed or
+/// absent. 1:1 port of oracle `zvb` (2.1.223 @251671996) — note the owner test
+/// is JS-falsy (`if(r.owner)return!1`), so an empty-string owner counts as
+/// unowned.
+pub(crate) fn pick_next_task(tasks: &[task_store::TodoTask]) -> Option<&task_store::TodoTask> {
+    let open: std::collections::HashSet<&str> = tasks
+        .iter()
+        .filter(|t| t.status != engine::TodoState::Completed)
+        .map(|t| t.id.as_str())
+        .collect();
+    tasks.iter().find(|t| {
+        if t.status != engine::TodoState::Pending {
+            return false;
+        }
+        if t.owner.as_deref().is_some_and(|o| !o.is_empty()) {
+            return false;
+        }
+        t.blocked_by.iter().all(|b| !open.contains(b.as_str()))
+    })
+}
+
+/// Build the injected prompt for an auto-claimed task. 1:1 port of oracle
+/// `Vvb` (2.1.223 @251672219). Byte-exact quirks locked by the segment table:
+/// a trailing SPACE after the colon at end-of-line, and a leading space
+/// before the subject (`` `…task #${id}: \n\n ${subject}` ``); the
+/// description (when non-empty) follows after a blank line.
+pub(crate) fn claimed_task_prompt(task: &task_store::TodoTask) -> String {
+    let mut t = format!(
+        "Complete all open tasks. Start with task #{}: \n\n {}",
+        task.id, task.subject
+    );
+    if !task.description.is_empty() {
+        t.push_str(&format!("\n\n{}", task.description));
+    }
+    t
+}
+
+/// Wrap an inter-agent message in the `<teammate-message>` envelope the
+/// runner injects for every non-`user` sender. Minimal port of oracle `$Tr`
+/// (2.1.223 @248033882, tag const `$W = "teammate-message"` @240126609) for
+/// the `from:"task-list"` path: no `color=` / `summary=` attributes (the
+/// task-list sender passes neither).
+pub(crate) fn teammate_message_envelope(from: &str, text: &str) -> String {
+    format!("<teammate-message teammate_id=\"{from}\">\n{text}\n</teammate-message>")
+}
+
+/// Resolve the task-list id a teammate's auto-claim reads.
+///
+/// `LINGXI_TASK_LIST_ID` env override, else the teammate's team name — the
+/// SAME first two levels as the Task tools' `resolve_task_list_id`, so the
+/// lead's TaskCreate and the teammate's auto-claim always see one list.
+///
+/// // ORACLE QUIRK (2.1.223 @251678388): the oracle passes
+/// `t.parentSessionId` here, but `initializeSessionTeam` has RENAMED the
+/// session task dir to the team-name dir by then, so the oracle's auto-claim
+/// reads a stale (usually empty) directory whenever teamName ≠ sessionId.
+/// The port deliberately keeps reading the live list (behavior over bug);
+/// see the `leader_and_teammate_resolve_same_dir` invariant in tool-task.
+///
+/// An empty team name (a standalone spawn outside any team) returns `None` —
+/// the analogue of the oracle's `standalone: g` gate, which skips both rIp
+/// call sites.
+pub(crate) fn resolve_teammate_list_id(team_name: &str) -> Option<String> {
+    if let Ok(id) = std::env::var("LINGXI_TASK_LIST_ID") {
+        if !id.trim().is_empty() {
+            return Some(id);
+        }
+    }
+    if team_name.is_empty() {
+        return None;
+    }
+    Some(team_name.to_string())
+}
+
+/// Check the shared task list and atomically claim the next available task.
+/// 1:1 port of oracle `rIp` (2.1.223 @251672343): list → [`pick_next_task`]
+/// → [`task_store::TodoStore::claim_task`] → mark `in_progress` → return the
+/// [`claimed_task_prompt`] text. `None` when there is nothing claimable, the
+/// claim loses a race, or any store error occurs (all logged with the
+/// oracle's `[inProcessRunner]` message bodies).
+pub(crate) async fn check_and_claim_next_task(list_id: &str, agent_name: &str) -> Option<String> {
+    let store = task_store::TodoStore::for_list(list_id);
+    let tasks = store.list().await;
+    let next = pick_next_task(&tasks)?.clone();
+    let res = store
+        .claim_task(&next.id, agent_name, task_store::ClaimOptions::default())
+        .await;
+    if let Some(reason) = res.reason() {
+        tracing::info!(
+            target: "lingxi_tasks::in_process_teammate",
+            "[inProcessRunner] Failed to claim task #{}: {reason}", next.id
+        );
+        return None;
+    }
+    // Oracle: `await WXe(e, n.id, {status:"in_progress"})` as a separate
+    // follow-up write after the claim.
+    store
+        .update(&next.id, |t| t.status = engine::TodoState::InProgress)
+        .await;
+    tracing::info!(
+        target: "lingxi_tasks::in_process_teammate",
+        "[inProcessRunner] Claimed task #{}: {}", next.id, next.subject
+    );
+    Some(claimed_task_prompt(&next))
+}
 
 /// Resolves the static [`AgentDefinition`] for a teammate spawn.
 ///
@@ -615,6 +748,17 @@ impl Task for InProcessTeammateHandler {
             .await
             .map_err(|e| TaskError::Internal(e.to_string()))?;
 
+        // 4b. Startup auto-claim (oracle `if(!standalone) await rIp(...)`
+        //     before the runner loop, 2.1.223 @251678388): claim the next
+        //     available task as a SIDE EFFECT ONLY — the oracle discards the
+        //     returned prompt here because the TeamCreate description already
+        //     seeded the first message. A teamless spawn (`None` list id) is
+        //     the standalone analogue and skips.
+        let claim_list_id = resolve_teammate_list_id(&team_name);
+        if let Some(list_id) = &claim_list_id {
+            let _ = check_and_claim_next_task(list_id, &name).await;
+        }
+
         // 5. Spawn the streaming worker through the runtime (never tokio::spawn
         //    — D17). It pumps out_rx -> spool, one line per event, and reports
         //    terminal status. It stops on Failed / Killed or when out_rx closes
@@ -635,14 +779,74 @@ impl Task for InProcessTeammateHandler {
         let idle_name = name.clone();
         let idle_team_name = team_name.clone();
         let worker_task_id = task_id.clone();
+        // Idle auto-claim state (oracle `Kvb` poll loop): the pool handle +
+        // slot id let the worker self-inject a claimed task's prompt as the
+        // next user message, exactly like the mailbox path.
+        let claim_pool = self.pool.clone();
+        let claim_agent_id = aid;
+        let claim_name = name.clone();
         let worker = Box::pin(async move {
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
-            while let Some(ev) = out_rx.recv().await {
+            // `true` while the teammate is parked between turn-sets — the only
+            // window in which the oracle's runner polls the task list.
+            let mut idle = false;
+            let mut tick = tokio::time::interval(IDLE_POLL_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let ev = tokio::select! {
+                    ev = out_rx.recv() => match ev {
+                        Some(ev) => ev,
+                        None => break, // slot dropped its sender (deallocate)
+                    },
+                    _ = tick.tick(), if idle => {
+                        // Idle auto-claim (oracle poll loop @251675509: after
+                        // the mailbox check, `let g=await rIp(i, agentName);
+                        // if(g)return{type:"new_message", message:g,
+                        // from:"task-list"}`). The claimed prompt is injected
+                        // as the next user message wearing the task-list
+                        // teammate envelope; the mailbox pump injects its own
+                        // messages independently (the port's bounded ordering
+                        // divergence — documented in the module header).
+                        if stop_loop.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Some(list_id) = &claim_list_id {
+                            if let Some(prompt) =
+                                check_and_claim_next_task(list_id, &claim_name).await
+                            {
+                                let content =
+                                    teammate_message_envelope("task-list", &prompt);
+                                let sent = claim_pool
+                                    .send_event(
+                                        &claim_agent_id,
+                                        engine::Event::UserMessage {
+                                            message_id: protocol::MessageId::new(),
+                                            request_id: protocol::RequestId::new(),
+                                            content,
+                                        },
+                                    )
+                                    .await;
+                                match sent {
+                                    Ok(()) => idle = false,
+                                    Err(e) => tracing::warn!(
+                                        target: "lingxi_tasks::in_process_teammate",
+                                        error = %e,
+                                        "task-list claim injection failed; slot gone?"
+                                    ),
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                };
                 if stop_loop.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
+                // Any runner event means the teammate is (or just was) active;
+                // is_idle_event re-opens the poll window below.
+                idle = false;
                 let line = event_line(&ev);
                 // Routed through the output manager's `append` so the per-file
                 // 5GB disk cap is enforced (T17) and the write uses O_NOFOLLOW
@@ -670,6 +874,9 @@ impl Task for InProcessTeammateHandler {
                             })
                             .await;
                     }
+                    // Open the idle-poll window (oracle: the parked runner's
+                    // 500ms mailbox/task-list poll).
+                    idle = true;
                 }
                 if let Some(status) = terminal_status(&ev) {
                     // Failed / Killed end the teammate; a per-turn-set Completed

@@ -16,4 +16,7 @@
 pub mod proper_lockfile;
 pub mod todo_store;
 
-pub use todo_store::{TodoStore, TodoTask};
+pub use todo_store::{
+    ClaimOptions, ClaimResult, TeammateEndReason, TodoStore, TodoTask, UnassignOutcome,
+    UnassignedTask,
+};

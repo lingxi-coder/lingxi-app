@@ -46,6 +46,107 @@ use engine::TodoState;
 /// High-water-mark file name (claude-code `HIGH_WATER_MARK_FILE`).
 const HIGH_WATER_MARK_FILE: &str = ".highwatermark";
 
+/// Outcome of one atomic claim attempt — the oracle's discriminated result
+/// (2.1.223 `QOd` / `uTy`, `utils/tasks.ts`). The `reason` wire strings are
+/// exposed via [`ClaimResult::reason`] for log parity (`rIp` logs
+/// `o.reason`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimResult {
+    /// `{success:!0, task}` — the claimer now owns the (re-read) task.
+    Success {
+        /// The task as written (owner = claimer).
+        task: TodoTask,
+    },
+    /// `reason:"task_not_found"` — missing id, unreadable file, or (matching
+    /// the oracle's catch-all `catch` arm) any I/O failure mid-claim.
+    TaskNotFound,
+    /// `reason:"already_claimed"` — a DIFFERENT owner is set (the oracle's
+    /// `l.owner&&l.owner!==r` is falsy for an empty-string owner, so an empty
+    /// owner counts as unowned; re-claiming your own task succeeds).
+    AlreadyClaimed {
+        /// The task as read under the lock.
+        task: TodoTask,
+    },
+    /// `reason:"already_resolved"` — `status === "completed"`.
+    AlreadyResolved {
+        /// The task as read under the lock.
+        task: TodoTask,
+    },
+    /// `reason:"blocked"` — `blockedBy` ∩ {non-completed ids} is non-empty.
+    Blocked {
+        /// The task as read under the lock.
+        task: TodoTask,
+        /// The still-open blocker ids (`blockedByTasks`).
+        blocked_by_tasks: Vec<String>,
+    },
+    /// `reason:"agent_busy"` — [`ClaimOptions::check_agent_busy`] only
+    /// (`uTy`): the claimer already owns other non-completed tasks.
+    AgentBusy {
+        /// The task as read under the lock.
+        task: TodoTask,
+        /// The claimer's other open task ids (`busyWithTasks`).
+        busy_with_tasks: Vec<String>,
+    },
+}
+
+impl ClaimResult {
+    /// The oracle's `reason` wire string; `None` on success.
+    #[must_use]
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Success { .. } => None,
+            Self::TaskNotFound => Some("task_not_found"),
+            Self::AlreadyClaimed { .. } => Some("already_claimed"),
+            Self::AlreadyResolved { .. } => Some("already_resolved"),
+            Self::Blocked { .. } => Some("blocked"),
+            Self::AgentBusy { .. } => Some("agent_busy"),
+        }
+    }
+}
+
+/// Options for [`TodoStore::claim_task`] (oracle `QOd`'s `n = {}`).
+///
+/// `check_agent_busy` mirrors `checkAgentBusy` — LATENT in 2.1.223: the flag
+/// is reachable in the oracle but `checkAgentBusy:!0` has ZERO call sites
+/// (the lone binary hit is a V8-snapshot table entry). Ported faithfully as
+/// an option nothing passes yet.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClaimOptions {
+    /// Route through the `uTy` busy-check variant.
+    pub check_agent_busy: bool,
+}
+
+/// Why a teammate's tasks are being unassigned (oracle `RSr`'s 4th arg).
+///
+/// Both live 2.1.223 call sites pass `"shutdown"`; the `"terminated"` branch
+/// ("was terminated") has zero callers — ported latent, like
+/// [`ClaimOptions::check_agent_busy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeammateEndReason {
+    /// `"shutdown"` → "has shut down."
+    Shutdown,
+    /// `"terminated"` → "was terminated." (latent in 2.1.223).
+    Terminated,
+}
+
+/// One unassigned task in [`UnassignOutcome`] (oracle `{id, subject}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnassignedTask {
+    /// Decimal task id.
+    pub id: String,
+    /// Task subject at unassign time.
+    pub subject: String,
+}
+
+/// Result of [`TodoStore::unassign_tasks_for_teammate`] (oracle `RSr`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnassignOutcome {
+    /// The tasks reset to ownerless-pending, in list (id-ascending) order.
+    pub unassigned_tasks: Vec<UnassignedTask>,
+    /// The byte-exact notification for the lead's inbox.
+    pub notification_message: String,
+}
+
 /// One V2 task as persisted on disk. 1:1 with claude-code `TaskSchema`
 /// (`utils/tasks.ts`); wire keys are camelCase (`activeForm`, `blockedBy`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -396,6 +497,222 @@ impl TodoStore {
         }
         true
     }
+
+    /// Unlocked read-merge-write of `{owner}` onto the task under `id` (the
+    /// oracle's `XOd(e,t,{owner:r})` local branch). Callers hold whichever
+    /// lock the variant requires; this helper itself takes NONE — the mkdir
+    /// lock in [`crate::proper_lockfile`] is not reentrant, so the QOd path
+    /// (which already holds `<id>.json`'s lock) must not go through
+    /// [`Self::update`].
+    fn xod_merge_owner(&self, id: &str, owner: &str) -> Option<TodoTask> {
+        let content = std::fs::read_to_string(self.task_path(id)).ok()?;
+        let mut task = serde_json::from_str::<TodoTask>(&content).ok()?;
+        task.owner = Some(owner.to_string());
+        task.id = id.to_string();
+        self.write_task(&task).ok()?;
+        Some(task)
+    }
+
+    /// The still-open blocker ids of `task` given the full list — the shared
+    /// core of both claim variants (`blockedBy ∩ {non-completed ids}`).
+    fn open_blockers(task: &TodoTask, all: &[TodoTask]) -> Vec<String> {
+        let open: std::collections::HashSet<&str> = all
+            .iter()
+            .filter(|t| t.status != TodoState::Completed)
+            .map(|t| t.id.as_str())
+            .collect();
+        task.blocked_by
+            .iter()
+            .filter(|b| open.contains(b.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Atomically claim the task under `task_id` for `owner`. 1:1 port of the
+    /// oracle's `QOd` (and, with [`ClaimOptions::check_agent_busy`], its `uTy`
+    /// variant) from `utils/tasks.ts` (2.1.223 @247330643):
+    ///
+    /// * `QOd`: unlocked existence pre-check → lock `<id>.json` → re-read →
+    ///   `already_claimed` (owner set ≠ claimer; empty owner is unowned, JS
+    ///   falsy) / `already_resolved` (completed) / `blocked` (open blockers)
+    ///   → single `{owner}` merge-write → success.
+    /// * `uTy`: the same checks under the LIST-level `.lock` instead, plus
+    ///   `agent_busy` when the claimer owns other non-completed tasks; the
+    ///   success write goes through a per-task file lock (oracle `WXe`).
+    ///
+    /// Any mid-claim I/O failure maps to [`ClaimResult::TaskNotFound`],
+    /// mirroring the oracle's catch-all `catch` arm. (The oracle's `[Tasks]`
+    /// console logs are not reproduced — this module, like the rest of the
+    /// store, does not log; `rIp`'s `[inProcessRunner]` logs live with the
+    /// runner.)
+    pub async fn claim_task(
+        &self,
+        task_id: &str,
+        owner: &str,
+        opts: ClaimOptions,
+    ) -> ClaimResult {
+        // Oracle order: the unlocked existence pre-check runs BEFORE the
+        // checkAgentBusy dispatch.
+        if self.get(task_id).await.is_none() {
+            return ClaimResult::TaskNotFound;
+        }
+        if opts.check_agent_busy {
+            return self.claim_task_with_busy_check(task_id, owner).await;
+        }
+
+        let _guard = self.lock.lock().await;
+        // Lock the individual task file (oracle `my(ASr(e,t), u4t)`).
+        // Best-effort acquire, matching `create`/`update`.
+        let task_path = self.task_path(task_id);
+        let _xlock = crate::proper_lockfile::lock(&task_path).await.ok();
+
+        // Re-read under the lock.
+        let Some(task) = self.get(task_id).await else {
+            return ClaimResult::TaskNotFound;
+        };
+        // JS `l.owner && l.owner !== r`: empty string is falsy ⇒ unowned.
+        if let Some(existing) = task.owner.as_deref() {
+            if !existing.is_empty() && existing != owner {
+                return ClaimResult::AlreadyClaimed { task };
+            }
+        }
+        if task.status == TodoState::Completed {
+            return ClaimResult::AlreadyResolved { task };
+        }
+        let all = self.list().await;
+        let blocked_by_tasks = Self::open_blockers(&task, &all);
+        if !blocked_by_tasks.is_empty() {
+            return ClaimResult::Blocked {
+                task,
+                blocked_by_tasks,
+            };
+        }
+        match self.xod_merge_owner(task_id, owner) {
+            Some(task) => ClaimResult::Success { task },
+            None => ClaimResult::TaskNotFound,
+        }
+    }
+
+    /// The `uTy` arm of [`Self::claim_task`] — see there. LATENT: nothing in
+    /// 2.1.223 passes `checkAgentBusy: true`.
+    async fn claim_task_with_busy_check(&self, task_id: &str, owner: &str) -> ClaimResult {
+        let _guard = self.lock.lock().await;
+        // Oracle `m4s`: ensure + lock the LIST-level `.lock`.
+        self.ensure_list_lock_target();
+        let _xlock = crate::proper_lockfile::lock(&self.list_lock_target())
+            .await
+            .ok();
+
+        // `uTy` works from the full list snapshot (`soe`), not a point read.
+        let all = self.list().await;
+        let Some(task) = all.iter().find(|t| t.id == task_id).cloned() else {
+            return ClaimResult::TaskNotFound;
+        };
+        if let Some(existing) = task.owner.as_deref() {
+            if !existing.is_empty() && existing != owner {
+                return ClaimResult::AlreadyClaimed { task };
+            }
+        }
+        if task.status == TodoState::Completed {
+            return ClaimResult::AlreadyResolved { task };
+        }
+        let blocked_by_tasks = Self::open_blockers(&task, &all);
+        if !blocked_by_tasks.is_empty() {
+            return ClaimResult::Blocked {
+                task,
+                blocked_by_tasks,
+            };
+        }
+        let busy_with_tasks: Vec<String> = all
+            .iter()
+            .filter(|t| {
+                t.status != TodoState::Completed
+                    && t.owner.as_deref() == Some(owner)
+                    && t.id != task_id
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        if !busy_with_tasks.is_empty() {
+            return ClaimResult::AgentBusy {
+                task,
+                busy_with_tasks,
+            };
+        }
+        // Oracle success path is `WXe` — a per-task-file-locked merge-write
+        // (a DIFFERENT lock target than the held list-level `.lock`, so no
+        // reentrancy hazard).
+        let task_path = self.task_path(task_id);
+        let _tlock = crate::proper_lockfile::lock(&task_path).await.ok();
+        match self.xod_merge_owner(task_id, owner) {
+            Some(task) => ClaimResult::Success { task },
+            None => ClaimResult::TaskNotFound,
+        }
+    }
+
+    /// Unassign every non-completed task owned by a departing teammate and
+    /// build the lead's notification. 1:1 port of the oracle's `RSr`
+    /// (`utils/tasks.ts`, 2.1.223 @247331880):
+    ///
+    /// * matches `owner === agent_id || owner === name`;
+    /// * resets each match to ownerless `pending` (oracle
+    ///   `WXe(e, id, {owner: void 0, status: "pending"})`);
+    /// * notification: `` `${name} has shut down.` `` (or `"was terminated"`
+    ///   for [`TeammateEndReason::Terminated`] — latent in 2.1.223), and when
+    ///   any task was unassigned appends `` ` ${n} task(s) were unassigned:
+    ///   #id "subj", …. Use TaskList to check availability and TaskUpdate
+    ///   with owner to reassign them to idle teammates.` ``
+    pub async fn unassign_tasks_for_teammate(
+        &self,
+        agent_id: &str,
+        name: &str,
+        reason: TeammateEndReason,
+    ) -> UnassignOutcome {
+        let matches: Vec<TodoTask> = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|t| {
+                t.status != TodoState::Completed
+                    && (t.owner.as_deref() == Some(agent_id) || t.owner.as_deref() == Some(name))
+            })
+            .collect();
+        for t in &matches {
+            // Oracle `WXe` merge `{owner: void 0, status: "pending"}` —
+            // [`Self::update`] carries the same per-task file lock.
+            self.update(&t.id, |task| {
+                task.owner = None;
+                task.status = TodoState::Pending;
+            })
+            .await;
+        }
+
+        let verb = match reason {
+            TeammateEndReason::Terminated => "was terminated",
+            TeammateEndReason::Shutdown => "has shut down",
+        };
+        let mut notification_message = format!("{name} {verb}.");
+        if !matches.is_empty() {
+            let list = matches
+                .iter()
+                .map(|c| format!("#{} \"{}\"", c.id, c.subject))
+                .collect::<Vec<_>>()
+                .join(", ");
+            notification_message.push_str(&format!(
+                " {} task(s) were unassigned: {list}. Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.",
+                matches.len()
+            ));
+        }
+        UnassignOutcome {
+            unassigned_tasks: matches
+                .into_iter()
+                .map(|t| UnassignedTask {
+                    id: t.id,
+                    subject: t.subject,
+                })
+                .collect(),
+            notification_message,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -601,6 +918,266 @@ mod tests {
         assert_eq!(store.get(&a).await.unwrap().blocks, vec![b.clone()]);
         assert_eq!(store.get(&b).await.unwrap().blocked_by, vec![a.clone()]);
         assert!(!store.block_task(&a, "999").await);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── claim cluster (oracle 2.1.223 QOd / uTy / RSr) ──────────────────────
+
+    async fn seed(store: &TodoStore, subject: &str, status: TodoState, owner: Option<&str>) -> String {
+        let mut t = TodoTask::new(subject.into(), "desc".into(), None, Map::new());
+        t.status = status;
+        t.owner = owner.map(str::to_string);
+        store.create(t).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn claim_success_sets_owner_and_only_owner() {
+        let (store, dir) = temp_store();
+        let id = seed(&store, "open", TodoState::Pending, None).await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let ClaimResult::Success { task } = &res else {
+            panic!("expected Success, got {res:?}");
+        };
+        assert_eq!(task.owner.as_deref(), Some("worker-a"));
+        // The claim writes ONLY {owner} — status stays pending (rIp sets
+        // in_progress in a separate follow-up write).
+        assert_eq!(task.status, TodoState::Pending);
+        // Persisted on disk, not just in the returned struct.
+        assert_eq!(
+            store.get(&id).await.unwrap().owner.as_deref(),
+            Some("worker-a")
+        );
+        assert_eq!(res.reason(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn reclaiming_your_own_task_succeeds() {
+        let (store, dir) = temp_store();
+        let id = seed(&store, "mine", TodoState::Pending, Some("worker-a")).await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        assert!(matches!(res, ClaimResult::Success { .. }), "{res:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn empty_string_owner_counts_as_unowned() {
+        // JS `l.owner && l.owner !== r` — "" is falsy.
+        let (store, dir) = temp_store();
+        let id = seed(&store, "empty-owner", TodoState::Pending, Some("")).await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        assert!(matches!(res, ClaimResult::Success { .. }), "{res:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claim_of_foreign_task_is_already_claimed() {
+        let (store, dir) = temp_store();
+        let id = seed(&store, "theirs", TodoState::Pending, Some("worker-b")).await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let ClaimResult::AlreadyClaimed { task } = &res else {
+            panic!("expected AlreadyClaimed, got {res:?}");
+        };
+        assert_eq!(task.owner.as_deref(), Some("worker-b"));
+        assert_eq!(res.reason(), Some("already_claimed"));
+        // Owner unchanged on disk.
+        assert_eq!(
+            store.get(&id).await.unwrap().owner.as_deref(),
+            Some("worker-b")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claim_of_completed_task_is_already_resolved() {
+        let (store, dir) = temp_store();
+        let id = seed(&store, "done", TodoState::Completed, None).await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        assert!(matches!(res, ClaimResult::AlreadyResolved { .. }), "{res:?}");
+        assert_eq!(res.reason(), Some("already_resolved"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claim_of_missing_task_is_task_not_found() {
+        let (store, dir) = temp_store();
+        let res = store
+            .claim_task("41", "worker-a", ClaimOptions::default())
+            .await;
+        assert_eq!(res, ClaimResult::TaskNotFound);
+        assert_eq!(res.reason(), Some("task_not_found"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claim_blocked_by_open_blocker_lists_only_open_ones() {
+        let (store, dir) = temp_store();
+        let done_blocker = seed(&store, "done blocker", TodoState::Completed, None).await;
+        let open_blocker = seed(&store, "open blocker", TodoState::Pending, None).await;
+        let id = seed(&store, "target", TodoState::Pending, None).await;
+        store.block_task(&done_blocker, &id).await;
+        store.block_task(&open_blocker, &id).await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let ClaimResult::Blocked {
+            blocked_by_tasks, ..
+        } = &res
+        else {
+            panic!("expected Blocked, got {res:?}");
+        };
+        // Only the NON-completed blocker blocks (oracle filters via the
+        // incomplete-id set).
+        assert_eq!(blocked_by_tasks, &vec![open_blocker.clone()]);
+        assert_eq!(res.reason(), Some("blocked"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claim_succeeds_once_all_blockers_complete() {
+        let (store, dir) = temp_store();
+        let blocker = seed(&store, "blocker", TodoState::Pending, None).await;
+        let id = seed(&store, "target", TodoState::Pending, None).await;
+        store.block_task(&blocker, &id).await;
+        store
+            .update(&blocker, |t| t.status = TodoState::Completed)
+            .await;
+        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        assert!(matches!(res, ClaimResult::Success { .. }), "{res:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn busy_check_rejects_owner_with_other_open_tasks() {
+        let (store, dir) = temp_store();
+        let other = seed(&store, "other open", TodoState::InProgress, Some("worker-a")).await;
+        let done = seed(&store, "other done", TodoState::Completed, Some("worker-a")).await;
+        let id = seed(&store, "target", TodoState::Pending, None).await;
+        let res = store
+            .claim_task(
+                &id,
+                "worker-a",
+                ClaimOptions {
+                    check_agent_busy: true,
+                },
+            )
+            .await;
+        let ClaimResult::AgentBusy {
+            busy_with_tasks, ..
+        } = &res
+        else {
+            panic!("expected AgentBusy, got {res:?}");
+        };
+        // The completed task and the target itself are excluded.
+        assert_eq!(busy_with_tasks, &vec![other.clone()]);
+        assert!(!busy_with_tasks.contains(&done));
+        assert_eq!(res.reason(), Some("agent_busy"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn busy_check_free_owner_claims_successfully() {
+        let (store, dir) = temp_store();
+        seed(&store, "someone elses", TodoState::InProgress, Some("worker-b")).await;
+        let id = seed(&store, "target", TodoState::Pending, None).await;
+        let res = store
+            .claim_task(
+                &id,
+                "worker-a",
+                ClaimOptions {
+                    check_agent_busy: true,
+                },
+            )
+            .await;
+        let ClaimResult::Success { task } = res else {
+            panic!("expected Success");
+        };
+        assert_eq!(task.owner.as_deref(), Some("worker-a"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claim_leaves_no_stale_lock_directories() {
+        let (store, dir) = temp_store();
+        let id = seed(&store, "open", TodoState::Pending, None).await;
+        let _ = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let _ = store
+            .claim_task(
+                &id,
+                "worker-a",
+                ClaimOptions {
+                    check_agent_busy: true,
+                },
+            )
+            .await;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.ends_with(".lock.lock") && !name.ends_with(".json.lock"),
+                "stale lock artifact left behind: {name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn unassign_matches_agent_id_or_name_and_resets_to_pending() {
+        let (store, dir) = temp_store();
+        let by_id = seed(&store, "Fix parser", TodoState::InProgress, Some("agent-uuid-1")).await;
+        let by_name = seed(&store, "Write docs", TodoState::Pending, Some("nova")).await;
+        let done = seed(&store, "Shipped", TodoState::Completed, Some("nova")).await;
+        let foreign = seed(&store, "Other", TodoState::Pending, Some("someone-else")).await;
+
+        let outcome = store
+            .unassign_tasks_for_teammate("agent-uuid-1", "nova", TeammateEndReason::Shutdown)
+            .await;
+
+        // Matched by agent id OR display name; completed + foreign untouched.
+        assert_eq!(
+            outcome
+                .unassigned_tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![by_id.as_str(), by_name.as_str()]
+        );
+        for id in [&by_id, &by_name] {
+            let t = store.get(id).await.unwrap();
+            assert_eq!(t.owner, None, "owner cleared");
+            assert_eq!(t.status, TodoState::Pending, "status reset");
+        }
+        assert_eq!(
+            store.get(&done).await.unwrap().owner.as_deref(),
+            Some("nova"),
+            "completed task keeps its owner"
+        );
+        assert_eq!(
+            store.get(&foreign).await.unwrap().owner.as_deref(),
+            Some("someone-else")
+        );
+        // Byte-exact notification (oracle segment table @247332622 region):
+        // base sentence + ` N task(s) were unassigned: #id "subj", …. Use …`.
+        assert_eq!(
+            outcome.notification_message,
+            format!(
+                "nova has shut down. 2 task(s) were unassigned: #{by_id} \"Fix parser\", #{by_name} \"Write docs\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates."
+            )
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn unassign_with_no_matches_is_bare_sentence() {
+        let (store, dir) = temp_store();
+        seed(&store, "unrelated", TodoState::Pending, None).await;
+        let outcome = store
+            .unassign_tasks_for_teammate("agent-uuid-1", "nova", TeammateEndReason::Shutdown)
+            .await;
+        assert!(outcome.unassigned_tasks.is_empty());
+        assert_eq!(outcome.notification_message, "nova has shut down.");
+        // Latent "terminated" branch (zero call sites in 2.1.223) byte-check.
+        let outcome = store
+            .unassign_tasks_for_teammate("agent-uuid-1", "nova", TeammateEndReason::Terminated)
+            .await;
+        assert_eq!(outcome.notification_message, "nova was terminated.");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

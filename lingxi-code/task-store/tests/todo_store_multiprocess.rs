@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Map};
-use task_store::todo_store::{TodoStore, TodoTask};
+use task_store::todo_store::{ClaimOptions, ClaimResult, TodoStore, TodoTask};
 
 const ROLE_ENV: &str = "LINGXI_TODO_MP_ROLE";
 const DIR_ENV: &str = "LINGXI_TODO_MP_DIR";
+const CLAIM_ID_ENV: &str = "LINGXI_TODO_MP_CLAIM_ID";
 /// Worker processes.
 const N: usize = 4;
 /// Tasks each process creates (create phase) / increments (update phase).
@@ -40,6 +41,7 @@ fn multiprocess_create_and_update_is_race_free() {
             match role.as_str() {
                 "create" => child_create(&dir).await,
                 "update" => child_update(&dir).await,
+                "claim" => child_claim(&dir).await,
                 other => {
                     eprintln!("unknown role {other}");
                     1
@@ -97,6 +99,39 @@ fn multiprocess_create_and_update_is_race_free() {
         "lost update: {N} procs * {PER_PROC} increments should total {total}, got {counter}"
     );
 
+    // Phase 3: N processes race ONE `claim_task` each on a fresh pending task
+    // (oracle QOd). The per-task file lock makes check+write atomic, so exactly
+    // one claimer may win; the rest must observe `already_claimed`.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("parent runtime");
+    let claim_target = rt.block_on(async {
+        let store = TodoStore::in_dir(dir.clone());
+        store
+            .create(TodoTask::new(
+                "contended".into(),
+                "d".into(),
+                None,
+                Map::new(),
+            ))
+            .await
+            .expect("create claim target")
+    });
+    let exit_codes = run_workers_with_codes("claim", &dir, &claim_target);
+    let wins = exit_codes.iter().filter(|&&c| c == 0).count();
+    let losses = exit_codes.iter().filter(|&&c| c == 2).count();
+    assert_eq!(
+        (wins, losses),
+        (1, N - 1),
+        "exactly one claimer must win; exit codes: {exit_codes:?}"
+    );
+    let owner = read_task(&dir, &claim_target).owner.expect("owner set");
+    assert!(
+        owner.starts_with("claimer-"),
+        "winning claimer recorded on disk, got {owner}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -136,6 +171,25 @@ async fn child_update(dir: &Path) -> i32 {
     0
 }
 
+/// One contended claim (phase 3). Exit code: 0 = won the claim, 2 = lost to
+/// another claimer (`already_claimed`), 1 = anything else (a bug).
+async fn child_claim(dir: &Path) -> i32 {
+    let store = TodoStore::in_dir(dir.to_path_buf());
+    let target = std::env::var(CLAIM_ID_ENV).expect("child needs claim target id");
+    let owner = format!("claimer-{}", std::process::id());
+    match store
+        .claim_task(&target, &owner, ClaimOptions::default())
+        .await
+    {
+        ClaimResult::Success { .. } => 0,
+        ClaimResult::AlreadyClaimed { .. } => 2,
+        other => {
+            eprintln!("unexpected claim outcome: {other:?}");
+            1
+        }
+    }
+}
+
 fn read_task(dir: &Path, id: &str) -> TodoTask {
     let content =
         std::fs::read_to_string(dir.join(format!("{id}.json"))).expect("read shared task");
@@ -145,24 +199,41 @@ fn read_task(dir: &Path, id: &str) -> TodoTask {
 /// Spawn N copies of this test binary as `role` workers against `dir` and wait
 /// for each to exit successfully.
 fn run_workers(role: &str, dir: &Path) {
+    let codes = spawn_workers(role, dir, None);
+    for code in codes {
+        assert_eq!(code, 0, "{role} worker failed with exit code {code}");
+    }
+}
+
+/// Like [`run_workers`] but collects raw exit codes (phase 3 uses them to
+/// distinguish claim wins from losses) and threads the claim-target id.
+fn run_workers_with_codes(role: &str, dir: &Path, claim_id: &str) -> Vec<i32> {
+    spawn_workers(role, dir, Some(claim_id))
+}
+
+fn spawn_workers(role: &str, dir: &Path, claim_id: Option<&str>) -> Vec<i32> {
     let exe = std::env::current_exe().expect("current_exe");
     let children: Vec<_> = (0..N)
         .map(|_| {
-            Command::new(&exe)
-                .arg("multiprocess_create_and_update_is_race_free")
+            let mut cmd = Command::new(&exe);
+            cmd.arg("multiprocess_create_and_update_is_race_free")
                 .arg("--exact")
                 .arg("--nocapture")
                 .env(ROLE_ENV, role)
-                .env(DIR_ENV, dir)
-                // Don't let the harness's own env leak a stale role/dir.
-                .spawn()
-                .expect("spawn worker")
+                .env(DIR_ENV, dir);
+            if let Some(id) = claim_id {
+                cmd.env(CLAIM_ID_ENV, id);
+            }
+            cmd.spawn().expect("spawn worker")
         })
         .collect();
-    for mut child in children {
-        let status = child.wait().expect("await worker");
-        assert!(status.success(), "{role} worker failed: {status}");
-    }
+    children
+        .into_iter()
+        .map(|mut child| {
+            let status = child.wait().expect("await worker");
+            status.code().unwrap_or(-1)
+        })
+        .collect()
 }
 
 fn unique_dir() -> PathBuf {

@@ -1195,7 +1195,7 @@ Expected: 编译失败，四个新状态与六个新方法都不存在。
         self.draft.plan_for_revision = None;
 ```
 
-`open_designer`（`state.rs:259`）的允许态加上 `AppWorkflowState::QuestionnaireFailed` 与 `AppWorkflowState::PlanFailed`，让失败后还能回到设计器。
+**`open_designer` 不动。** 计划初稿曾要求把两个失败态加进它的允许列表「让失败后还能回到设计器」——那是错的：`open_designer` 会把状态设成 `AwaitingSpecConfirmation`（`state.rs:281`），从 `questionnaire_failed` 调它等于在没有问卷、没有方案的情况下打开确认门。失败后回设计器不需要任何服务端转移：`retry_questionnaire` / `retry_plan` 已经负责状态，客户端本地导航即可。
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -2334,6 +2334,8 @@ fn sources_schema() -> serde_json::Value {
 
 三个 prompt 文件写明各自的职责、输出契约与硬约束（写码那份必须列出 `WRITABLE_ROOTS`、禁 API routes / Server Actions / `eval` / 外部脚本 / 直接网络调用、必须走 `window.lingxi.v1`、必须静态导出兼容）。
 
+`generate_sources.md` 还必须写明**写盘是覆盖语义**：初次生成要给出完整的一套文件；修订时只返回需要新建或改写的文件，未提及的文件会原样保留，**不要为了「保险」重发整个 app**。
+
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cargo test -p engine-mobile --all-features local_apps_llm:: 2>&1 | tail -20`
@@ -2471,6 +2473,31 @@ async fn a_revision_job_passes_the_prompt_and_the_existing_tree_to_the_model() {
     assert!(prompt.contains("把搜索框挪到顶部"), "the user's words: {prompt}");
     assert!(prompt.contains("components/Old.jsx"), "the existing tree: {prompt}");
 }
+
+#[tokio::test]
+async fn a_revision_leaves_files_the_model_did_not_mention_untouched() {
+    let harness = generation_harness(vec![Ok(serde_json::json!({
+        "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+    }))])
+    .await;
+    harness.seed("components/Keep.jsx", "export const Keep = 1").await;
+
+    let mut request = harness.initial_request();
+    request.kind = GenerationRequestKind::Revision;
+    request.prompt = Some("把搜索框挪到顶部".into());
+
+    harness
+        .executor
+        .generate_source(&request, &harness.layout)
+        .await
+        .expect("revision succeeds");
+
+    assert_eq!(
+        harness.read("components/Keep.jsx").await.as_deref(),
+        Some("export const Keep = 1"),
+        "writes are an overlay — a one-line change must not require re-emitting the whole app"
+    );
+}
 ```
 
 `generation_harness(responses)` 建一个内存 fs 的 `AppLayout`、一个 `ScriptedModel`（复用 Task 8 那个，提到 `crate::local_apps_llm::test_support` 或在本模块内重建）、一个已 `attach_service` 的 `MobileAppGenerationExecutor`，并给出 `read` / `seed` / `model_calls` / `prompt_at` / `initial_request` 助手。
@@ -2524,7 +2551,9 @@ Expected: 编译失败，构造器还没有 `llm` 参数。
         let mut last_error = None;
         for _ in 0..MAX_ATTEMPTS {
             let writes = self.llm.generate_sources(&source_request).await?;
-            clear_generated_roots(&workspace)?;
+            // 覆盖写，不清空：模型返回哪几个文件就替换哪几个，其余原样
+            // 保留。这样「把搜索框挪到顶部」只需重写一个文件，而不是
+            // 逼模型重发整个 app —— 那样它漏发一个文件就等于静默删除它。
             for write in &writes {
                 write_file(&workspace, &write.path, write.contents.as_bytes(), true)?;
             }
@@ -2544,7 +2573,9 @@ Expected: 编译失败，构造器还没有 `llm` 参数。
     }
 ```
 
-新增两个私有助手：`read_generated_tree(workspace)` 遍历五个可写根收集 `FileWrite`（受 `MAX_GENERATED_TOTAL_BYTES` 预算约束，超出则截断并在末尾追加一条说明文件，防止一棵大树把 prompt 撑爆）；`clear_generated_roots(workspace)` 在写入前清空五个可写根——**必须清空**，否则上一轮留下的文件会和这一轮的混在一起，validator 看到的是两代产物的并集。
+新增一个私有助手 `read_generated_tree(workspace) -> Result<Vec<FileWrite>, AppError>`：遍历五个可写根收集现有源码，受 `MAX_GENERATED_TOTAL_BYTES` 预算约束，超出时按路径字典序截断，并把「已省略 N 个文件」写进 `SourceRequest` 的**提示文本**（不是伪造一个 `FileWrite`——那会让模型以为工作区里真有这么一个文件）。
+
+**写盘是覆盖语义，不清空目录。** 模型返回的集合被当作要创建或替换的文件，未提及的文件原样保留——就像开发者改代码。清空重写会让每一次「把按钮改大一点」都变成整个 app 的重新生成，而模型只要漏发一个文件就等于静默删掉它。代价是可能留下孤儿文件；这是真实文件树的常态，`validate_workspace_source` 仍然对合并后的整棵树生效，孤儿文件挡不住构建。真需要删文件时再加一个显式的 `deletions: Vec<String>` 字段，现在 YAGNI。
 
 `local_apps_profile.rs` 里构造 `MobileAppGenerationExecutor` 的地方补上 `llm` 实参。
 

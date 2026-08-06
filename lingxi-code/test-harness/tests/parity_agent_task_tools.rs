@@ -82,14 +82,18 @@ fn agent_task_tool_names_match_production_constants() {
 }
 
 #[test]
-fn six_builtin_subagent_types_match_production() {
+fn four_builtin_subagent_types_match_production() {
+    // Re-captured 2026-08-06 from the REAL 2.1.220/221/223 binaries: the old
+    // 2026-03-31 TS snapshot's `verification` agent is a phantom (0-hit in
+    // every local oracle), and the oracle's `claude-code-guide` + `claude`
+    // catch-all are excluded as the user-confirmed multi-provider divergence.
     let f = fx();
     let prod: Vec<String> = tool_agent::agent::BUILTIN_SUBAGENT_TYPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
     assert_eq!(f.builtin_subagent_types, prod);
-    assert_eq!(f.builtin_subagent_types.len(), 6);
+    assert_eq!(f.builtin_subagent_types.len(), 4);
 }
 
 #[test]

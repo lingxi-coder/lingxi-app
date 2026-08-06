@@ -15,23 +15,26 @@
 //!   [`BUILTIN_AGENT_MAX_TURNS`] as a high safety cap (matching
 //!   `parse_agent_markdown`'s custom-agent default of 100).
 //! - **`permission_mode`**: all built-ins use [`AgentPermissionMode::Bubble`].
-//!   claude-code's `claude-code-guide` uses `'dontAsk'`, which has no Rust
-//!   enum analog and would be INERT at the runner anyway (the runner reads
-//!   `permission_mode` only via [`crate::tool_resolver::AgentToolResolver`],
-//!   and only `Plan` narrows the tool set). The read-only agents (Explore,
-//!   Plan, verification) express their read-only-ness via
+//!   The read-only agents (Explore,
+//!   Plan) express their read-only-ness via
 //!   [`AgentToolPolicy::Except`] over the write tools — NOT via
 //!   `permission_mode: Plan` (which would over-narrow to 5 read tools and drop
 //!   the read-only `Bash` they legitimately use).
-//! - **Dynamic prompts deferred**: `claude-code-guide` and `statusline-setup`
-//!   build their system prompt from host context (the user's skills / MCP /
-//!   plugins / settings; PS1 shell logic) that the Rust port does not yet
-//!   assemble. Their structural config (tool policy / model / `when_to_use`)
-//!   is faithful, and their prompt body is assembled from live host context
-//!   (settings path, enabled plugins, shell/terminal hints, and the current
-//!   `statusLine` setting when present). The 4 static agents' prompts are
+//! - **Dynamic prompts deferred**: `statusline-setup`
+//!   builds its system prompt from host context (PS1 shell logic, settings)
+//!   that the Rust port does not fully
+//!   assemble. Its structural config (tool policy / model / `when_to_use`)
+//!   is faithful, and its prompt body is assembled from live host context
+//!   (settings path, shell/terminal hints, and the current
+//!   `statusLine` setting when present). The 3 static agents' prompts are
 //!   ported VERBATIM (non-embedded-search-tools branch:
 //!   `Glob`/`Grep`/`Read`/`Bash`).
+//! - **Claude-branded agents excluded (multi-provider divergence, user-
+//!   confirmed 2026-08-06)**: the oracle's `claude-code-guide` (Claude-docs
+//!   guide) and the 2.1.223 `claude` catch-all (`QFt`, FleetView default) are
+//!   deliberately NOT registered — LingXi is multi-provider and both agents
+//!   steer users to Claude-specific docs/products. Recorded in the
+//!   accepted-divergences ledger; do NOT re-add for byte parity.
 //! - **`color` / `background`**: now exist as `AgentDefinition` fields (parsed
 //!   from frontmatter / JSON by [`crate::catalog`]); built-ins leave them at
 //!   their defaults here (`color` is assigned at display time). `omitLingxiMd`
@@ -51,8 +54,6 @@
 //! - **One-shot only**: this spawn path always sets `persistent: false`, so the
 //!   reference's `ONE_SHOT_BUILTIN_AGENT_TYPES` (Explore / Plan) vs continuable
 //!   distinction has no behavioral surface here — every spawn is one-shot.
-//!   `claude-code-guide`'s `when_to_use` mention of continuing a prior run via
-//!   `SendMessage` is therefore not provided by this path yet.
 
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
@@ -66,7 +67,7 @@ use std::path::{Path, PathBuf};
 pub const BUILTIN_AGENT_MAX_TURNS: u32 = 100;
 const LINGXI_DOT_DIR: &str = ".lingxi";
 
-/// Tools the read-only built-ins (Explore, Plan, verification) must NOT have,
+/// Tools the read-only built-ins (Explore, Plan) must NOT have,
 /// mirroring claude-code's `disallowedTools` for those agents.
 fn read_only_disallowed() -> Vec<String> {
     [
@@ -198,129 +199,6 @@ List 3-5 files most critical for implementing this plan:
 - path/to/file3.ts
 
 REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any files. You do NOT have access to file editing tools.";
-
-/// `src/tools/AgentTool/built-in/verificationAgent.ts`
-/// (`${BASH_TOOL_NAME}` -> `Bash`, `${WEB_FETCH_TOOL_NAME}` -> `WebFetch`).
-const VERIFICATION_PROMPT: &str = r#"You are a verification specialist. Your job is not to confirm the implementation works — it's to try to break it.
-
-You have two documented failure patterns. First, verification avoidance: when faced with a check, you find reasons not to run it — you read code, narrate what you would test, write "PASS," and move on. Second, being seduced by the first 80%: you see a polished UI or a passing test suite and feel inclined to pass it, not noticing half the buttons do nothing, the state vanishes on refresh, or the backend crashes on bad input. The first 80% is the easy part. Your entire value is in finding the last 20%. The caller may spot-check your commands by re-running them — if a PASS step has no command output, or output that doesn't match re-execution, your report gets rejected.
-
-=== CRITICAL: DO NOT MODIFY THE PROJECT ===
-You are STRICTLY PROHIBITED from:
-- Creating, modifying, or deleting any files IN THE PROJECT DIRECTORY
-- Installing dependencies or packages
-- Running git write operations (add, commit, push)
-
-You MAY write ephemeral test scripts to a temp directory (/tmp or $TMPDIR) via Bash redirection when inline commands aren't sufficient — e.g., a multi-step race harness or a Playwright test. Clean up after yourself.
-
-Check your ACTUAL available tools rather than assuming from this prompt. You may have browser automation (mcp__claude-in-chrome__*, mcp__playwright__*), WebFetch, or other MCP tools depending on the session — do not skip capabilities you didn't think to check for.
-
-=== WHAT YOU RECEIVE ===
-You will receive: the original task description, files changed, approach taken, and optionally a plan file path.
-
-=== VERIFICATION STRATEGY ===
-Adapt your strategy based on what was changed:
-
-**Frontend changes**: Start dev server → check your tools for browser automation (mcp__claude-in-chrome__*, mcp__playwright__*) and USE them to navigate, screenshot, click, and read console — do NOT say "needs a real browser" without attempting → curl a sample of page subresources (image-optimizer URLs like /_next/image, same-origin API routes, static assets) since HTML can serve 200 while everything it references fails → run frontend tests
-**Backend/API changes**: Start server → curl/fetch endpoints → verify response shapes against expected values (not just status codes) → test error handling → check edge cases
-**CLI/script changes**: Run with representative inputs → verify stdout/stderr/exit codes → test edge inputs (empty, malformed, boundary) → verify --help / usage output is accurate
-**Infrastructure/config changes**: Validate syntax → dry-run where possible (terraform plan, kubectl apply --dry-run=server, docker build, nginx -t) → check env vars / secrets are actually referenced, not just defined
-**Library/package changes**: Build → full test suite → import the library from a fresh context and exercise the public API as a consumer would → verify exported types match README/docs examples
-**Bug fixes**: Reproduce the original bug → verify fix → run regression tests → check related functionality for side effects
-**Mobile (iOS/Android)**: Clean build → install on simulator/emulator → dump accessibility/UI tree (idb ui describe-all / uiautomator dump), find elements by label, tap by tree coords, re-dump to verify; screenshots secondary → kill and relaunch to test persistence → check crash logs (logcat / device console)
-**Data/ML pipeline**: Run with sample input → verify output shape/schema/types → test empty input, single row, NaN/null handling → check for silent data loss (row counts in vs out)
-**Database migrations**: Run migration up → verify schema matches intent → run migration down (reversibility) → test against existing data, not just empty DB
-**Refactoring (no behavior change)**: Existing test suite MUST pass unchanged → diff the public API surface (no new/removed exports) → spot-check observable behavior is identical (same inputs → same outputs)
-**Other change types**: The pattern is always the same — (a) figure out how to exercise this change directly (run/call/invoke/deploy it), (b) check outputs against expectations, (c) try to break it with inputs/conditions the implementer didn't test. The strategies above are worked examples for common cases.
-
-=== REQUIRED STEPS (universal baseline) ===
-1. Read the project's LINGXI.md / README for build/test commands and conventions. Check package.json / Makefile / pyproject.toml for script names. If the implementer pointed you to a plan or spec file, read it — that's the success criteria.
-2. Run the build (if applicable). A broken build is an automatic FAIL.
-3. Run the project's test suite (if it has one). Failing tests are an automatic FAIL.
-4. Run linters/type-checkers if configured (eslint, tsc, mypy, etc.).
-5. Check for regressions in related code.
-
-Then apply the type-specific strategy above. Match rigor to stakes: a one-off script doesn't need race-condition probes; production payments code needs everything.
-
-Test suite results are context, not evidence. Run the suite, note pass/fail, then move on to your real verification. The implementer is an LLM too — its tests may be heavy on mocks, circular assertions, or happy-path coverage that proves nothing about whether the system actually works end-to-end.
-
-=== RECOGNIZE YOUR OWN RATIONALIZATIONS ===
-You will feel the urge to skip checks. These are the exact excuses you reach for — recognize them and do the opposite:
-- "The code looks correct based on my reading" — reading is not verification. Run it.
-- "The implementer's tests already pass" — the implementer is an LLM. Verify independently.
-- "This is probably fine" — probably is not verified. Run it.
-- "Let me start the server and check the code" — no. Start the server and hit the endpoint.
-- "I don't have a browser" — did you actually check for mcp__claude-in-chrome__* / mcp__playwright__*? If present, use them. If an MCP tool fails, troubleshoot (server running? selector right?). The fallback exists so you don't invent your own "can't do this" story.
-- "This would take too long" — not your call.
-If you catch yourself writing an explanation instead of a command, stop. Run the command.
-
-=== ADVERSARIAL PROBES (adapt to the change type) ===
-Functional tests confirm the happy path. Also try to break it:
-- **Concurrency** (servers/APIs): parallel requests to create-if-not-exists paths — duplicate sessions? lost writes?
-- **Boundary values**: 0, -1, empty string, very long strings, unicode, MAX_INT
-- **Idempotency**: same mutating request twice — duplicate created? error? correct no-op?
-- **Orphan operations**: delete/reference IDs that don't exist
-These are seeds, not a checklist — pick the ones that fit what you're verifying.
-
-=== BEFORE ISSUING PASS ===
-Your report must include at least one adversarial probe you ran (concurrency, boundary, idempotency, orphan op, or similar) and its result — even if the result was "handled correctly." If all your checks are "returns 200" or "test suite passes," you have confirmed the happy path, not verified correctness. Go back and try to break something.
-
-=== BEFORE ISSUING FAIL ===
-You found something that looks broken. Before reporting FAIL, check you haven't missed why it's actually fine:
-- **Already handled**: is there defensive code elsewhere (validation upstream, error recovery downstream) that prevents this?
-- **Intentional**: does LINGXI.md / comments / commit message explain this as deliberate?
-- **Not actionable**: is this a real limitation but unfixable without breaking an external contract (stable API, protocol spec, backwards compat)? If so, note it as an observation, not a FAIL — a "bug" that can't be fixed isn't actionable.
-Don't use these as excuses to wave away real issues — but don't FAIL on intentional behavior either.
-
-=== OUTPUT FORMAT (REQUIRED) ===
-Every check MUST follow this structure. A check without a Command run block is not a PASS — it's a skip.
-
-```
-### Check: [what you're verifying]
-**Command run:**
-  [exact command you executed]
-**Output observed:**
-  [actual terminal output — copy-paste, not paraphrased. Truncate if very long but keep the relevant part.]
-**Result: PASS** (or FAIL — with Expected vs Actual)
-```
-
-Bad (rejected):
-```
-### Check: POST /api/register validation
-**Result: PASS**
-Evidence: Reviewed the route handler in routes/auth.py. The logic correctly validates
-email format and password length before DB insert.
-```
-(No command run. Reading code is not verification.)
-
-Good:
-```
-### Check: POST /api/register rejects short password
-**Command run:**
-  curl -s -X POST localhost:8000/api/register -H 'Content-Type: application/json' \
-    -d '{"email":"t@t.co","password":"short"}' | python3 -m json.tool
-**Output observed:**
-  {
-    "error": "password must be at least 8 characters"
-  }
-  (HTTP 400)
-**Expected vs Actual:** Expected 400 with password-length error. Got exactly that.
-**Result: PASS**
-```
-
-End with exactly this line (parsed by caller):
-
-VERDICT: PASS
-or
-VERDICT: FAIL
-or
-VERDICT: PARTIAL
-
-PARTIAL is for environmental limitations only (no test framework, tool unavailable, server can't start) — not for "I'm unsure whether this is a bug." If you can run the check, you must decide PASS or FAIL.
-
-Use the literal string `VERDICT: ` followed by exactly one of `PASS`, `FAIL`, `PARTIAL`. No markdown bold, no punctuation, no variation.
-- **FAIL**: include what failed, exact error output, reproduction steps.
-- **PARTIAL**: what was verified, what could not be and why (missing tool/env), what the implementer should know."#;
 
 // ── Workflow-subagent prompts (byte-identical to kBp / xBp in v2.1.186) ──
 
@@ -494,39 +372,6 @@ fn configured_output_style(settings_json: Option<&serde_json::Value>) -> String 
         .unwrap_or_else(|| "default".to_string())
 }
 
-fn dynamic_claude_code_guide_prompt() -> String {
-    let ctx = builtin_prompt_context();
-    let plugins = enabled_plugin_names(ctx.settings_json.as_ref());
-    let plugin_line = if plugins.is_empty() {
-        "Enabled plugins: none detected.".to_string()
-    } else {
-        format!("Enabled plugins: {}.", plugins.join(", "))
-    };
-    let cwd = ctx
-        .cwd
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    format!(
-        "You are the Claude guide agent. Help the user understand and use Claude Code (the CLI tool), the Claude Agent SDK, and the Claude API effectively.\n\n\
-Answer questions about Claude Code features, hooks, slash commands, MCP servers, settings, IDE integrations, keyboard shortcuts, status line behavior, custom output styles, and plugin behavior. Prefer official documentation and current local configuration evidence over assumptions.\n\n\
-Host context:\n\
-- Settings path: {}\n\
-- Current working directory: {}\n\
-- Shell: {}\n\
-- Terminal: {}\n\
-- Output style: {}\n\
-- {}\n\n\
-Use this context when the user asks what is configured locally. If the answer depends on runtime state you cannot infer from these inputs, say what you verified and what remains unknown.",
-        ctx.settings_path.display(),
-        cwd,
-        ctx.shell,
-        ctx.terminal,
-        configured_output_style(ctx.settings_json.as_ref()),
-        plugin_line,
-    )
-}
-
 fn dynamic_statusline_setup_prompt() -> String {
     let ctx = builtin_prompt_context();
     let ps1 = std::env::var("PS1")
@@ -564,8 +409,7 @@ fn def(
         max_turns: BUILTIN_AGENT_MAX_TURNS,
         model,
         // See module docs: Bubble for all; read-only-ness is via `Except`, not
-        // `permission_mode: Plan`. `claude-code-guide`'s `dontAsk` has no Rust
-        // analog and is inert at the runner.
+        // `permission_mode: Plan`.
         permission_mode: AgentPermissionMode::Bubble,
         source: AgentSource::BuiltIn,
         base_dir: "built-in".into(),
@@ -590,12 +434,20 @@ fn def(
     }
 }
 
-/// The 7 built-in subagent definitions, byte-aligned with
+/// The 5 built-in subagent definitions, byte-aligned with
 /// `claude-code/src/tools/AgentTool/built-in/*.ts` (3P/non-ant defaults).
 ///
 /// Returned in the upstream registration order (general-purpose,
-/// statusline-setup, Explore, Plan, claude-code-guide, verification,
-/// workflow-subagent). The caller indexes by `agent_type`, so order is cosmetic.
+/// statusline-setup, Explore, Plan, workflow-subagent).
+/// The caller indexes by `agent_type`, so order is cosmetic.
+///
+/// NOTE (2.1.223 audit): the oracle's `verificationAgent` never existed in any
+/// local oracle binary (2.1.220/221/223 all 0-hit) — a stale-leaked-TS phantom,
+/// removed. The oracle `rJe` roster additionally carries `claude-code-guide`
+/// and a `claude` catch-all — both deliberately excluded as the multi-provider
+/// divergence (see module docs). The oracle registers `workflow-subagent` via
+/// the workflow path rather than `builtInAgents`; the port keeps it here as
+/// its resolution registry.
 #[must_use]
 pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
     vec![
@@ -647,26 +499,6 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             AgentToolPolicy::Except(read_only_disallowed()),
             AgentModel::Inherit,
             PLAN_PROMPT,
-        ),
-        def(
-            "claude-code-guide",
-            "Use this agent when the user asks questions (\"Can Claude...\", \"Does Claude...\", \"How do I...\") about: (1) Claude Code (the CLI tool) - features, hooks, slash commands, MCP servers, settings, IDE integrations, keyboard shortcuts; (2) Claude Agent SDK - building custom agents; (3) Claude API (formerly Anthropic API) - API usage, tool use, Anthropic SDK usage. **IMPORTANT:** Before spawning a new agent, check if there is already a running or recently completed claude-code-guide agent that you can continue via SendMessage.",
-            AgentToolPolicy::Explicit(vec![
-                "Glob".to_string(),
-                "Grep".to_string(),
-                "Read".to_string(),
-                "WebFetch".to_string(),
-                "WebSearch".to_string(),
-            ]),
-            AgentModel::Alias("haiku".to_string()),
-            &dynamic_claude_code_guide_prompt(),
-        ),
-        def(
-            "verification",
-            "Use this agent to verify that implementation work is correct before reporting completion. Invoke after non-trivial tasks (3+ file edits, backend/API changes, infrastructure changes). Pass the ORIGINAL user task description, list of files changed, and approach taken. The agent runs builds, tests, linters, and checks to produce a PASS/FAIL/PARTIAL verdict with evidence.",
-            AgentToolPolicy::Except(read_only_disallowed()),
-            AgentModel::Inherit,
-            VERIFICATION_PROMPT,
         ),
         // workflow-subagent has disallowed_tools, which the `def` helper doesn't
         // support (it always sets disallowed_tools: vec![]). Use the dedicated
@@ -738,9 +570,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn has_seven_builtins_with_unique_types() {
+    fn has_five_builtins_with_unique_types() {
         let defs = builtin_agent_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 5);
         let mut names: Vec<&str> = defs.iter().map(|d| d.agent_type.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -748,10 +580,8 @@ mod tests {
             vec![
                 "Explore",
                 "Plan",
-                "claude-code-guide",
                 "general-purpose",
                 "statusline-setup",
-                "verification",
                 "workflow-subagent",
             ]
         );
@@ -774,7 +604,7 @@ mod tests {
             }
         ));
         // Read-only agents: Except the 5 write tools.
-        for ty in ["Explore", "Plan", "verification"] {
+        for ty in ["Explore", "Plan"] {
             match &find(&defs, ty).tools {
                 AgentToolPolicy::Except(names) => assert_eq!(names, &read_only_disallowed()),
                 other => panic!("{ty}: expected Except, got {other:?}"),
@@ -787,10 +617,6 @@ mod tests {
             }
             other => panic!("expected Explicit, got {other:?}"),
         }
-        match &find(&defs, "claude-code-guide").tools {
-            AgentToolPolicy::Explicit(v) => assert_eq!(v.len(), 5),
-            other => panic!("expected Explicit, got {other:?}"),
-        }
     }
 
     #[test]
@@ -801,17 +627,9 @@ mod tests {
             AgentModel::Inherit
         ));
         assert!(matches!(find(&defs, "Plan").model, AgentModel::Inherit));
-        assert!(matches!(
-            find(&defs, "verification").model,
-            AgentModel::Inherit
-        ));
         // 2.1.198 `qme`: Explore's frontmatter is `inherit` — the session-model
         // cap is applied by `resolve_builtin_explore_model` (GAe), not here.
         assert!(matches!(find(&defs, "Explore").model, AgentModel::Inherit));
-        assert!(matches!(
-            &find(&defs, "claude-code-guide").model,
-            AgentModel::Alias(m) if m == "haiku"
-        ));
         assert!(matches!(
             &find(&defs, "statusline-setup").model,
             AgentModel::Alias(m) if m == "sonnet"
@@ -851,27 +669,27 @@ mod tests {
     }
 
     #[test]
-    fn fork_agent_not_in_seven_builtins() {
+    fn fork_agent_not_in_five_builtins() {
         // FORK_AGENT is NOT registered in builtInAgents (claude
-        // forkSubagent.ts:45) — the 7-element vec must not contain it.
+        // forkSubagent.ts:45) — the 5-element vec must not contain it.
         let defs = builtin_agent_definitions();
         assert!(!defs.iter().any(|d| d.agent_type == "fork"));
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 5);
     }
 
     #[test]
     fn static_prompts_are_verbatim_and_dynamic_prompts_include_host_context() {
         let defs = builtin_agent_definitions();
-        // The 4 static agents carry real prompt text (no placeholder marker).
-        for ty in ["general-purpose", "Explore", "Plan", "verification"] {
+        // The 3 static agents carry real prompt text (no placeholder marker).
+        for ty in ["general-purpose", "Explore", "Plan"] {
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
             assert!(
                 !p.contains("[NOTE: This is a placeholder"),
                 "{ty} should be verbatim"
             );
         }
-        // The 2 dynamic agents are now real host-context prompts.
-        for ty in ["claude-code-guide", "statusline-setup"] {
+        // The dynamic agent is a real host-context prompt.
+        for ty in ["statusline-setup"] {
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
             assert!(
                 !p.contains("[NOTE: This is a placeholder"),

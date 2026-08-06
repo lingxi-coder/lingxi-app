@@ -50,7 +50,7 @@ pub const AGENT_TOOL_NAME: &str = "Agent";
 /// `LEGACY_AGENT_TOOL_NAME`).
 pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 
-/// Six built-in subagent types — byte-aligned with upstream
+/// Four built-in subagent types — byte-aligned with upstream
 /// `claude-code/src/tools/AgentTool/built-in/*.ts`.
 ///
 /// ADVISORY ONLY. `AgentTool` no longer rejects a `subagent_type` outside this
@@ -60,12 +60,15 @@ pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 /// `tool-agent` cannot depend on the `agent` crate (cycle — see the module
 /// header), so the canonical definitions live there; this literal is kept for
 /// tests and documentation of the built-in set, not as a gate.
+///
+/// vs the 2.1.223 `rJe` roster: the phantom `verification` agent (stale
+/// leaked-TS, 0-hit in every local oracle) was removed, and the Claude-branded
+/// `claude-code-guide` + `claude` catch-all are deliberately excluded — the
+/// multi-provider divergence (user-confirmed 2026-08-06).
 pub const BUILTIN_SUBAGENT_TYPES: &[&str] = &[
     "general-purpose",
     "Plan",
     "Explore",
-    "verification",
-    "claude-code-guide",
     "statusline-setup",
 ];
 

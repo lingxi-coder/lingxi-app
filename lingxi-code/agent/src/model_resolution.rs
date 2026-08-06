@@ -1568,13 +1568,13 @@ mod tests {
             resolve_builtin_explore_model(&plan, "claude-fable-5", true),
             AgentModel::Inherit
         ));
-        let guide = crate::builtins::builtin_agent_definitions()
+        let statusline = crate::builtins::builtin_agent_definitions()
             .into_iter()
-            .find(|d| d.agent_type == "claude-code-guide")
+            .find(|d| d.agent_type == "statusline-setup")
             .unwrap();
         assert!(matches!(
-            resolve_builtin_explore_model(&guide, "claude-fable-5", true),
-            AgentModel::Alias(ref a) if a == "haiku"
+            resolve_builtin_explore_model(&statusline, "claude-fable-5", true),
+            AgentModel::Alias(ref a) if a == "sonnet"
         ));
         // A USER-DEFINED agent literally named "Explore": source != built-in →
         // untouched (GAe early-return on source).

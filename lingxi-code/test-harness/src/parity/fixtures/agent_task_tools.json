@@ -1,7 +1,6 @@
 {
-  "_source": "claude-code/src/tools/{AgentTool,SendMessageTool,TaskCreateTool,TaskGetTool,TaskListTool,TaskUpdateTool,TaskStopTool,TaskOutputTool}/{constants,prompt}.ts (commit 2026-03-31 snapshot)",
-  "_note": "M4-05 byte-aligned literals for 8 agent/task tools. Documented divergences from the plan + spec: (a) Task ID format is `[bartwmd][0-9a-z]{8}` (9 chars; M1 lock from lingxi_tasks::id::generate_task_id), NOT UUID v4 as spec §7 line 497 says. (b) Subagent types — six literals from claude-code/src/tools/AgentTool/built-in/*.ts (general-purpose, Plan, Explore, verification, claude-code-guide, statusline-setup); spec §7 line 495 says 'claude' but no such literal exists upstream. (c) Send-message claim window 30s is a LingXi-internal lock (no upstream literal). (d) Tool event suffix `_completed` per M3-06; spec §1 shorthand `_succeeded` is NOT the wire string. (e) Agent + 6 task tools + SendMessage ship as a tool surface in lingxi-tools (byte-locked schemas + telemetry + error formats); actual recursive subagent dispatch + registry mutation lands in lingxi-coordinator post-M5 because the M1 dep graph (lingxi-tasks/lingxi-agent → lingxi-tools) blocks a direct path-dep.",
-
+  "_source": "REAL binaries ~/.local/share/claude/versions/{2.1.220,2.1.221,2.1.223} (rJe/getBuiltInAgents @244921900 in 2.1.223) for builtin_subagent_types; remaining literals from claude-code/src/tools/*.ts (commit 2026-03-31 snapshot), pending re-verification against the binary",
+  "_note": "M4-05 byte-aligned literals for 8 agent/task tools. builtin_subagent_types RE-CAPTURED 2026-08-06 against the real binaries: (a) the old snapshot's 'verification' agent is a stale-leaked-TS PHANTOM — 0-hit in 2.1.220/221/223 (nudge text, tengu_hive_evidence, VERIFICATION_AGENT, prompt phrases, verificationAgent filename all absent); removed. (b) the oracle rJe roster ALSO carries 'claude-code-guide' (PYu) and a 'claude' catch-all (QFt) — both deliberately EXCLUDED as the multi-provider divergence (user-confirmed 2026-08-06; LingXi is multi-LLM-provider and both agents steer users to Claude-specific docs/products). The 2026-03-31 note claiming \"'claude' ... no such literal exists upstream\" was itself stale — QFt exists in 2.1.223. Other locks unchanged: (c) Task ID format `[bartwmd][0-9a-z]{8}` (9 chars; M1 lock), NOT UUID v4. (d) Send-message claim window 30s is a LingXi-internal lock. (e) Tool event suffix `_completed` per M3-06. (f) Agent + 6 task tools + SendMessage ship as a tool surface in lingxi-tools; recursive dispatch lands in lingxi-coordinator post-M5.",
   "tool_names": {
     "agent": "Agent",
     "agent_legacy_alias": "Task",
@@ -13,30 +12,32 @@
     "task_stop": "TaskStop",
     "task_output": "TaskOutput"
   },
-
   "builtin_subagent_types": [
     "general-purpose",
     "Plan",
     "Explore",
-    "verification",
-    "claude-code-guide",
     "statusline-setup"
   ],
-
   "send_message_claim_window_secs": 30,
-
   "task_id_regex": "^[bartwmd][0-9a-z]{8}$",
-
   "task_types": [
-    "local_bash", "local_agent", "remote_agent",
-    "in_process_teammate", "local_workflow", "monitor_mcp",
-    "monitor_ws", "mcp_task", "dream"
+    "local_bash",
+    "local_agent",
+    "remote_agent",
+    "in_process_teammate",
+    "local_workflow",
+    "monitor_mcp",
+    "monitor_ws",
+    "mcp_task",
+    "dream"
   ],
-
   "task_status_values": [
-    "pending", "running", "completed", "failed", "killed"
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "killed"
   ],
-
   "telemetry_events": [
     "tengu_tool_agent_started",
     "tengu_tool_agent_completed",
@@ -63,7 +64,6 @@
     "tengu_tool_send_message_completed",
     "tengu_tool_send_message_failed"
   ],
-
   "constants_lock": {
     "AGENT_TOOL_NAME": "Agent",
     "LEGACY_AGENT_TOOL_NAME": "Task",

@@ -555,19 +555,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     #[test]
-    fn six_builtin_subagent_types_byte_aligned() {
+    fn four_builtin_subagent_types_byte_aligned() {
         assert_eq!(
             BUILTIN_SUBAGENT_TYPES,
-            &[
-                "general-purpose",
-                "Plan",
-                "Explore",
-                "verification",
-                "claude-code-guide",
-                "statusline-setup"
-            ]
+            &["general-purpose", "Plan", "Explore", "statusline-setup"]
         );
-        assert_eq!(BUILTIN_SUBAGENT_TYPES.len(), 6);
+        assert_eq!(BUILTIN_SUBAGENT_TYPES.len(), 4);
     }
 
     #[test]

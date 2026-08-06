@@ -233,86 +233,6 @@ pub fn is_agent_swarms_enabled() -> bool {
     agent_swarms_enabled_inner(user_type_ant, env_truthy("LINGXI_EXPERIMENTAL_AGENT_TEAMS"))
 }
 
-// ==== Verification nudge (sub-batch [5]) ====================================
-//
-// Structural verification nudge shared by the V2 `TaskUpdate` (todo store) and
-// the V1 `TodoWrite` (in-memory session todos) tools. When the main-thread
-// agent closes out a 3+ item list with every item completed and none of those
-// items a verification step, the tool appends a reminder to its model-facing
-// result text suggesting the model spawn the verification subagent.
-//
-// claude-code: `TaskUpdateTool.ts:326-349` + `:396-398` (regex over task
-// subjects) and `TodoWriteTool.ts:72-86` + `:104-113` (regex over todo
-// contents). The nudge suffix is byte-identical in both (em-dash U+2014).
-
-/// `VERIFICATION_AGENT_TYPE` (`AgentTool/constants.ts:4`) — the `subagent_type`
-/// the nudge tells the model to spawn.
-pub(crate) const VERIFICATION_AGENT_TYPE: &str = "verification";
-
-/// The exact claude-code verification-nudge suffix (`TaskUpdateTool.ts:397` /
-/// `TodoWriteTool.ts:107`), with `${VERIFICATION_AGENT_TYPE}` interpolated and
-/// the leading `\n\n`. The dash before "only the verifier" is an em-dash
-/// (U+2014), matching the TS `—` / literal `—`.
-pub(crate) fn verification_nudge_suffix() -> String {
-    format!("\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (subagent_type=\"{VERIFICATION_AGENT_TYPE}\"). You cannot self-assign PARTIAL by listing caveats in your summary — only the verifier issues a verdict.")
-}
-
-/// Case-insensitive `/verif/i` test (`TaskUpdateTool.ts:345` over `t.subject` /
-/// `TodoWriteTool.ts:83` over `t.content`). "verif" is ASCII, so
-/// ASCII-lowercasing the haystack and substring-searching is equivalent to the
-/// JS regex (no non-ASCII codepoint case-folds into `v`/`e`/`r`/`i`/`f`).
-pub(crate) fn matches_verif(s: &str) -> bool {
-    s.to_ascii_lowercase().contains("verif")
-}
-
-/// Whether the verification-nudge FEATURE is live at call time. claude gates the
-/// nudge on `feature('VERIFICATION_AGENT') && getFeatureValue_CACHED_MAY_BE_STALE(
-/// 'tengu_hive_evidence', false)` (`TaskUpdateTool.ts:334-335`). BOTH the bundle
-/// feature and the GrowthBook flag default OFF in production, so the nudge never
-/// reaches the model on the common interactive path. Neither real flag is
-/// threaded into the tool crate yet, so this proxies them with an env opt-in that
-/// is OFF by default — matching prod claude (no suffix). Swap this for the real
-/// `feature(...) && getFeatureValue(...)` terms once the host threads them in.
-pub(crate) fn verification_feature_enabled() -> bool {
-    env_truthy("LINGXI_VERIFICATION_AGENT")
-}
-
-/// Shared predicate for the structural verification nudge — the common core of
-/// `TaskUpdateTool.ts:333-349` and `TodoWriteTool.ts:77-86`. Returns `true`
-/// when the nudge should be appended: the feature is on, this is the main
-/// thread, every item is completed, there are `>= 3` items, and no item's
-/// subject/content matches `/verif/i`.
-///
-/// `items` yields the per-item text the regex runs over (TaskUpdate: task
-/// subjects; TodoWrite: todo contents). `all_completed` is whether every item
-/// is `completed` (JS `Array.every`, vacuously `true` for an empty list — the
-/// `count >= 3` guard rejects that case); `count` is the item count.
-///
-/// PURE predicate for the structural-shape part of the gate (no flag read): the
-/// EXACT main-thread check `agent_id.is_none()` (== `!context.agentId`), the
-/// conservative `!is_non_interactive_session` guard, every item completed,
-/// `>= 3` items, and no item matching `/verif/i`. The FEATURE gate
-/// ([`verification_feature_enabled`], OFF by default — mirroring
-/// `feature('VERIFICATION_AGENT') && getFeatureValue('tengu_hive_evidence',
-/// false)`, both OFF in prod) is applied SEPARATELY at the call site so this
-/// predicate stays a pure, deterministic unit. `items` yields the per-item text
-/// the `/verif/i` regex runs over (TaskUpdate: task subjects; TodoWrite:
-/// contents). With the feature OFF by default, no suffix reaches the model on
-/// the common interactive path — matching prod claude.
-pub(crate) fn verification_nudge_needed<'a>(
-    agent_id_is_none: bool,
-    is_non_interactive_session: bool,
-    all_completed: bool,
-    count: usize,
-    mut items: impl Iterator<Item = &'a str>,
-) -> bool {
-    !is_non_interactive_session
-        && agent_id_is_none
-        && all_completed
-        && count >= 3
-        && !items.any(matches_verif)
-}
-
 // ==== Product-A V2 shared helpers ==========================================
 
 /// Wire string for an `engine::TodoState` (`pending`/`in_progress`/`completed`).
@@ -1759,55 +1679,27 @@ impl Tool for TaskUpdateTool {
                 updated_fields.push("blockedBy".into());
             }
         }
-        // Structural verification nudge (TaskUpdateTool.ts:326-349 + 396-398).
-        // Gated on the COMPUTED transition — TS checks `updates.status ===
-        // 'completed'`, and `updates.status` is set only when `status !==
-        // existingTask.status` (TaskUpdateTool.ts:230,267). The Rust mirror is
-        // `new_status`, populated above only when `st != existing.status`, so a
-        // no-op write that re-sends an already-`completed` status does NOT fire
-        // the nudge. Gated (cheaply) with the main-thread + interactive checks
-        // before re-listing the store; `store.list()` reflects the just-applied
-        // update (the store mutation above already persisted it).
-        let mut nudge_needed = false;
-        if verification_feature_enabled()
-            && new_status == Some(TodoState::Completed)
-            && ctx.agent_id.is_none()
-            && !ctx.options.is_non_interactive_session
-        {
-            let all_tasks = store.list().await;
-            let all_done = all_tasks.iter().all(|t| t.status == TodoState::Completed);
-            nudge_needed = verification_nudge_needed(
-                ctx.agent_id.is_none(),
-                ctx.options.is_non_interactive_session,
-                all_done,
-                all_tasks.len(),
-                all_tasks.iter().map(|t| t.subject.as_str()),
-            );
-        }
-
         emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
 
         let mut content = render_task_update_success(&task_id, &updated_fields);
-        // Teammate completion reminder (TaskUpdateTool.ts:386-394): when a
-        // teammate (`getAgentId()`) closes a task to `completed` and swarms are
-        // live, append the reminder. Gated on the COMPUTED transition's `to`
+        // Teammate completion reminder (2.1.223 `mapToolResultToToolResultBlockParam`):
+        // when a teammate closes a task to `completed` and swarms are live,
+        // append the reminder. Gated on the COMPUTED transition's `to`
         // (`statusChange?.to === 'completed'`), which is `status_change`'s `to`.
-        // Ordered BEFORE the verification nudge to match the TS suffix order.
+        // (The verification nudge that used to follow was a stale-leaked-TS
+        // phantom — 0-hit in oracle 2.1.220/221/223 — and was removed; the P6
+        // output-shape refactor moves this render to the model_content seam.)
         if matches!(status_change, Some((_, TodoState::Completed)))
             && ctx.agent_id.is_some()
             && is_agent_swarms_enabled()
         {
             content.push_str("\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.");
         }
-        if nudge_needed {
-            content.push_str(&verification_nudge_suffix());
-        }
         let mut data = json!({
             "content": content,
             "success": true,
             "taskId": task_id,
             "updatedFields": updated_fields,
-            "verificationNudgeNeeded": nudge_needed,
         });
         if let Some((from, to)) = status_change {
             data["statusChange"] = json!({ "from": status_wire(from), "to": status_wire(to) });

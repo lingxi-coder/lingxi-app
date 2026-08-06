@@ -2561,11 +2561,11 @@ mod tests {
     async fn resolve_definition_resolves_family_alias_to_concrete_id() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
-        // claude-code-guide is Alias("haiku"); parent is opus (different tier)
-        // → resolves to haiku's concrete default id, NOT the parent.
+        // statusline-setup is Alias("sonnet"); parent is opus (different tier)
+        // → resolves to sonnet's concrete default id, NOT the parent.
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
-        let def = spawner.resolve_definition("claude-code-guide", None).await;
-        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
+        let def = spawner.resolve_definition("statusline-setup", None).await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"));
     }
 
     // ── 2.1.198 GAe: built-in Explore inherits the session model capped at opus ──
@@ -2637,8 +2637,8 @@ mod tests {
         // No default model wired (legacy/tests): the alias is NOT resolved — the
         // runner's resolve_model then emits it raw (back-compat).
         let spawner = PoolSubagentSpawner::new(pool);
-        let def = spawner.resolve_definition("claude-code-guide", None).await;
-        assert!(matches!(&def.model, AgentModel::Alias(m) if m == "haiku"));
+        let def = spawner.resolve_definition("statusline-setup", None).await;
+        assert!(matches!(&def.model, AgentModel::Alias(m) if m == "sonnet"));
     }
 
     // ── FIX (B-agent-model-inheritance): live /model switch + nested parent ──
@@ -3038,8 +3038,8 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
         let entries = spawner.agent_listing().await;
-        // All 7 built-ins, sorted by type.
-        assert_eq!(entries.len(), 7);
+        // All 5 built-ins, sorted by type.
+        assert_eq!(entries.len(), 5);
         let by: std::collections::HashMap<&str, &SubagentListingEntry> =
             entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
         // general-purpose: All { .. } → "All tools".
@@ -3071,8 +3071,8 @@ mod tests {
         // The catalog entry (Explicit[Read] → "Read") wins over the built-in.
         assert_eq!(explore.when_to_use, "CUSTOM EXPLORE");
         assert_eq!(explore.tools_description, "Read");
-        // Still 7 (override, not addition).
-        assert_eq!(entries.len(), 7);
+        // Still 5 (override, not addition).
+        assert_eq!(entries.len(), 5);
     }
 
     #[test]

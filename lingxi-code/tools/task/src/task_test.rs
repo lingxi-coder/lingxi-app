@@ -227,114 +227,24 @@ mod tests {
         assert_eq!(render_task_update_fail("9", Some("")), "Task #9 not found");
     }
 
-    // ── verification nudge (sub-batch [5]) ───────────────────────────────
-
-    #[test]
-    fn verification_nudge_suffix_is_byte_exact() {
-        // Byte-locked against TaskUpdateTool.ts:397 / TodoWriteTool.ts:107 with
-        // VERIFICATION_AGENT_TYPE = 'verification'. Note the em-dash (U+2014).
-        assert_eq!(VERIFICATION_AGENT_TYPE, "verification");
-        assert_eq!(
-            verification_nudge_suffix(),
-            "\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (subagent_type=\"verification\"). You cannot self-assign PARTIAL by listing caveats in your summary \u{2014} only the verifier issues a verdict."
-        );
-    }
-
-    #[test]
-    fn matches_verif_is_case_insensitive_substring() {
-        assert!(matches_verif("Run verification tests"));
-        assert!(matches_verif("VERIFY the build"));
-        assert!(matches_verif("Reverify outputs"));
-        assert!(!matches_verif("Ship the feature"));
-        assert!(!matches_verif("verfy")); // typo: not a /verif/ match
-    }
-
-    #[test]
-    fn verification_nudge_fires_on_main_thread_all_done_3plus_no_verif() {
-        // main thread (agent_id none) + interactive + all completed + 3 items
-        // + none /verif/ ⇒ nudge.
-        assert!(verification_nudge_needed(
-            true,
-            false,
-            true,
-            3,
-            ["Implement", "Wire it up", "Document"].into_iter(),
-        ));
-    }
-
-    #[test]
-    fn verification_nudge_absent_when_fewer_than_three() {
-        assert!(!verification_nudge_needed(
-            true,
-            false,
-            true,
-            2,
-            ["Implement", "Document"].into_iter(),
-        ));
-    }
-
-    #[test]
-    fn verification_nudge_absent_when_an_item_matches_verif() {
-        assert!(!verification_nudge_needed(
-            true,
-            false,
-            true,
-            3,
-            ["Implement", "Verify the fix", "Document"].into_iter(),
-        ));
-    }
-
-    #[test]
-    fn verification_nudge_absent_for_subagent() {
-        // agent_id present (!context.agentId is false) ⇒ no nudge.
-        assert!(!verification_nudge_needed(
-            false,
-            false,
-            true,
-            3,
-            ["Implement", "Wire it up", "Document"].into_iter(),
-        ));
-    }
-
-    #[test]
-    fn verification_nudge_absent_when_not_all_completed() {
-        assert!(!verification_nudge_needed(
-            true,
-            false,
-            false,
-            3,
-            ["Implement", "Wire it up", "Document"].into_iter(),
-        ));
-    }
-
-    #[test]
-    fn verification_nudge_absent_in_non_interactive_session() {
-        // PARITY-GAP approximation of the unexpressible feature gate.
-        assert!(!verification_nudge_needed(
-            true,
-            true,
-            true,
-            3,
-            ["Implement", "Wire it up", "Document"].into_iter(),
-        ));
-    }
-
-    // ── TaskUpdate nudge gates on the COMPUTED transition (TaskUpdateTool.ts:
-    //    230,267,338) — a no-op `completed` re-send must NOT fire ────────────
-    mod task_update_nudge_transition_gate {
+    // ── TaskUpdate statusChange gates on the COMPUTED transition — a no-op
+    //    `completed` re-send must NOT report a transition (oracle 2.1.223
+    //    `g.status!==void 0` is set only when `status !== existingTask.status`).
+    //    Also locks the phantom-nudge ABSENCE: `verificationNudgeNeeded` must
+    //    never appear (0-hit in oracle 2.1.220/221/223). ─────────────────────
+    mod task_update_transition_gate {
         use super::*;
         use std::sync::Arc;
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
 
-        /// Restore-on-drop guard for the two process-global env vars this test
+        /// Restore-on-drop guard for the process-global env vars this test
         /// flips, plus cleanup of the throwaway store dir — runs even if an
         /// assertion panics. Holds the shared [`super::ENV_LOCK`] so it does not
         /// race other env-mutating tests on `LINGXI_CONFIG_DIR`.
         struct EnvGuard {
             prev_config: Option<std::ffi::OsString>,
             prev_list: Option<std::ffi::OsString>,
-            prev_verif: Option<std::ffi::OsString>,
             dir: std::path::PathBuf,
             _lock: std::sync::MutexGuard<'static, ()>,
         }
@@ -347,10 +257,6 @@ mod tests {
                 match &self.prev_list {
                     Some(v) => std::env::set_var("LINGXI_TASK_LIST_ID", v),
                     None => std::env::remove_var("LINGXI_TASK_LIST_ID"),
-                }
-                match &self.prev_verif {
-                    Some(v) => std::env::set_var("LINGXI_VERIFICATION_AGENT", v),
-                    None => std::env::remove_var("LINGXI_VERIFICATION_AGENT"),
                 }
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
@@ -368,10 +274,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn no_op_completed_does_not_fire_but_real_transition_does() {
+        async fn no_op_completed_reports_no_transition_but_real_one_does() {
             // Isolate the file-backed store to a throwaway config dir + list id.
             let unique = format!(
-                "lingxi-task-nudge-{}-{}",
+                "lingxi-task-transition-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -382,7 +288,6 @@ mod tests {
             let _guard = EnvGuard {
                 prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
                 prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
-                prev_verif: std::env::var_os("LINGXI_VERIFICATION_AGENT"),
                 dir: dir.clone(),
                 _lock: super::ENV_LOCK
                     .lock()
@@ -390,12 +295,8 @@ mod tests {
             };
             std::env::set_var("LINGXI_CONFIG_DIR", &dir);
             std::env::set_var("LINGXI_TASK_LIST_ID", &unique);
-            // T13: the nudge FEATURE is OFF by default (matching prod claude). The
-            // store-level transition logic is unchanged; the feature gate is the
-            // only difference. Turn it ON for the transition assertions below.
-            std::env::remove_var("LINGXI_VERIFICATION_AGENT");
 
-            // 3-item list, none /verif/: two completed + one pending.
+            // 3-item list: two completed + one pending.
             let store = TodoStore::for_list(&unique);
             let id1 = store
                 .create(task("Implement parser", TodoState::Completed))
@@ -412,31 +313,9 @@ mod tests {
 
             let tool = TaskUpdateTool::new(bctx());
 
-            // Phase 0 — FEATURE OFF (default): even a real ->completed transition
-            // that closes a 3+ all-done list must NOT fire the nudge, because the
-            // VERIFICATION_AGENT/tengu_hive_evidence flags default OFF in prod.
-            let res = tool
-                .call(
-                    json!({ "taskId": &id3, "status": "completed" }),
-                    fresh_ctx(),
-                    fresh_tx(),
-                )
-                .await
-                .expect("transition update ok");
-            assert_eq!(
-                res.data["verificationNudgeNeeded"],
-                json!(false),
-                "feature OFF by default ⇒ no nudge on the common interactive path"
-            );
-            // Re-open #3 so the transition-on assertions below see the same shape.
-            store.update(&id3, |t| t.status = TodoState::Pending).await;
-
-            // Enable the feature for the remaining (gate-on) assertions.
-            std::env::set_var("LINGXI_VERIFICATION_AGENT", "1");
-
             // Phase 1 — NO-OP: re-send `completed` on the already-completed #1.
-            // Raw input status == "completed" (the OLD buggy gate would fire),
-            // but the COMPUTED transition is empty, so the nudge must NOT fire.
+            // Raw input status == "completed", but the COMPUTED transition is
+            // empty, so no statusChange is reported (oracle `g.status` unset).
             let res = tool
                 .call(
                     json!({ "taskId": &id1, "status": "completed" }),
@@ -445,18 +324,17 @@ mod tests {
                 )
                 .await
                 .expect("no-op update ok");
-            assert_eq!(
-                res.data["verificationNudgeNeeded"],
-                json!(false),
-                "no-op completed re-send must not trip the nudge"
-            );
             assert!(
                 res.data.get("statusChange").is_none(),
                 "no statusChange on a no-op"
             );
+            assert!(
+                res.data.get("verificationNudgeNeeded").is_none(),
+                "phantom nudge field must never appear (0-hit in oracle 2.1.220/221/223)"
+            );
 
-            // Phase 2 — REAL transition: #3 pending → completed closes the list
-            // (all 3 completed, >= 3, none /verif/), so the nudge fires.
+            // Phase 2 — REAL transition: #3 pending → completed reports the
+            // transition.
             let res = tool
                 .call(
                     json!({ "taskId": &id3, "status": "completed" }),
@@ -465,12 +343,12 @@ mod tests {
                 )
                 .await
                 .expect("transition update ok");
-            assert_eq!(
-                res.data["verificationNudgeNeeded"],
-                json!(true),
-                "a real ->completed transition that closes a 3+ list fires the nudge"
-            );
             assert_eq!(res.data["statusChange"]["to"], "completed");
+            assert_eq!(res.data["statusChange"]["from"], "pending");
+            assert!(
+                res.data.get("verificationNudgeNeeded").is_none(),
+                "phantom nudge field must never appear on the transition path either"
+            );
         }
     }
 

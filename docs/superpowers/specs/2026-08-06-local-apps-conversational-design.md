@@ -248,7 +248,17 @@ awaiting_preview_confirmation                         ◀ 人工门 ②
 - `AuthoringQuestionnaire` 与 `Planning` 期间设计器为只读，避免用户在 LLM 往返途中改答案造成竞态。
 - 触发 `planning` 的动作是设计器最后一步的主按钮，文案为「生成方案」而非「下一步」——它会产生一次 LLM 往返，用户需要预期到等待。
 
-**`begin_revision` 签名变更**：现为 `begin_revision(&self, app_id: &str)`（`service.rs:1286`），改为 `begin_revision(&self, app_id: &str, prompt: String)`，把用户的自然语言要求写进已存在但无人写入的 `GenerationJob.prompt`（`generation.rs:110`）。`Revision` job 必须携带非空 prompt。
+**修订链路已经存在，不要重复建设。** 核查代码后确认（本节初稿曾错误地写成需要改 `begin_revision` 签名）：
+
+- `AppService::request_revision(app_id, prompt)`（`service.rs:1312`）与 `AppState::request_revision(prompt, now)`（`state.rs:540`）**已存在且已携带 prompt**，转移是 `awaiting_preview_confirmation | ready → revising`。
+- prompt **已经全链路接通**：`request_revision` 入队 `RevisionRequested` continuation → 协调器在 `generation.rs:889-900` 取出 `prompt` 建 job → `generation.rs:558` 传进 `GenerationRequest.prompt`。
+- 客户端命令已有（`host.rs:3130` `handle_request_app_revision`），iOS 也已能在预览门里提反馈（`LocalAppDetailView.swift:490` 的 `store.requestRevision`）。
+- `begin_revision`（`state.rs:503`）是**另一个**转移（`validation_failed → revising`），不带 prompt 是正确的，不动。
+
+因此本设计在修订链路上只需补两处缺口：
+
+1. **MCP 未暴露** —— 12 个工具里没有修订入口（`local_apps_mcp.rs:171-290`），会话中的 agent 发起不了迭代。
+2. **唯一的消费者丢弃了它** —— `generate_source` 渲染模版，从不读 `request.prompt`。这正是「命名了、算出来了、从没接上」的典型。§4.3 接上它。
 
 ## 6. MCP 工具表变更
 
@@ -257,7 +267,7 @@ awaiting_preview_confirmation                         ◀ 人工门 ②
 | 工具 | 变更 |
 |---|---|
 | `create` | 参数 `template`（四选一枚举）改为 `brief`（string, 1..=2000）；`name` 改为可选 |
-| `revise` | **新增**。`(app_id, prompt)` → 调用 `AppService::begin_revision`。今天 `begin_revision` 只存在于服务层、未暴露给 agent，会话中无法发起迭代——这是必补的一环 |
+| `revise` | **新增**。`(app_id, prompt)` → 调用**已存在的** `AppService::request_revision`（`service.rs:1312`）。服务层与 prompt 链路都是现成的，缺的只是 MCP 这一层暴露——12 个工具里没有任何修订入口 |
 | `get` | 响应携带 questionnaire / plan / brief，不再有 template |
 | `list` | 响应删除 `templates` 数组 |
 | `propose_design` | 不变。其语义（给用户提字段建议、由用户手动 apply）在动态问卷上同样成立 |
@@ -275,7 +285,7 @@ awaiting_preview_confirmation                         ◀ 人工门 ②
 | `LocalAppDesignerView` | 新增 `Other…` 与「由你决定」两种 chip |
 | `LocalAppDesignerView` | 新增四个中间态界面：出题中、出题失败（重试 / 改描述）、出计划中、出计划失败 |
 | 新增确认 sheet | 只读展示 `AppPlan`（数据表 / 权限 / 域名 / summary），出口只有「返回修改」与「确认并生成」。**做成独立 sheet 而非问卷的第 N 步**——它不是问卷的一部分，不应继承步骤条的编辑语义 |
-| `LocalAppDetailView.swift` | 底部新增常驻输入框，提交即 `revise(app_id, prompt)` |
+| `LocalAppDetailView.swift:490` | 已有的 `store.requestRevision(appID:feedback:)` 目前只挂在预览门的反馈 sheet 上。改为 `ready` 态也常驻一条底部输入框，复用同一个调用——不是新建能力，是把入口从一次性的门扩展成持续可用 |
 | `LocalAppsStore.swift` | 删除 templates 缓存，新增 questionnaire / plan |
 
 会话中提要求与详情页输入框走同一个服务方法、同一条 revision 链——用户可以看着预览直接改，不必来回切页面。

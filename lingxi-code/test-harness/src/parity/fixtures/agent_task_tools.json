@@ -19,7 +19,7 @@
     "statusline-setup"
   ],
   "send_message_claim_window_secs": 30,
-  "task_id_regex": "^[bartwmd][0-9a-z]{8}$",
+  "task_id_regex": "^[bartwmdks][0-9a-z]{8}$",
   "task_types": [
     "local_bash",
     "local_agent",

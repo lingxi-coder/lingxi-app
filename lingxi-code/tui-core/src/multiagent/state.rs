@@ -9,7 +9,7 @@
 /// maps one-to-one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskRow {
-    /// 9-char `[bartwmd][0-9a-z]{8}` task id.
+    /// 9-char `[bartwmdks][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string (e.g. `"local_bash"`).
     pub task_type: String,

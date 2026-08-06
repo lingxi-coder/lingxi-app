@@ -173,7 +173,7 @@ pub enum PermissionAction {
 pub enum TaskAction {
     /// Stop the running background task with this 9-char id.
     Kill {
-        /// The `[bartwmd][0-9a-z]{8}` task id to stop.
+        /// The `[bartwmdks][0-9a-z]{8}` task id to stop.
         task_id: String,
     },
 }

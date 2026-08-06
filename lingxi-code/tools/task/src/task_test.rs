@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn task_id_regex_matches_fresh_generated() {
         use regex::Regex;
-        let re = Regex::new(r"^[bartwmdk][0-9a-z]{8}$").unwrap();
+        let re = Regex::new(r"^[bartwmdks][0-9a-z]{8}$").unwrap();
         for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k'] {
             let id = fresh_task_id(c);
             assert!(re.is_match(&id), "generated id {id} fails regex");

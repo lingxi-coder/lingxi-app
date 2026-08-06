@@ -5836,7 +5836,7 @@ mod tests {
                 .await
                 .expect("create succeeds");
             // claude-code cron id = `randomUUID().slice(0,8)` → 8 lowercase hex
-            // chars (NOT a `[bartwmd]`-prefixed task id, and NOT deterministically
+            // chars (NOT a `[bartwmdks]`-prefixed task id, and NOT deterministically
             // 'd'-prefixed — the previous `starts_with('d')` assertion passed only
             // ~1/16 of the time).
             assert_eq!(created.id.len(), 8, "cron id is 8 chars: {}", created.id);

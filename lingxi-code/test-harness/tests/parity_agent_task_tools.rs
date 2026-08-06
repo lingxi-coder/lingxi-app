@@ -111,7 +111,9 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
     let f = fx();
     let re = regex::Regex::new(&f.task_id_regex).unwrap();
     // Probe with a few well-formed prefixes (one per TaskType).
-    for prefix in ['b', 'a', 'r', 't', 'w', 'm', 'd'] {
+    // One probe per TaskType prefix, incl. 's' (oracle `monitor_ws:"s"`
+    // @242497270) and 'k' (`mcp_task`).
+    for prefix in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 's'] {
         let id = format!("{prefix}12345678");
         assert!(
             re.is_match(&id),

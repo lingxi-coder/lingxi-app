@@ -1217,22 +1217,24 @@ Reach for this when the task matches an available agent type, when you have inde
                     reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
                 });
                 // claude `async_launched` tool_result text, byte-for-byte
-                // (AgentTool.tsx:1328-1330): a fixed prefix + a
-                // `canReadOutputFile`-branched instruction tail, joined by `\n`.
+                // (2.1.223 @251729190: prefix `n` + `canReadOutputFile`-branched
+                // tail `o`, joined by `\n`). The 223 prefix appends the
+                // don't-fabricate sentence ("You know nothing about its
+                // results…"), and the non-readable tail appends the
+                // still-running sentence — both new since the 2.1.207 lock.
                 let output_file = &launch.output_file;
                 let prefix = format!(
-                    "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes."
+                    "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime."
                 );
                 let instructions = if can_read_output_file {
-                    // claude `canReadOutputFile` branch (AgentTool.tsx, v2.1.193):
-                    // warn the model NOT to read the `.output` file — it is the
-                    // full subagent JSONL transcript and would overflow context.
-                    // (`${Ds}` resolves to `Read`.)
+                    // claude `canReadOutputFile` branch: warn the model NOT to
+                    // read the `.output` file — it is the full subagent JSONL
+                    // transcript and would overflow context. (`${ys}` = `Read`.)
                     format!(
                         "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {output_file}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification."
                     )
                 } else {
-                    "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message.".to_string()
+                    "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
                 };
                 let model_content = format!("{prefix}\n{instructions}");
                 Ok(ToolCallResult {

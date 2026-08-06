@@ -1006,7 +1006,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // exercises the else-branch tail.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn async_launched_tool_result_is_byte_exact_2_1_207() {
+    async fn async_launched_tool_result_is_byte_exact_2_1_223() {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1035,13 +1035,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // The agentId is dynamic; reconstruct the exact expected model_content
         // around it, pinning both changed strings byte-for-byte.
         let agent_id = result.data["agentId"].as_str().expect("agentId string");
+        // 2.1.223 @251729190 (`n` prefix) + @251730184 (else-arm `o` tail):
+        // the prefix gained the don't-fabricate sentence, the tail gained the
+        // still-running sentence, both new vs the old 2.1.207 lock.
         let expected = format!(
-            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes.\nIn your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message."
+            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.\nIn your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running."
         );
         assert_eq!(
             result.data["model_content"].as_str().unwrap(),
             expected,
-            "async_launched model_content must be byte-exact vs CC 2.1.207"
+            "async_launched model_content must be byte-exact vs CC 2.1.223"
         );
     }
 

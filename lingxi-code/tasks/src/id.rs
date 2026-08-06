@@ -44,7 +44,9 @@ impl TaskType {
             Self::InProcessTeammate => 't',
             Self::LocalWorkflow => 'w',
             Self::MonitorMcp => 'm',
-            Self::Monitor => 'm',
+            // Oracle 2.1.223 prefix table (@242497270): `monitor_ws:"s"` —
+            // an earlier port shared MonitorMcp's 'm', colliding the two.
+            Self::Monitor => 's',
             Self::McpTask => 'k',
             Self::Dream => 'd',
         }

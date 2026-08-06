@@ -349,7 +349,7 @@ pub struct DoctorSummaryDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TaskRowDto {
-    /// 9-char `[bartwmd][0-9a-z]{8}` task id.
+    /// 9-char `[bartwmdks][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string (one of the 7 byte-locked variants).
     pub task_type: String,

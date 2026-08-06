@@ -1095,26 +1095,46 @@ fn task_snapshot_to_ffi(value: traits::MobileLinuxTaskSnapshot) -> MobileLinuxTa
 }
 
 #[cfg(feature = "uniffi")]
-fn event_to_ffi(value: traits::MobileLinuxEvent) -> MobileLinuxStreamEventFfi {
-    match value.kind {
+/// `None` for events that have no stream representation and must be SKIPPED
+/// (not surfaced as a bogus stream event).
+fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEventFfi> {
+    Some(match value.kind {
         traits::MobileLinuxEventKind::TaskStatusChanged {
             status,
             exit_code,
             detail,
-        } => MobileLinuxStreamEventFfi {
-            sequence: value.sequence,
-            task_id: value.task_id.clone(),
-            stream_id: value
-                .task_id
-                .clone()
-                .unwrap_or_else(|| "runtime".to_string()),
-            source: MobileLinuxStreamSourceFfi::Run,
-            kind: MobileLinuxStreamEventKindFfi::Exit,
-            text: detail,
-            data: None,
-            exit_code,
-            timed_out: matches!(status, traits::MobileLinuxTaskStatus::TimedOut),
-        },
+        } => {
+            // ONLY terminal statuses read as an exit. This arm used to map
+            // EVERY status change to `kind: Exit` — including the `Running`
+            // emitted by task CREATION. The PTY task's id IS the session id,
+            // so merely opening a terminal planted `{kind: exit, stream:
+            // <session>, code: nil}` at the head of the event log; the
+            // terminal's first read closed a perfectly healthy shell with
+            // "[process exited]" and stopped polling, and every restart died
+            // the same way at its own creation event.
+            if matches!(
+                status,
+                traits::MobileLinuxTaskStatus::Queued
+                    | traits::MobileLinuxTaskStatus::Running
+                    | traits::MobileLinuxTaskStatus::Backgrounded
+            ) {
+                return None;
+            }
+            MobileLinuxStreamEventFfi {
+                sequence: value.sequence,
+                task_id: value.task_id.clone(),
+                stream_id: value
+                    .task_id
+                    .clone()
+                    .unwrap_or_else(|| "runtime".to_string()),
+                source: MobileLinuxStreamSourceFfi::Run,
+                kind: MobileLinuxStreamEventKindFfi::Exit,
+                text: detail,
+                data: None,
+                exit_code,
+                timed_out: matches!(status, traits::MobileLinuxTaskStatus::TimedOut),
+            }
+        }
         traits::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxStreamEventFfi {
             sequence: value.sequence,
             task_id: value.task_id.clone(),
@@ -1180,7 +1200,7 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> MobileLinuxStreamEventFfi {
             exit_code: None,
             timed_out: false,
         },
-    }
+    })
 }
 
 #[cfg(feature = "uniffi")]
@@ -2636,7 +2656,7 @@ impl IosMobileLinuxRuntimeHandle {
                 limit.unwrap_or(MAX_MOBILE_LINUX_EVENT_BATCH as u32) as usize,
             )
             .await
-            .map(|events| events.into_iter().map(event_to_ffi).collect())
+            .map(|events| events.into_iter().filter_map(event_to_ffi).collect())
             .map_err(mobile_linux_error_to_ffi)
     }
 
@@ -3013,6 +3033,42 @@ uniffi::setup_scaffolding!();
 
 #[cfg(all(test, feature = "uniffi"))]
 mod tests {
+    /// A task's non-terminal status changes must NEVER surface as stream
+    /// events: `event_to_ffi` used to map EVERY `TaskStatusChanged` to
+    /// `kind: Exit`, so the `Running` emitted by PTY task CREATION (task id =
+    /// session id) closed a freshly opened, healthy terminal with
+    /// "[process exited]" on its very first read — and every restart died at
+    /// its own creation event the same way.
+    #[test]
+    fn non_terminal_task_status_events_are_skipped_and_terminal_ones_map_to_exit() {
+        let event = |status| traits::MobileLinuxEvent {
+            sequence: 1,
+            task_id: Some("session-1".to_string()),
+            kind: traits::MobileLinuxEventKind::TaskStatusChanged {
+                status,
+                exit_code: None,
+                detail: None,
+            },
+        };
+        for status in [
+            traits::MobileLinuxTaskStatus::Queued,
+            traits::MobileLinuxTaskStatus::Running,
+            traits::MobileLinuxTaskStatus::Backgrounded,
+        ] {
+            assert!(
+                super::event_to_ffi(event(status)).is_none(),
+                "{status:?} must not become a stream event"
+            );
+        }
+        let ffi = super::event_to_ffi(event(traits::MobileLinuxTaskStatus::Completed))
+            .expect("terminal status maps");
+        assert!(matches!(ffi.kind, super::MobileLinuxStreamEventKindFfi::Exit));
+        assert_eq!(ffi.stream_id, "session-1");
+        let timed_out = super::event_to_ffi(event(traits::MobileLinuxTaskStatus::TimedOut))
+            .expect("terminal status maps");
+        assert!(timed_out.timed_out);
+    }
+
     use std::sync::Arc;
 
     use async_trait::async_trait;

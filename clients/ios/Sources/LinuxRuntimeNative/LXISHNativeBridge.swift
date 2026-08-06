@@ -862,6 +862,7 @@ private final class LXISHNativeCoordinator {
     /// understands, carrying the REAL exit code, and free the one-PTY slot so
     /// the restart link actually works.
     private func handleGuestProcessExit(pid: Int32, waitStatus: Int32) {
+        NSLog("LXISHBridge: guest process exit pid=%d rawStatus=0x%x", pid, waitStatus)
         queue.async {
             for (key, runtime) in self.runtimes {
                 var runtime = runtime
@@ -871,6 +872,10 @@ private final class LXISHNativeCoordinator {
                     continue
                 }
                 let status = LXISHGuestWaitStatus.decode(waitStatus)
+                NSLog(
+                    "LXISHBridge: attributing exit pid=%d to PTY session %@ (code=%d detail=%@)",
+                    pid, sessionId, status.code, status.detail ?? "nil"
+                )
                 runtime.ptySessionId = nil
                 runtime.nextSequence += 1
                 runtime.events.append(

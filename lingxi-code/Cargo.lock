@@ -1334,6 +1334,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
+ "task-store",
  "tasks",
  "telemetry",
  "tempfile",

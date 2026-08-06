@@ -402,18 +402,79 @@ impl SendMessageTool {
         self.route(&leader, msg).await?;
 
         // On approval, signal the responding (calling) worker's backing task to
-        // cancel — the in-process analog of `task.abortController.abort()`.
+        // cancel — the in-process analog of `task.abortController.abort()` —
+        // then run the oracle's departure sequence (2.1.223 `Urv` @261175890 /
+        // print.ts shutdown_approved @262044791): remove the member from the
+        // team file (`jqt`), unassign its tasks (`RSr`), and deliver the
+        // notification to the LEAD's mailbox as a `teammate_terminated` frame
+        // (`Qyt` schema @248040794: `{type, message}`).
+        //
+        // PLACEMENT NOTE (topology adaptation, not a byte-mapped call site):
+        // the oracle runs this inside the lead's inbox-processing loop when
+        // the `shutdown_approved` frame arrives; the port has no lead-side
+        // poll loop yet, and this approval handler is the earliest point that
+        // knows the teammate is going away — same sequence, different host.
         if approve {
-            if let (Some(seam), Some(agent_id)) = (&self.spawn_seam, ctx.agent_id) {
-                if let Some(worker) = self
+            if let Some(agent_id) = ctx.agent_id {
+                let worker = self
                     .team
                     .list()
                     .await
                     .into_iter()
-                    .find(|w| w.agent_id == agent_id && !w.task_id.is_empty())
-                {
-                    // Best-effort: a kill failure does not fail the response send.
-                    let _ = seam.kill(&worker.task_id).await;
+                    .find(|w| w.agent_id == agent_id);
+                if let (Some(seam), Some(worker)) = (&self.spawn_seam, &worker) {
+                    if !worker.task_id.is_empty() {
+                        // Best-effort: a kill failure does not fail the response send.
+                        let _ = seam.kill(&worker.task_id).await;
+                    }
+                }
+                if let (Some(team_name), Some(worker)) = (self.team.team_name().await, &worker) {
+                    let agent_id_str = agent_id.to_string();
+                    // jqt: drop the member from config.json first (oracle order:
+                    // team file → RSr → lead notification). Best-effort — a
+                    // missing/corrupt team file must not fail the response.
+                    if let Some(home) = crate::team_file::lingxi_home() {
+                        let _ = crate::team_file::remove_team_member(
+                            &home,
+                            &team_name,
+                            &agent_id_str,
+                            &worker.name,
+                        );
+                    }
+                    // RSr over the shared task list. List-id resolution matches
+                    // the teammate auto-claim: env override, else the team name
+                    // (the tools' resolve_task_list_id first two levels).
+                    let list_id = std::env::var("LINGXI_TASK_LIST_ID")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| team_name.clone());
+                    let outcome = task_store::TodoStore::for_list(&list_id)
+                        .unassign_tasks_for_teammate(
+                            &agent_id_str,
+                            &worker.name,
+                            task_store::TeammateEndReason::Shutdown,
+                        )
+                        .await;
+                    // Lead notification frame (Qyt): `{type:"teammate_terminated",
+                    // message}` routed into the leader's mailbox like any other
+                    // inter-agent frame. Best-effort.
+                    let frame = serde_json::to_string(&json!({
+                        "type": "teammate_terminated",
+                        "message": outcome.notification_message,
+                    }))
+                    .unwrap_or_default();
+                    let _ = self
+                        .route(
+                            &leader,
+                            TeammateMessage {
+                                from: Self::sender_from(ctx),
+                                content: frame,
+                                message_id: tool_api::util::ids::ulid_or_uuid(),
+                                timestamp: SystemTime::now(),
+                                request_id: Some(request_id.clone()),
+                            },
+                        )
+                        .await;
                 }
             }
         }
@@ -1171,6 +1232,132 @@ mod tests {
         assert_eq!(
             seam.killed_task.lock().unwrap().as_deref(),
             Some("task-worker")
+        );
+    }
+
+    /// Serializes the env-mutating departure test below.
+    static DEPART_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The full oracle departure sequence on shutdown approval (Urv
+    /// @261175890 / print.ts @262044791): member removed from the team file
+    /// (jqt), the teammate's tasks unassigned to ownerless-pending (RSr), and
+    /// the lead's mailbox receives the `{type:"teammate_terminated", message}`
+    /// frame (Qyt @248040794) carrying RSr's byte-exact notification.
+    #[tokio::test]
+    async fn approved_shutdown_removes_member_unassigns_tasks_and_notifies_lead() {
+        let _lock = DEPART_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_config = std::env::var_os(branding::CONFIG_DIR_ENV);
+        let prev_list = std::env::var_os("LINGXI_TASK_LIST_ID");
+        std::env::set_var(branding::CONFIG_DIR_ENV, tmp.path());
+        std::env::remove_var("LINGXI_TASK_LIST_ID");
+        struct EnvRestore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+                    None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+                }
+                match &self.1 {
+                    Some(v) => std::env::set_var("LINGXI_TASK_LIST_ID", v),
+                    None => std::env::remove_var("LINGXI_TASK_LIST_ID"),
+                }
+            }
+        }
+        let _restore = EnvRestore(prev_config, prev_list);
+
+        let team_name = "depart-team";
+        let coordinator = AgentId::new();
+        let registry = Arc::new(TeamRegistry::new(coordinator));
+        registry.set_team_name(Some(team_name.to_string())).await;
+        let lead_mailbox = observable_mailbox(&registry, coordinator).await;
+        let worker = registry
+            .spawn_worker("e".into(), "nova".into(), "task-nova".into())
+            .await
+            .unwrap();
+
+        // Team file with the lead + the departing member.
+        let home = crate::team_file::lingxi_home().unwrap();
+        crate::team_file::write_team_file(
+            &home,
+            team_name,
+            &crate::team_file::TeamFile {
+                name: team_name.into(),
+                description: None,
+                created_at: 0,
+                lead_agent_id: format!("team-lead@{team_name}"),
+                lead_session_id: None,
+                members: vec![
+                    crate::team_file::TeamMember {
+                        agent_id: format!("team-lead@{team_name}"),
+                        name: "team-lead".into(),
+                        agent_type: None,
+                        model: None,
+                        joined_at: 0,
+                        tmux_pane_id: String::new(),
+                        cwd: String::new(),
+                        subscriptions: vec![],
+                    },
+                    crate::team_file::TeamMember {
+                        agent_id: worker.to_string(),
+                        name: "nova".into(),
+                        agent_type: None,
+                        model: None,
+                        joined_at: 0,
+                        tmux_pane_id: String::new(),
+                        cwd: String::new(),
+                        subscriptions: vec![],
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        // The departing teammate owns one open task on the shared list.
+        let store = task_store::TodoStore::for_list(team_name);
+        let mut owned = task_store::TodoTask::new(
+            "Fix parser".into(),
+            "d".into(),
+            None,
+            serde_json::Map::new(),
+        );
+        owned.status = engine::TodoState::InProgress;
+        owned.owner = Some("nova".into());
+        let tid = store.create(owned).await.unwrap();
+
+        let tool = SendMessageTool::new(registry);
+        let input = json!({
+            "to": "team-lead",
+            "message": { "type": "shutdown_response", "request_id": "r9", "approve": true }
+        });
+        tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
+
+        // jqt: the member is gone from config.json; the lead remains.
+        let file = crate::team_file::read_team_file(&home, team_name).unwrap();
+        assert_eq!(file.members.len(), 1);
+        assert_eq!(file.members[0].name, "team-lead");
+
+        // RSr: the task is ownerless-pending again.
+        let t = store.get(&tid).await.unwrap();
+        assert_eq!(t.owner, None);
+        assert_eq!(t.status, engine::TodoState::Pending);
+
+        // Qyt frame in the lead's inbox, after the shutdown_approved frame.
+        let frames = lead_mailbox.drain();
+        let terminated = frames
+            .iter()
+            .find_map(|m| {
+                let v: serde_json::Value = serde_json::from_str(&m.content).ok()?;
+                (v["type"] == "teammate_terminated").then_some(v)
+            })
+            .expect("lead received the teammate_terminated frame");
+        assert_eq!(
+            terminated["message"],
+            format!(
+                "nova has shut down. 1 task(s) were unassigned: #{tid} \"Fix parser\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates."
+            )
         );
     }
 

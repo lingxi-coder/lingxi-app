@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+task-store = { path = "../task-store" }
 branding.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }

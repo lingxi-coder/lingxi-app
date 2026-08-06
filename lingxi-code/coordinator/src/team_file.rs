@@ -138,6 +138,44 @@ pub fn write_team_file(home: &Path, name: &str, file: &TeamFile) -> std::io::Res
     std::fs::write(team_file_path(home, name), json)
 }
 
+/// Read + parse a team's `config.json` (`readTeamFile`, `teamHelpers.ts`).
+///
+/// # Errors
+/// Returns the underlying `std::io::Error` on a read failure, or an
+/// `InvalidData` error when the file is not valid `TeamFile` JSON.
+pub fn read_team_file(home: &Path, name: &str) -> std::io::Result<TeamFile> {
+    let content = std::fs::read_to_string(team_file_path(home, name))?;
+    serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Remove one member from a team's `config.json`, matching by agent id OR
+/// display name — the port of the oracle's `jqt(teamName, {agentId, name})`
+/// (2.1.223 shutdown paths: `Urv` @261175890 and the print.ts
+/// `shutdown_approved` handler @262044791, both of which remove the member
+/// from the team file BEFORE unassigning its tasks).
+///
+/// Returns `true` when a member was removed and the file written back.
+///
+/// # Errors
+/// Propagates read/parse/write failures from the underlying file IO.
+pub fn remove_team_member(
+    home: &Path,
+    team_name: &str,
+    agent_id: &str,
+    member_name: &str,
+) -> std::io::Result<bool> {
+    let mut file = read_team_file(home, team_name)?;
+    let before = file.members.len();
+    file.members
+        .retain(|m| m.agent_id != agent_id && m.name != member_name);
+    if file.members.len() == before {
+        return Ok(false);
+    }
+    write_team_file(home, team_name, &file)?;
+    Ok(true)
+}
+
 /// `cleanupTeamDirectories` (`TeamDeleteTool.ts:101` → `teamHelpers.ts:641-683`),
 /// reduced to the directory removal the coordinator needs: remove the team dir
 /// (`~/.lingxi/teams/{name}/`) and the tasks dir (`~/.lingxi/tasks/{name}/`).

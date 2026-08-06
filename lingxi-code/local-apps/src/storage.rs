@@ -56,9 +56,9 @@ use crate::error::AppError;
 use crate::ids;
 use crate::state::AppState;
 use crate::types::{
-    AppContinuationKind, AppDesignDraft, AppInteractionKind, AppInteractionRequest,
-    AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
-    APPS_SCHEMA_VERSION,
+    AppContinuationKind, AppDesignDraft, AppDesignPatchOp, AppInteractionKind,
+    AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState,
+    AppWorkflowState, DesignValue, APPS_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -296,6 +296,50 @@ fn ensure_schema_version(rel: &Path, found: u32) -> Result<(), AppError> {
     }
 }
 
+// TODO(local-apps#questionnaire, Task 3/5/6): `DesignValue::Deferred` is the
+// questionnaire-answer sentinel; `service::validate_design_value` refuses it
+// on every WRITE path into `AppDesignDraft` today, so a draft can only ever
+// carry one by having it hand-edited (or written by a newer build) straight
+// onto disk. `read_doc` above is a bare `serde_json::from_str` with no
+// semantic validation, so this load path is the one place that gap is still
+// open — reject it here, the same way every other per-app invariant in
+// `load_all` fails loudly instead of laundering bad data into memory (and
+// from there into both `GetAppDetails` and every subsequent
+// `DesignDraftChanged`/`DesignSuggestionAvailable` event, which re-ship the
+// whole field map from this same in-memory draft). `lower_design_value` in
+// `engine-mobile` relies on this check to make its own `Deferred` arm
+// unreachable.
+//
+// Task 3 makes `Deferred` a legitimate, persisted value inside
+// `AppDesignDraft::fields` (the "let the model decide" answer). The MOMENT
+// that lands, this function must be relaxed to match — otherwise a
+// legitimately-saved draft would fail to reload with `storage_corrupt` on
+// the very next process start. Tasks 5/6 then give it a real wire
+// representation, at which point `lower_design_value`'s `unreachable!()` also
+// needs to become a real mapping instead of firing.
+fn ensure_no_deferred_design_values(draft_rel: &Path, draft: &AppDesignDraft) -> Result<(), AppError> {
+    let is_deferred = |value: &DesignValue| matches!(value, DesignValue::Deferred);
+    if draft.fields.values().any(is_deferred) {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: field value is deferred, which is not yet a supported persisted value",
+            draft_rel.display()
+        )));
+    }
+    if let Some(suggestion) = &draft.pending_suggestion {
+        let has_deferred_op = suggestion.patch.ops.iter().any(|op| {
+            matches!(op, AppDesignPatchOp::Set { value, .. } if is_deferred(value))
+        });
+        if has_deferred_op {
+            return Err(AppError::StorageCorrupt(format!(
+                "{}: pending suggestion sets a deferred value, which is not yet a supported \
+                 persisted value",
+                draft_rel.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Load every app from disk. A missing index means an empty store; a corrupt
 /// index or per-app document fails with `storage_corrupt` rather than
 /// silently dropping apps.
@@ -357,6 +401,7 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         let draft_rel = design_spec_rel(&record.id);
         let draft: AppDesignDraft = read_doc(root, &draft_rel)?;
         ensure_schema_version(&draft_rel, draft.schema_version)?;
+        ensure_no_deferred_design_values(&draft_rel, &draft)?;
 
         let interactions = load_interactions(root, &record.id)?;
 
@@ -1468,6 +1513,80 @@ mod tests {
                 "{doc}: {err}"
             );
         }
+    }
+
+    /// The write-side gate (`service::validate_design_value`) refuses to ever
+    /// persist a `Deferred` field — but `read_doc` is a bare
+    /// `serde_json::from_str` with no semantic validation, so a hand-edited
+    /// (or newer-build) `design-spec.json` on disk could still smuggle one
+    /// in. Reproduces exactly that: a live app's draft is saved normally,
+    /// then a field is overwritten on disk with `{"kind":"deferred"}` before
+    /// the store is reloaded. Without `ensure_no_deferred_design_values` this
+    /// loads silently and the next `GetAppDetails`/`AppDesignDraftChanged`
+    /// lowering would hit `DesignValueDto`'s unrepresented `Deferred` arm.
+    #[test]
+    fn a_deferred_field_hand_edited_onto_disk_is_storage_corrupt_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = new_app("kkkk1111");
+        save_full(dir.path(), &[app]);
+        let path = dir
+            .path()
+            .join("apps/kkkk1111/workspace/.lingxi/design-spec.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["fields"]["tone"] = serde_json::json!({ "kind": "deferred" });
+        std::fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+        let err = load_all(dir.path()).unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
+        assert!(err.to_string().contains("deferred"), "{err}");
+    }
+
+    /// Same gap, reached through a pending suggestion's patch instead of a
+    /// live field — `AppDesignSuggestion::patch` round-trips through the same
+    /// unvalidated `read_doc`.
+    #[test]
+    fn a_deferred_value_in_a_pending_suggestion_patch_is_storage_corrupt_at_load() {
+        let draft = AppDesignDraft {
+            schema_version: APPS_SCHEMA_VERSION,
+            template: AppTemplateKind::CrudTracker,
+            revision: 1,
+            fields: std::collections::BTreeMap::new(),
+            pending_suggestion: Some(crate::types::AppDesignSuggestion {
+                suggestion_id: "sugg-1".into(),
+                patch: crate::types::AppDesignPatch {
+                    ops: vec![AppDesignPatchOp::Set {
+                        field_id: "tone".into(),
+                        value: DesignValue::Deferred,
+                    }],
+                    note: None,
+                },
+                based_on_revision: 1,
+            }),
+            confirmed_revision: None,
+        };
+        let err =
+            ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
+        assert!(err.to_string().contains("pending suggestion"), "{err}");
+    }
+
+    /// A draft with no `Deferred` value anywhere (the common case, including
+    /// an empty `fields` map and no pending suggestion) is unaffected.
+    #[test]
+    fn a_draft_without_any_deferred_value_passes_the_guard() {
+        let draft = AppDesignDraft {
+            schema_version: APPS_SCHEMA_VERSION,
+            template: AppTemplateKind::CrudTracker,
+            revision: 1,
+            fields: std::collections::BTreeMap::from([(
+                "tone".to_string(),
+                DesignValue::ShortText("playful".into()),
+            )]),
+            pending_suggestion: None,
+            confirmed_revision: None,
+        };
+        ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap();
     }
 
     /// A document above [`MAX_DOC_BYTES`] is out of contract: it must fail

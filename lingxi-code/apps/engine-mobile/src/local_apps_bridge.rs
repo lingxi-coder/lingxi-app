@@ -380,15 +380,21 @@ fn lower_design_value(value: DesignValue) -> DesignValueDto {
             value: value.into_iter().map(lower_data_field).collect(),
         },
         DesignValue::DomainList(value) => DesignValueDto::DomainList { value },
-        // `Deferred` is the questionnaire-answer sentinel added for the
-        // conversational designer (local-apps#questionnaire). `local-apps`
-        // service::validate_design_value rejects it on every write path into
-        // `AppDesignDraft::fields` (update_draft, store_suggestion,
-        // continuation replay), so a live draft can never hold one and this
-        // arm is unreachable today. Wiring a wire representation is a later
-        // task, once the questionnaire/answers flow actually populates drafts.
+        // TODO(local-apps#questionnaire, Task 5/6): `Deferred` is the
+        // questionnaire-answer sentinel added for the conversational
+        // designer. `local-apps` closes BOTH the ways a live draft could
+        // hold one today: `service::validate_design_value` rejects it on
+        // every write path (`update_draft`, `store_suggestion`, continuation
+        // replay — service.rs), and `storage::ensure_no_deferred_design_values`
+        // rejects it on load (`storage.rs`, for hand-edited/legacy-build
+        // disk state). So this arm cannot fire today — `todo!()` rather than
+        // `unreachable!()` because Task 3 is expected to make `Deferred` a
+        // legitimate draft value, at which point BOTH of those gates and
+        // this arm need to move together: the gates relax and this becomes a
+        // real `DesignValueDto::Deferred` mapping (which itself needs adding
+        // to client-protocol, re-blessing the version-guard contract index).
         DesignValue::Deferred => {
-            unreachable!("AppDesignDraft::fields cannot hold DesignValue::Deferred")
+            todo!("DesignValueDto has no Deferred wire representation yet (T5/T6)")
         }
     }
 }

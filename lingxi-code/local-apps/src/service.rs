@@ -203,15 +203,20 @@ fn validate_design_value(field_id: &str, value: &DesignValue) -> Result<(), AppE
             Ok(())
         }
         DesignValue::Boolean(_) | DesignValue::Density(_) => Ok(()),
-        // `Deferred` is the questionnaire-answer sentinel added for the
-        // conversational designer (local-apps#questionnaire); the generic
-        // draft-patch pipeline does not understand it yet — wiring it into
-        // `AppDesignDraft` is a later task. Reject it here so the invariant
-        // "`AppDesignDraft::fields` never holds a `Deferred` value" holds for
-        // every writer (`update_draft`, `store_suggestion`, continuation
-        // replay), which is what lets the wire-lowering match in
-        // `engine-mobile` treat this arm as unreachable instead of needing a
-        // wire representation before that later task lands.
+        // TODO(local-apps#questionnaire, Task 3): `Deferred` is the
+        // questionnaire-answer sentinel added for the conversational
+        // designer; the generic draft-patch pipeline does not understand it
+        // yet — wiring it into `AppDesignDraft` is Task 3's job. Reject it
+        // here so the invariant "`AppDesignDraft::fields` never holds a
+        // `Deferred` value" holds for every WRITE path (`update_draft`,
+        // `store_suggestion`, continuation replay). The matching LOAD-path
+        // gate is `storage::ensure_no_deferred_design_values` (a hand-edited
+        // or newer-build disk document is the other way one could appear);
+        // together the two are what let `engine-mobile`'s wire-lowering match
+        // treat its `Deferred` arm as unreachable instead of needing a wire
+        // representation before Task 3 lands. When Task 3 relaxes this arm,
+        // the storage.rs gate must relax in the same change, or a
+        // legitimately-saved draft fails to reload on next start.
         DesignValue::Deferred => Err(AppError::InvalidRequest(format!(
             "value of field {field_id:?} cannot be a deferred answer in a draft patch"
         ))),

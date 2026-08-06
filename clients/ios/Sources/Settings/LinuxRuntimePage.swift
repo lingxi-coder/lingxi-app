@@ -6,8 +6,6 @@ private struct LinuxRuntimeCommandFailure: Error {
 }
 
 private enum LinuxRuntimeBridge {
-    private static let workspaceIDDefaultsKey = "lingxi.mobile-linux.workspace.default.id"
-
     actor HandleCache {
         private struct Key: Equatable {
             let mode: String
@@ -59,22 +57,15 @@ private enum LinuxRuntimeBridge {
 
     private static func config(for mode: LinuxRuntimeMode) -> IosMobileLinuxConfigFfi {
         let manifest = LXISHRuntimeBundleMetadata.current()
-        let workspaceID = stableWorkspaceID()
-        let appSupportRoot = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .path ?? ""
-        let workspaceHostPath = (appSupportRoot as NSString)
-            .appendingPathComponent("workspaces/\(workspaceID)")
-        try? FileManager.default.createDirectory(
-            atPath: workspaceHostPath,
-            withIntermediateDirectories: true
-        )
-        let managedRoot = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("mobile-linux/ios-ish", isDirectory: true)
-            .path ?? ""
+        // The shared helpers, not local re-derivations: this page and the
+        // terminal must resolve the SAME workspace id and directory, and the
+        // managedRoot split this diff fixed came from exactly this kind of
+        // sibling copy. The local copies had already drifted on the
+        // degenerate branch (a missing Application Support produced a
+        // relative "workspaces/<id>" here, "" in the helper).
+        let workspaceID = LXISHDefaultWorkspace.stableID()
+        let workspaceHostPath = LXISHDefaultWorkspace.hostPath(id: workspaceID)
+        let managedRoot = LXISHDefaultWorkspace.managedRootPath()
         let authorizationFile = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
         return IosMobileLinuxConfigFfi(
             mode: mode == .legacy ? .legacy : .mobileLinux,
@@ -86,18 +77,6 @@ private enum LinuxRuntimeBridge {
             archiveSha256: manifest.archiveSha256,
             authorizationFile: authorizationFile
         )
-    }
-
-    private static func stableWorkspaceID() -> String {
-        let defaults = UserDefaults.standard
-        if let persisted = defaults.string(forKey: workspaceIDDefaultsKey),
-           UUID(uuidString: persisted) != nil
-        {
-            return persisted.lowercased()
-        }
-        let generated = UUID().uuidString.lowercased()
-        defaults.set(generated, forKey: workspaceIDDefaultsKey)
-        return generated
     }
 
     static func load(mode: LinuxRuntimeMode) async -> LinuxRuntimeState {
@@ -304,10 +283,15 @@ private enum LinuxRuntimeBridge {
             lastAction: action,
             lastActionMessage: detail,
             busyAction: nil,
-            tasks: tasks.map(mapTask),
-            mounts: status.writableGuestPaths.map {
-                LinuxRuntimeMountRow(id: $0, hostPath: "App Sandbox", guestPath: $0, readOnly: !$0.starts(with: "/workspace/"))
-            }
+            tasks: tasks.map(mapTask)
+            // NOTE deliberately NOT populated: `mounts`. The probe reports
+            // writable GUEST paths (`writableGuestPaths` above) whose host
+            // backing is unknown here; an earlier build synthesized one
+            // display-label row per path into `mounts` (hostPath = the
+            // localized "App Sandbox" string), forcing the terminal to filter
+            // them back out BY STRING SHAPE before openPty. `mounts` now
+            // carries real mount specs only; the Settings list renders the
+            // sandbox rows straight from `writableGuestPaths`.
         )
     }
 
@@ -562,21 +546,54 @@ struct LinuxRuntimePage: View {
         }
     }
 
+    /// One display row per entry: real mounts first (host path as subtitle),
+    /// then the probe's writable guest paths (host backing unknown — the
+    /// localized "App Sandbox" label is a VIEW concern now, no longer
+    /// synthesized into `LinuxRuntimeState.mounts`; `writableGuestPaths` is by
+    /// definition writable, so those rows are never read-only).
+    private struct MountDisplayRow: Identifiable {
+        let id: String
+        let guestPath: String
+        let hostLabel: String
+        let readOnly: Bool
+    }
+
+    private var mountDisplayRows: [MountDisplayRow] {
+        let real = store.linuxRuntime.mounts.map {
+            MountDisplayRow(
+                id: "mount:\($0.id)",
+                guestPath: $0.guestPath,
+                hostLabel: $0.hostPath,
+                readOnly: $0.readOnly
+            )
+        }
+        let sandbox = store.linuxRuntime.writableGuestPaths.map {
+            MountDisplayRow(
+                id: "sandbox:\($0)",
+                guestPath: $0,
+                hostLabel: String(localized: "settings_linux_mount_host_app_sandbox"),
+                readOnly: false
+            )
+        }
+        return real + sandbox
+    }
+
     private var mountsSection: some View {
         SettingsSection(label: String(localized: "settings_linux_section_mounts")) {
-            if store.linuxRuntime.mounts.isEmpty {
+            let rows = mountDisplayRows
+            if rows.isEmpty {
                 SettingsRow(label: String(localized: "settings_linux_mounts_label"),
                             sub: String(localized: "settings_linux_no_mounts_detail"),
                             value: "0", chevron: false, isLast: true)
             } else {
-                ForEach(Array(store.linuxRuntime.mounts.enumerated()), id: \.element.id) { index, mount in
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, mount in
                     SettingsRow(label: mount.guestPath,
-                                sub: mount.hostPath,
+                                sub: mount.hostLabel,
                                 value: mount.readOnly
                                     ? String(localized: "settings_linux_read_only")
                                     : String(localized: "settings_linux_writable"),
                                 chevron: false,
-                                isLast: index == store.linuxRuntime.mounts.count - 1)
+                                isLast: index == rows.count - 1)
                 }
             }
         }
@@ -676,7 +693,12 @@ struct LinuxRuntimePage: View {
         }
         guard store.linuxRuntime.selectedMode == mode,
               store.linuxRuntime.busyAction == action else { return }
-        store.linuxRuntime = next
+        // `next` is built entirely from the probe, so the user-input fields
+        // (the 初始命令 draft) come back at their defaults. `applyProbe` owns
+        // the preserve list — a raw `store.linuxRuntime = next` here once
+        // discarded whatever the user typed, and `TerminalRuntime.make` runs
+        // `terminal.draftCommand` as the next shell's initial command.
+        store.linuxRuntime.applyProbe(next)
     }
 
     private var normalizedDraftCommand: String? {
@@ -686,7 +708,12 @@ struct LinuxRuntimePage: View {
 
     @MainActor
     private func refreshTasks() async {
-        guard !taskOperations.isBusy else { return }
+        // Mutually exclusive with `run(_:mode:)`, not just with other task
+        // operations: `run` replaces the whole `linuxRuntime` object when its
+        // probe returns, so a task result written during that await was
+        // silently overwritten by the pre-operation snapshot — the stopped
+        // task came back as running and the confirmation message vanished.
+        guard !taskOperations.isBusy, store.linuxRuntime.busyAction == nil else { return }
         if let result = await taskOperations.refreshTasks(mode: store.linuxRuntime.selectedMode) {
             store.linuxRuntime.tasks = result.tasks
             store.linuxRuntime.lastActionMessage = result.message
@@ -695,7 +722,8 @@ struct LinuxRuntimePage: View {
 
     @MainActor
     private func stopTask(taskID: String) async {
-        guard !taskOperations.isBusy else { return }
+        // Same exclusion as `refreshTasks()` — see the comment there.
+        guard !taskOperations.isBusy, store.linuxRuntime.busyAction == nil else { return }
         if let result = await taskOperations.stopTask(mode: store.linuxRuntime.selectedMode, taskID: taskID) {
             store.linuxRuntime.tasks = result.tasks
             store.linuxRuntime.lastActionMessage = result.message

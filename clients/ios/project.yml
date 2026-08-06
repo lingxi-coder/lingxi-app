@@ -152,6 +152,21 @@ targets:
             echo "error: Linux runtime manifest is missing; rebuild the Alpine runtime."
             exit 1
           fi
+          # iSH's FsApplyOverlay does
+          #   [NSBundle bundleWithURL:[mainBundle URLForResource:@"RootfsPatch" ...]]
+          # and only then checks the RESULT for nil — but URLForResource:
+          # returns nil when the bundle is absent, and +bundleWithURL: RAISES on
+          # a nil URL. Shipping this bundle is the supported configuration of
+          # the vendored component; without it the app aborts inside
+          # -[ISHKernel bootWithRootPath:] the first time a terminal opens.
+          # Fail the build rather than the device.
+          PATCH_BUNDLE="${SRCROOT}/../../docs/superpowers/references/OpenMinis/deps/resources/RootfsPatch.bundle"
+          if [ ! -d "${PATCH_BUNDLE}" ]; then
+            echo "error: RootfsPatch.bundle is missing; iSH FsApplyOverlay raises on a nil bundle URL and aborts the app at boot."
+            exit 1
+          fi
+          rm -rf "${DESTINATION}/RootfsPatch.bundle"
+          cp -R "${PATCH_BUNDLE}" "${DESTINATION}/RootfsPatch.bundle"
           AUTH_MANIFEST="${SRCROOT}/../../docs/mobile-linux/authorization/AUTHORIZATION_MANIFEST.json"
           if [ -f "${AUTH_MANIFEST}" ]; then
             cp "${AUTH_MANIFEST}" "${DESTINATION}/AUTHORIZATION_MANIFEST.json"

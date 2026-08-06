@@ -39,6 +39,113 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         XCTAssertEqual(manifest.archiveSha256, "abc123")
     }
 
+    /// Byte-for-byte the JSON serde writes for Rust's `NativeConfigPayload`
+    /// (`lingxi-code/platforms/ios-ish-runtime/src/lib.rs`), which has no
+    /// `rename_all`, so the wire keys are the Rust field names. Every
+    /// config-bearing C-ABI call carries exactly this; if it stops decoding,
+    /// the whole native runtime stops with a Foundation decoder message rather
+    /// than anything that names the runtime. Decoded through THE bridge
+    /// decoder (`LXISHBridgeJSON`) — the snake_case convention now lives at
+    /// that chokepoint, not in per-struct `CodingKeys`.
+    func testNativeConfigDecodesTheKeysRustActuallySends() throws {
+        let wire = Data("""
+        {
+          "managed_root": "/managed",
+          "workspace_host_path": "/workspace-host",
+          "stable_workspace_id": "12345678-1234-4abc-8def-1234567890ab",
+          "abi": "arm64",
+          "rootfs_version": "3.24.1",
+          "archive_sha256": null,
+          "authorization_file": null
+        }
+        """.utf8)
+
+        let config = try LXISHBridgeJSON.decoder().decode(LXISHNativeConfig.self, from: wire)
+
+        XCTAssertEqual(config.managedRoot, "/managed")
+        XCTAssertEqual(config.workspaceHostPath, "/workspace-host")
+        XCTAssertEqual(config.stableWorkspaceId, "12345678-1234-4abc-8def-1234567890ab")
+        XCTAssertEqual(config.abi, "arm64")
+        XCTAssertEqual(config.rootfsVersion, "3.24.1")
+        XCTAssertNil(config.archiveSha256)
+        XCTAssertNil(config.authorizationFile)
+    }
+
+    /// camelCase is what the struct used to expect and what Rust never sends.
+    /// Without this the fix could be silently undone by a decoder that accepts
+    /// both, and the bug would come back with the same unreadable message.
+    func testNativeConfigRejectsCamelCaseKeys() {
+        let wire = Data("""
+        {
+          "managedRoot": "/managed",
+          "workspaceHostPath": "/workspace-host",
+          "stableWorkspaceId": "12345678-1234-4abc-8def-1234567890ab",
+          "abi": "arm64",
+          "rootfsVersion": "3.24.1"
+        }
+        """.utf8)
+
+        XCTAssertThrowsError(
+            try LXISHBridgeJSON.decoder().decode(LXISHNativeConfig.self, from: wire)
+        )
+    }
+
+    /// WHY the bridge coders carry NO key strategy, pinned as a test: a
+    /// chokepoint `convertFromSnakeCase` looks like the class fix for this
+    /// bridge's repeated missing-CodingKeys outages, but Foundation's key
+    /// strategies transform DICTIONARY keys too, and the requests embed
+    /// environment maps. Real env vars — `GIT_CONFIG_COUNT`, `no_proxy`,
+    /// `npm_config_userAgent` — must cross the bridge byte-verbatim. If a
+    /// future pass re-adds a strategy, this fails before the terminal does.
+    func testBridgeCodersPreserveEnvMapKeys() throws {
+        let wire = Data("""
+        {
+          "command": "/bin/sh",
+          "args": ["-c", "env"],
+          "cwd": null,
+          "env": {
+            "GIT_CONFIG_COUNT": "1",
+            "no_proxy": "localhost",
+            "npm_config_userAgent": "npm/10",
+            "TERM": "xterm-256color"
+          },
+          "stdin": null,
+          "timeout_ms": 1000,
+          "network": "allowed",
+          "mounts": null
+        }
+        """.utf8)
+        let request = try LXISHBridgeJSON.decoder().decode(LXISHRunRequest.self, from: wire)
+        XCTAssertEqual(request.env["GIT_CONFIG_COUNT"], "1")
+        XCTAssertEqual(request.env["no_proxy"], "localhost")
+        XCTAssertEqual(request.env["npm_config_userAgent"], "npm/10")
+        XCTAssertEqual(request.env["TERM"], "xterm-256color")
+        XCTAssertEqual(request.timeoutMs, 1000, "struct fields still decode their snake keys")
+
+        let encoded = try LXISHBridgeJSON.encoder().encode(request)
+        let json = String(decoding: encoded, as: UTF8.self)
+        for key in ["GIT_CONFIG_COUNT", "no_proxy", "npm_config_userAgent", "TERM"] {
+            XCTAssertTrue(json.contains("\"\(key)\""), "env key must survive encode verbatim: \(key)")
+        }
+        XCTAssertTrue(json.contains("\"timeout_ms\""), "struct keys stay snake_case: \(json)")
+    }
+
+    /// iSH's `exit_hook` receives the kernel's wait-status encoding
+    /// (`do_exit(status << 8)` on a normal exit; the low 7 bits carry a fatal
+    /// signal). The bridge's ISHProcessExited observer — the piece that turns
+    /// a user typing `exit` into a `pty_closed` event instead of a dead
+    /// caret — must decode both shapes.
+    func testGuestWaitStatusDecodesNormalExitsAndSignals() {
+        // exit 0 / exit 3 → status << 8.
+        XCTAssertEqual(LXISHGuestWaitStatus.decode(0).code, 0)
+        XCTAssertNil(LXISHGuestWaitStatus.decode(0).detail)
+        XCTAssertEqual(LXISHGuestWaitStatus.decode(3 << 8).code, 3)
+        // SIGKILL(9) → shell convention 128 + signal, with a diagnosis.
+        let killed = LXISHGuestWaitStatus.decode(9)
+        XCTAssertEqual(killed.code, 137)
+        XCTAssertEqual(killed.detail, "terminated by signal 9")
+    }
+
     func testTerminalDescriptorFallsBackToBundledManifestWhenRuntimeStateIsEmpty() throws {
         let manifestURL = temporaryRoot.appendingPathComponent("linux-runtime-manifest.json")
         try """

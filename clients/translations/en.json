@@ -1043,7 +1043,6 @@
   "cron_notification_skipped %@": "%@ scheduled task skipped",
   "cron_notification_status_update %@": "%@ scheduled task status update",
   "terminal_open_runtime_settings": "Open Runtime Settings",
-  "terminal_try_repair": "Try Repair",
   "terminal_view_runtime": "View Runtime",
   "terminal_input_placeholder": "Enter command",
   "terminal_copy_button": "Copy",
@@ -1576,5 +1575,14 @@
   "voice_model_name_melo_zh_en": "MeloTTS Chinese + English",
   "voice_model_name_kitten_nano_en": "Kitten Nano (English)",
   "voice_pack_title_zh": "Chinese (Mandarin)",
-  "voice_pack_subtitle_zh": "Zipformer 14M streaming ASR + MeloTTS"
+  "voice_pack_subtitle_zh": "Zipformer 14M streaming ASR + MeloTTS",
+  "settings_linux_mount_host_app_sandbox": "App Sandbox",
+  "terminal_dismiss_keyboard": "Dismiss keyboard",
+  "terminal_exit_notice_code %lld": "[process exited with code %lld]",
+  "terminal_exit_notice_timeout": "[process timed out and was terminated]",
+  "terminal_exit_notice_unknown": "[process exited]",
+  "terminal_history_next": "Next command",
+  "terminal_history_previous": "Previous command",
+  "terminal_restart_session": "restart shell",
+  "terminal_status_connecting": "[connecting to shell…]"
 }

@@ -37,7 +37,13 @@ struct LinuxTerminalLine: Identifiable, Equatable {
 }
 
 struct LinuxTerminalState: Equatable {
-    var draftCommand: String = "python3 --version"
+    /// Empty by default. This is the VALUE of 初始命令, not its placeholder,
+    /// and `TerminalRuntimeDescriptor.make` auto-runs any non-empty draft in
+    /// every shell it opens — a sample default meant every cold-launch
+    /// terminal executed "python3 --version" unasked and seeded it into the
+    /// command history. The sample lives in the field's placeholder
+    /// (`settings_linux_command_placeholder`), where samples belong.
+    var draftCommand: String = ""
     var activeSessionID: String? = nil
     var lines: [LinuxTerminalLine] = []
     var lastExitCode: Int32? = nil

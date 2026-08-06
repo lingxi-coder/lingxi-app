@@ -111,11 +111,20 @@ extension TerminalRuntimeDescriptor {
             ?? LXISHDefaultWorkspace.hostPath(id: projectId)
         let workspaceGuestPath = project?.workspace.guestPath
             ?? LXISHDefaultWorkspace.guestHome
-        let managedRoot =
-            linuxRuntime.managedRoot
-            ?? URL(fileURLWithPath: appSandboxRoot, isDirectory: true)
-            .appendingPathComponent("mobile-linux/ios-ish", isDirectory: true)
-            .path
+        // Same directory the Linux runtime page installs into. The old fallback
+        // hung off `appSandboxRoot`, which carries a `LingxiCode` component the
+        // Settings path does not, so a terminal opened before Settings looked
+        // for the rootfs somewhere it was never installed.
+        //
+        // SINGLE AUTHORITY: always the configured constant, never the probe's
+        // `linuxRuntime.managedRoot` echo. Settings (`LinuxRuntimeBridge
+        // .config()`) and its HandleCache key use the constant unconditionally;
+        // a `?? `-style probe-first read here kept a second authority alive —
+        // if the runtime ever reports a canonicalized spelling (/var vs
+        // /private/var), the terminal would boot one root while Settings
+        // installs/repairs another. That two-directory divergence is the
+        // failure mode this constant exists to kill.
+        let managedRoot = LXISHDefaultWorkspace.managedRootPath()
 
         let config = TerminalRuntimeConfig(
             mode: linuxRuntime.selectedMode == .legacy ? .legacy : .mobileLinux,
@@ -134,7 +143,12 @@ extension TerminalRuntimeDescriptor {
         )
 
         return TerminalRuntimeDescriptor(
-            config: workspaceHostPath.isEmpty ? nil : config,  // only if the container itself is unavailable
+            // nil config = the container itself is unavailable. Covers BOTH
+            // degenerate branches of the shared helpers: a missing workspace
+            // container AND `managedRootPath()`'s empty-string failure (no
+            // Application Support) — an empty managed root must never reach
+            // the FFI as if it were a real directory.
+            config: (workspaceHostPath.isEmpty || managedRoot.isEmpty) ? nil : config,
             workspace: TerminalWorkspaceDescriptor(
                 hostPath: project?.workspace.hostURL.path ?? workspaceHostPath,
                 guestPath: workspaceGuestPath,
@@ -157,6 +171,12 @@ extension TerminalRuntimeDescriptor {
         )
     }
 
+    // `linuxRuntime.mounts` now carries REAL mount specs only: the bridge no
+    // longer synthesizes "App Sandbox" display-label rows into it (those are a
+    // Settings-view rendering of `writableGuestPaths`), so the old
+    // string-shape `isRealMount` filter — which silently depended on no
+    // translation of the label starting with "/" — is gone with the
+    // conflation it guarded against.
     private static func mapMount(_ mount: LinuxRuntimeMountRow) -> TerminalMountSpec {
         TerminalMountSpec(
             hostPath: mount.hostPath,

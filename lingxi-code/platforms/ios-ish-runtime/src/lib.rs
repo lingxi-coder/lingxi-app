@@ -856,13 +856,14 @@ impl IosIshRuntime {
                         for event in events {
                             after_sequence = Some(event.sequence);
                             if event.session_id != session_id {
-                                runtime.emit_runtime_error(
-                                    Some(session_id.clone()),
-                                    format!(
-                                        "ignoring PTY event for unexpected session {}",
-                                        event.session_id
-                                    ),
-                                );
+                                // Skip silently. A straggler event from a
+                                // previous session (the journal outlives a
+                                // shell; reopen is a supported flow now) is
+                                // not a fault of THIS session — but this used
+                                // to emit a RuntimeError tagged with the NEW
+                                // session id, which the terminal maps
+                                // straight to a failed state: one stale event
+                                // killed a healthy restarted shell.
                                 continue;
                             }
                             match event.kind.as_str() {
@@ -884,17 +885,23 @@ impl IosIshRuntime {
                                 }
                                 "pty_closed" => {
                                     control.open.store(false, Ordering::Release);
+                                    // A shell SELF-exit (user typed `exit`, or the
+                                    // guest process died) rides in with the real
+                                    // wait-status-decoded code from the bridge's
+                                    // ISHProcessExited observer; a bridge-initiated
+                                    // close carries none and stays code 0.
+                                    let exit_code = Some(event.exit_code.unwrap_or(0));
                                     runtime.finish_task(
                                         &session_id,
                                         &control.task,
                                         MobileLinuxTaskStatus::Completed,
-                                        Some(0),
+                                        exit_code,
                                         event.detail.clone(),
                                     );
                                     runtime.emit_pty_closed_once(
                                         &session_id,
                                         &control,
-                                        Some(0),
+                                        exit_code,
                                         event.detail,
                                     );
                                     runtime.clear_current_pty(&session_id);
@@ -917,6 +924,18 @@ impl IosIshRuntime {
                             None,
                             Some(error.to_string()),
                         );
+                        // Release the NATIVE side before announcing the death.
+                        // The Swift bridge frees its one-interactive-PTY slot
+                        // only through a close call; without this, the exit
+                        // event below reaches the terminal, the user taps
+                        // 重新启动 shell, and every reopen is refused with
+                        // "only one interactive PTY session is supported per
+                        // managed root" until the app is relaunched. Closing
+                        // before the emit also keeps a prompt restart from
+                        // racing this task for the slot. Best-effort: if the
+                        // pipeline is so broken that close itself fails, the
+                        // Swift bridge now releases the slot regardless.
+                        let _ = runtime.native_close_pty(&session_id).await;
                         runtime.emit_pty_closed_once(
                             &session_id,
                             &control,
@@ -1266,7 +1285,12 @@ impl MobileLinuxRuntime for IosIshRuntime {
     async fn close_pty(&self, handle: &PtySessionHandle) -> Result<(), MobileLinuxError> {
         let control = self.current_pty(&handle.id)?;
         control.open.store(false, Ordering::Release);
-        self.native_close_pty(&handle.id).await?;
+        // Do not `?` here. Only one PTY may be open per runtime, so returning
+        // early on a failed native close left `state.pty` occupied for the life
+        // of the handle and every later `open_pty` was refused with "only one
+        // PTY session is supported by the iSH bridge". The slot is our own
+        // bookkeeping: release it either way and report the failure afterwards.
+        let native_result = self.native_close_pty(&handle.id).await;
         self.finish_task(
             &handle.id,
             &control.task,
@@ -1281,7 +1305,7 @@ impl MobileLinuxRuntime for IosIshRuntime {
             Some("PTY closed".to_string()),
         );
         self.clear_current_pty(&handle.id);
-        Ok(())
+        native_result
     }
 
     async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
@@ -1630,6 +1654,11 @@ struct NativePtyEventPayload {
     kind: String,
     data_base64: Option<String>,
     detail: Option<String>,
+    /// Real guest exit code on a shell self-exit (`pty_closed` emitted by the
+    /// bridge's ISHProcessExited observer). Absent for bridge-initiated
+    /// closes, whose contract stays "closed cleanly" (code 0).
+    #[serde(default)]
+    exit_code: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2821,6 +2850,26 @@ mod tests {
         assert_eq!(result.stdout, "Linux\n");
         assert_eq!(result.exit_code, 0);
         assert!(!result.timed_out);
+    }
+
+    #[test]
+    fn pty_closed_event_carries_and_defaults_the_guest_exit_code() {
+        // Shell SELF-exit (bridge's ISHProcessExited observer): the real
+        // wait-status-decoded code rides in `exit_code`.
+        let events = parse_poll_events(
+            r#"{"ok":true,"events":[{"sequence":7,"session_id":"s1","kind":"pty_closed","data_base64":null,"detail":null,"exit_code":3}]}"#,
+        )
+        .expect("parse pty_closed with exit_code");
+        assert_eq!(events[0].kind, "pty_closed");
+        assert_eq!(events[0].exit_code, Some(3));
+
+        // Bridge-initiated close omits the field entirely — must default to
+        // None (the reader then reports the historical code 0), not fail.
+        let events = parse_poll_events(
+            r#"{"ok":true,"events":[{"sequence":8,"session_id":"s1","kind":"pty_closed","data_base64":null,"detail":null}]}"#,
+        )
+        .expect("parse pty_closed without exit_code");
+        assert_eq!(events[0].exit_code, None);
     }
 
     #[test]

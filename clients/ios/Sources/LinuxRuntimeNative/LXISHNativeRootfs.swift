@@ -11,6 +11,11 @@
 import CryptoKit
 import Foundation
 
+/// Returned to Rust under the envelope's `"status"` key. Rust is uniformly
+/// snake_case on both directions of this bridge, and this struct was emitting
+/// camelCase — latent only because `parse_native_ok` reads `{ok, error}` and
+/// throws the rest away. The first Rust-side reader of a real status field
+/// would have reproduced the config-decode outage exactly.
 struct LXISHRootfsStatus: Codable {
     var state: String
     var backend: String
@@ -25,6 +30,23 @@ struct LXISHRootfsStatus: Codable {
     var installedSizeBytes: UInt64?
     var writableGuestPaths: [String]
     var lastError: String?
+
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case backend
+        case mode
+        case platform
+        case abi
+        case version
+        case managedRoot = "managed_root"
+        case activeRoot = "active_root"
+        case stagedRoot = "staged_root"
+        case archiveSha256 = "archive_sha256"
+        case installedSizeBytes = "installed_size_bytes"
+        case writableGuestPaths = "writable_guest_paths"
+        case lastError = "last_error"
+    }
 }
 
 /// The guest workspace that exists whether or not a project is open.
@@ -52,11 +74,17 @@ enum LXISHDefaultWorkspace {
         return generated
     }
 
+    /// One derivation of the Application Support base for both paths below.
+    /// Two sibling copies of this guard were how the managed root and the
+    /// workspace could ever disagree on their failure behavior.
+    private static var supportDirectory: URL? {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    }
+
     static func hostPath(id: String? = nil) -> String {
         let workspaceID = id ?? stableID()
-        guard let support = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        else {
+        guard let support = supportDirectory else {
             return ""
         }
         let url = support
@@ -65,8 +93,38 @@ enum LXISHDefaultWorkspace {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url.path
     }
+
+    /// Where the Alpine rootfs is installed. One machine, so one path.
+    ///
+    /// The Linux runtime page computed `<AppSupport>/mobile-linux/ios-ish`
+    /// while the terminal fell back to `<AppSandboxRoot>/mobile-linux/ios-ish`
+    /// — and `appSandboxRoot` appends `LingxiCode` first, so the two were
+    /// different directories. The only thing that reconciled them was
+    /// `LinuxRuntimeState.managedRoot`, which is `Equatable` and not persisted,
+    /// so it was nil on every cold launch: open the terminal before visiting
+    /// Settings and it probed a root with no rootfs, or installed a second full
+    /// Alpine beside the first, and Settings' repair/reset then operated on the
+    /// copy the terminal never booted.
+    static func managedRootPath() -> String {
+        guard let support = supportDirectory else {
+            return ""
+        }
+        return support
+            .appendingPathComponent("mobile-linux/ios-ish", isDirectory: true)
+            .path
+    }
 }
 
+/// Decoded from the JSON that Rust's `NativeConfigPayload`
+/// (`platforms/ios-ish-runtime`) writes for every config-bearing call across
+/// the C ABI. serde emits Rust field names verbatim — `managed_root`, not
+/// `managedRoot` — and this struct did not say so, while `LXISHMountSpec`,
+/// `LXISHRunRequest` and the rest all do. Every call that carries a config
+/// (install, boot, run, pty_open, …) therefore failed to decode on arrival,
+/// and the terminal surfaced the decoder's "The data couldn't be read because
+/// it is missing." as its launch failure. `LXISHRootfsStatus` above had the
+/// same defect in the response direction; that one was latent, this one was
+/// not.
 struct LXISHNativeConfig: Codable, Hashable {
     var managedRoot: String
     var workspaceHostPath: String
@@ -75,6 +133,7 @@ struct LXISHNativeConfig: Codable, Hashable {
     var rootfsVersion: String
     var archiveSha256: String?
     var authorizationFile: String?
+
 
     var normalizedManagedRoot: URL {
         URL(fileURLWithPath: managedRoot, isDirectory: true).standardizedFileURL
@@ -94,6 +153,16 @@ struct LXISHNativeConfig: Codable, Hashable {
 
     var mountsCacheURL: URL {
         normalizedManagedRoot.appendingPathComponent("mounts.json")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case managedRoot = "managed_root"
+        case workspaceHostPath = "workspace_host_path"
+        case stableWorkspaceId = "stable_workspace_id"
+        case abi
+        case rootfsVersion = "rootfs_version"
+        case archiveSha256 = "archive_sha256"
+        case authorizationFile = "authorization_file"
     }
 }
 
@@ -118,10 +187,12 @@ private struct LXISHInstalledRootfsMetadata: Codable {
     var arch: String
     var updatedAt: String
 
+
     enum CodingKeys: String, CodingKey {
-        case abi, arch
+        case abi
         case rootfsVersion = "rootfs_version"
         case archiveSha256 = "archive_sha256"
+        case arch
         case updatedAt = "updated_at"
     }
 }
@@ -224,7 +295,7 @@ final class LXISHNativeRootfsManager {
 
     func cacheMounts(_ mounts: [LXISHMountSpec], for config: LXISHNativeConfig) throws {
         try fileManager.createDirectory(at: config.normalizedManagedRoot, withIntermediateDirectories: true)
-        let data = try JSONEncoder().encode(mounts)
+        let data = try LXISHBridgeJSON.encoder().encode(mounts)
         try data.write(to: config.mountsCacheURL, options: .atomic)
     }
 
@@ -232,7 +303,7 @@ final class LXISHNativeRootfsManager {
         guard let data = try? Data(contentsOf: config.mountsCacheURL) else {
             return []
         }
-        return (try? JSONDecoder().decode([LXISHMountSpec].self, from: data)) ?? []
+        return (try? LXISHBridgeJSON.decoder().decode([LXISHMountSpec].self, from: data)) ?? []
     }
 
     private func readArchTag(at rootfsURL: URL) -> String? {
@@ -362,7 +433,7 @@ final class LXISHNativeRootfsManager {
             arch: currentArch,
             updatedAt: ISO8601DateFormatter().string(from: Date())
         )
-        let data = try JSONEncoder().encode(payload)
+        let data = try LXISHBridgeJSON.encoder().encode(payload)
         try data.write(
             to: rootfsURL.appendingPathComponent("bridge-state.json"),
             options: .atomic
@@ -374,7 +445,7 @@ final class LXISHNativeRootfsManager {
         guard let data = try? Data(contentsOf: metadataURL) else {
             return nil
         }
-        return try? JSONDecoder().decode(LXISHInstalledRootfsMetadata.self, from: data)
+        return try? LXISHBridgeJSON.decoder().decode(LXISHInstalledRootfsMetadata.self, from: data)
     }
 
     private func metadataMatches(_ metadata: LXISHInstalledRootfsMetadata?, config: LXISHNativeConfig) -> Bool {

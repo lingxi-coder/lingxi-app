@@ -33492,6 +33492,40 @@
         }
       }
     },
+    "settings_linux_mount_host_app_sandbox": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用沙盒"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用程式沙盒"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Sandbox"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリサンドボックス"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 샌드박스"
+          }
+        }
+      }
+    },
     "settings_linux_mount_managed_summary": {
       "localizations": {
         "zh-Hans": {
@@ -46820,6 +46854,142 @@
         }
       }
     },
+    "terminal_dismiss_keyboard": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起键盘"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起鍵盤"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dismiss keyboard"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キーボードを閉じる"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "키보드 닫기"
+          }
+        }
+      }
+    },
+    "terminal_exit_notice_code %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[进程已退出，代码 %lld]"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[行程已結束，代碼 %lld]"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[process exited with code %lld]"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[プロセスが終了しました コード %lld]"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[프로세스가 코드 %lld(으)로 종료되었습니다]"
+          }
+        }
+      }
+    },
+    "terminal_exit_notice_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[进程超时已终止]"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[行程逾時已終止]"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[process timed out and was terminated]"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[タイムアウトによりプロセスを終了しました]"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[시간 초과로 프로세스를 종료했습니다]"
+          }
+        }
+      }
+    },
+    "terminal_exit_notice_unknown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[进程已退出]"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[行程已結束]"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[process exited]"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[プロセスが終了しました]"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[프로세스가 종료되었습니다]"
+          }
+        }
+      }
+    },
     "terminal_guest_workspace_unavailable": {
       "localizations": {
         "zh-Hans": {
@@ -46850,6 +47020,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "guest workspace를 사용할 수 없습니다"
+          }
+        }
+      }
+    },
+    "terminal_history_next": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一条命令"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一則指令"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next command"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次のコマンド"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음 명령"
+          }
+        }
+      }
+    },
+    "terminal_history_previous": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一条命令"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一則指令"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previous command"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前のコマンド"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 명령"
           }
         }
       }
@@ -47364,6 +47602,40 @@
         }
       }
     },
+    "terminal_restart_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新启动 shell"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新啟動 shell"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restart shell"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "シェルを再起動"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "셸 다시 시작"
+          }
+        }
+      }
+    },
     "terminal_run_failed": {
       "localizations": {
         "zh-Hans": {
@@ -47432,36 +47704,36 @@
         }
       }
     },
-    "terminal_try_repair": {
+    "terminal_status_connecting": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "尝试修复"
+            "value": "[正在连接 shell…]"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "嘗試修復"
+            "value": "[正在連線 shell…]"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Try Repair"
+            "value": "[connecting to shell…]"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "修復を試みる"
+            "value": "[シェルに接続中…]"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "복구 시도"
+            "value": "[셸에 연결하는 중…]"
           }
         }
       }

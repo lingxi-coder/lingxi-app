@@ -1043,7 +1043,6 @@
   "cron_notification_skipped %@": "%@ 定时任务已跳过",
   "cron_notification_status_update %@": "%@ 定时任务状态更新",
   "terminal_open_runtime_settings": "打开运行时设置",
-  "terminal_try_repair": "尝试修复",
   "terminal_view_runtime": "查看运行时",
   "terminal_input_placeholder": "输入命令",
   "terminal_copy_button": "复制",
@@ -1576,5 +1575,14 @@
   "voice_model_name_melo_zh_en": "MeloTTS 中英双语",
   "voice_model_name_kitten_nano_en": "Kitten Nano 英文",
   "voice_pack_title_zh": "中文（普通话）",
-  "voice_pack_subtitle_zh": "Zipformer 14M 流式识别 + MeloTTS"
+  "voice_pack_subtitle_zh": "Zipformer 14M 流式识别 + MeloTTS",
+  "settings_linux_mount_host_app_sandbox": "应用沙盒",
+  "terminal_dismiss_keyboard": "收起键盘",
+  "terminal_exit_notice_code %lld": "[进程已退出，代码 %lld]",
+  "terminal_exit_notice_timeout": "[进程超时已终止]",
+  "terminal_exit_notice_unknown": "[进程已退出]",
+  "terminal_history_next": "下一条命令",
+  "terminal_history_previous": "上一条命令",
+  "terminal_restart_session": "重新启动 shell",
+  "terminal_status_connecting": "[正在连接 shell…]"
 }

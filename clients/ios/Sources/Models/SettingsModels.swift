@@ -160,6 +160,20 @@ struct LinuxRuntimeState: Equatable {
     }
 
     var canOpenTerminal: Bool { terminalSupported && available }
+
+    /// Fold a bridge PROBE result into this state. The ONLY sanctioned way to
+    /// apply a whole probe: `LinuxRuntimeBridge` builds a full
+    /// `LinuxRuntimeState`, which is a bigger type than the probe's data — it
+    /// contains user-INPUT fields the probe cannot know. A wholesale
+    /// `store.linuxRuntime = probed` clobbers those by default, and every new
+    /// writer had to remember a hand-merge at its call site (the draft-command
+    /// clobber shipped exactly that way). The preserve list now lives here,
+    /// once, next to the type it protects.
+    mutating func applyProbe(_ probe: LinuxRuntimeState) {
+        let preservedTerminal = terminal
+        self = probe
+        terminal = preservedTerminal
+    }
 }
 
 // MARK: - Presets data

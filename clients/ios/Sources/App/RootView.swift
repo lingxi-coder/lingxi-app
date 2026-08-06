@@ -356,8 +356,7 @@ struct RootView: View {
             TerminalView(
                 descriptor: descriptor,
                 onDismiss: { popRoute() },
-                onOpenRuntimeSettings: { popRoute(); navigation.showSettings(.linuxRuntime) },
-                onRepairRuntime: { popRoute(); navigation.showSettings(.linuxRuntime) }
+                onOpenRuntimeSettings: { popRoute(); navigation.showSettings(.linuxRuntime) }
             )
         case .cron(let scopeID, let taskID):
             let route = scopeID.map { CronRoute.task(scopeID: $0, taskID: taskID) }

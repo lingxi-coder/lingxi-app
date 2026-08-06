@@ -10,11 +10,38 @@ import Foundation
 import Network
 import ObjectiveC.runtime
 
+/// The ONE pair of coders for this bridge. Rust (serde) is uniformly
+/// snake_case on both directions of the C ABI; the convention is enforced by
+/// per-struct `CodingKeys` plus the round-trip tests that pin them.
+///
+/// DELIBERATELY NO `keyDecodingStrategy`/`keyEncodingStrategy` here, although
+/// a chokepoint strategy looks like the obvious class fix for the
+/// missing-CodingKeys outages this bridge has shipped: Foundation's key
+/// strategies transform DICTIONARY keys too, and these payloads embed
+/// environment maps (`env: [String: String]`). Real env vars like
+/// `GIT_CONFIG_COUNT`, `no_proxy`, and `npm_config_userAgent` would be
+/// silently rewritten in flight — a worse outage than the one being
+/// prevented, and no case-based heuristic survives `npm_config_userAgent`.
+/// `LXISHRuntimeBundleManifestTests.testBridgeCodersPreserveEnvMapKeys` pins
+/// this decision; if a future pass re-adds a strategy, that test fails first.
+enum LXISHBridgeJSON {
+    static func decoder() -> JSONDecoder {
+        JSONDecoder()
+    }
+
+    static func encoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
+}
+
 struct LXISHMountSpec: Codable, Hashable {
     var hostPath: String
     var guestPath: String
     var readOnly: Bool
     var purpose: String
+
 
     enum CodingKeys: String, CodingKey {
         case hostPath = "host_path"
@@ -34,9 +61,16 @@ struct LXISHRunRequest: Codable {
     var network: String
     var mounts: [LXISHMountSpec]?
 
+
     enum CodingKeys: String, CodingKey {
-        case command, args, cwd, env, stdin, network, mounts
+        case command
+        case args
+        case cwd
+        case env
+        case stdin
         case timeoutMs = "timeout_ms"
+        case network
+        case mounts
     }
 }
 
@@ -54,6 +88,7 @@ struct LXISHPtyWriteRequest: Codable {
     var sessionId: String
     var dataBase64: String
 
+
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case dataBase64 = "data_base64"
@@ -65,14 +100,17 @@ struct LXISHPtyResizeRequest: Codable {
     var cols: UInt16
     var rows: UInt16
 
+
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
-        case cols, rows
+        case cols
+        case rows
     }
 }
 
 struct LXISHPtyCloseRequest: Codable {
     var sessionId: String
+
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -83,6 +121,7 @@ struct LXISHPollRequest: Codable {
     var afterSequence: UInt64?
     var limit: UInt32?
 
+
     enum CodingKeys: String, CodingKey {
         case afterSequence = "after_sequence"
         case limit
@@ -91,6 +130,7 @@ struct LXISHPollRequest: Codable {
 
 struct LXISHBackgroundProcessRequest: Codable {
     var processId: String
+
 
     enum CodingKeys: String, CodingKey {
         case processId = "process_id"
@@ -102,6 +142,7 @@ struct LXISHBackgroundPollRequest: Codable {
     var afterSequence: UInt64?
     var limit: UInt32?
 
+
     enum CodingKeys: String, CodingKey {
         case processId = "process_id"
         case afterSequence = "after_sequence"
@@ -112,6 +153,7 @@ struct LXISHBackgroundPollRequest: Codable {
 struct LXISHLoopbackProbeRequest: Codable {
     var port: UInt16
     var timeoutMs: UInt32
+
 
     enum CodingKeys: String, CodingKey {
         case port
@@ -132,8 +174,10 @@ private struct LXISHRunResultPayload: Codable {
     var cancelled: Bool
     var durationSeconds: Double
 
+
     enum CodingKeys: String, CodingKey {
-        case stdout, stderr
+        case stdout
+        case stderr
         case exitCode = "exit_code"
         case timedOut = "timed_out"
         case cancelled
@@ -147,6 +191,11 @@ private struct LXISHPtyEventPayload: Codable {
     var kind: String
     var dataBase64: String?
     var detail: String?
+    /// Real guest exit code, present only on a shell SELF-exit `pty_closed`
+    /// (produced by the ISHProcessExited observer). Bridge-initiated closes
+    /// omit it; the Rust reader then reports code 0 as before.
+    var exitCode: Int32?
+
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -154,6 +203,7 @@ private struct LXISHPtyEventPayload: Codable {
         case kind
         case dataBase64 = "data_base64"
         case detail
+        case exitCode = "exit_code"
     }
 }
 
@@ -167,11 +217,16 @@ private struct LXISHBackgroundEventPayload: Codable {
     var cancelled: Bool?
     var detail: String?
 
+
     enum CodingKeys: String, CodingKey {
-        case sequence, kind, line, cancelled, detail
+        case sequence
         case processId = "process_id"
+        case kind
+        case line
         case dataBase64 = "data_base64"
         case exitCode = "exit_code"
+        case cancelled
+        case detail
     }
 }
 
@@ -451,6 +506,14 @@ private final class LXISHKernelRuntimeBridge {
         if interactiveShellOpen {
             try writeInputData(Data("exit\n".utf8))
         }
+        interactiveShellOpen = false
+    }
+
+    /// Flag-only release for a shell that ALREADY died in the guest (observed
+    /// via ISHProcessExited). Unlike [`closeInteractiveShell`], this must not
+    /// write `exit\n` — there is no shell left to read it, and the write would
+    /// land in the next session's input if one races in.
+    func markInteractiveShellClosed() {
         interactiveShellOpen = false
     }
 
@@ -748,8 +811,83 @@ private final class LXISHShellExecutorRuntimeBridge {
     }
 }
 
+/// Decoder for the iSH kernel's wait-status encoding (`do_exit(status << 8)`
+/// on a normal exit; the low 7 bits carry a fatal signal). Internal — the
+/// unit suite pins the decode against both encodings.
+enum LXISHGuestWaitStatus {
+    /// Shell-convention result: normal exit → `(status >> 8) & 0xff`;
+    /// signal death → `128 + signal` with a human-readable detail.
+    static func decode(_ status: Int32) -> (code: Int32, detail: String?) {
+        let signal = status & 0x7f
+        if signal == 0 {
+            return ((status >> 8) & 0xff, nil)
+        }
+        return (128 + signal, "terminated by signal \(signal)")
+    }
+}
+
 private final class LXISHNativeCoordinator {
     static let shared = LXISHNativeCoordinator()
+
+    /// Posted by the embedded iSH kernel's `exit_hook` for guest init (pid 1)
+    /// and DIRECT children of init — which in this app are exactly the
+    /// interactive shell (`executeCommand:` → `become_new_init_child`) and the
+    /// background executor's processes. Payload: `{"pid": pid_t, "code":
+    /// wait-status}` (ISHKernel.m `handle_process_exit`).
+    private static let guestProcessExited = Notification.Name("ISHProcessExited")
+
+    private var processExitObserver: NSObjectProtocol?
+
+    private init() {
+        // Observe unconditionally: without this, a user typing `exit` (or the
+        // shell crashing) produced NO event anywhere in the stack — the screen
+        // stayed .ready with a dead caret forever, and the one-PTY slot stayed
+        // occupied so even a manual restart was refused.
+        processExitObserver = NotificationCenter.default.addObserver(
+            forName: Self.guestProcessExited,
+            object: nil,
+            queue: nil
+        ) { [weak self] note in
+            guard let pid = (note.userInfo?["pid"] as? NSNumber)?.int32Value else { return }
+            let code = (note.userInfo?["code"] as? NSNumber)?.int32Value ?? 0
+            self?.handleGuestProcessExit(pid: pid, waitStatus: code)
+        }
+    }
+
+    /// A guest init-or-direct-child process exited. Background executor
+    /// children settle through their own completion callbacks and are
+    /// excluded by pid; whatever remains while a PTY session is open is the
+    /// interactive shell itself (pid 1 means guest init died, which the shell
+    /// cannot survive either). Emit the `pty_closed` the Rust reader already
+    /// understands, carrying the REAL exit code, and free the one-PTY slot so
+    /// the restart link actually works.
+    private func handleGuestProcessExit(pid: Int32, waitStatus: Int32) {
+        queue.async {
+            for (key, runtime) in self.runtimes {
+                var runtime = runtime
+                guard let sessionId = runtime.ptySessionId else { continue }
+                if pid != 1,
+                   runtime.backgroundProcesses.values.contains(where: { $0.guestPid == pid }) {
+                    continue
+                }
+                let status = LXISHGuestWaitStatus.decode(waitStatus)
+                runtime.ptySessionId = nil
+                runtime.nextSequence += 1
+                runtime.events.append(
+                    LXISHPtyEventPayload(
+                        sequence: runtime.nextSequence,
+                        sessionId: sessionId,
+                        kind: "pty_closed",
+                        dataBase64: nil,
+                        detail: pid == 1 ? "guest init exited" : status.detail,
+                        exitCode: status.code
+                    )
+                )
+                runtime.kernel.markInteractiveShellClosed()
+                self.runtimes[key] = runtime
+            }
+        }
+    }
 
     private final class BackgroundProcessState {
         let processId: String
@@ -1039,6 +1177,13 @@ private final class LXISHNativeCoordinator {
                 throw LXISHBridgeError.unavailable("only one interactive PTY session is supported per managed root")
             }
             let sessionId = UUID().uuidString.lowercased()
+            // A fresh session starts from a fresh journal. `pollOutput` never
+            // prunes, and the Rust reader for a NEW session polls from
+            // `after_sequence = None` — so a reopen (the terminal's 重新启动
+            // shell) would replay every retained event of the previous
+            // session as foreign-session traffic before reaching its own.
+            // `nextSequence` keeps rising so cursors stay monotonic.
+            runtime.events.removeAll()
             try self.validateEnvironment(environment)
             let ptyCommand = self.ptyCommand(
                 from: LXISHPtyOpenRequest(
@@ -1057,7 +1202,14 @@ private final class LXISHNativeCoordinator {
                 rows: request.rows
             ) { data in
                 self.queue.async {
-                    guard var current = self.runtimes[config.normalizedManagedRoot.path] else { return }
+                    guard var current = self.runtimes[config.normalizedManagedRoot.path],
+                          // A straggler callback from a PREVIOUS shell can fire
+                          // after its session closed and a new one opened; the
+                          // Rust reader treats any foreign-session event as a
+                          // runtime error, which the terminal renders as a
+                          // failure of the NEW session.
+                          current.ptySessionId == sessionId
+                    else { return }
                     current.nextSequence += 1
                     current.events.append(
                         LXISHPtyEventPayload(
@@ -1065,7 +1217,8 @@ private final class LXISHNativeCoordinator {
                             sessionId: sessionId,
                             kind: "pty_output",
                             dataBase64: data.base64EncodedString(),
-                            detail: nil
+                            detail: nil,
+                            exitCode: nil
                         )
                     )
                     self.runtimes[config.normalizedManagedRoot.path] = current
@@ -1104,7 +1257,14 @@ private final class LXISHNativeCoordinator {
             guard runtime.ptySessionId == request.sessionId else {
                 throw LXISHBridgeError.invalidRequest("unknown PTY session")
             }
-            try runtime.kernel.closeInteractiveShell()
+            // Release the slot BEFORE asking the kernel to close, not after.
+            // `ptySessionId` is our own bookkeeping and only one PTY is allowed
+            // per managed root, so a `closeInteractiveShell` that throws used to
+            // leave the slot occupied forever — every later open in this process
+            // was refused, with no way back short of killing the app. `execute`
+            // persists the mutated runtime on the throwing path too, so this
+            // assignment survives the error.
+            runtime.ptySessionId = nil
             runtime.nextSequence += 1
             runtime.events.append(
                 LXISHPtyEventPayload(
@@ -1112,10 +1272,11 @@ private final class LXISHNativeCoordinator {
                     sessionId: request.sessionId,
                     kind: "pty_closed",
                     dataBase64: nil,
-                    detail: nil
+                    detail: nil,
+                    exitCode: nil
                 )
             )
-            runtime.ptySessionId = nil
+            try runtime.kernel.closeInteractiveShell()
             return ["session_id": request.sessionId]
         }
     }
@@ -1396,9 +1557,7 @@ private func encodeEnvelope(ok: Bool, payload: [String: Any]) -> String {
             break
         }
     }
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.sortedKeys]
-    let data = (try? encoder.encode(Envelope(ok: ok, payload: converted))) ?? Data("{\"ok\":false}".utf8)
+    let data = (try? LXISHBridgeJSON.encoder().encode(Envelope(ok: ok, payload: converted))) ?? Data("{\"ok\":false}".utf8)
     return String(decoding: data, as: UTF8.self)
 }
 
@@ -1419,7 +1578,7 @@ private func decode<T: Decodable>(_ pointer: UnsafePointer<CChar>?, as type: T.T
         throw LXISHBridgeError.invalidRequest("payload is not valid UTF-8")
     }
     do {
-        return try JSONDecoder().decode(T.self, from: data)
+        return try LXISHBridgeJSON.decoder().decode(T.self, from: data)
     } catch {
         throw LXISHBridgeError.invalidRequest(error.localizedDescription)
     }

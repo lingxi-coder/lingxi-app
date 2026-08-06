@@ -968,7 +968,6 @@
     <string name="cron_execution_failed_default">실행 실패</string>
     <string name="cron_task_not_in_project">작업이 현재 Project에 속하지 않거나 삭제되었습니다</string>
     <string name="terminal_open_runtime_settings">런타임 설정 열기</string>
-    <string name="terminal_try_repair">복구 시도</string>
     <string name="terminal_view_runtime">런타임 보기</string>
     <string name="terminal_input_placeholder">명령 입력</string>
     <string name="terminal_copy_button">복사</string>
@@ -1488,4 +1487,12 @@
     <string name="voice_model_name_kitten_nano_en">Kitten Nano 영어</string>
     <string name="voice_pack_title_zh">중국어 (표준어)</string>
     <string name="voice_pack_subtitle_zh">Zipformer 14M 스트리밍 인식 + MeloTTS</string>
+    <string name="settings_linux_mount_host_app_sandbox">앱 샌드박스</string>
+    <string name="terminal_dismiss_keyboard">키보드 닫기</string>
+    <string name="terminal_exit_notice_timeout">[시간 초과로 프로세스를 종료했습니다]</string>
+    <string name="terminal_exit_notice_unknown">[프로세스가 종료되었습니다]</string>
+    <string name="terminal_history_next">다음 명령</string>
+    <string name="terminal_history_previous">이전 명령</string>
+    <string name="terminal_restart_session">셸 다시 시작</string>
+    <string name="terminal_status_connecting">[셸에 연결하는 중…]</string>
 </resources>

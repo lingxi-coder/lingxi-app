@@ -1043,7 +1043,6 @@
   "cron_notification_skipped %@": "%@ の定時タスクをスキップしました",
   "cron_notification_status_update %@": "%@ の定時タスクのステータスが更新されました",
   "terminal_open_runtime_settings": "ランタイム設定を開く",
-  "terminal_try_repair": "修復を試みる",
   "terminal_view_runtime": "ランタイムを表示",
   "terminal_input_placeholder": "コマンドを入力",
   "terminal_copy_button": "コピー",
@@ -1576,5 +1575,14 @@
   "voice_model_name_melo_zh_en": "MeloTTS 中英バイリンガル",
   "voice_model_name_kitten_nano_en": "Kitten Nano 英語",
   "voice_pack_title_zh": "中国語（普通話）",
-  "voice_pack_subtitle_zh": "Zipformer 14M ストリーミング認識 + MeloTTS"
+  "voice_pack_subtitle_zh": "Zipformer 14M ストリーミング認識 + MeloTTS",
+  "settings_linux_mount_host_app_sandbox": "アプリサンドボックス",
+  "terminal_dismiss_keyboard": "キーボードを閉じる",
+  "terminal_exit_notice_code %lld": "[プロセスが終了しました コード %lld]",
+  "terminal_exit_notice_timeout": "[タイムアウトによりプロセスを終了しました]",
+  "terminal_exit_notice_unknown": "[プロセスが終了しました]",
+  "terminal_history_next": "次のコマンド",
+  "terminal_history_previous": "前のコマンド",
+  "terminal_restart_session": "シェルを再起動",
+  "terminal_status_connecting": "[シェルに接続中…]"
 }

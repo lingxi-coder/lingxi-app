@@ -381,15 +381,13 @@ extension TerminalView {
     init(
         descriptor: TerminalRuntimeDescriptor,
         onDismiss: (() -> Void)? = nil,
-        onOpenRuntimeSettings: (() -> Void)? = nil,
-        onRepairRuntime: (() -> Void)? = nil
+        onOpenRuntimeSettings: (() -> Void)? = nil
     ) {
         self.init(
             descriptor: descriptor,
             client: FfiTerminalRuntimeClient(),
             onDismiss: onDismiss,
-            onOpenRuntimeSettings: onOpenRuntimeSettings,
-            onRepairRuntime: onRepairRuntime
+            onOpenRuntimeSettings: onOpenRuntimeSettings
         )
     }
 }

@@ -30,8 +30,18 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(openTerminal.waitForExistence(timeout: 5))
         openTerminal.tap()
 
-        XCTAssertTrue(app.navigationBars["终端"].waitForExistence(timeout: 8))
-        app.buttons["关闭"].tap()
+        // The terminal has no navigation title any more — it is the shell, and
+        // a title bar is not part of one. Identify it by the root's identifier,
+        // which does not depend on chrome, and leave via the system back
+        // button, which is the only dismissal the iOS build has ever had (the
+        // "关闭" button exists solely in TerminalView's macOS branch).
+        // Type-agnostic query on purpose: the identifier rides on the
+        // ScrollView-rooted transcript now, and a SwiftUI ScrollView surfaces
+        // as .scrollView, which `otherElements` (.other only) never matches —
+        // exactly why this file queries the chat transcript via
+        // `app.scrollViews["conversation.message-list"]`.
+        XCTAssertTrue(app.descendants(matching: .any)["terminal.root"].waitForExistence(timeout: 8))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 5))
     }
 

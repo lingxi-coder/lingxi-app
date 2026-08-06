@@ -968,7 +968,6 @@
     <string name="cron_execution_failed_default">Execution failed</string>
     <string name="cron_task_not_in_project">This task doesn\'t belong to the current project or has been deleted</string>
     <string name="terminal_open_runtime_settings">Open Runtime Settings</string>
-    <string name="terminal_try_repair">Try Repair</string>
     <string name="terminal_view_runtime">View Runtime</string>
     <string name="terminal_input_placeholder">Enter command</string>
     <string name="terminal_copy_button">Copy</string>
@@ -1488,4 +1487,12 @@
     <string name="voice_model_name_kitten_nano_en">Kitten Nano (English)</string>
     <string name="voice_pack_title_zh">Chinese (Mandarin)</string>
     <string name="voice_pack_subtitle_zh">Zipformer 14M streaming ASR + MeloTTS</string>
+    <string name="settings_linux_mount_host_app_sandbox">App Sandbox</string>
+    <string name="terminal_dismiss_keyboard">Dismiss keyboard</string>
+    <string name="terminal_exit_notice_timeout">[process timed out and was terminated]</string>
+    <string name="terminal_exit_notice_unknown">[process exited]</string>
+    <string name="terminal_history_next">Next command</string>
+    <string name="terminal_history_previous">Previous command</string>
+    <string name="terminal_restart_session">restart shell</string>
+    <string name="terminal_status_connecting">[connecting to shell…]</string>
 </resources>

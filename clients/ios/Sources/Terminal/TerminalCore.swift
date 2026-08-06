@@ -1,6 +1,26 @@
 import Foundation
 import SwiftUI
 
+/// One font for the whole terminal.
+///
+/// `renderedString` stamps a font onto every run of its `AttributedString`, and
+/// a run-level font attribute beats the enclosing `.font()` modifier — so a
+/// view that sets its own size silently loses to whatever the buffer wrote.
+/// That is exactly what happened when the screen moved to 13pt and the buffer
+/// kept `.body`: the shell's prompt tail and the caret share one row in
+/// `promptRow`, and they were rendering at two different sizes. Both sides read
+/// this constant now, so there is one place to change and no way to disagree.
+enum TerminalTypography {
+    /// `.footnote`, not `size: 13`: they are the same 13pt at the default
+    /// content size, but the text style follows Dynamic Type while the
+    /// literal ignores the user's accessibility text sizes entirely — a
+    /// regression from the `.body`-relative fonts this replaced, on exactly
+    /// the screen whose whole job is reading long output (and whose failure
+    /// notices and restart link are rendered in this font too).
+    static let font = Font.system(.footnote, design: .monospaced)
+    static let boldFont = Font.system(.footnote, design: .monospaced).bold()
+}
+
 enum TerminalNamedColor: Int, CaseIterable, Hashable, Sendable {
     case black = 0
     case red = 1
@@ -120,15 +140,15 @@ struct TerminalBufferLine: Identifiable, Equatable, Sendable {
                     attributed.backgroundColor = background
                 }
                 if currentStyle.bold {
-                    attributed.font = .system(.body, design: .monospaced).bold()
+                    attributed.font = TerminalTypography.boldFont
                 } else {
-                    attributed.font = .system(.body, design: .monospaced)
+                    attributed.font = TerminalTypography.font
                 }
                 attributed.underlineStyle = currentStyle.underline ? .single : .init(rawValue: 0)
                 attributed.inlinePresentationIntent = currentStyle.italic ? .emphasized : nil
             } else {
                 attributed.foregroundColor = defaultForeground
-                attributed.font = .system(.body, design: .monospaced)
+                attributed.font = TerminalTypography.font
             }
             rendered += attributed
             segment.removeAll(keepingCapacity: true)
@@ -145,7 +165,7 @@ struct TerminalBufferLine: Identifiable, Equatable, Sendable {
         if rendered.characters.isEmpty {
             var empty = AttributedString(" ")
             empty.foregroundColor = .clear
-            empty.font = .system(.body, design: .monospaced)
+            empty.font = TerminalTypography.font
             return empty
         }
         return rendered

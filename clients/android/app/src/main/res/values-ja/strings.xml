@@ -968,7 +968,6 @@
     <string name="cron_execution_failed_default">実行に失敗しました</string>
     <string name="cron_task_not_in_project">タスクは現在のプロジェクトに属していないか、削除されています</string>
     <string name="terminal_open_runtime_settings">ランタイム設定を開く</string>
-    <string name="terminal_try_repair">修復を試みる</string>
     <string name="terminal_view_runtime">ランタイムを表示</string>
     <string name="terminal_input_placeholder">コマンドを入力</string>
     <string name="terminal_copy_button">コピー</string>
@@ -1488,4 +1487,12 @@
     <string name="voice_model_name_kitten_nano_en">Kitten Nano 英語</string>
     <string name="voice_pack_title_zh">中国語（普通話）</string>
     <string name="voice_pack_subtitle_zh">Zipformer 14M ストリーミング認識 + MeloTTS</string>
+    <string name="settings_linux_mount_host_app_sandbox">アプリサンドボックス</string>
+    <string name="terminal_dismiss_keyboard">キーボードを閉じる</string>
+    <string name="terminal_exit_notice_timeout">[タイムアウトによりプロセスを終了しました]</string>
+    <string name="terminal_exit_notice_unknown">[プロセスが終了しました]</string>
+    <string name="terminal_history_next">次のコマンド</string>
+    <string name="terminal_history_previous">前のコマンド</string>
+    <string name="terminal_restart_session">シェルを再起動</string>
+    <string name="terminal_status_connecting">[シェルに接続中…]</string>
 </resources>

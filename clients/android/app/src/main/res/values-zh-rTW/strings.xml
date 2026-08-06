@@ -968,7 +968,6 @@
     <string name="cron_execution_failed_default">執行失敗</string>
     <string name="cron_task_not_in_project">任務不屬於當前 Project 或已被刪除</string>
     <string name="terminal_open_runtime_settings">開啟執行時設定</string>
-    <string name="terminal_try_repair">嘗試修復</string>
     <string name="terminal_view_runtime">檢視執行時</string>
     <string name="terminal_input_placeholder">輸入命令</string>
     <string name="terminal_copy_button">複製</string>
@@ -1488,4 +1487,12 @@
     <string name="voice_model_name_kitten_nano_en">Kitten Nano 英文</string>
     <string name="voice_pack_title_zh">中文（普通話）</string>
     <string name="voice_pack_subtitle_zh">Zipformer 14M 流式識別 + MeloTTS</string>
+    <string name="settings_linux_mount_host_app_sandbox">應用程式沙盒</string>
+    <string name="terminal_dismiss_keyboard">收起鍵盤</string>
+    <string name="terminal_exit_notice_timeout">[行程逾時已終止]</string>
+    <string name="terminal_exit_notice_unknown">[行程已結束]</string>
+    <string name="terminal_history_next">下一則指令</string>
+    <string name="terminal_history_previous">上一則指令</string>
+    <string name="terminal_restart_session">重新啟動 shell</string>
+    <string name="terminal_status_connecting">[正在連線 shell…]</string>
 </resources>

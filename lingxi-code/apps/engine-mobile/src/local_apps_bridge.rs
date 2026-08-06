@@ -380,6 +380,16 @@ fn lower_design_value(value: DesignValue) -> DesignValueDto {
             value: value.into_iter().map(lower_data_field).collect(),
         },
         DesignValue::DomainList(value) => DesignValueDto::DomainList { value },
+        // `Deferred` is the questionnaire-answer sentinel added for the
+        // conversational designer (local-apps#questionnaire). `local-apps`
+        // service::validate_design_value rejects it on every write path into
+        // `AppDesignDraft::fields` (update_draft, store_suggestion,
+        // continuation replay), so a live draft can never hold one and this
+        // arm is unreachable today. Wiring a wire representation is a later
+        // task, once the questionnaire/answers flow actually populates drafts.
+        DesignValue::Deferred => {
+            unreachable!("AppDesignDraft::fields cannot hold DesignValue::Deferred")
+        }
     }
 }
 

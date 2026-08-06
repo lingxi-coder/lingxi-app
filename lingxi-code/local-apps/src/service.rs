@@ -203,6 +203,18 @@ fn validate_design_value(field_id: &str, value: &DesignValue) -> Result<(), AppE
             Ok(())
         }
         DesignValue::Boolean(_) | DesignValue::Density(_) => Ok(()),
+        // `Deferred` is the questionnaire-answer sentinel added for the
+        // conversational designer (local-apps#questionnaire); the generic
+        // draft-patch pipeline does not understand it yet — wiring it into
+        // `AppDesignDraft` is a later task. Reject it here so the invariant
+        // "`AppDesignDraft::fields` never holds a `Deferred` value" holds for
+        // every writer (`update_draft`, `store_suggestion`, continuation
+        // replay), which is what lets the wire-lowering match in
+        // `engine-mobile` treat this arm as unreachable instead of needing a
+        // wire representation before that later task lands.
+        DesignValue::Deferred => Err(AppError::InvalidRequest(format!(
+            "value of field {field_id:?} cannot be a deferred answer in a draft patch"
+        ))),
     }
 }
 

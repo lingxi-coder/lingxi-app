@@ -201,6 +201,8 @@ pub enum DesignValue {
     DataFieldList(Vec<crate::manifest::DataFieldSchema>),
     /// HTTPS host names declared for the native network bridge.
     DomainList(Vec<String>),
+    /// The user explicitly chose to let the LLM decide this field.
+    Deferred,
 }
 
 /// One patch operation against the draft field map.

@@ -207,30 +207,20 @@ pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
     ))
 }
 
-/// Pure core of [`is_agent_swarms_enabled`] (`isAgentSwarmsEnabled`,
-/// `utils/agentSwarmsEnabled.ts:24-44`): ant builds are always on; external
-/// builds require opt-in via the experimental env var (or the `--agent-teams`
-/// CLI flag). The GrowthBook `tengu_amber_flint` killswitch and the
-/// `process.argv` flag are host-runtime signals not threaded into the tool
-/// crate, so the env-driven core is ported here (the killswitch is `true` by
-/// default upstream, and the flag is an alternate opt-in to the same env bit).
-fn agent_swarms_enabled_inner(user_type_ant: bool, experimental_env: bool) -> bool {
-    user_type_ant || experimental_env
-}
-
 /// Whether the agent-swarms/teammate surface is live at call time
-/// (`isAgentSwarmsEnabled()`). Gates the `TaskUpdate` auto-owner + owner-change
-/// mailbox notification side-effects (`TaskUpdateTool.ts:188-199,277-298`).
+/// (`isAgentSwarmsEnabled()` / oracle `Jc()`). Gates the `TaskUpdate`
+/// auto-owner + owner-change mailbox notification side-effects and the
+/// teammate completion reminder.
 ///
-/// `isEnabled()` for the swarm *tools* reads the `agent_swarms_enabled`
-/// [`ToolStaticContext`] feature flag (see `tool_team_create.rs`); the
-/// side-effect path runs inside `call()` where only env signals are available,
-/// so it mirrors the env-driven core of `agentSwarmsEnabled.ts` directly
-/// (`USER_TYPE === 'ant'` OR a truthy `LINGXI_EXPERIMENTAL_AGENT_TEAMS`).
+/// Delegates to the SHARED [`traits::env::agent_swarms_enabled`] — one
+/// implementation for this crate and `tool-ui`'s SendMessage (the
+/// previously-divergent private copies are gone). `isEnabled()` for the swarm
+/// *tools* reads the `agent_swarms_enabled` [`ToolStaticContext`] feature
+/// flag instead (see `tool_team_create.rs`) — a host-provided surface, not an
+/// env read.
 #[must_use]
 pub fn is_agent_swarms_enabled() -> bool {
-    let user_type_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
-    agent_swarms_enabled_inner(user_type_ant, env_truthy("LINGXI_EXPERIMENTAL_AGENT_TEAMS"))
+    traits::env::agent_swarms_enabled()
 }
 
 // ==== Product-A V2 shared helpers ==========================================
@@ -1370,15 +1360,18 @@ impl Tool for TaskUpdateTool {
             Some(t) => t,
             None => {
                 emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
+                // Oracle data shape (2.1.223 DCb): no `content` key — the
+                // model-facing string is rendered by
+                // mapToolResultToToolResultBlockParam (`error || "Task #N not
+                // found"`), carried here via `model_content`.
                 return Ok(ToolCallResult {
                     data: json!({
-                        "content": render_task_update_fail(&task_id, Some("Task not found")),
                         "success": false,
                         "taskId": task_id,
                         "updatedFields": Vec::<String>::new(),
                         "error": "Task not found",
                     }),
-                    model_content: None,
+                    model_content: Some(render_task_update_fail(&task_id, Some("Task not found"))),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
@@ -1413,26 +1406,30 @@ impl Tool for TaskUpdateTool {
         if let StatusInput::Deleted = status_input {
             let deleted = store.delete(&task_id).await;
             emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
-            let data = if deleted {
-                json!({
-                    "content": render_task_update_success(&task_id, &["deleted".to_string()]),
-                    "success": true,
-                    "taskId": task_id,
-                    "updatedFields": ["deleted"],
-                    "statusChange": { "from": status_wire(existing.status), "to": "deleted" },
-                })
+            let (data, model_content) = if deleted {
+                (
+                    json!({
+                        "success": true,
+                        "taskId": task_id,
+                        "updatedFields": ["deleted"],
+                        "statusChange": { "from": status_wire(existing.status), "to": "deleted" },
+                    }),
+                    render_task_update_success(&task_id, &["deleted".to_string()]),
+                )
             } else {
-                json!({
-                    "content": render_task_update_fail(&task_id, Some("Failed to delete task")),
-                    "success": false,
-                    "taskId": task_id,
-                    "updatedFields": Vec::<String>::new(),
-                    "error": "Failed to delete task",
-                })
+                (
+                    json!({
+                        "success": false,
+                        "taskId": task_id,
+                        "updatedFields": Vec::<String>::new(),
+                        "error": "Failed to delete task",
+                    }),
+                    render_task_update_fail(&task_id, Some("Failed to delete task")),
+                )
             };
             return Ok(ToolCallResult {
                 data,
-                model_content: None,
+                model_content: Some(model_content),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
@@ -1550,13 +1547,15 @@ impl Tool for TaskUpdateTool {
                             .await;
                             return Ok(ToolCallResult {
                                 data: json!({
-                                    "content": render_task_update_fail(&task_id, Some(&reason)),
                                     "success": false,
                                     "taskId": task_id,
                                     "updatedFields": Vec::<String>::new(),
                                     "error": reason,
                                 }),
-                                model_content: None,
+                                model_content: Some(render_task_update_fail(
+                                    &task_id,
+                                    Some(&reason),
+                                )),
                                 new_messages: vec![],
                                 context_modifier: None,
                                 is_error: false,
@@ -1682,21 +1681,26 @@ impl Tool for TaskUpdateTool {
         emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
 
         let mut content = render_task_update_success(&task_id, &updated_fields);
-        // Teammate completion reminder (2.1.223 `mapToolResultToToolResultBlockParam`):
-        // when a teammate closes a task to `completed` and swarms are live,
-        // append the reminder. Gated on the COMPUTED transition's `to`
-        // (`statusChange?.to === 'completed'`), which is `status_change`'s `to`.
-        // (The verification nudge that used to follow was a stale-leaked-TS
-        // phantom — 0-hit in oracle 2.1.220/221/223 — and was removed; the P6
-        // output-shape refactor moves this render to the model_content seam.)
+        // Teammate completion reminder (2.1.223 `mapToolResultToToolResultBlockParam`
+        // @251903590): when a TEAMMATE closes a task to `completed` and swarms
+        // are live, append the reminder after a BLANK line (`\n\n` — segment
+        // table confirmed; an earlier port used a single `\n`). Gates:
+        // - the COMPUTED transition's `to` (`statusChange?.to === 'completed'`);
+        // - `OU()` (@242089079) = the in-process TEAMMATE context's agentId —
+        //   undefined for a plain AgentTool subagent, so the port keys on
+        //   `ctx.agent_name` (documented teammate-only, TS `getAgentName()`),
+        //   NOT on the bare `agent_id` every subagent carries;
+        // - `Jc()` swarms-enabled.
         if matches!(status_change, Some((_, TodoState::Completed)))
-            && ctx.agent_id.is_some()
+            && ctx.agent_name.is_some()
             && is_agent_swarms_enabled()
         {
-            content.push_str("\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.");
+            content.push_str("\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.");
         }
+        // Oracle data shape (2.1.223 DCb zod): {success, taskId, updatedFields,
+        // error?, statusChange?} — no `content` key; the rendered string rides
+        // the model_content seam only.
         let mut data = json!({
-            "content": content,
             "success": true,
             "taskId": task_id,
             "updatedFields": updated_fields,
@@ -1706,7 +1710,7 @@ impl Tool for TaskUpdateTool {
         }
         Ok(ToolCallResult {
             data,
-            model_content: None,
+            model_content: Some(content),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,

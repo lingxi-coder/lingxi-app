@@ -14,6 +14,25 @@ pub fn is_env_truthy(value: Option<&str>) -> bool {
     matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on")
 }
 
+/// The env core of `isAgentSwarmsEnabled()` / oracle `Jc()` (2.1.223
+/// @247378175: `(CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS || svy()) &&
+/// getFeatureValue("tengu_amber_flint", true)`): Anthropic-internal runs
+/// (`USER_TYPE=ant`) are on by default, external runs need the experimental
+/// env opt-in (port-renamed `LINGXI_EXPERIMENTAL_AGENT_TEAMS`).
+///
+/// The oracle's remaining terms are not modeled: `tengu_amber_flint` is a
+/// default-TRUE GrowthBook killswitch (no GrowthBook in the port ⇒ always
+/// true) and `svy()` is internal-run detection folded into the `USER_TYPE`
+/// arm here. The single SHARED implementation for the two runtime gates
+/// (`tool-task`'s TaskUpdate side-effects, `tool-ui`'s SendMessage); the
+/// coordinator team tools gate on a host `agent_swarms_enabled` feature flag
+/// at `is_enabled` time instead — a different, documented surface.
+#[must_use]
+pub fn agent_swarms_enabled() -> bool {
+    std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
+        || is_env_truthy(std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS").ok().as_deref())
+}
+
 /// `isEnvDefinedFalsy(envVar)` (`utils/envUtils.ts:39-47`): a defined,
 /// non-empty value that normalizes (lowercase + trim) to one of
 /// `0`/`false`/`no`/`off`. An undefined or empty value is NOT falsy (TS returns

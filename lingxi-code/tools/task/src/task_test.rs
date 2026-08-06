@@ -808,8 +808,10 @@ mod tests {
         }
 
         // ── T5 teammate completion reminder (TaskUpdateTool.ts:386-394) ──────
+        // Oracle 2.1.223 mapToolResultToToolResultBlockParam @251903590:
+        // TWO newlines before the reminder (an earlier port used one).
         const TEAMMATE_REMINDER: &str =
-            "\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.";
+            "\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.";
 
         #[tokio::test]
         async fn teammate_completion_reminder_present_for_swarm_completed_agent() {
@@ -820,7 +822,44 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Teammate (agent_id present) closes the task → completed, swarms on.
+            // Teammate (agent NAME bound — oracle OU() is the teammate
+            // context, not any subagent) closes the task → completed, swarms on.
+            let tool = TaskUpdateTool::new(bctx(router));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "completed" }),
+                    ctx_with_named_agent(AgentId::new(), "nova"),
+                    fresh_tx(),
+                )
+                .await
+                .expect("update ok");
+
+            let content = res.model_content.as_deref().unwrap();
+            assert!(
+                content.ends_with(TEAMMATE_REMINDER),
+                "reminder appended verbatim after the success line: {content:?}"
+            );
+            assert_eq!(res.data["statusChange"]["to"], "completed");
+            // Oracle DCb data shape: the render lives ONLY on model_content.
+            assert!(
+                res.data.get("content").is_none(),
+                "data must not carry a content key (2.1.223 DCb)"
+            );
+        }
+
+        /// A PLAIN subagent (agent_id set, no teammate NAME) gets no reminder:
+        /// oracle `OU()` (@242089079) reads the in-process TEAMMATE context and
+        /// is undefined for ordinary AgentTool subagents — the old port gated
+        /// on the bare agent_id and over-fired here.
+        #[tokio::test]
+        async fn teammate_completion_reminder_absent_for_plain_subagent() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Build the thing", TodoState::Pending))
+                .await
+                .unwrap();
+
             let tool = TaskUpdateTool::new(bctx(router));
             let res = tool
                 .call(
@@ -831,12 +870,10 @@ mod tests {
                 .await
                 .expect("update ok");
 
-            let content = res.data["content"].as_str().unwrap();
             assert!(
-                content.ends_with(TEAMMATE_REMINDER),
-                "reminder appended verbatim after the success line: {content:?}"
+                !res.model_content.as_deref().unwrap().contains(TEAMMATE_REMINDER),
+                "no reminder for a plain subagent (agent_id without teammate name)"
             );
-            assert_eq!(res.data["statusChange"]["to"], "completed");
         }
 
         #[tokio::test]
@@ -852,15 +889,15 @@ mod tests {
             let res = tool
                 .call(
                     json!({ "taskId": &id, "status": "completed" }),
-                    ctx_with_agent(Some(AgentId::new())),
+                    ctx_with_named_agent(AgentId::new(), "nova"),
                     fresh_tx(),
                 )
                 .await
                 .expect("update ok");
 
             assert!(
-                !res.data["content"]
-                    .as_str()
+                !res.model_content
+                    .as_deref()
                     .unwrap()
                     .contains(TEAMMATE_REMINDER),
                 "no teammate reminder when swarms are off"
@@ -876,7 +913,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Main thread (agent_id None == !getAgentId()) ⇒ no reminder.
+            // Main thread (no teammate name == OU() undefined) ⇒ no reminder.
             let tool = TaskUpdateTool::new(bctx(router));
             let res = tool
                 .call(
@@ -888,11 +925,11 @@ mod tests {
                 .expect("update ok");
 
             assert!(
-                !res.data["content"]
-                    .as_str()
+                !res.model_content
+                    .as_deref()
                     .unwrap()
                     .contains(TEAMMATE_REMINDER),
-                "no teammate reminder on the main thread (no agent id)"
+                "no teammate reminder on the main thread (no teammate name)"
             );
         }
 
@@ -910,15 +947,15 @@ mod tests {
             let res = tool
                 .call(
                     json!({ "taskId": &id, "status": "in_progress" }),
-                    ctx_with_agent(Some(AgentId::new())),
+                    ctx_with_named_agent(AgentId::new(), "nova"),
                     fresh_tx(),
                 )
                 .await
                 .expect("update ok");
 
             assert!(
-                !res.data["content"]
-                    .as_str()
+                !res.model_content
+                    .as_deref()
                     .unwrap()
                     .contains(TEAMMATE_REMINDER),
                 "reminder only on a ->completed transition"

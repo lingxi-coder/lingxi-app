@@ -86,13 +86,10 @@ fn truncate_preview(s: &str, max_width: usize) -> String {
 /// `isAgentSwarmsEnabled()` gate: Anthropic-internal runs are on by default,
 /// while external runs require the experimental env opt-in. `SendMessage`
 /// mirrors that runtime gate and additionally requires a live mailbox router.
+/// Delegates to the SHARED [`traits::env::agent_swarms_enabled`] (one
+/// implementation with `tool-task`'s `is_agent_swarms_enabled`).
 fn agent_swarms_enabled() -> bool {
-    std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
-        || traits::env::is_env_truthy(
-            std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
-                .ok()
-                .as_deref(),
-        )
+    traits::env::agent_swarms_enabled()
 }
 
 static SEND_MESSAGE_SCHEMA: Lazy<Value> = Lazy::new(build_input_schema);

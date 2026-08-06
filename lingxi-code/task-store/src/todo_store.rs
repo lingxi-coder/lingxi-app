@@ -293,9 +293,10 @@ impl TodoStore {
         serde_json::from_str::<TodoTask>(&content).ok()
     }
 
-    /// List every parseable task. Port of `listTasks` (readdir → parse each).
-    /// claude-code returns readdir order; we sort by numeric id ascending for
-    /// determinism (which also matches the tool's "prefer ID order" guidance).
+    /// List every parseable task, sorted by numeric id ascending. Port of
+    /// `listTasks` — oracle 2.1.223 `soe` sorts the same way
+    /// (`.sort((l,c)=>Number(l.id)-Number(c.id))`, binary @247329851); an older
+    /// comment here claimed claude returns raw readdir order, which was stale.
     pub async fn list(&self) -> Vec<TodoTask> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return Vec::new();

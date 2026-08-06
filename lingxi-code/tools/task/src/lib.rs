@@ -20,11 +20,15 @@
 )]
 
 pub mod monitor;
-pub mod proper_lockfile;
 pub mod reminder;
 pub mod task;
-pub mod todo_store;
 pub mod todo_write;
+
+// The V2 todo store + its embedded proper-lockfile port moved to the leaf
+// `task-store` crate (so `tasks`/`coordinator` can reach them without the
+// `tool-task → cron → tasks` cycle). Re-exported under the original paths so
+// existing consumers (`orchestrator`, engine roots, tests) compile unchanged.
+pub use task_store::{proper_lockfile, todo_store};
 
 pub use monitor::MonitorTool;
 pub use task::{

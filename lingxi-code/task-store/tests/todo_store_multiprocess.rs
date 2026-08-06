@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Map};
-use tool_task::todo_store::{TodoStore, TodoTask};
+use task_store::todo_store::{TodoStore, TodoTask};
 
 const ROLE_ENV: &str = "LINGXI_TODO_MP_ROLE";
 const DIR_ENV: &str = "LINGXI_TODO_MP_DIR";

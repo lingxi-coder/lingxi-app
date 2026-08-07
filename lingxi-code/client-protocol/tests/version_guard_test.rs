@@ -620,14 +620,11 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::ListApps", "list_apps");
 
-    put("ClientCommand::ListAppTemplates", "list_app_templates");
-
     put("ClientCommand::GetAppDetails", "get_app_details");
     put("ClientCommand::GetAppDetails.app_id", "String");
 
     put("ClientCommand::CreateApp", "create_app");
     put("ClientCommand::CreateApp.name", "String");
-    put("ClientCommand::CreateApp.template", "AppTemplateKindDto");
     put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
 
@@ -999,11 +996,6 @@ fn current_contract_index() -> ContractIndex {
     put("CoordinatorWorkerDto.status", "String");
 
     // ── Local-apps DTOs (local_apps.rs) ───────────────────────────────────
-    put("AppTemplateKindDto::Dashboard", "dashboard");
-    put("AppTemplateKindDto::CrudTracker", "crud_tracker");
-    put("AppTemplateKindDto::ContentShowcase", "content_showcase");
-    put("AppTemplateKindDto::FormUtility", "form_utility");
-
     put(
         "AppWorkflowStateDto::AuthoringQuestionnaire",
         "authoring_questionnaire",
@@ -1121,13 +1113,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppPlanDto.capabilities", "Vec<AppCapabilityKindDto>");
     put("AppPlanDto.domains", "Vec<String>");
     put("AppPlanDto.summary", "String");
-
-    put("AppTemplateDto.kind", "AppTemplateKindDto");
-    put("AppTemplateDto.version", "u32");
-    put("AppTemplateDto.name", "String");
-    put("AppTemplateDto.description", "String");
-    put("AppTemplateDto.steps", "Vec<AppDesignStepDto>");
-    put("AppTemplateDto.collections", "Vec<AppDataCollectionDto>");
 
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
@@ -1323,11 +1308,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppAuthorizationDecisionDto::AllowSession", "allow_session");
     put("AppAuthorizationDecisionDto::AllowAlways", "allow_always");
 
-    put("AppEventDto::AppTemplatesChanged", "app_templates_changed");
-    put(
-        "AppEventDto::AppTemplatesChanged.templates",
-        "Vec<AppTemplateDto>",
-    );
     put("AppEventDto::AppDetailsChanged", "app_details_changed");
     put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
     put(
@@ -1657,7 +1637,7 @@ fn contract_index_covers_every_dto() {
         AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
         AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
         AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-        AppTemplateDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
+        AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
         AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -1930,14 +1910,6 @@ fn contract_index_covers_every_dto() {
         domains: Vec::new(),
         summary: String::new(),
     };
-    let _app_template = AppTemplateDto {
-        kind: AppTemplateKindDto::CrudTracker,
-        version: 0,
-        name: String::new(),
-        description: String::new(),
-        steps: Vec::new(),
-        collections: Vec::new(),
-    };
     let app_generation_job = AppGenerationJobDto {
         id: String::new(),
         app_id: String::new(),
@@ -2030,11 +2002,9 @@ fn contract_index_covers_every_dto() {
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
     // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these nine tags to exist.
+    // `ClientEvent::AppEvent`, so nothing else forces these eight tags to
+    // exist.
     let _app_events: Vec<AppEventDto> = vec![
-        AppEventDto::AppTemplatesChanged {
-            templates: Vec::new(),
-        },
         AppEventDto::AppDetailsChanged {
             details: app_details,
         },

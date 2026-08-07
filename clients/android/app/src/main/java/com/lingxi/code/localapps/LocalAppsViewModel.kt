@@ -23,10 +23,8 @@ import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeModeDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
-import com.lingxi.code.bindings.AppTemplateDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
-import com.lingxi.code.bindings.AppTemplateKindDto
 import com.lingxi.code.bindings.AppWorkflowStateDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
@@ -234,20 +232,9 @@ class LocalAppsViewModel(
                     ),
                 )
             }
-        requestTemplates(bound)
-    }
-
-    private suspend fun requestTemplates(bound: ConversationSource) {
-        runCatching { bound.submitClientCommand(ClientCommand.ListAppTemplates) }
-            .onFailure {
-                error(
-                    strings.resolve(
-                        R.string.local_apps_error_load_templates,
-                        "无法加载应用模板：%1\$s",
-                        "${it.message ?: it::class.simpleName}",
-                    ),
-                )
-            }
+        // NOTE (local-apps#questionnaire, Task 5): `requestTemplates` /
+        // `ClientCommand.ListAppTemplates` were deleted (human-partner ruling:
+        // total removal of the static template catalog).
     }
 
     private fun createSelectedTemplate() {
@@ -256,10 +243,15 @@ class LocalAppsViewModel(
         val name = state.createName.trim()
         if (name.isEmpty()) return
         pendingCreate = name to template.kind
+        // NOTE (local-apps#questionnaire, Task 5): `ClientCommand.CreateApp.template`
+        // was deleted alongside `AppTemplateKindDto` (human-partner ruling:
+        // total removal of the static template catalog) — the wire command no
+        // longer carries a template selection at all. This whole template-based
+        // create flow is superseded by the brief-based one; replacing it is
+        // Task 20's job, not this task's.
         submit(
             ClientCommand.CreateApp(
                 name = name,
-                template = template.kind.toBindingTemplateKind(),
                 origin = AppCreateOriginDto.LIBRARY,
                 conversationId = null,
             ),
@@ -832,17 +824,13 @@ class LocalAppsViewModel(
 
     private fun reduceAppEvent(event: AppEventDto) {
         when (event) {
-            is AppEventDto.AppTemplatesChanged -> {
-                val templates = event.templates.map(AppTemplateDto::toUiTemplate).sortedBy { it.name }
-                val names = templates.associate { it.kind to it.name }
-                _uiState.update { state ->
-                    state.copy(
-                        templates = templates,
-                        templatesLoading = false,
-                        apps = state.apps.map { app -> app.copy(templateName = names[app.templateKind] ?: app.templateName) },
-                    )
-                }
-            }
+            // NOTE (local-apps#questionnaire, Task 5): `AppEventDto.AppTemplatesChanged`
+            // was deleted (human-partner ruling: total removal of the static
+            // template catalog) — no case for it exists on the wire enum
+            // anymore, so there is nothing to match here. `templates`/
+            // `templatesLoading` on the ui-state and the `templateName` lookup
+            // below are now unreachable dead state; removing them is Task 18's
+            // job alongside the rest of the template-picker UI.
             is AppEventDto.AppDetailsChanged -> reduceDetails(event.details)
             // TODO(local-apps#questionnaire, Task 18/19): no Android designer
             // surface renders the LLM-authored questionnaire yet. Task 19
@@ -1253,20 +1241,12 @@ private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
     is LocalAppsDestination.Details -> appId
 }
 
-private fun AppTemplateKindDto.toUiTemplateKind(): String = when (this) {
-    AppTemplateKindDto.DASHBOARD -> "dashboard"
-    AppTemplateKindDto.CRUD_TRACKER -> "crud_tracker"
-    AppTemplateKindDto.CONTENT_SHOWCASE -> "content_showcase"
-    AppTemplateKindDto.FORM_UTILITY -> "form_utility"
-}
-
-private fun String.toBindingTemplateKind(): AppTemplateKindDto = when (this) {
-    "dashboard" -> AppTemplateKindDto.DASHBOARD
-    "crud_tracker" -> AppTemplateKindDto.CRUD_TRACKER
-    "content_showcase" -> AppTemplateKindDto.CONTENT_SHOWCASE
-    "form_utility" -> AppTemplateKindDto.FORM_UTILITY
-    else -> error("Unsupported template kind: $this")
-}
+// NOTE (local-apps#questionnaire, Task 5): `AppTemplateKindDto`/`AppTemplateDto`
+// and the `toUiTemplateKind`/`toBindingTemplateKind`/`toUiTemplate` conversions
+// that used to live here were deleted from client-protocol (human-partner
+// ruling: total removal of the static template catalog). `LocalAppTemplate`
+// (the native UI model) and its screens still exist — replacing that UI with
+// the brief-based create flow is Task 18/19/20's job, not this task's.
 
 // TODO(local-apps#questionnaire, Task 13/18): AUTHORING_QUESTIONNAIRE /
 // QUESTIONNAIRE_FAILED / PLANNING / PLAN_FAILED are new conversational-design
@@ -1312,6 +1292,13 @@ private fun AppRuntimeDetailsDto.toUiRuntime(): LocalAppRuntime = LocalAppRuntim
     recovery = recoveryState?.name?.lowercase(),
 )
 
+// NOTE (local-apps#questionnaire, Task 5): this conversion already does not
+// compile — `template` was removed from `AppRecordDto` back in Task 2 (the DTO
+// field, as opposed to the `AppTemplateKindDto`/`AppTemplateDto` types this
+// task deletes) and `LocalAppItem` was never updated to match. Pre-existing
+// breakage, not introduced here; left for Task 18 (Android data layer), which
+// is expected to replace `templateKind`/`templateName` with `brief` as part
+// of the real UI migration.
 private fun AppRecordDto.toUiApp(
     templateNames: Map<String, String>,
     runtime: LocalAppRuntime? = null,
@@ -1328,32 +1315,6 @@ private fun AppRecordDto.toUiApp(
         updatedAtMs = updatedAtMs.toLong(),
     )
 }
-
-private fun AppTemplateDto.toUiTemplate(): LocalAppTemplate = LocalAppTemplate(
-    kind = kind.toUiTemplateKind(),
-    version = version,
-    name = name,
-    description = description,
-    steps = steps.map { step ->
-        LocalAppDesignStep(
-            id = step.id,
-            order = step.order,
-            title = step.title,
-            description = step.description,
-            fields = step.fields.map { field ->
-                LocalAppDesignField(
-                    id = field.id,
-                    label = field.label,
-                    description = field.description,
-                    kind = field.fieldType.toUiFieldKind(),
-                    required = field.required,
-                    defaultValue = field.defaultValue?.toUiValue(),
-                    options = field.options.map { LocalAppFieldOption(it.value, it.label) },
-                )
-            },
-        )
-    },
-)
 
 private fun AppDesignFieldTypeDto.toUiFieldKind(): LocalAppFieldKind = when (this) {
     AppDesignFieldTypeDto.SHORT_TEXT -> LocalAppFieldKind.ShortText

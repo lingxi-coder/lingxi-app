@@ -2,18 +2,12 @@ import Foundation
 
 #if canImport(engine_mobileFFI)
 enum LocalAppsProtocolAdapter {
-    static func template(_ dto: AppTemplateDto) -> LocalAppTemplate {
-        let kind = templateKind(dto.kind)
-        return LocalAppTemplate(
-            id: kind.rawValue,
-            kind: kind,
-            version: UInt64(dto.version),
-            name: dto.name,
-            description: dto.description,
-            steps: dto.steps.map(designStep),
-            collections: dto.collections.map(collection)
-        )
-    }
+    // NOTE (local-apps#questionnaire, Task 5): `AppTemplateDto`/`AppTemplateKindDto`
+    // and the `template(_:)`/`templateKind(_:)` conversions that used to live here
+    // were deleted from client-protocol (human-partner ruling: total removal of
+    // the static template catalog). `LocalAppTemplate`/`LocalAppTemplateKind`
+    // (the native UI models) and their screens still exist — replacing that UI
+    // with the brief-based create flow is Task 13/16's job, not this task's.
 
     static func designStep(_ dto: AppDesignStepDto) -> LocalAppDesignStep {
         LocalAppDesignStep(
@@ -100,6 +94,13 @@ enum LocalAppsProtocolAdapter {
         }
     }
 
+    // NOTE (local-apps#questionnaire, Task 5): this conversion already does not
+    // compile — `dto.template` was removed from `AppRecordDto` back in Task 2
+    // (the DTO field, as opposed to the `AppTemplateKindDto`/`AppTemplateDto`
+    // types this task deletes) and `LocalAppSummary` was never updated to match.
+    // Pre-existing breakage, not introduced here; left for Task 13 (iOS model
+    // layer), which is expected to replace `templateKind` with `brief` on
+    // `LocalAppSummary` as part of the real UI migration.
     static func app(_ dto: AppRecordDto) -> LocalAppSummary {
         LocalAppSummary(
             id: dto.id,
@@ -109,24 +110,6 @@ enum LocalAppsProtocolAdapter {
             workflow: workflow(dto.workflowState),
             workspaceRelativePath: dto.workspaceRel
         )
-    }
-
-    static func templateKind(_ dto: AppTemplateKindDto) -> LocalAppTemplateKind {
-        switch dto {
-        case .dashboard: .dashboard
-        case .crudTracker: .crudTracker
-        case .contentShowcase: .contentShowcase
-        case .formUtility: .formUtility
-        }
-    }
-
-    static func templateKind(_ value: LocalAppTemplateKind) -> AppTemplateKindDto {
-        switch value {
-        case .dashboard: .dashboard
-        case .crudTracker: .crudTracker
-        case .contentShowcase: .contentShowcase
-        case .formUtility: .formUtility
-        }
     }
 
     static func workflow(_ dto: AppWorkflowStateDto) -> LocalAppWorkflow {

@@ -56,7 +56,7 @@ use client_protocol::listings::{
     SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
-    builtin_app_templates, AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
+    AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
     AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
     AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
@@ -64,7 +64,7 @@ use client_protocol::local_apps::{
     AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
     AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto,
     AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
+    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
     AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -436,14 +436,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
-            "event/app_templates_changed.json",
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppTemplatesChanged {
-                    templates: builtin_app_templates(),
-                },
-            },
-        ),
-        (
             "event/app_details_changed.json",
             ClientEvent::AppEvent {
                 event: AppEventDto::AppDetailsChanged {
@@ -812,10 +804,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ),
         ("command/list_apps.json", ClientCommand::ListApps),
         (
-            "command/list_app_templates.json",
-            ClientCommand::ListAppTemplates,
-        ),
-        (
             "command/get_app_details.json",
             ClientCommand::GetAppDetails {
                 app_id: "habits-1a2b".to_string(),
@@ -825,7 +813,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/create_app.json",
             ClientCommand::CreateApp {
                 name: "Habits".to_string(),
-                template: AppTemplateKindDto::Dashboard,
                 origin: AppCreateOriginDto::Chat,
                 conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
             },

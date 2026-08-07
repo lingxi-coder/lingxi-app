@@ -47,7 +47,7 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppEventDto, AppTemplateKindDto};
+use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppEventDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -2756,12 +2756,6 @@ impl MobileEngineHandle {
         Self::emit_apps_snapshot(&service).await;
     }
 
-    async fn handle_list_app_templates(&self) {
-        self.emit_app_event(AppEventDto::AppTemplatesChanged {
-            templates: crate::local_apps_bridge::builtin_templates(),
-        });
-    }
-
     async fn handle_get_app_details(&self, app_id: String) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
@@ -2798,7 +2792,6 @@ impl MobileEngineHandle {
     async fn handle_create_app(
         &self,
         name: &str,
-        _template: AppTemplateKindDto,
         origin: AppCreateOriginDto,
         conversation_id: Option<String>,
     ) {
@@ -2821,15 +2814,15 @@ impl MobileEngineHandle {
         // match — see `AppCreateOrigin::conversation_binding`).
         let conversation_id = origin.conversation_binding(conversation_id);
         // TODO(local-apps#questionnaire, Task 11): `ClientCommand::CreateApp`
-        // still carries the template-era `template` field (now ignored — the
-        // core `AppRecord`/`AppService::create_app` no longer have a template
-        // concept, Task 2) and has no `brief` field yet. Task 11 replaces this
-        // wire shape with the conversational-design one. Until then `name`
-        // doubles as the brief: a real, user-supplied string (not a
-        // fabricated placeholder), so `create` keeps working for the ~14
-        // existing tests that exercise `ClientCommand::CreateApp` end to end.
-        // This is DELIBERATELY pinned, not silent:
-        // `create_app_persists_name_as_brief_until_task_11_adds_a_real_one`
+        // still has no `brief` field (its template-era `template` field was
+        // deleted outright — local-apps#questionnaire, Task 5, coordinator
+        // ruling: total removal of the static template catalog; it did NOT
+        // become a `brief`). Task 11 replaces this wire shape with the real
+        // conversational-design one. Until then `name` doubles as the brief:
+        // a real, user-supplied string (not a fabricated placeholder), so
+        // `create` keeps working for the existing tests that exercise
+        // `ClientCommand::CreateApp` end to end. This is DELIBERATELY pinned,
+        // not silent: `create_app_persists_name_as_brief_until_task_11_adds_a_real_one`
         // asserts `AppRecord.brief == name` and fails the moment this
         // changes, forcing Task 11 to touch this comment and this call
         // instead of leaving the gap for Task 8's questionnaire authoring to
@@ -3662,21 +3655,16 @@ impl MobileEngineHandle {
                 self.handle_list_apps().await;
                 Ok(())
             }
-            ClientCommand::ListAppTemplates => {
-                self.handle_list_app_templates().await;
-                Ok(())
-            }
             ClientCommand::GetAppDetails { app_id } => {
                 self.handle_get_app_details(app_id).await;
                 Ok(())
             }
             ClientCommand::CreateApp {
                 name,
-                template,
                 origin,
                 conversation_id,
             } => {
-                self.handle_create_app(&name, template, origin, conversation_id)
+                self.handle_create_app(&name, origin, conversation_id)
                     .await;
                 Ok(())
             }
@@ -7332,7 +7320,7 @@ mod tests {
 
     use client_protocol::local_apps::{
         AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
-        AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto, DesignValueDto,
+        AppRuntimeStateDto, AppWorkflowStateDto, DesignValueDto,
     };
 
     /// Drain and return every event delivered to the fake listener so far.
@@ -7370,28 +7358,21 @@ mod tests {
         })
     }
 
+    /// (local-apps#questionnaire, Task 5, coordinator ruling: total removal of
+    /// the static template catalog): this test used to also cover
+    /// `ListAppTemplates` → `AppTemplatesChanged` before the FIRST assertion
+    /// below; that command/event pair is deleted along with the catalog, so
+    /// the test is renamed to describe what it still covers — `CreateApp` →
+    /// `AppsChanged` and `GetAppDetails` → `AppDetailsChanged`.
     #[test]
-    fn local_apps_templates_and_details_round_trip_through_submit() {
+    fn local_apps_create_and_details_round_trip_through_submit() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
             handle
-                .submit(ClientCommand::ListAppTemplates)
-                .await
-                .expect("submit(ListAppTemplates)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppEvent {
-                    event: AppEventDto::AppTemplatesChanged { templates }
-                } if templates.len() == 4
-            )));
-
-            handle
                 .submit(ClientCommand::CreateApp {
                     name: "Tracker".into(),
-                    template: AppTemplateKindDto::CrudTracker,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -7453,7 +7434,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: NAME.into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -7497,7 +7477,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Habit Tracker".into(),
-                    template: AppTemplateKindDto::CrudTracker,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: Some("conv-ignored".into()),
                 })
@@ -7820,7 +7799,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Board".into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Chat,
                     conversation_id: Some("conv-7".into()),
                 })
@@ -7929,7 +7907,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Persist".into(),
-                    template: AppTemplateKindDto::FormUtility,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -8007,7 +7984,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Moodboard".into(),
-                    template: AppTemplateKindDto::ContentShowcase,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -8254,7 +8230,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Gallery".into(),
-                    template: AppTemplateKindDto::ContentShowcase,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -8452,7 +8427,6 @@ mod tests {
                 handle
                     .submit(ClientCommand::CreateApp {
                         name: "Reentrant".into(),
-                        template: AppTemplateKindDto::Dashboard,
                         origin: AppCreateOriginDto::Library,
                         conversation_id: None,
                     })
@@ -8526,7 +8500,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Sweep".into(),
-                    template: AppTemplateKindDto::CrudTracker,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -8656,7 +8629,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Telemetry".into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -8757,7 +8729,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Conflicted".into(),
-                    template: AppTemplateKindDto::ContentShowcase,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -8866,7 +8837,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Fifo".into(),
-                    template: AppTemplateKindDto::FormUtility,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })
@@ -9033,7 +9003,6 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Habit Tracker".into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
                 })

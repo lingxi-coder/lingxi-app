@@ -15,4 +15,12 @@
 /// `local_apps::AppRecord`/`AppManifest` no longer carry a template — apps
 /// are now designed from a free-text `brief`) is a BREAKING structural
 /// change per the F1-09 guard.
-pub const CLIENT_PROTOCOL_VERSION: &str = "2.0.0";
+///
+/// Bumped to 3.0.0 (local-apps#questionnaire, Task 5, coordinator ruling):
+/// total removal of the static template catalog — `AppTemplateKindDto`,
+/// `AppTemplateDto`, `ClientCommand::ListAppTemplates`,
+/// `AppEventDto::AppTemplatesChanged`, and `ClientCommand::CreateApp.template`
+/// are all deleted. Each is independently a BREAKING structural change per
+/// the F1-09 guard (a removed variant / removed field), so this is a real
+/// major bump, not folded into 2.0.0's.
+pub const CLIENT_PROTOCOL_VERSION: &str = "3.0.0";

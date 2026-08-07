@@ -32,12 +32,14 @@ fn version_is_semver() {
     }
 }
 
-/// Task 2's engine-mobile fix-forward pins the contract at `2.0.0` (a MAJOR
-/// bump: `AppRecordDto.template` / `AppManifestDto.template` were removed —
+/// Task 5's total removal of the static template catalog (`AppTemplateKindDto`,
+/// `AppTemplateDto`, `ClientCommand::ListAppTemplates`,
+/// `AppEventDto::AppTemplatesChanged`, `ClientCommand::CreateApp.template`)
+/// pins the contract at `3.0.0` (a further MAJOR bump past Task 2's `2.0.0` —
 /// see `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
 /// change here is a deliberate, reviewed bump — this test makes an accidental
 /// edit visible.
 #[test]
-fn version_is_two_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "2.0.0");
+fn version_is_three_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "3.0.0");
 }

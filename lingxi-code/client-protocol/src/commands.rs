@@ -35,7 +35,6 @@ use crate::computer_access::ComputerAccessResponseDto;
 use crate::listings::TaskStatusDto;
 use crate::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppDesignPatchDto,
-    AppTemplateKindDto,
 };
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
@@ -320,9 +319,6 @@ pub enum ClientCommand {
     /// the full record set.
     ListApps,
 
-    /// List the Rust-owned dynamic app templates.
-    ListAppTemplates,
-
     /// Request the complete detail snapshot for one app.
     GetAppDetails {
         /// App whose detail snapshot is requested.
@@ -334,8 +330,6 @@ pub enum ClientCommand {
     CreateApp {
         /// User-facing display name.
         name: String,
-        /// Scaffold template the app is designed from.
-        template: AppTemplateKindDto,
         /// Where the creation originated (`chat` / `library`).
         origin: AppCreateOriginDto,
         /// Conversation the app was created from (`origin: chat`). Skipped

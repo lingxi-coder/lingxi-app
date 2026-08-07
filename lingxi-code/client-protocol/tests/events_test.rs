@@ -11,12 +11,11 @@
 
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::local_apps::{
-    builtin_app_templates, AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto,
-    AppCheckpointDto, AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto,
-    AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto,
-    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto, DesignValueDto,
+    AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
+    AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
+    AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto, AppRuntimeModeDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
+    AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use std::collections::HashMap;
@@ -507,11 +506,6 @@ fn app_runtime_changed_round_trips() {
 fn extended_local_app_events_round_trip() {
     let events = vec![
         ClientEvent::AppEvent {
-            event: AppEventDto::AppTemplatesChanged {
-                templates: builtin_app_templates(),
-            },
-        },
-        ClientEvent::AppEvent {
             event: AppEventDto::AppQuestionnaireChanged {
                 app_id: "habits-1a2b".to_string(),
                 revision: 2,
@@ -586,7 +580,6 @@ fn extended_local_app_events_round_trip() {
     // directions and still succeeds, so the literals below are what make a
     // rename visible here.
     let expected_types = [
-        "app_templates_changed",
         "app_questionnaire_changed",
         "app_plan_changed",
         "app_generation_job_changed",
@@ -597,11 +590,7 @@ fn extended_local_app_events_round_trip() {
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 8] = [
-        (
-            "/event/templates/0/kind",
-            serde_json::Value::from("dashboard"),
-        ),
+    let expected_leaves: [(&str, serde_json::Value); 7] = [
         ("/event/revision", serde_json::Value::from(2_u64)),
         ("/event/revision", serde_json::Value::from(3_u64)),
         (

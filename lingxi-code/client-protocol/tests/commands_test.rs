@@ -22,7 +22,7 @@ use client_protocol::commands::{
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
-    AppDesignPatchDto, AppDesignPatchOpDto, AppTemplateKindDto, DesignValueDto,
+    AppDesignPatchDto, AppDesignPatchOpDto, DesignValueDto,
 };
 use client_protocol::permission::PermissionResponseDto;
 
@@ -473,7 +473,6 @@ fn list_apps_round_trips() {
 #[test]
 fn extended_local_app_commands_round_trip() {
     let commands = vec![
-        ClientCommand::ListAppTemplates,
         ClientCommand::GetAppDetails {
             app_id: "habits-1a2b".to_string(),
         },
@@ -513,7 +512,6 @@ fn extended_local_app_commands_round_trip() {
     ];
 
     let expected_types = [
-        "list_app_templates",
         "get_app_details",
         "request_app_design_suggestion",
         "dismiss_app_design_suggestion",
@@ -532,20 +530,20 @@ fn extended_local_app_commands_round_trip() {
     }
 }
 
-/// `CreateApp` — name + bare-string template/origin + an optional
-/// `conversation_id` (present for `origin: chat`, skipped when `None`).
+/// `CreateApp` — name + bare-string origin + an optional `conversation_id`
+/// (present for `origin: chat`, skipped when `None`). `template` was removed
+/// (local-apps#questionnaire, Task 5, coordinator ruling: total removal of
+/// the static template catalog).
 #[test]
 fn create_app_round_trips() {
     let cmd = ClientCommand::CreateApp {
         name: "Habits".to_string(),
-        template: AppTemplateKindDto::Dashboard,
         origin: AppCreateOriginDto::Chat,
         conversation_id: Some("conv-42".to_string()),
     };
     let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
     assert_eq!(json["type"], "create_app");
     assert_eq!(json["name"], "Habits");
-    assert_eq!(json["template"], "dashboard");
     assert_eq!(json["origin"], "chat");
     assert_eq!(json["conversation_id"], "conv-42");
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize CreateApp");
@@ -554,7 +552,6 @@ fn create_app_round_trips() {
     // A library-born app carries no conversation_id — the None is skipped.
     let from_library = ClientCommand::CreateApp {
         name: "Recipes".to_string(),
-        template: AppTemplateKindDto::ContentShowcase,
         origin: AppCreateOriginDto::Library,
         conversation_id: None,
     };
@@ -838,7 +835,6 @@ fn no_live_command_carries_session_id() {
         ClientCommand::ListApps,
         ClientCommand::CreateApp {
             name: "Habits".to_string(),
-            template: AppTemplateKindDto::Dashboard,
             origin: AppCreateOriginDto::Chat,
             conversation_id: Some("conv-42".to_string()),
         },

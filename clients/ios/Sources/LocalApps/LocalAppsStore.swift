@@ -338,7 +338,9 @@ final class LocalAppsStore {
             isRefreshing = true
             do {
                 try await submitCommand(.listApps)
-                try await submitCommand(.listAppTemplates)
+                // NOTE (local-apps#questionnaire, Task 5): `.listAppTemplates`
+                // was deleted with `ClientCommand::ListAppTemplates` (human-partner
+                // ruling: total removal of the static template catalog).
             } catch {
                 isRefreshing = false
                 errorMessage = error.localizedDescription
@@ -367,10 +369,15 @@ final class LocalAppsStore {
                 template: template.kind,
                 knownAppIDs: Set(apps.map(\.id))
             )
+            // NOTE (local-apps#questionnaire, Task 5): `ClientCommand::CreateApp.template`
+            // was deleted alongside `AppTemplateKindDto` (human-partner ruling:
+            // total removal of the static template catalog) — the wire command
+            // no longer carries a template selection at all. This whole
+            // template-based create flow is superseded by the brief-based one;
+            // replacing it is Task 16's job, not this task's.
             let succeeded = await send(
                 .createApp(
                     name: trimmed,
-                    template: LocalAppsProtocolAdapter.templateKind(template.kind),
                     origin: .library,
                     conversationId: nil
                 )
@@ -746,9 +753,13 @@ final class LocalAppsStore {
     #if canImport(engine_mobileFFI)
         private func handleAppEvent(_ event: AppEventDto) {
             switch event {
-            case let .appTemplatesChanged(templates):
-                installTemplates(templates.map(LocalAppsProtocolAdapter.template))
-
+            // NOTE (local-apps#questionnaire, Task 5): `AppEventDto::AppTemplatesChanged`
+            // was deleted (human-partner ruling: total removal of the static
+            // template catalog) — no case for it exists on the wire enum
+            // anymore, so there is nothing to match here. `installTemplates`
+            // and the `templates` store below are now unreachable dead code;
+            // removing them is Task 13's job alongside the rest of the
+            // template-picker UI.
             case let .appDetailsChanged(details):
                 let summary = LocalAppsProtocolAdapter.app(details.app)
                 upsertApp(summary)

@@ -9,30 +9,10 @@
 //! equivalence.
 
 use client_protocol::local_apps::{
-    builtin_app_templates, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
-    AppDataFieldTypeDto, AppDesignFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto,
-    AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto,
-    DensityLevelDto, DesignValueDto,
+    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDataFieldTypeDto,
+    AppDesignFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto,
+    AppRuntimeStateDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
-
-/// `AppTemplateKindDto` is a bare wire STRING, byte-identical to the core
-/// `AppTemplateKind::as_str()` values.
-#[test]
-fn template_kind_serializes_as_bare_string() {
-    let cases = [
-        (AppTemplateKindDto::Dashboard, "\"dashboard\""),
-        (AppTemplateKindDto::CrudTracker, "\"crud_tracker\""),
-        (AppTemplateKindDto::ContentShowcase, "\"content_showcase\""),
-        (AppTemplateKindDto::FormUtility, "\"form_utility\""),
-    ];
-    for (kind, expected) in cases {
-        let json = serde_json::to_string(&kind).expect("serialize AppTemplateKindDto");
-        assert_eq!(json, expected, "AppTemplateKindDto::{kind:?} wire form");
-        let back: AppTemplateKindDto =
-            serde_json::from_str(&json).expect("deserialize AppTemplateKindDto");
-        assert_eq!(back, kind);
-    }
-}
 
 /// `AppWorkflowStateDto` — every spec-§B state round-trips as its bare
 /// `snake_case` string.
@@ -351,45 +331,6 @@ fn app_checkpoint_round_trips() {
     let back: AppCheckpointDto =
         serde_json::from_value(json).expect("deserialize AppCheckpointDto");
     assert_eq!(back, checkpoint);
-}
-
-#[test]
-fn builtin_templates_define_the_same_five_ordered_steps() {
-    let templates = builtin_app_templates();
-    assert_eq!(templates.len(), 4);
-    for template in &templates {
-        assert_eq!(template.version, 1);
-        assert_eq!(
-            template
-                .steps
-                .iter()
-                .map(|step| (step.order, step.id.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                (1, "basic"),
-                (2, "structure"),
-                (3, "data"),
-                (4, "appearance"),
-                (5, "permissions"),
-            ]
-        );
-        assert_eq!(template.collections.len(), 1);
-        assert!(template
-            .steps
-            .iter()
-            .flat_map(|step| &step.fields)
-            .any(|field| { field.field_type == AppDesignFieldTypeDto::DataFieldList }));
-        assert!(template
-            .steps
-            .iter()
-            .flat_map(|step| &step.fields)
-            .any(|field| { field.field_type == AppDesignFieldTypeDto::DomainList }));
-    }
-    assert_eq!(templates[0].collections[0].id, "records");
-    assert_eq!(templates[1].collections[0].id, "items");
-    assert_eq!(templates[2].collections[0].id, "entries");
-    assert_eq!(templates[3].collections[0].id, "submissions");
-    assert!(!templates[3].collections[0].enabled_by_default);
 }
 
 #[test]

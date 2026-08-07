@@ -34,7 +34,7 @@ use client_protocol::local_apps::{
     AppDataFieldDto, AppDataFieldTypeDto, AppDesignFieldValueDto, AppDesignPatchDto,
     AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto, AppManifestDto, AppRecordDto,
     AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppTemplateDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use local_apps::{
     load_manifest, AppCheckpoint, AppCheckpointKind, AppDesignDraft, AppDesignPatch,
@@ -562,10 +562,6 @@ pub(crate) fn lower_details(
         generation_job: None,
         checkpoints: checkpoints.iter().map(lower_checkpoint).collect(),
     })
-}
-
-pub(crate) fn builtin_templates() -> Vec<AppTemplateDto> {
-    client_protocol::local_apps::builtin_app_templates()
 }
 
 /// Lower a full draft field map for `AppDesignDraftChanged`.

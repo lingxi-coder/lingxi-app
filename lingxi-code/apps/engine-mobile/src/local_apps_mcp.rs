@@ -6,7 +6,6 @@
 //! stdio or remote transport surface.
 
 use async_trait::async_trait;
-use client_protocol::local_apps::builtin_app_templates;
 use local_apps::AppService;
 use protocol::McpConnectionId;
 use serde_json::{json, Value};
@@ -315,12 +314,14 @@ impl LocalAppsMcpTransport {
                 }
                 let total = apps.len();
                 apps.truncate(limit);
+                // NOTE (local-apps#questionnaire, Task 5): `"templates"` used to
+                // carry `builtin_app_templates()` here — deleted alongside the
+                // static template catalog (human-partner ruling: total removal).
                 Self::result(json!({
                     "apps": apps,
                     "count": apps.len(),
                     "total": total,
                     "has_more": total > apps.len(),
-                    "templates": builtin_app_templates()
                 }))
             }
             "get" => {

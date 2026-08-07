@@ -742,8 +742,14 @@ pub(crate) fn resolve_gate_evidence(app: &mut AppState) -> bool {
         // `open_designer` accepts GenerationFailed as well as CollectingSpec
         // (state.rs), so a crash between the interactions.json and the mirror
         // writes can leave either source state with the gate already armed.
+        // `plan_ready` (Task 3) arms the SAME Designer gate from `Planning` —
+        // a crash in that same write window must repair forward here too, or
+        // a torn `plan_ready` wedges `confirm_design` behind a source state
+        // this table never resolves.
         (
-            AppWorkflowState::CollectingSpec | AppWorkflowState::GenerationFailed,
+            AppWorkflowState::CollectingSpec
+            | AppWorkflowState::GenerationFailed
+            | AppWorkflowState::Planning,
             Some(AppInteractionKind::Designer),
         ) => Some(AppWorkflowState::AwaitingSpecConfirmation),
         (AppWorkflowState::Validating, Some(AppInteractionKind::Preview)) => {

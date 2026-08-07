@@ -1004,7 +1004,17 @@ fn current_contract_index() -> ContractIndex {
     put("AppTemplateKindDto::ContentShowcase", "content_showcase");
     put("AppTemplateKindDto::FormUtility", "form_utility");
 
+    put(
+        "AppWorkflowStateDto::AuthoringQuestionnaire",
+        "authoring_questionnaire",
+    );
+    put(
+        "AppWorkflowStateDto::QuestionnaireFailed",
+        "questionnaire_failed",
+    );
     put("AppWorkflowStateDto::CollectingSpec", "collecting_spec");
+    put("AppWorkflowStateDto::Planning", "planning");
+    put("AppWorkflowStateDto::PlanFailed", "plan_failed");
     put(
         "AppWorkflowStateDto::AwaitingSpecConfirmation",
         "awaiting_spec_confirmation",

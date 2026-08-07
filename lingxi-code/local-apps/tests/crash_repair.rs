@@ -64,14 +64,18 @@ fn fresh_app(id: &str) -> AppState {
     );
     app.questionnaire_ready(one_step(), None, T0)
         .expect("fixture questionnaire is valid");
-    app.draft.plan = Some(AppPlan {
+    app.draft.plan = Some(a_plan());
+    app.draft.plan_for_revision = Some(app.draft.revision);
+    app
+}
+
+fn a_plan() -> AppPlan {
+    AppPlan {
         collections: Vec::new(),
         capabilities: Vec::new(),
         domains: Vec::new(),
         summary: "s".into(),
-    });
-    app.draft.plan_for_revision = Some(app.draft.revision);
-    app
+    }
 }
 
 /// Persist the full consistent store — the committed state BEFORE the torn
@@ -192,6 +196,32 @@ fn torn_open_designer_repairs_to_awaiting_spec_confirmation() {
     assert_eq!(pending.interaction_id, "int-1");
     // The repaired gate is actually satisfiable.
     app.confirm_design("int-1", 0, T0 + 3).expect("confirmable");
+}
+
+/// `plan_ready` (Task 3) arms the SAME Designer gate `open_designer` does,
+/// but from `Planning` — a third source state the repair table's
+/// `(CollectingSpec | GenerationFailed, Some(Designer))` pattern originally
+/// missed. A crash in this window would otherwise wedge `confirm_design`
+/// behind a `Planning` record the table never resolves.
+#[test]
+fn torn_plan_ready_repairs_to_awaiting_spec_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut before = fresh_app("aaaa1111");
+    before.begin_planning(T0 + 1).unwrap();
+    let mut after = before.clone();
+    after.plan_ready(a_plan(), "int-1".into(), T0 + 2).unwrap();
+    tear(dir.path(), &before, &after, &Tear::AfterInteractions);
+
+    let mut app = load_repaired(dir.path());
+    assert_eq!(
+        app.record.workflow_state,
+        AppWorkflowState::AwaitingSpecConfirmation
+    );
+    let pending = app.interactions.pending.clone().expect("gate survives");
+    assert_eq!(pending.interaction_id, "int-1");
+    // The repaired gate is actually satisfiable.
+    app.confirm_design("int-1", app.draft.revision, T0 + 3)
+        .expect("confirmable");
 }
 
 /// `open_designer` is also the escape hatch out of `generation_failed`, so

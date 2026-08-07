@@ -302,6 +302,7 @@ impl AppState {
             &[
                 AppWorkflowState::CollectingSpec,
                 AppWorkflowState::QuestionnaireFailed,
+                AppWorkflowState::PlanFailed,
             ],
         )?;
         let trimmed = brief.trim();
@@ -362,6 +363,21 @@ impl AppState {
     pub fn retry_plan(&mut self, now_ms: u64) -> Result<(), AppError> {
         self.ensure_workflow("retry_plan", &[AppWorkflowState::PlanFailed])?;
         self.set_workflow(AppWorkflowState::Planning, now_ms);
+        Ok(())
+    }
+
+    /// `plan_failed -> collecting_spec`. `retry_plan` is only useful when
+    /// the SAME answers might plan successfully on a second try (e.g. a
+    /// transient LLM error); when the plan failed because the answers
+    /// themselves are unsatisfiable, `retry_plan` alone traps the user in
+    /// `plan_failed` forever — there was no way back to edit an answer or
+    /// change the brief. This is the other escape: it leaves the
+    /// questionnaire and every answer intact (unlike `update_brief`, which
+    /// clears both because a new brief invalidates the old questionnaire)
+    /// so the user can fix an answer and `begin_planning` again.
+    pub fn reopen_answers(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow("reopen_answers", &[AppWorkflowState::PlanFailed])?;
+        self.set_workflow(AppWorkflowState::CollectingSpec, now_ms);
         Ok(())
     }
 
@@ -758,8 +774,12 @@ mod tests {
     };
     use crate::types::DesignValue;
 
-    const ALL_WORKFLOW_STATES: [AppWorkflowState; 9] = [
+    const ALL_WORKFLOW_STATES: [AppWorkflowState; 13] = [
+        AppWorkflowState::AuthoringQuestionnaire,
+        AppWorkflowState::QuestionnaireFailed,
         AppWorkflowState::CollectingSpec,
+        AppWorkflowState::Planning,
+        AppWorkflowState::PlanFailed,
         AppWorkflowState::AwaitingSpecConfirmation,
         AppWorkflowState::Generating,
         AppWorkflowState::Validating,
@@ -1638,6 +1658,56 @@ mod tests {
         assert_eq!(app.record.workflow_state, AppWorkflowState::PlanFailed);
         app.retry_plan(5).expect("a failed plan can be retried");
         assert_eq!(app.record.workflow_state, AppWorkflowState::Planning);
+    }
+
+    /// Ruling (review round 1, finding 7): `retry_plan` alone traps a user
+    /// whose ANSWERS made the plan fail — there was no way to edit them or
+    /// change the brief. `reopen_answers` is the escape back to
+    /// `collecting_spec` that keeps the questionnaire and every answer
+    /// intact, so the user can fix one and `begin_planning` again.
+    #[test]
+    fn reopen_answers_returns_to_collecting_spec_keeping_the_answers() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.draft
+            .fields
+            .insert("tone".into(), DesignValue::SingleChoice("a".into()));
+        app.begin_planning(3).expect("planning starts");
+        app.plan_failed(4).expect("planning can fail");
+        app.reopen_answers(5)
+            .expect("plan_failed can reopen the answers");
+        assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
+        assert_eq!(
+            app.draft.questionnaire.len(),
+            1,
+            "the questionnaire survives — only the plan failed, not the questions"
+        );
+        assert_eq!(
+            app.draft.fields.get("tone"),
+            Some(&DesignValue::SingleChoice("a".into())),
+            "the user's answer survives so they can fix it, not re-answer from scratch"
+        );
+    }
+
+    /// `update_brief`'s other escape from `plan_failed`: when the answers
+    /// aren't the problem — the BRIEF itself needs to change — the user can
+    /// go all the way back to a fresh questionnaire, same as from
+    /// `questionnaire_failed`.
+    #[test]
+    fn update_brief_escapes_a_failed_plan_too() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.begin_planning(3).expect("planning starts");
+        app.plan_failed(4).expect("planning can fail");
+        app.update_brief("换个方向重来".into(), 5)
+            .expect("plan_failed can also change the brief");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+        assert!(app.draft.questionnaire.is_empty());
     }
 
     #[test]

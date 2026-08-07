@@ -179,7 +179,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record and open its human design wizard. This never confirms the design or starts generation.",
+                "Create a local app record. The app starts in authoring_questionnaire while its design questionnaire is set up; wait for that to complete before opening the design wizard. This never confirms the design or starts generation.",
                 json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":200},"template":{"enum":["dashboard","crud_tracker","content_showcase","form_utility"]},"conversation_id":{"type":"string","maxLength":128}},"required":["name","template"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -369,9 +369,10 @@ impl LocalAppsMcpTransport {
                 // This tool used to open the designer gate immediately after
                 // create; that step is gone until Task 4/8 wire the
                 // questionnaire-authoring LLM round trip that carries the app
-                // to `collecting_spec`, and Task 10 rewires this tool (and
-                // its "open its human design wizard" description above)
-                // around that round trip.
+                // to `collecting_spec`. The tool description above was
+                // updated to match (no more "open its human design wizard"
+                // promise); Task 10 still owns the real conversational
+                // rewrite of this tool's shape around that round trip.
                 let conversation_id = input
                     .get("conversation_id")
                     .and_then(Value::as_str)

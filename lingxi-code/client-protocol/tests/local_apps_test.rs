@@ -39,7 +39,17 @@ fn template_kind_serializes_as_bare_string() {
 #[test]
 fn workflow_state_serializes_as_bare_string() {
     let cases = [
+        (
+            AppWorkflowStateDto::AuthoringQuestionnaire,
+            "\"authoring_questionnaire\"",
+        ),
+        (
+            AppWorkflowStateDto::QuestionnaireFailed,
+            "\"questionnaire_failed\"",
+        ),
         (AppWorkflowStateDto::CollectingSpec, "\"collecting_spec\""),
+        (AppWorkflowStateDto::Planning, "\"planning\""),
+        (AppWorkflowStateDto::PlanFailed, "\"plan_failed\""),
         (
             AppWorkflowStateDto::AwaitingSpecConfirmation,
             "\"awaiting_spec_confirmation\"",

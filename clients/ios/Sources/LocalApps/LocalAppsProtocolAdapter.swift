@@ -131,7 +131,20 @@ enum LocalAppsProtocolAdapter {
 
     static func workflow(_ dto: AppWorkflowStateDto) -> LocalAppWorkflow {
         switch dto {
+        // TODO(local-apps#questionnaire, Task 13/18): `authoringQuestionnaire` /
+        // `questionnaireFailed` / `planning` / `planFailed` are new
+        // conversational-design states (core Task 3) with no dedicated iOS
+        // UI yet. Until Task 13/18 add real screens for them, they map onto
+        // the closest existing bucket by KIND (an LLM round trip in
+        // progress → `.generating`'s busy/spinner treatment; a failed round
+        // trip → `.generationFailed`'s retry treatment) — explicit arms,
+        // not a catch-all, so this switch still breaks the moment a real
+        // state is removed or renamed.
+        case .authoringQuestionnaire: .generating
+        case .questionnaireFailed: .generationFailed
         case .collectingSpec: .collectingSpec
+        case .planning: .generating
+        case .planFailed: .generationFailed
         case .awaitingSpecConfirmation: .awaitingSpecConfirmation
         case .generating: .generating
         case .validating: .validating

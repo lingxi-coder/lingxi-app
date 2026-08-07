@@ -1258,8 +1258,20 @@ private fun String.toBindingTemplateKind(): AppTemplateKindDto = when (this) {
     else -> error("Unsupported template kind: $this")
 }
 
+// TODO(local-apps#questionnaire, Task 13/18): AUTHORING_QUESTIONNAIRE /
+// QUESTIONNAIRE_FAILED / PLANNING / PLAN_FAILED are new conversational-design
+// states (core Task 3) with no dedicated Android UI yet. Until Task 13/18 add
+// real screens for them, they map onto the closest existing bucket by KIND
+// (an LLM round trip in progress -> Generating's busy/spinner treatment; a
+// failed round trip -> GenerationFailed's retry treatment) -- explicit
+// branches, not an `else`, so this `when` still breaks the moment a real
+// state is removed or renamed.
 private fun AppWorkflowStateDto.toUiWorkflow(): LocalAppWorkflow = when (this) {
+    AppWorkflowStateDto.AUTHORING_QUESTIONNAIRE -> LocalAppWorkflow.Generating
+    AppWorkflowStateDto.QUESTIONNAIRE_FAILED -> LocalAppWorkflow.GenerationFailed
     AppWorkflowStateDto.COLLECTING_SPEC -> LocalAppWorkflow.CollectingSpec
+    AppWorkflowStateDto.PLANNING -> LocalAppWorkflow.Generating
+    AppWorkflowStateDto.PLAN_FAILED -> LocalAppWorkflow.GenerationFailed
     AppWorkflowStateDto.AWAITING_SPEC_CONFIRMATION -> LocalAppWorkflow.AwaitingSpecConfirmation
     AppWorkflowStateDto.GENERATING -> LocalAppWorkflow.Generating
     AppWorkflowStateDto.VALIDATING -> LocalAppWorkflow.Validating

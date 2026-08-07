@@ -1130,15 +1130,48 @@ fn sweep_trash(root: &Path) {
 mod tests {
     use super::*;
     use crate::error::AppErrorCode;
+    use crate::questionnaire::{
+        AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignStep,
+    };
 
+    fn one_step() -> Vec<AppDesignStep> {
+        vec![AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "basics".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "tone".into(),
+                label: "tone".into(),
+                description: None,
+                field_type: AppDesignFieldType::SingleChoice,
+                required: false,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: None,
+                options: vec![AppDesignFieldOption {
+                    value: "a".into(),
+                    label: "A".into(),
+                }],
+            }],
+        }]
+    }
+
+    /// A fresh app fast-forwarded straight to `collecting_spec` — none of
+    /// these storage goldens exercise questionnaire authoring itself, they
+    /// pin document persistence/load-repair, so the fixture just needs to
+    /// clear `open_designer`'s `collecting_spec | generation_failed` gate.
     fn new_app(id: &str) -> AppState {
-        AppState::create(
+        let mut app = AppState::create(
             id.into(),
             format!("App {id}"),
             "a test app".into(),
             Some("conv-9".into()),
             1_700_000_000_000,
-        )
+        );
+        app.questionnaire_ready(one_step(), None, 1_700_000_000_000)
+            .expect("fixture questionnaire is valid");
+        app
     }
 
     fn save_full(root: &Path, apps: &[AppState]) {

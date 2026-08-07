@@ -844,10 +844,13 @@ mod tests {
             .create_app("Habits", "a habit tracker", None)
             .await
             .expect("create app");
+        let record = local_apps::test_support::advance_to_collecting_spec(&service, &record.id)
+            .await;
         let interaction = service
             .open_designer(&record.id)
             .await
             .expect("open designer");
+        local_apps::test_support::stamp_fresh_plan(&service, &record.id).await;
         service
             .confirm_design(&record.id, &interaction.interaction_id, 0)
             .await

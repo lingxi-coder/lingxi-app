@@ -224,6 +224,8 @@ mod tests {
                 .create_app("Survivor", "a test app", None)
                 .await
                 .expect("create app");
+            local_apps::test_support::advance_to_collecting_spec(&profile.service, &record.id)
+                .await;
             (profile, record.id)
         });
         // The reconnect / project switch: engine #1's runtime goes away while
@@ -240,6 +242,7 @@ mod tests {
                 .open_designer(&app_id)
                 .await
                 .expect("open designer");
+            local_apps::test_support::stamp_fresh_plan(&profile.service, &app_id).await;
             let revision = profile.service.draft(&app_id).await.expect("draft").revision;
             profile
                 .service

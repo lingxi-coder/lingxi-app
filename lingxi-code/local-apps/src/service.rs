@@ -292,13 +292,18 @@ enum SuggestionOutcome {
 /// Single source of truth for local apps (phase 1: data model, state
 /// machines, storage, continuations — no runtime, no git).
 pub struct AppService {
-    root: PathBuf,
+    /// `pub(crate)` (not private) solely so [`crate::test_support`]'s
+    /// cross-crate test fixtures can splice fixture state onto disk without
+    /// a public API surface — production code outside this module has no
+    /// business touching it.
+    pub(crate) root: PathBuf,
     clock: Arc<dyn Clock>,
     sink: Arc<dyn ContinuationSink>,
     observer: Arc<dyn AppEventObserver>,
     /// `Arc` so completion tasks can hold an [`OwnedMutexGuard`] across a
-    /// caller-cancellation boundary (see the module doc).
-    state: Arc<Mutex<Vec<AppState>>>,
+    /// caller-cancellation boundary (see the module doc). `pub(crate)` for
+    /// the same test-fixture reason as `root`.
+    pub(crate) state: Arc<Mutex<Vec<AppState>>>,
     /// Serializes every commit → emit window (and snapshot emissions).
     /// Acquired in the CALLER before `state` (so guard-grant order == commit
     /// order — tokio's FIFO-fair `Mutex` is load-bearing here) and released
@@ -1679,6 +1684,7 @@ impl AppService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{advance_to_collecting_spec, stamp_fresh_plan};
     use crate::continuation::{NoopContinuationSink, RecordingContinuationSink};
     use crate::error::AppErrorCode;
     use crate::events::RecordingAppEventObserver;
@@ -1733,6 +1739,7 @@ mod tests {
         }
     }
 
+
     #[tokio::test]
     async fn create_list_and_reload_from_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -1747,7 +1754,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(record.name, "Habit Tracker", "name is trimmed");
-        assert_eq!(record.workflow_state, AppWorkflowState::CollectingSpec);
+        assert_eq!(
+            record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
         assert_eq!(
             record.workspace_rel,
             format!("apps/{}/workspace", record.id)
@@ -1833,6 +1843,7 @@ mod tests {
             .create_app("A", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_draft(&record.id, 0, &patch("title", "Mine"))
             .await
@@ -1874,6 +1885,7 @@ mod tests {
             .create_app("A", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let interaction = h.service.open_designer(&record.id).await.unwrap();
         h.service
             .update_draft(&record.id, 0, &patch("title", "T"))
@@ -1901,6 +1913,7 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(h.sink.calls().is_empty());
+        stamp_fresh_plan(&h.service, &record.id).await;
         // Exact id + current revision succeeds and delivers the continuation.
         h.service
             .confirm_design(&record.id, &interaction.interaction_id, 1)
@@ -1931,11 +1944,13 @@ mod tests {
             .create_app("Keep", "a test app", None)
             .await
             .unwrap();
+        let keep = advance_to_collecting_spec(&h.service, &keep.id).await;
         let gone = h
             .service
             .create_app("Gone", "a test app", None)
             .await
             .unwrap();
+        let gone = advance_to_collecting_spec(&h.service, &gone.id).await;
         let _ = h.take_events().await;
         h.service.delete_app(&gone.id).await.unwrap();
         assert_eq!(h.service.list_apps().await, vec![keep.clone()]);
@@ -1961,6 +1976,7 @@ mod tests {
             .create_app("Busy", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_runtime_record(
                 &record.id,
@@ -2005,6 +2021,7 @@ mod tests {
             .create_app("Stuck", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let app_dir = dir.path().join("apps").join(&record.id);
         // Finding 13 mechanism, inverted for the rename seam: a regular FILE
@@ -2038,6 +2055,7 @@ mod tests {
             .create_app("Race", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let service = Arc::new(h.service);
         // Race `AppsChanged` snapshots against workflow toggles; the
@@ -2088,6 +2106,7 @@ mod tests {
             .create_app("R", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let runtime = h
             .service
@@ -2145,7 +2164,9 @@ mod tests {
             .create_app("Q", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let interaction = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         // confirm_design succeeds even though delivery fails (at-least-once).
         h.service
             .confirm_design(&record.id, &interaction.interaction_id, 0)
@@ -2191,7 +2212,9 @@ mod tests {
             .create_app("D", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let interaction = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service
             .confirm_design(&record.id, &interaction.interaction_id, 0)
             .await
@@ -2240,11 +2263,13 @@ mod tests {
             .create_app("M", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         // Two continuations: cancel then confirm.
         let i1 = h.service.open_designer(&record.id).await.unwrap();
         assert!(i1.interaction_id.starts_with("int-"));
         h.service.cancel_design(&record.id).await.unwrap();
         let i2 = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service
             .confirm_design(&record.id, &i2.interaction_id, 0)
             .await
@@ -2299,6 +2324,7 @@ mod tests {
             .create_app("C", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         assert!(h
             .service
             .list_checkpoints(&record.id)
@@ -2322,6 +2348,7 @@ mod tests {
             .create_app("Restorable", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_draft(&record.id, 0, &patch("title", "v1"))
             .await
@@ -2373,6 +2400,7 @@ mod tests {
             .create_app("Legacy", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_draft(&record.id, 0, &patch("title", "v1"))
             .await
@@ -2410,6 +2438,7 @@ mod tests {
             .create_app("P", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let progress = AppGenerationProgress {
             app_id: record.id.clone(),
@@ -2449,11 +2478,13 @@ mod tests {
             .create_app("A", "a test app", None)
             .await
             .unwrap();
+        let a = advance_to_collecting_spec(&h.service, &a.id).await;
         let b = h
             .service
             .create_app("B", "a test app", None)
             .await
             .unwrap();
+        let b = advance_to_collecting_spec(&h.service, &b.id).await;
         for record in [&a, &b] {
             h.service.open_designer(&record.id).await.unwrap();
             h.service.cancel_design(&record.id).await.unwrap();
@@ -2505,7 +2536,9 @@ mod tests {
             .create_app("F", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service
             .confirm_design(&record.id, &gate.interaction_id, 0)
             .await
@@ -2621,6 +2654,7 @@ mod tests {
             .create_app("A", &format!("  {}  ", "x".repeat(MAX_BRIEF_BYTES)), None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         assert_eq!(record.brief, "x".repeat(MAX_BRIEF_BYTES));
     }
 
@@ -2646,6 +2680,7 @@ mod tests {
             .create_app("Suggestion", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.take_events().await;
         let suggestion = h
             .service
@@ -2690,6 +2725,7 @@ mod tests {
             .create_app("Caps", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let set_op = |field: &str, text: &str| AppDesignPatchOp::Set {
             field_id: field.into(),
             value: DesignValue::ShortText(text.into()),
@@ -2773,6 +2809,7 @@ mod tests {
             .create_app("Contract", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let data_fields = |id: &str| AppDesignPatch {
             ops: vec![AppDesignPatchOp::Set {
                 field_id: "collection_fields".into(),
@@ -2847,6 +2884,7 @@ mod tests {
             .create_app("Fields", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         // Fill to the cap across several max-size patches.
         assert_eq!(
             MAX_DRAFT_FIELDS % MAX_PATCH_OPS,
@@ -2909,6 +2947,7 @@ mod tests {
             .create_app("Prompt", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         // Oversized prompt: rejected as invalid_request even though the state
         // gate would also refuse — the cap runs first.
         let err = h
@@ -2942,6 +2981,7 @@ mod tests {
             .create_app("N", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&service, &record.id).await;
         service.open_designer(&record.id).await.unwrap();
         service.cancel_design(&record.id).await.unwrap();
         let interactions = service.interactions(&record.id).await.unwrap();
@@ -2963,6 +3003,7 @@ mod tests {
             .create_app("Big", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let value = "\u{1}".repeat(MAX_TEXT_VALUE_BYTES); // in caps; escapes 6x
         let chunk = |chunk: usize| AppDesignPatch {
             ops: (0..MAX_PATCH_OPS)
@@ -3014,7 +3055,9 @@ mod tests {
             .create_app("Roll", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         let _ = h.take_events().await;
 
         // Make ONLY the index write fail: a directory squatting on
@@ -3136,7 +3179,9 @@ mod tests {
             .create_app("MidBatch", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let app_dir = dir.path().join("apps").join(&record.id);
         let draft_path = app_dir.join("workspace/.lingxi/design-spec.json");
@@ -3243,6 +3288,7 @@ mod tests {
             .create_app("Merge", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service.open_designer(&record.id).await.unwrap();
         h.service.cancel_design(&record.id).await.unwrap(); // seq 1 queued
 
@@ -3354,6 +3400,7 @@ mod tests {
             .create_app("Race", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&service, &record.id).await;
         service.open_designer(&record.id).await.unwrap();
         service.cancel_design(&record.id).await.unwrap(); // seq 1 queued
         recording.set_fail(false);
@@ -3396,6 +3443,7 @@ mod tests {
             .create_app("Proof", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
 
         // Residual window by hand: on DISK the confirm committed (gate
@@ -3484,6 +3532,7 @@ mod tests {
             .create_app("Err", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
 
         let huge = "e".repeat(MAX_TEXT_VALUE_BYTES + 500);
@@ -3560,6 +3609,7 @@ mod tests {
             .create_app("Sugg", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_draft(&record.id, 0, &patch("title", "T"))
             .await
@@ -3632,6 +3682,7 @@ mod tests {
             .create_app("P", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let base = AppGenerationProgress {
             app_id: record.id.clone(),
@@ -3684,13 +3735,16 @@ mod tests {
             .create_app("GateA", "a test app", None)
             .await
             .unwrap();
+        let a = advance_to_collecting_spec(&h.service, &a.id).await;
         let designer_gate = h.service.open_designer(&a.id).await.unwrap();
         let b = h
             .service
             .create_app("GateB", "a test app", None)
             .await
             .unwrap();
+        let b = advance_to_collecting_spec(&h.service, &b.id).await;
         let gate = h.service.open_designer(&b.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &b.id).await;
         h.service
             .confirm_design(&b.id, &gate.interaction_id, 0)
             .await
@@ -3734,6 +3788,7 @@ mod tests {
             .create_app("LateSub", "a test app", None)
             .await
             .unwrap();
+        let a = advance_to_collecting_spec(&h.service, &a.id).await;
         let gate = h.service.open_designer(&a.id).await.unwrap();
         drop(h);
 
@@ -3767,6 +3822,7 @@ mod tests {
             .create_app("Order", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
 
         let gate = h.service.open_designer(&record.id).await.unwrap();
@@ -3787,6 +3843,7 @@ mod tests {
             "open_designer must announce the state change BEFORE the gate"
         );
 
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service
             .confirm_design(&record.id, &gate.interaction_id, 0)
             .await
@@ -3824,6 +3881,7 @@ mod tests {
             .create_app("Busy2", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_runtime_record(
                 &record.id,
@@ -3860,6 +3918,7 @@ mod tests {
             .create_app("Lean", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let index_path = dir.path().join("apps/index.json");
         let index_before = std::fs::read_to_string(&index_path).unwrap();
 
@@ -3936,7 +3995,9 @@ mod tests {
             .create_app("Hybrid", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service.flush_events().await;
         drop(h);
 
@@ -3948,6 +4009,7 @@ mod tests {
         // forward-crash prefix shape.
         let committed = storage::load_all(dir.path()).unwrap();
         let mut confirmed = committed[0].clone();
+        confirmed.draft.plan_for_revision = Some(confirmed.draft.revision);
         confirmed
             .confirm_design(&gate.interaction_id, 0, 1_700_000_000_100)
             .unwrap();
@@ -3994,12 +4056,15 @@ mod tests {
             .create_app("Hybrid2", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service.flush_events().await;
         drop(h);
 
         let committed = storage::load_all(dir.path()).unwrap();
         let mut confirmed = committed[0].clone();
+        confirmed.draft.plan_for_revision = Some(confirmed.draft.revision);
         confirmed
             .confirm_design(&gate.interaction_id, 0, 1_700_000_000_100)
             .unwrap();
@@ -4095,6 +4160,7 @@ mod tests {
             .create_app("Plant", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&service, &record.id).await;
         service.open_designer(&record.id).await.unwrap();
         // cancel_design queues seq 1 and drains: delivering seq 1 plants
         // seq 2 on disk mid-flight; the post-delivery merge must keep it and
@@ -4133,6 +4199,7 @@ mod tests {
             .create_app("HornB", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
         h.service.flush_events().await;
 
@@ -4216,7 +4283,9 @@ mod tests {
             .create_app("Big", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let gate = h.service.open_designer(&record.id).await.unwrap();
+        stamp_fresh_plan(&h.service, &record.id).await;
         h.service
             .confirm_design(&record.id, &gate.interaction_id, 0)
             .await
@@ -4276,6 +4345,7 @@ mod tests {
             .create_app("Stale", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         // Suggestion computed against revision 0…
         let suggestion = h
             .service
@@ -4368,12 +4438,14 @@ mod tests {
             .create_app("From A", "a test app", None)
             .await
             .unwrap();
+        let app1 = advance_to_collecting_spec(&a.service, &app1.id).await;
         // B has never seen app1; its index write must preserve it.
         let app2 = b
             .service
             .create_app("From B", "a test app", None)
             .await
             .unwrap();
+        let app2 = advance_to_collecting_spec(&b.service, &app2.id).await;
         let on_disk = storage::load_all(dir.path()).unwrap();
         let mut ids_on_disk: Vec<&str> = on_disk.iter().map(|app| app.record.id.as_str()).collect();
         ids_on_disk.sort_unstable();
@@ -4393,6 +4465,7 @@ mod tests {
             .create_app("A again", "a test app", None)
             .await
             .unwrap();
+        let app3 = advance_to_collecting_spec(&a.service, &app3.id).await;
         let final_state = storage::load_all(dir.path()).unwrap();
         let mut final_ids: Vec<&str> = final_state
             .iter()
@@ -4508,6 +4581,7 @@ mod tests {
             .create_app("Drop", "a test app", None)
             .await
             .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let observer = Arc::clone(&h.observer);
         let service = Arc::new(h.service);

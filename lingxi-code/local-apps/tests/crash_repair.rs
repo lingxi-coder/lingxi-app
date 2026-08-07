@@ -15,23 +15,63 @@ use local_apps::storage::{
 };
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    AppContinuationKind, AppEventObserver, AppInteractionKind, AppInteractions, AppService,
-    AppState, AppWorkflowState, ContinuationSink, RecordingAppEventObserver,
-    RecordingContinuationSink, APPS_SCHEMA_VERSION,
+    AppContinuationKind, AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignStep,
+    AppEventObserver, AppInteractionKind, AppInteractions, AppPlan, AppService, AppState,
+    AppWorkflowState, ContinuationSink, RecordingAppEventObserver, RecordingContinuationSink,
+    APPS_SCHEMA_VERSION,
 };
 use std::path::Path;
 use std::sync::Arc;
 
 const T0: u64 = 1_753_000_000_000;
 
+fn one_step() -> Vec<AppDesignStep> {
+    vec![AppDesignStep {
+        id: "basics".into(),
+        order: 0,
+        title: "basics".into(),
+        description: None,
+        fields: vec![AppDesignField {
+            id: "tone".into(),
+            label: "tone".into(),
+            description: None,
+            field_type: AppDesignFieldType::SingleChoice,
+            required: false,
+            allows_custom: false,
+            allows_defer: false,
+            default_value: None,
+            options: vec![AppDesignFieldOption {
+                value: "a".into(),
+                label: "A".into(),
+            }],
+        }],
+    }]
+}
+
+/// A fresh app fast-forwarded straight to `collecting_spec` WITH an
+/// already-computed plan matching the current revision — none of these
+/// crash-repair goldens exercise questionnaire authoring or planning
+/// themselves, they pin the torn-write repair machinery, so the fixture
+/// just needs to satisfy `confirm_design`'s plan-freshness gate without
+/// ever touching `update_draft` (which would invalidate it again).
 fn fresh_app(id: &str) -> AppState {
-    AppState::create(
+    let mut app = AppState::create(
         id.into(),
         format!("App {id}"),
         "a test app".into(),
         None,
         T0,
-    )
+    );
+    app.questionnaire_ready(one_step(), None, T0)
+        .expect("fixture questionnaire is valid");
+    app.draft.plan = Some(AppPlan {
+        collections: Vec::new(),
+        capabilities: Vec::new(),
+        domains: Vec::new(),
+        summary: "s".into(),
+    });
+    app.draft.plan_for_revision = Some(app.draft.revision);
+    app
 }
 
 /// Persist the full consistent store — the committed state BEFORE the torn

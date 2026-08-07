@@ -362,6 +362,16 @@ impl LocalAppsMcpTransport {
                 // field without that test forcing it to touch this comment
                 // and this call.
 
+                // TODO(local-apps#questionnaire, Task 10): a fresh app now
+                // starts in `authoring_questionnaire` (Task 3), not
+                // `collecting_spec` — `open_designer` requires
+                // `collecting_spec | generation_failed` and would refuse it.
+                // This tool used to open the designer gate immediately after
+                // create; that step is gone until Task 4/8 wire the
+                // questionnaire-authoring LLM round trip that carries the app
+                // to `collecting_spec`, and Task 10 rewires this tool (and
+                // its "open its human design wizard" description above)
+                // around that round trip.
                 let conversation_id = input
                     .get("conversation_id")
                     .and_then(Value::as_str)
@@ -370,14 +380,9 @@ impl LocalAppsMcpTransport {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
-                let interaction = match service.open_designer(&record.id).await {
-                    Ok(interaction) => interaction,
-                    Err(error) => return Ok(Self::app_error(error)),
-                };
                 Self::result(json!({
                     "app": record,
-                    "designer": interaction,
-                    "next_step": "Wait for the user to complete and confirm the design wizard."
+                    "next_step": "The app is being set up; wait for its questionnaire before designing."
                 }))
             }
             "propose_design" => {
@@ -628,18 +633,22 @@ mod tests {
         assert!(schemas.contains("reload"));
     }
 
-    async fn attached_transport(root: &std::path::Path) -> LocalAppsMcpTransport {
+    async fn attached_transport(
+        root: &std::path::Path,
+    ) -> (LocalAppsMcpTransport, Arc<AppService>) {
         let transport = LocalAppsMcpTransport::new(root.to_path_buf());
-        let service = AppService::load(
-            root,
-            Arc::new(local_apps::test_support::FixedClock::new(1)),
-            Arc::new(local_apps::NoopContinuationSink),
-            Arc::new(local_apps::NoopAppEventObserver),
-        )
-        .await
-        .expect("load app service");
-        assert!(transport.attach_service(Arc::new(service)).is_ok());
-        transport
+        let service = Arc::new(
+            AppService::load(
+                root,
+                Arc::new(local_apps::test_support::FixedClock::new(1)),
+                Arc::new(local_apps::NoopContinuationSink),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("load app service"),
+        );
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        (transport, service)
     }
 
     /// PINS the gap the `create` handler's TODO names: until Task 10 gives
@@ -654,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn create_persists_name_as_brief_until_task_10_adds_a_real_one() {
         let root = tempfile::tempdir().unwrap();
-        let transport = attached_transport(root.path()).await;
+        let (transport, _service) = attached_transport(root.path()).await;
         let created = transport
             .call(
                 "create",
@@ -674,7 +683,7 @@ mod tests {
     #[tokio::test]
     async fn propose_design_accepts_the_protocol_snake_case_patch_wire() {
         let root = tempfile::tempdir().unwrap();
-        let transport = attached_transport(root.path()).await;
+        let (transport, service) = attached_transport(root.path()).await;
         let created = transport
             .call(
                 "create",
@@ -686,6 +695,10 @@ mod tests {
             .as_str()
             .expect("app id")
             .to_string();
+        // `store_suggestion` needs a draft-editable state; a fresh app
+        // starts in `authoring_questionnaire` (Task 3) until Task 4/8 wire
+        // the real questionnaire-authoring round trip.
+        local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
 
         let result = transport
             .call(
@@ -708,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn list_reports_truncation_instead_of_claiming_a_complete_library() {
         let root = tempfile::tempdir().unwrap();
-        let transport = attached_transport(root.path()).await;
+        let (transport, _service) = attached_transport(root.path()).await;
         for index in 0..3 {
             transport
                 .call(

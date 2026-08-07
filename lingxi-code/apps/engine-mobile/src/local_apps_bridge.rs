@@ -304,7 +304,11 @@ pub(crate) fn lower_error_code(code: AppErrorCode) -> AppErrorCodeDto {
 
 fn lower_workflow_state(state: AppWorkflowState) -> AppWorkflowStateDto {
     match state {
+        AppWorkflowState::AuthoringQuestionnaire => AppWorkflowStateDto::AuthoringQuestionnaire,
+        AppWorkflowState::QuestionnaireFailed => AppWorkflowStateDto::QuestionnaireFailed,
         AppWorkflowState::CollectingSpec => AppWorkflowStateDto::CollectingSpec,
+        AppWorkflowState::Planning => AppWorkflowStateDto::Planning,
+        AppWorkflowState::PlanFailed => AppWorkflowStateDto::PlanFailed,
         AppWorkflowState::AwaitingSpecConfirmation => AppWorkflowStateDto::AwaitingSpecConfirmation,
         AppWorkflowState::Generating => AppWorkflowStateDto::Generating,
         AppWorkflowState::Validating => AppWorkflowStateDto::Validating,

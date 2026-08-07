@@ -7492,13 +7492,21 @@ mod tests {
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             assert_eq!(apps.len(), 1);
             assert_eq!(apps[0].name, "Habit Tracker");
-            assert_eq!(apps[0].workflow_state, AppWorkflowStateDto::CollectingSpec);
+            assert_eq!(
+                apps[0].workflow_state,
+                AppWorkflowStateDto::AuthoringQuestionnaire
+            );
             assert_eq!(
                 apps[0].conversation_id, None,
                 "a library-origin create binds no conversation"
             );
             let app_id = apps[0].id.clone();
             assert_eq!(apps[0].workspace_rel, format!("apps/{app_id}/workspace"));
+
+            // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
+            // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
 
             // Open the designer gate; the interaction id reaches the client
             // ONLY through this event (spec §I gating).
@@ -7663,6 +7671,7 @@ mod tests {
                 "failed confirms must not advance the workflow"
             );
 
+            local_apps::test_support::stamp_fresh_plan(&service, &app_id).await;
             // The exact pending id + the current revision confirms → generating.
             handle
                 .submit(ClientCommand::ConfirmAppDesign {
@@ -7914,6 +7923,8 @@ mod tests {
             let events = drain_events(&handle, &listener).await;
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             let app_id = apps[0].id.clone();
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
             handle
                 .submit(ClientCommand::UpdateAppDesignDraft {
                     app_id: app_id.clone(),
@@ -7993,6 +8004,11 @@ mod tests {
             .id
             .clone();
 
+            // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
+            // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+
             // The designer gate opens at revision 0; its interaction id
             // reaches the client only through this event.
             handle
@@ -8033,7 +8049,6 @@ mod tests {
             // An agent-side suggestion (AppService seam — the phase-3 designer
             // agent drives this) is announced with the id the apply command
             // must echo.
-            let service = handle.local_apps().expect("local-apps service");
             let suggestion = service
                 .store_suggestion(
                     &app_id,
@@ -8235,6 +8250,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
 
             handle
                 .submit(ClientCommand::OpenAppDesigner {
@@ -8250,6 +8267,7 @@ mod tests {
                     _ => None,
                 })
                 .expect("AppDesignerRequested must be emitted");
+            local_apps::test_support::stamp_fresh_plan(&service, &app_id).await;
             handle
                 .submit(ClientCommand::ConfirmAppDesign {
                     app_id: app_id.clone(),
@@ -8262,7 +8280,6 @@ mod tests {
 
             // The generation/validation seams (phase 3 drives them) open the
             // preview gate.
-            let service = handle.local_apps().expect("local-apps service");
             service
                 .generation_complete(&app_id)
                 .await
@@ -8431,6 +8448,8 @@ mod tests {
                     .expect("CreateApp must announce AppsChanged")[0]
                     .id
                     .clone();
+                let service = handle.local_apps().expect("local-apps service");
+                local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
 
                 // Delivering AppDesignerRequested makes the listener drive
                 // the draft edit from inside `on_event`; both the outer and
@@ -8503,6 +8522,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8510,7 +8531,6 @@ mod tests {
                 .await
                 .expect("submit(OpenAppDesigner)");
             drain_events(&handle, &listener).await;
-            let service = handle.local_apps().expect("local-apps service");
 
             /// Highest yield offset in the sweep; this one is the deterministic
             /// anchor (see below) rather than another timing probe.
@@ -8733,6 +8753,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8747,7 +8769,6 @@ mod tests {
                 })
                 .await
                 .expect("submit(UpdateAppDesignDraft)");
-            let service = handle.local_apps().expect("local-apps service");
             let suggestion = service
                 .store_suggestion(
                     &app_id,
@@ -8841,6 +8862,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8911,10 +8934,12 @@ mod tests {
                     .create_app("Queued", "a test app", None)
                     .await
                     .expect("create app");
+                local_apps::test_support::advance_to_collecting_spec(&service, &record.id).await;
                 let gate = service
                     .open_designer(&record.id)
                     .await
                     .expect("open designer");
+                local_apps::test_support::stamp_fresh_plan(&service, &record.id).await;
                 service
                     .confirm_design(&record.id, &gate.interaction_id, 0)
                     .await

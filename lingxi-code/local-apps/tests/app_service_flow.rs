@@ -2,11 +2,13 @@
 //! observed, then a rebuild from disk alone with exactly-once continuation
 //! redelivery and seq dedup — all without any Node/runtime.
 
+use local_apps::storage;
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    AppDesignPatch, AppDesignPatchOp, AppErrorCode, AppEvent, AppEventObserver, AppRuntimeState,
-    AppService, AppWorkflowState, ContinuationSink, DesignValue,
-    RecordingAppEventObserver, RecordingContinuationSink,
+    AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignPatch, AppDesignPatchOp,
+    AppDesignStep, AppErrorCode, AppEvent, AppEventObserver, AppPlan, AppRuntimeState, AppService,
+    AppWorkflowState, ContinuationSink, DesignValue, RecordingAppEventObserver,
+    RecordingContinuationSink,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -33,6 +35,72 @@ async fn harness(root: &Path) -> Harness {
         sink,
         observer,
     }
+}
+
+/// Reload `h.service` from disk, keeping the SAME sink/observer `Arc`s so
+/// already-recorded events survive the swap.
+async fn reload(h: Harness, root: &Path) -> Harness {
+    drop(h.service);
+    let service = AppService::load(
+        root,
+        Arc::new(FixedClock::new(1_753_800_000_000)),
+        Arc::clone(&h.sink) as Arc<dyn ContinuationSink>,
+        Arc::clone(&h.observer) as Arc<dyn AppEventObserver>,
+    )
+    .await
+    .expect("reload service");
+    Harness {
+        service,
+        sink: h.sink,
+        observer: h.observer,
+    }
+}
+
+fn one_step() -> Vec<AppDesignStep> {
+    vec![AppDesignStep {
+        id: "basics".into(),
+        order: 0,
+        title: "basics".into(),
+        description: None,
+        fields: vec![AppDesignField {
+            id: "tone".into(),
+            label: "tone".into(),
+            description: None,
+            field_type: AppDesignFieldType::SingleChoice,
+            required: false,
+            allows_custom: false,
+            allows_defer: false,
+            default_value: None,
+            options: vec![AppDesignFieldOption {
+                value: "a".into(),
+                label: "A".into(),
+            }],
+        }],
+    }]
+}
+
+/// Task 4 wires the real LLM-driven questionnaire-authoring/planning round
+/// trip through `AppService`; until then, splice a completed questionnaire
+/// and a matching plan directly onto the on-disk state for `app_id` — the
+/// same storage-level bypass `crash_repair.rs` uses — so this acceptance
+/// test can reach `collecting_spec`/`awaiting_spec_confirmation` through
+/// the public surface that exists today.
+fn splice_questionnaire_and_plan(root: &Path, app_id: &str, now_ms: u64) {
+    let mut apps = storage::load_all(root).expect("load for splice");
+    let app = apps
+        .iter_mut()
+        .find(|a| a.record.id == app_id)
+        .expect("app on disk");
+    app.questionnaire_ready(one_step(), None, now_ms)
+        .expect("fixture questionnaire is valid");
+    app.draft.plan = Some(AppPlan {
+        collections: Vec::new(),
+        capabilities: Vec::new(),
+        domains: Vec::new(),
+        summary: "s".into(),
+    });
+    app.draft.plan_for_revision = Some(app.draft.revision);
+    storage::save_app_files(root, app).expect("save spliced app");
 }
 
 fn set(field: &str, value: DesignValue) -> AppDesignPatch {
@@ -78,6 +146,15 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
         .await
         .expect("create app");
     let app_id = record.id.clone();
+
+    // See `splice_questionnaire_and_plan`'s doc: advances the app from the
+    // real initial `authoring_questionnaire` to `collecting_spec` with a
+    // matching plan already computed, standing in for Task 4's not-yet-wired
+    // LLM round trip. `h.sink`/`h.observer` survive the reload, so the
+    // `AppsChanged` event `create_app` already emitted stays `events[0]`.
+    splice_questionnaire_and_plan(dir.path(), &app_id, 1_753_800_000_001);
+    let h = reload(h, dir.path()).await;
+    h.sink.set_fail(true);
 
     // open_designer -> awaiting_spec_confirmation with a pending gate.
     let designer = h
@@ -158,6 +235,28 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
             .code(),
         AppErrorCode::RevisionConflict
     );
+
+    // Every `update_draft` above invalidated the spliced plan (answers
+    // changed, so the plan they were computed against is stale — exactly
+    // what `confirm_design`'s freshness gate exists to catch). Task 4 will
+    // wire a real re-plan round trip after edits; splice a fresh plan for
+    // the now-current revision (3) directly, same bypass as above.
+    {
+        let mut apps = storage::load_all(dir.path()).expect("load for re-splice");
+        let app = apps
+            .iter_mut()
+            .find(|a| a.record.id == app_id)
+            .expect("app on disk");
+        app.draft.plan = Some(AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: Vec::new(),
+            summary: "s".into(),
+        });
+        app.draft.plan_for_revision = Some(app.draft.revision);
+        storage::save_app_files(dir.path(), app).expect("save re-spliced app");
+    }
+    let h = reload(h, dir.path()).await;
 
     // confirm_design -> generating (continuation enqueued, delivery fails).
     h.service

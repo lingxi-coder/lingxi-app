@@ -69,8 +69,18 @@ pub enum AppTemplateKindDto {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AppWorkflowStateDto {
+    /// LLM is authoring the questionnaire for this brief. Designer is
+    /// read-only.
+    AuthoringQuestionnaire,
+    /// Authoring failed; retryable, or the brief can be changed and
+    /// re-authored.
+    QuestionnaireFailed,
     /// Draft is being filled in; no confirmation gate is open.
     CollectingSpec,
+    /// LLM is deriving the plan from the answers. Designer is read-only.
+    Planning,
+    /// Planning failed; retryable.
+    PlanFailed,
     /// The designer interaction is pending user confirmation.
     AwaitingSpecConfirmation,
     /// Code generation is running.

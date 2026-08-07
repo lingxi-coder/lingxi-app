@@ -113,6 +113,70 @@ class LocalAppsScreenTest {
         assertEquals(LocalAppDesignValue.StringList(listOf("api.example.com")), committed)
     }
 
+    /**
+     * A second review round caught what a single-call test cannot: every one
+     * of the tests above calls `commitCustomChipText` ONCE with `value = null`,
+     * which always looks correct even if the function accumulates rather than
+     * replaces. `onValueChange(..., true)` commits on every keystroke and the
+     * committed value is fed straight back in as `value` on the next
+     * recomposition — a naive `values + text` (no filter, since `DomainList`
+     * declares no `options` the way `MultipleChoice` does) left every partial
+     * keystroke permanently in the list: typing "api.example.com" produced
+     * `["a","ap","api",…,"api.example.com"]`, silently polluting the
+     * permissions-adjacent allowed-domains list with unvalidated fragments
+     * (no format check runs on this path). This test drives the SAME
+     * multi-keystroke feedback loop the real Composable does — threading
+     * `previousCustomText` exactly as `DesignerFieldChips` threads its
+     * remembered `customText` — and asserts the final list holds exactly the
+     * typed text, once.
+     */
+    @Test
+    fun `typing progressively into the other box on a domain list field replaces the slot instead of accumulating fragments`() {
+        val field = designField(allowsCustom = true).copy(kind = LocalAppFieldKind.DomainList)
+        var value: LocalAppDesignValue? = null
+        var previous = ""
+        for (keystroke in listOf("a", "ap", "api", "api.example.com")) {
+            value = commitCustomChipText(field, keystroke, value, previous)
+            previous = keystroke
+        }
+        assertEquals(LocalAppDesignValue.StringList(listOf("api.example.com")), value)
+    }
+
+    /** The readback half of the same defect: revisiting the field must show the full typed text, not the first fragment. */
+    @Test
+    fun `reading back the other box after progressive typing returns the full text not a fragment`() {
+        val field = designField(allowsCustom = true).copy(kind = LocalAppFieldKind.DomainList)
+        var value: LocalAppDesignValue? = null
+        var previous = ""
+        for (keystroke in listOf("a", "ap", "api", "api.example.com")) {
+            value = commitCustomChipText(field, keystroke, value, previous)
+            previous = keystroke
+        }
+        assertEquals("api.example.com", customTextFor(field, value))
+    }
+
+    /**
+     * A pre-existing list entry (e.g. one added through `StringListEditor`'s
+     * own separate add flow, in between two of the custom box's keystrokes)
+     * must survive — only the custom box's OWN previously-committed text
+     * (`previousCustomText`, threaded explicitly, not re-derived from
+     * `value`'s list position) is replaced. An earlier version of this fix
+     * used a "the custom entry is always the list's LAST element" position
+     * heuristic instead, which a review caught silently dropping exactly
+     * this kind of separately-added entry (it becomes "last" and gets
+     * mistaken for the stale fragment).
+     */
+    @Test
+    fun `typing into the other box on a domain list field does not disturb a separately added entry`() {
+        val field = designField(allowsCustom = true).copy(kind = LocalAppFieldKind.DomainList)
+        var value: LocalAppDesignValue = commitCustomChipText(field, "a", value = null, previousCustomText = "")
+        // Simulate StringListEditor's own add flow appending a real entry
+        // after the custom box's first keystroke.
+        value = LocalAppDesignValue.StringList((value as LocalAppDesignValue.StringList).values + "cdn.example.com")
+        value = commitCustomChipText(field, "ap", value, previousCustomText = "a")
+        assertEquals(LocalAppDesignValue.StringList(listOf("cdn.example.com", "ap")), value)
+    }
+
     @Test
     fun `choosing defer stores the deferred value rather than clearing the field`() {
         var recorded: LocalAppDesignValue? = null

@@ -853,8 +853,15 @@ private fun DesignerFieldChips(
         OutlinedTextField(
             value = customText,
             onValueChange = { text ->
+                // The box's OWN previous commit, tracked by this Composable
+                // across keystrokes — NOT re-derived from `value` each time.
+                // This is what lets `commitCustomChipText` replace exactly
+                // the entry this box wrote, even if `value`'s list also
+                // gained an unrelated entry from `StringListEditor`'s own
+                // add flow in between (see `commitCustomChipText`'s doc).
+                val previousCustomText = customText
                 customText = text
-                onValueChange(commitCustomChipText(field, text, value), true)
+                onValueChange(commitCustomChipText(field, text, value, previousCustomText), true)
             },
             placeholder = { Text(stringResource(R.string.local_apps_custom_other)) },
             singleLine = true,
@@ -871,14 +878,28 @@ private fun isChipOptionSelected(field: LocalAppDesignField, optionValue: String
         else -> false
     }
 
-/** The free-text box's current content: whatever part of [value] is NOT one of [field]'s declared options. */
-private fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValue?): String {
+/**
+ * The free-text box's current content: whatever part of [value] is NOT one
+ * of [field]'s declared options. Used ONLY to seed the box's initial state
+ * on a fresh composition (`remember(field.id)` in [DesignerFieldChips]) —
+ * every keystroke after that is tracked by the Composable itself and threaded
+ * explicitly into [commitCustomChipText] as `previousCustomText`, which is
+ * what makes the write side robust (see that function's doc). For
+ * `ScreenList`/`FeatureList`/`DomainList`, which declare no `options` at all
+ * (only `SingleChoice`/`MultipleChoice` do, questionnaire.rs:61-63) and so
+ * have no declared-vs-custom CONTENT split to filter by, this is a
+ * best-effort guess (the list's last entry) for that one cold-start moment
+ * only — getting it wrong just means the box starts empty or shows the wrong
+ * pre-existing entry once; it can no longer corrupt the list, because writes
+ * no longer depend on this guess being right.
+ */
+internal fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValue?): String {
     val optionValues = field.options.mapTo(hashSetOf()) { it.value }
     return when (value) {
         is LocalAppDesignValue.Text -> value.value.takeUnless { it in optionValues }.orEmpty()
         is LocalAppDesignValue.Choice -> value.value.takeUnless { it in optionValues }.orEmpty()
         is LocalAppDesignValue.Choices -> value.values.firstOrNull { it !in optionValues }.orEmpty()
-        is LocalAppDesignValue.StringList -> value.values.firstOrNull { it !in optionValues }.orEmpty()
+        is LocalAppDesignValue.StringList -> value.values.lastOrNull().orEmpty()
         else -> ""
     }
 }
@@ -890,16 +911,40 @@ private fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValue
  * `SingleChoice` field with `allowsCustom` must still commit a `Choice`
  * value, a `ScreenList`/`FeatureList`/`DomainList` field a `StringList`, etc.
  *
- * The consequence of getting this wrong is not a crash here — `apply_patch`
- * (state.rs) inserts whatever shape arrives blindly, so a wrong-kind draft
- * "saves" fine. It surfaces later, at `begin_planning` ->
- * `validate_answers` (questionnaire.rs): `SingleChoice.accepts(ShortText)`
- * is false, so a `Text` sent for a `SingleChoice` field fails generation
- * with "answered with a value of the wrong kind" — a raw engine rejection
- * at the exact 生成方案 tap this task exists to unblock. Mirrors
- * [toggledChipOption]'s per-kind dispatch above.
+ * Getting the SHAPE wrong is not a crash here — `apply_patch` (state.rs)
+ * inserts whatever arrives blindly, so a wrong-kind draft "saves" fine. It
+ * surfaces later, at `begin_planning` -> `validate_answers`
+ * (questionnaire.rs): `SingleChoice.accepts(ShortText)` is false, so a
+ * `Text` sent for a `SingleChoice` field fails generation with "answered
+ * with a value of the wrong kind" — a raw engine rejection at the exact
+ * 生成方案 tap this task exists to unblock. Mirrors [toggledChipOption]'s
+ * per-kind dispatch above.
+ *
+ * [previousCustomText] is [DesignerFieldChips]'s own remembered box content
+ * BEFORE this keystroke — not re-derived from [value]. For
+ * `MultipleChoice`, the stale fragment is filtered out by CONTENT against
+ * `field.options` (a known set), so position never matters there. For
+ * `ScreenList`/`FeatureList`/`DomainList`, which declare no `options` at
+ * all, there is no such known set — an EARLIER version of this fix tried a
+ * "the custom entry is always the list's last element" convention instead,
+ * and a review caught that it silently drops whatever
+ * `StringListEditor`'s OWN separate add flow appended in between two
+ * keystrokes (that entry, being last, would get mistaken for the stale
+ * fragment and removed). Removing [previousCustomText] BY IDENTITY — at
+ * most one occurrence, so a real list entry that happens to equal an
+ * earlier keystroke is not also eaten — fixes both: it no longer
+ * accumulates one entry per keystroke (a review's first catch, which
+ * silently polluted a permissions-adjacent `DomainList`'s allowed-hosts
+ * with fragments like `["a","ap","api",…]` — no format check runs on this
+ * path; `isValidDomain` only gates `StringListEditor`'s own add flow), and
+ * it no longer depends on WHERE in the list the custom entry sits.
  */
-internal fun commitCustomChipText(field: LocalAppDesignField, text: String, value: LocalAppDesignValue?): LocalAppDesignValue =
+internal fun commitCustomChipText(
+    field: LocalAppDesignField,
+    text: String,
+    value: LocalAppDesignValue?,
+    previousCustomText: String = "",
+): LocalAppDesignValue =
     when (field.kind) {
         LocalAppFieldKind.ShortText, LocalAppFieldKind.LongText, LocalAppFieldKind.Color ->
             LocalAppDesignValue.Text(text)
@@ -911,7 +956,12 @@ internal fun commitCustomChipText(field: LocalAppDesignField, text: String, valu
         }
         LocalAppFieldKind.ScreenList, LocalAppFieldKind.FeatureList, LocalAppFieldKind.DomainList -> {
             val values = (value as? LocalAppDesignValue.StringList)?.values.orEmpty()
-            LocalAppDesignValue.StringList(if (text.isNotEmpty() && text !in values) values + text else values)
+            val withoutPreviousCustom = if (previousCustomText.isEmpty()) {
+                values
+            } else {
+                values.toMutableList().apply { remove(previousCustomText) }
+            }
+            LocalAppDesignValue.StringList(if (text.isNotEmpty()) withoutPreviousCustom + text else withoutPreviousCustom)
         }
         // No natural "custom text" shape for these three — no current
         // questionnaire schema exercises `allowsCustom` on them — but this

@@ -273,13 +273,22 @@ impl AppState {
         epoch: u64,
         now_ms: u64,
     ) -> Result<bool, AppError> {
+        // Epoch checked BEFORE the workflow guard, deliberately: a stale
+        // round's completion racing a FRESH round that already finished
+        // (moved the app past `authoring_questionnaire` entirely) must stay
+        // a silent no-op — checking the guard first would instead reject it
+        // with `WorkflowStateInvalid`, which `report_llm_failure` treats as
+        // a genuine error and surfaces to the client as a confusing
+        // `AppOperationFailed` on an app that already looks successful.
+        // A mismatched epoch is decisive on its own regardless of the
+        // CURRENT workflow state, so checking it first is strictly safer.
+        if epoch != self.record.llm_round {
+            return Ok(false);
+        }
         self.ensure_workflow(
             "questionnaire_ready",
             &[AppWorkflowState::AuthoringQuestionnaire],
         )?;
-        if epoch != self.record.llm_round {
-            return Ok(false);
-        }
         crate::questionnaire::validate_questionnaire(&steps)?;
         self.draft.questionnaire = steps;
         if let Some(name) = name {
@@ -299,13 +308,14 @@ impl AppState {
     /// legitimately in flight (both sit in the same `authoring_questionnaire`
     /// state, so the workflow guard alone cannot tell them apart).
     pub fn questionnaire_failed(&mut self, epoch: u64, now_ms: u64) -> Result<bool, AppError> {
+        // Epoch checked first — see [`Self::questionnaire_ready`]'s comment.
+        if epoch != self.record.llm_round {
+            return Ok(false);
+        }
         self.ensure_workflow(
             "questionnaire_failed",
             &[AppWorkflowState::AuthoringQuestionnaire],
         )?;
-        if epoch != self.record.llm_round {
-            return Ok(false);
-        }
         self.set_workflow(AppWorkflowState::QuestionnaireFailed, now_ms);
         Ok(true)
     }
@@ -397,8 +407,9 @@ impl AppState {
     ///
     /// `epoch`-gated exactly like [`Self::questionnaire_ready`], for the
     /// identical reason (planning's own retry-from-`planning` escape hatch
-    /// creates the same possible-second-live-task shape). A stale round
-    /// returns `Ok(None)` — a no-op, not an error.
+    /// creates the same possible-second-live-task shape) and checked
+    /// BEFORE the workflow guard for the identical reason too. A stale
+    /// round returns `Ok(None)` — a no-op, not an error.
     pub fn plan_ready(
         &mut self,
         plan: crate::questionnaire::AppPlan,
@@ -406,10 +417,10 @@ impl AppState {
         epoch: u64,
         now_ms: u64,
     ) -> Result<Option<AppInteractionRequest>, AppError> {
-        self.ensure_workflow("plan_ready", &[AppWorkflowState::Planning])?;
         if epoch != self.record.llm_round {
             return Ok(None);
         }
+        self.ensure_workflow("plan_ready", &[AppWorkflowState::Planning])?;
         crate::questionnaire::validate_plan(&plan)?;
         self.draft.plan = Some(plan);
         self.draft.plan_for_revision = Some(self.draft.revision);
@@ -426,12 +437,13 @@ impl AppState {
     }
 
     /// `planning -> plan_failed`. `epoch`-gated like
-    /// [`Self::questionnaire_failed`], for the identical reason.
+    /// [`Self::questionnaire_failed`], for the identical reason, checked
+    /// before the workflow guard for the identical reason too.
     pub fn plan_failed(&mut self, epoch: u64, now_ms: u64) -> Result<bool, AppError> {
-        self.ensure_workflow("plan_failed", &[AppWorkflowState::Planning])?;
         if epoch != self.record.llm_round {
             return Ok(false);
         }
+        self.ensure_workflow("plan_failed", &[AppWorkflowState::Planning])?;
         self.set_workflow(AppWorkflowState::PlanFailed, now_ms);
         Ok(true)
     }
@@ -1729,6 +1741,58 @@ mod tests {
         assert_eq!(app.record.name, "Right Name");
     }
 
+    /// The OTHER ordering of the same race: the review's likely-in-practice
+    /// case — the user retried BECAUSE round 1 was slow, so round 2 (the
+    /// fresh one) finishes FIRST, moving the app past
+    /// `authoring_questionnaire` entirely (to `collecting_spec`) before the
+    /// stale round ever resolves. When the stale round finally completes —
+    /// success OR failure — it must land on the SAME `epoch != llm_round`
+    /// no-op path as the other ordering, NOT fall through to
+    /// `ensure_workflow` and get rejected with `WorkflowStateInvalid` (which
+    /// the engine's `report_llm_failure` would surface to the client as a
+    /// confusing `AppOperationFailed` on an app that already looks
+    /// successful — exactly what the epoch exists to prevent). This is why
+    /// the epoch check runs BEFORE `ensure_workflow` in all four gated
+    /// methods, not after.
+    #[test]
+    fn a_stale_task_finishing_after_the_fresh_round_already_succeeded_is_still_silent() {
+        let mut app = authoring_app();
+        let stale_epoch = app.record.llm_round;
+        let fresh_epoch = app
+            .retry_questionnaire(2)
+            .expect("retry from authoring_questionnaire itself is a valid self-transition");
+        assert_ne!(stale_epoch, fresh_epoch, "retry must bump the epoch");
+
+        // The FRESH round wins the race outright: it resolves and applies
+        // FIRST, moving the app past `authoring_questionnaire` entirely.
+        let applied = app
+            .questionnaire_ready(one_step(), Some("Right Name".into()), fresh_epoch, 3)
+            .expect("the fresh epoch is not stale");
+        assert!(applied);
+        assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
+
+        // The STALE round's success THEN arrives — must be a silent no-op,
+        // not an `Err` from `ensure_workflow` (the app is no longer even in
+        // `authoring_questionnaire`).
+        let applied = app
+            .questionnaire_ready(one_step(), Some("Wrong Name".into()), stale_epoch, 4)
+            .expect("a stale epoch is Ok, not an error, REGARDLESS of the current workflow state");
+        assert!(!applied);
+        assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
+        assert_eq!(app.record.name, "Right Name", "the stale round changed nothing");
+
+        // Same shape for the STALE round's FAILURE arriving late.
+        let failed = app
+            .questionnaire_failed(stale_epoch, 5)
+            .expect("a stale epoch is Ok, not an error, on the failure path too");
+        assert!(!failed);
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::CollectingSpec,
+            "a stale FAILURE must not fail-close an app that already succeeded"
+        );
+    }
+
     #[test]
     fn updating_the_brief_clears_the_questionnaire_answers_and_plan() {
         let mut app = authoring_app();
@@ -1829,6 +1893,61 @@ mod tests {
         assert_eq!(
             app.record.workflow_state,
             AppWorkflowState::AwaitingSpecConfirmation
+        );
+    }
+
+    /// The OTHER ordering, for planning — mirrors
+    /// `a_stale_task_finishing_after_the_fresh_round_already_succeeded_is_still_silent`:
+    /// the fresh round wins and opens the confirmation gate BEFORE the
+    /// stale round's completion (success or failure) ever arrives. The
+    /// stale arrival must stay a silent no-op even though the app is no
+    /// longer even in `planning` — never an `ensure_workflow` rejection
+    /// surfaced as a client-visible error.
+    #[test]
+    fn a_stale_planning_task_finishing_after_the_fresh_round_already_succeeded_is_still_silent() {
+        let mut app = authoring_app();
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
+            .expect("authoring succeeds");
+        let stale_epoch = app.begin_planning(3).expect("planning starts");
+        let fresh_epoch = app
+            .retry_plan(4)
+            .expect("retry from planning itself is a valid self-transition");
+        assert_ne!(stale_epoch, fresh_epoch, "retry must bump the epoch");
+
+        // The FRESH round wins outright: opens the confirmation gate first.
+        let fresh_result = app
+            .plan_ready(a_plan(), "fresh-int".into(), fresh_epoch, 5)
+            .expect("the fresh epoch is not stale")
+            .expect("fresh epoch must not be rejected as stale");
+        assert_eq!(fresh_result.interaction_id, "fresh-int");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation
+        );
+
+        // The STALE round's success THEN arrives — silent no-op, not an
+        // `Err` from `ensure_workflow` (the app is no longer even in
+        // `planning`).
+        let stale_result = app
+            .plan_ready(a_plan(), "stale-int".into(), stale_epoch, 6)
+            .expect("a stale epoch is Ok, not an error, REGARDLESS of the current workflow state");
+        assert!(stale_result.is_none(), "the stale round must not reopen or touch the gate");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation,
+            "unchanged by the stale arrival"
+        );
+
+        // Same shape for the STALE round's FAILURE arriving late.
+        let failed = app
+            .plan_failed(stale_epoch, 7)
+            .expect("a stale epoch is Ok, not an error, on the failure path too");
+        assert!(!failed);
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation,
+            "a stale FAILURE must not fail-close an app that already succeeded"
         );
     }
 

@@ -296,50 +296,29 @@ fn ensure_schema_version(rel: &Path, found: u32) -> Result<(), AppError> {
     }
 }
 
-// TODO(local-apps#questionnaire, Task 3/5/6): `DesignValue::Deferred` is the
-// questionnaire-answer sentinel; `service::validate_design_value` refuses it
-// on every WRITE path into `AppDesignDraft` today, so a draft can only ever
-// carry one by having it hand-edited (or written by a newer build) straight
-// onto disk. `read_doc` above is a bare `serde_json::from_str` with no
-// semantic validation, so this load path is the one place that gap is still
-// open — reject it here, the same way every other per-app invariant in
-// `load_all` fails loudly instead of laundering bad data into memory (and
-// from there into both `GetAppDetails` and every subsequent
-// `DesignDraftChanged`/`DesignSuggestionAvailable` event, which re-ship the
-// whole field map from this same in-memory draft). `lower_design_value` in
-// `engine-mobile` relies on this check to make its own `Deferred` arm
+// `DesignValue::Deferred` ("let the model decide") is now a legitimate value
+// in TWO of the three places `AppDesignDraft` can carry a `DesignValue`:
+// `fields` (a real answer) and `pending_suggestion`'s patch ops (an
+// LLM-proposed patch may itself propose deferring a field) — both write
+// through `service::validate_design_value`, which now accepts it (see that
+// function's doc). This is what lets `engine-mobile`'s
+// `lower_design_value`/`raise_design_value` map it to/from the wire
+// `DesignValueDto::Deferred` (client-protocol) instead of treating it as
 // unreachable.
 //
-// EXHAUSTIVENESS (Task 2): every location `AppDesignDraft` can carry a
-// `DesignValue` is covered — `fields` (answers), `pending_suggestion`'s patch
-// ops, AND `questionnaire[*].fields[*].default_value` (a `Deferred` default
-// added by the LLM authoring step, distinct from a `Deferred` ANSWER). The
-// third is checked here even though `validate_questionnaire` already refuses
-// a `default_value` whose variant doesn't match its `field_type` (and
-// `AppDesignFieldType::accepts` has no arm for `Deferred`, so a validated
-// questionnaire can never carry one): nothing on this LOAD path calls
-// `validate_questionnaire` yet, so a hand-edited or newer-build document could
-// still smuggle one past `serde_json::from_str` alone, straight into the same
-// `lower_design_value` `unreachable!()` this function exists to keep
-// unreachable. When a future task wires `validate_questionnaire` into the
-// load path itself, this arm becomes redundant with it (not wrong) — leave it
-// as the defense-in-depth layer.
-//
-// Task 3 makes `Deferred` a legitimate, persisted value inside
-// `AppDesignDraft::fields` (the "let the model decide" answer). The MOMENT
-// that lands, this function must be relaxed to match — otherwise a
-// legitimately-saved draft would fail to reload with `storage_corrupt` on
-// the very next process start. Tasks 5/6 then give it a real wire
-// representation, at which point `lower_design_value`'s `unreachable!()` also
-// needs to become a real mapping instead of firing.
+// The THIRD location — `questionnaire[*].fields[*].default_value` — stays
+// gated. A field's own authored DEFAULT is not an answer; it is validated by
+// `validate_questionnaire`'s `AppDesignFieldType::accepts`, which has no arm
+// for `Deferred` (a *validated* questionnaire can never carry one there).
+// Nothing on this LOAD path calls `validate_questionnaire` yet, so a
+// hand-edited or newer-build document could still smuggle a `Deferred`
+// default past a bare `serde_json::from_str` — reject it here, the same way
+// every other per-app invariant in `load_all` fails loudly instead of
+// laundering bad data into memory. When a future task wires
+// `validate_questionnaire` into the load path itself, this check becomes
+// redundant with it (not wrong) — leave it as the defense-in-depth layer.
 fn ensure_no_deferred_design_values(draft_rel: &Path, draft: &AppDesignDraft) -> Result<(), AppError> {
     let is_deferred = |value: &DesignValue| matches!(value, DesignValue::Deferred);
-    if draft.fields.values().any(is_deferred) {
-        return Err(AppError::StorageCorrupt(format!(
-            "{}: field value is deferred, which is not yet a supported persisted value",
-            draft_rel.display()
-        )));
-    }
     let has_deferred_default = draft.questionnaire.iter().any(|step| {
         step.fields
             .iter()
@@ -347,22 +326,10 @@ fn ensure_no_deferred_design_values(draft_rel: &Path, draft: &AppDesignDraft) ->
     });
     if has_deferred_default {
         return Err(AppError::StorageCorrupt(format!(
-            "{}: a questionnaire field default value is deferred, which is not yet a supported \
-             persisted value",
+            "{}: a questionnaire field default value is deferred, which is never a legal \
+             default (only an answer)",
             draft_rel.display()
         )));
-    }
-    if let Some(suggestion) = &draft.pending_suggestion {
-        let has_deferred_op = suggestion.patch.ops.iter().any(|op| {
-            matches!(op, AppDesignPatchOp::Set { value, .. } if is_deferred(value))
-        });
-        if has_deferred_op {
-            return Err(AppError::StorageCorrupt(format!(
-                "{}: pending suggestion sets a deferred value, which is not yet a supported \
-                 persisted value",
-                draft_rel.display()
-            )));
-        }
     }
     Ok(())
 }
@@ -1624,38 +1591,39 @@ mod tests {
         }
     }
 
-    /// The write-side gate (`service::validate_design_value`) refuses to ever
-    /// persist a `Deferred` field — but `read_doc` is a bare
-    /// `serde_json::from_str` with no semantic validation, so a hand-edited
-    /// (or newer-build) `design-spec.json` on disk could still smuggle one
-    /// in. Reproduces exactly that: a live app's draft is saved normally,
-    /// then a field is overwritten on disk with `{"kind":"deferred"}` before
-    /// the store is reloaded. Without `ensure_no_deferred_design_values` this
-    /// loads silently and the next `GetAppDetails`/`AppDesignDraftChanged`
-    /// lowering would hit `DesignValueDto`'s unrepresented `Deferred` arm.
+    /// `Deferred` ("let the model decide") is now a legitimate persisted
+    /// `fields` value (Task 2 made it a real draft answer; the sibling
+    /// write-side gate `service::validate_design_value` now accepts it too —
+    /// see that function's doc). A live app's draft is saved normally with a
+    /// `Deferred` field, then the store is reloaded from disk: this must
+    /// round-trip cleanly, not fail `storage_corrupt` the way it used to
+    /// before this gate was lifted.
     #[test]
-    fn a_deferred_field_hand_edited_onto_disk_is_storage_corrupt_at_load() {
+    fn a_deferred_field_persists_and_reloads_cleanly() {
         let dir = tempfile::tempdir().unwrap();
-        let app = new_app("kkkk1111");
+        let mut app = new_app("kkkk1111");
+        app.draft
+            .fields
+            .insert("tone".to_string(), DesignValue::Deferred);
         save_full(dir.path(), &[app]);
-        let path = dir
-            .path()
-            .join("apps/kkkk1111/workspace/.lingxi/design-spec.json");
-        let mut doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        doc["fields"]["tone"] = serde_json::json!({ "kind": "deferred" });
-        std::fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
 
-        let err = load_all(dir.path()).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
-        assert!(err.to_string().contains("deferred"), "{err}");
+        let reloaded = load_all(dir.path()).expect("a deferred field must reload cleanly");
+        let reloaded_app = reloaded
+            .iter()
+            .find(|state| state.record.id == "kkkk1111")
+            .expect("app present after reload");
+        assert_eq!(
+            reloaded_app.draft.fields.get("tone"),
+            Some(&DesignValue::Deferred),
+            "the deferred answer must survive the round trip byte-for-byte"
+        );
     }
 
-    /// Same gap, reached through a pending suggestion's patch instead of a
-    /// live field — `AppDesignSuggestion::patch` round-trips through the same
-    /// unvalidated `read_doc`.
+    /// Same legalization, reached through a pending suggestion's patch
+    /// instead of a live field: an LLM-proposed patch may itself propose
+    /// deferring a field, and that must also survive a reload.
     #[test]
-    fn a_deferred_value_in_a_pending_suggestion_patch_is_storage_corrupt_at_load() {
+    fn a_deferred_value_in_a_pending_suggestion_patch_passes_the_guard() {
         let draft = AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
             revision: 1,
@@ -1676,10 +1644,8 @@ mod tests {
             }),
             confirmed_revision: None,
         };
-        let err =
-            ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
-        assert!(err.to_string().contains("pending suggestion"), "{err}");
+        ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft)
+            .expect("a deferred value in a pending suggestion is legal");
     }
 
     /// The THIRD `DesignValue`-bearing location `AppDesignDraft` grew in Task

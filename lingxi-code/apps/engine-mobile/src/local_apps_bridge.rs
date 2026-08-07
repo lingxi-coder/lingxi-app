@@ -198,51 +198,52 @@ impl AppEventObserver for SinkAppEventObserver {
 /// (`QuestionnaireChanged`/`PlanChanged` — see their arms below); the single
 /// caller ([`AppEmissionQueue::spawn`]'s forwarder loop) simply skips
 /// emitting on `None`. This is a real return path, not a defensive
-/// leftover: unlike [`lower_design_value`]'s `Deferred` arm (gated
-/// unreachable by two write-time/load-time service rejections), NOTHING
-/// gates these two — the forwarder task that calls this function is spawned
-/// once, detached, with its `JoinHandle` discarded (`AppEmissionQueue::spawn`
-/// below), so a `panic!`/`todo!()` here would silently kill the ENTIRE
-/// app-event stream for every app, forever, with no crash and no log (the
-/// panicked task's `JoinError` is never awaited, and `enqueue`'s
+/// leftover: NOTHING gates these two (unlike the `Deferred` value
+/// [`lower_design_value`] used to gate on write/load rejections before Task
+/// 5 gave it a real `DesignValueDto::Deferred` mapping) — the forwarder task
+/// that calls this function is spawned once, detached, with its
+/// `JoinHandle` discarded (`AppEmissionQueue::spawn` below), so a
+/// `panic!`/`todo!()` here would silently kill the ENTIRE app-event stream
+/// for every app, forever, with no crash and no log (the panicked task's
+/// `JoinError` is never awaited, and `enqueue`'s
 /// `let _ = self.tx.send(..)` swallows the resulting closed-channel error).
 pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
     match event {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
         }),
-        // TODO(local-apps#questionnaire, Task 5/6): `QuestionnaireChanged`
-        // and `PlanChanged` are Task 4's new domain events for the
-        // conversational designer's authoring/planning round trips. Neither
-        // has a wire `ClientEvent`/`AppEventDto` twin yet — that's Task 5
-        // (client-protocol DTO) and Task 6 (this bridge's mapping). Nothing
+        // TODO(local-apps#questionnaire, Task 6): `QuestionnaireChanged` and
+        // `PlanChanged` are Task 4's new domain events for the conversational
+        // designer's authoring/planning round trips. Task 5 landed their wire
+        // twins (`AppEventDto::{AppQuestionnaireChanged, AppPlanChanged}`,
+        // client-protocol) — what's still missing is THIS bridge's mapping
+        // from the domain event to that DTO, which is Task 6's job. Nothing
         // in engine-mobile calls the `AppService` methods that emit these
         // (`questionnaire_ready`, `plan_ready`) until Task 8 wires the LLM
         // round trip, so these arms cannot fire today — but UNLIKE
-        // `lower_design_value`'s `Deferred` arm below, that "cannot fire" is
-        // an observation, not an enforced invariant: nothing stops Task 8
-        // from calling `questionnaire_ready`/`plan_ready` before Task 5/6
-        // give this function something to lower them to. Log-and-drop
-        // instead of `todo!()`/`unreachable!()` so that sequencing mistake
-        // degrades to "the client falls behind on these two events" instead
-        // of silently killing the whole app-event stream (see the function
-        // doc above).
+        // `lower_design_value`'s (former) `Deferred` arm, that "cannot fire"
+        // is an observation, not an enforced invariant: nothing stops Task 8
+        // from calling `questionnaire_ready`/`plan_ready` before Task 6 gives
+        // this function something to lower them to. Log-and-drop instead of
+        // `todo!()`/`unreachable!()` so that sequencing mistake degrades to
+        // "the client falls behind on these two events" instead of silently
+        // killing the whole app-event stream (see the function doc above).
         AppEvent::QuestionnaireChanged { app_id, .. } => {
             tracing::error!(
                 app_id = %app_id,
-                "dropping QuestionnaireChanged: no wire ClientEvent/AppEventDto \
-                 representation yet (Task 5/6); the client will not learn the \
-                 conversational designer's authored questionnaire until those \
-                 land"
+                "dropping QuestionnaireChanged: this bridge does not map it onto \
+                 AppEventDto::AppQuestionnaireChanged yet (Task 6); the client will \
+                 not learn the conversational designer's authored questionnaire \
+                 until that lands"
             );
             None
         }
         AppEvent::PlanChanged { app_id, .. } => {
             tracing::error!(
                 app_id = %app_id,
-                "dropping PlanChanged: no wire ClientEvent/AppEventDto \
-                 representation yet (Task 5/6); the client will not learn the \
-                 conversational designer's authored plan until those land"
+                "dropping PlanChanged: this bridge does not map it onto \
+                 AppEventDto::AppPlanChanged yet (Task 6); the client will not \
+                 learn the conversational designer's authored plan until that lands"
             );
             None
         }
@@ -335,6 +336,7 @@ pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
     AppRecordDto {
         id: record.id.clone(),
         name: record.name.clone(),
+        brief: record.brief.clone(),
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
         workflow_state: lower_workflow_state(record.workflow_state),
@@ -434,22 +436,13 @@ fn lower_design_value(value: DesignValue) -> DesignValueDto {
             value: value.into_iter().map(lower_data_field).collect(),
         },
         DesignValue::DomainList(value) => DesignValueDto::DomainList { value },
-        // TODO(local-apps#questionnaire, Task 5/6): `Deferred` is the
-        // questionnaire-answer sentinel added for the conversational
-        // designer. `local-apps` closes BOTH the ways a live draft could
-        // hold one today: `service::validate_design_value` rejects it on
-        // every write path (`update_draft`, `store_suggestion`, continuation
-        // replay — service.rs), and `storage::ensure_no_deferred_design_values`
-        // rejects it on load (`storage.rs`, for hand-edited/legacy-build
-        // disk state). So this arm cannot fire today — `todo!()` rather than
-        // `unreachable!()` because Task 3 is expected to make `Deferred` a
-        // legitimate draft value, at which point BOTH of those gates and
-        // this arm need to move together: the gates relax and this becomes a
-        // real `DesignValueDto::Deferred` mapping (which itself needs adding
-        // to client-protocol, re-blessing the version-guard contract index).
-        DesignValue::Deferred => {
-            todo!("DesignValueDto has no Deferred wire representation yet (T5/T6)")
-        }
+        // The user explicitly chose to let the LLM decide this field. `Deferred`
+        // is a legitimate draft value (`local-apps`'s `validate_design_value` /
+        // `ensure_no_deferred_design_values` both accept it — see their docs),
+        // so it needs a real wire representation: client-protocol's
+        // `DesignValueDto::Deferred` carries the same "bare tag, no payload"
+        // shape as the core value.
+        DesignValue::Deferred => DesignValueDto::Deferred,
     }
 }
 
@@ -556,6 +549,14 @@ pub(crate) fn lower_details(
         app: lower_record(record),
         design_revision: draft.revision,
         design_fields: lower_design_field_values(draft),
+        // TODO(local-apps#questionnaire, Task 6): `draft.questionnaire` /
+        // `draft.plan` are real domain data (Task 2) with a real wire shape
+        // (`AppDesignStepDto` / `AppPlanDto`, Task 5) but no lowering
+        // function yet — same "not wired" placeholder as `generation_job`
+        // below, not a design decision. Task 6 owns
+        // `lower_questionnaire`/`lower_plan` and wiring them in here.
+        questionnaire: Vec::new(),
+        plan: None,
         manifest: load_manifest_snapshot(root, &record.id)?,
         runtime: lower_runtime_details(runtime),
         generation_job: None,
@@ -685,6 +686,7 @@ fn raise_design_value(value: DesignValueDto) -> Result<DesignValue, AppError> {
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         DesignValueDto::DomainList { value } => DesignValue::DomainList(value),
+        DesignValueDto::Deferred => DesignValue::Deferred,
         other => {
             return Err(AppError::InvalidRequest(format!(
                 "unsupported design value: {other:?}"
@@ -752,6 +754,7 @@ mod tests {
                 enum_options: Vec::new(),
             }]),
             DesignValue::DomainList(vec!["api.example.com".into()]),
+            DesignValue::Deferred,
         ]
     }
 
@@ -923,6 +926,7 @@ mod tests {
         let record_dto = AppRecordDto {
             id: "app00001".into(),
             name: "Habits".into(),
+            brief: "a habit tracker".into(),
             created_at_ms: 11,
             updated_at_ms: 22,
             workflow_state: AppWorkflowStateDto::Ready,

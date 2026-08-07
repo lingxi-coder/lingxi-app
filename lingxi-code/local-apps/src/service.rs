@@ -208,23 +208,20 @@ fn validate_design_value(field_id: &str, value: &DesignValue) -> Result<(), AppE
             Ok(())
         }
         DesignValue::Boolean(_) | DesignValue::Density(_) => Ok(()),
-        // TODO(local-apps#questionnaire, Task 3): `Deferred` is the
-        // questionnaire-answer sentinel added for the conversational
-        // designer; the generic draft-patch pipeline does not understand it
-        // yet — wiring it into `AppDesignDraft` is Task 3's job. Reject it
-        // here so the invariant "`AppDesignDraft::fields` never holds a
-        // `Deferred` value" holds for every WRITE path (`update_draft`,
-        // `store_suggestion`, continuation replay). The matching LOAD-path
-        // gate is `storage::ensure_no_deferred_design_values` (a hand-edited
-        // or newer-build disk document is the other way one could appear);
-        // together the two are what let `engine-mobile`'s wire-lowering match
-        // treat its `Deferred` arm as unreachable instead of needing a wire
-        // representation before Task 3 lands. When Task 3 relaxes this arm,
-        // the storage.rs gate must relax in the same change, or a
-        // legitimately-saved draft fails to reload on next start.
-        DesignValue::Deferred => Err(AppError::InvalidRequest(format!(
-            "value of field {field_id:?} cannot be a deferred answer in a draft patch"
-        ))),
+        // `Deferred` is the questionnaire-answer sentinel ("let the model
+        // decide") — a legitimate draft value since Task 2's `AppDesignDraft`
+        // three-way split. It carries no payload, so there is nothing here to
+        // size-check; WHETHER a given field is allowed to defer (its
+        // questionnaire entry's `allows_defer`) is a semantic question this
+        // generic, schema-agnostic patch validator cannot answer — that gate
+        // is `questionnaire::validate_answers`, run when advancing to
+        // planning. Accepting it here is what lets `storage.rs`'s load-path
+        // guard drop its matching check for `fields`/`pending_suggestion`
+        // (this function is the only write path into both), and what lets
+        // `engine-mobile`'s `lower_design_value`/`raise_design_value` map it
+        // to/from `DesignValueDto::Deferred` instead of treating it as
+        // unreachable.
+        DesignValue::Deferred => Ok(()),
     }
 }
 
@@ -2079,6 +2076,46 @@ mod tests {
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 1);
+    }
+
+    /// `DesignValue::Deferred` ("let the model decide") is a legal draft
+    /// patch value — `validate_design_value` no longer rejects it (Task 5
+    /// lifted the write-side gate alongside the load-side one in
+    /// `storage.rs`). The full round trip a client relies on: patch → draft →
+    /// disk → reload must preserve it exactly.
+    #[tokio::test]
+    async fn a_deferred_answer_is_accepted_and_survives_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("A"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        let deferred_patch = AppDesignPatch {
+            ops: vec![AppDesignPatchOp::Set {
+                field_id: "title".into(),
+                value: DesignValue::Deferred,
+            }],
+            note: None,
+        };
+        h.service
+            .update_draft(&record.id, 0, &deferred_patch)
+            .await
+            .expect("a deferred answer is a legal patch value");
+
+        let draft = h.service.draft(&record.id).await.unwrap();
+        assert_eq!(draft.fields.get("title"), Some(&DesignValue::Deferred));
+
+        drop(h);
+        let h2 = harness(dir.path()).await;
+        let reloaded = h2.service.draft(&record.id).await.unwrap();
+        assert_eq!(
+            reloaded.fields.get("title"),
+            Some(&DesignValue::Deferred),
+            "the deferred answer must survive disk reload"
+        );
     }
 
     #[tokio::test]

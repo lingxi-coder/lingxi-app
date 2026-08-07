@@ -1106,6 +1106,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppDesignFieldDto.description", "Option<String>");
     put("AppDesignFieldDto.field_type", "AppDesignFieldTypeDto");
     put("AppDesignFieldDto.required", "bool");
+    put("AppDesignFieldDto.allows_custom", "bool");
+    put("AppDesignFieldDto.allows_defer", "bool");
     put("AppDesignFieldDto.default_value", "Option<DesignValueDto>");
     put("AppDesignFieldDto.options", "Vec<AppDesignFieldOptionDto>");
 
@@ -1114,6 +1116,11 @@ fn current_contract_index() -> ContractIndex {
     put("AppDesignStepDto.title", "String");
     put("AppDesignStepDto.description", "Option<String>");
     put("AppDesignStepDto.fields", "Vec<AppDesignFieldDto>");
+
+    put("AppPlanDto.collections", "Vec<AppDataCollectionDto>");
+    put("AppPlanDto.capabilities", "Vec<AppCapabilityKindDto>");
+    put("AppPlanDto.domains", "Vec<String>");
+    put("AppPlanDto.summary", "String");
 
     put("AppTemplateDto.kind", "AppTemplateKindDto");
     put("AppTemplateDto.version", "u32");
@@ -1124,6 +1131,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
+    put("AppRecordDto.brief", "String");
     put("AppRecordDto.created_at_ms", "u64");
     put("AppRecordDto.updated_at_ms", "u64");
     put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
@@ -1155,6 +1163,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put("DesignValueDto::DomainList", "domain_list");
     put("DesignValueDto::DomainList.value", "Vec<String>");
+    put("DesignValueDto::Deferred", "deferred");
 
     put("AppDesignPatchOpDto::Set", "set");
     put("AppDesignPatchOpDto::Set.field_id", "String");
@@ -1249,6 +1258,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppDetailsDto.app", "AppRecordDto");
     put("AppDetailsDto.design_revision", "u64");
     put("AppDetailsDto.design_fields", "Vec<AppDesignFieldValueDto>");
+    put("AppDetailsDto.questionnaire", "Vec<AppDesignStepDto>");
+    put("AppDetailsDto.plan", "Option<AppPlanDto>");
     put("AppDetailsDto.manifest", "Option<AppManifestDto>");
     put("AppDetailsDto.runtime", "AppRuntimeDetailsDto");
     put(
@@ -1319,6 +1330,20 @@ fn current_contract_index() -> ContractIndex {
     );
     put("AppEventDto::AppDetailsChanged", "app_details_changed");
     put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
+    put(
+        "AppEventDto::AppQuestionnaireChanged",
+        "app_questionnaire_changed",
+    );
+    put("AppEventDto::AppQuestionnaireChanged.app_id", "String");
+    put("AppEventDto::AppQuestionnaireChanged.revision", "u64");
+    put(
+        "AppEventDto::AppQuestionnaireChanged.steps",
+        "Vec<AppDesignStepDto>",
+    );
+    put("AppEventDto::AppPlanChanged", "app_plan_changed");
+    put("AppEventDto::AppPlanChanged.app_id", "String");
+    put("AppEventDto::AppPlanChanged.revision", "u64");
+    put("AppEventDto::AppPlanChanged.plan", "Option<AppPlanDto>");
     put(
         "AppEventDto::AppGenerationJobChanged",
         "app_generation_job_changed",
@@ -1630,7 +1655,7 @@ fn contract_index_covers_every_dto() {
         AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
         AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
         AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
-        AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+        AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
         AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
         AppTemplateDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
         AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
@@ -1821,6 +1846,7 @@ fn contract_index_covers_every_dto() {
         AppRecordDto {
             id: String::new(),
             name: String::new(),
+            brief: String::new(),
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1886,6 +1912,8 @@ fn contract_index_covers_every_dto() {
         description: None,
         field_type: AppDesignFieldTypeDto::ShortText,
         required: false,
+        allows_custom: false,
+        allows_defer: false,
         default_value: None,
         options: Vec::new(),
     };
@@ -1895,6 +1923,12 @@ fn contract_index_covers_every_dto() {
         title: String::new(),
         description: None,
         fields: Vec::new(),
+    };
+    let _app_plan = AppPlanDto {
+        collections: Vec::new(),
+        capabilities: Vec::new(),
+        domains: Vec::new(),
+        summary: String::new(),
     };
     let _app_template = AppTemplateDto {
         kind: AppTemplateKindDto::CrudTracker,
@@ -1939,6 +1973,7 @@ fn contract_index_covers_every_dto() {
         app: AppRecordDto {
             id: String::new(),
             name: String::new(),
+            brief: String::new(),
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1947,6 +1982,8 @@ fn contract_index_covers_every_dto() {
         },
         design_revision: 0,
         design_fields: Vec::new(),
+        questionnaire: Vec::new(),
+        plan: None,
         manifest: None,
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,
@@ -1993,13 +2030,23 @@ fn contract_index_covers_every_dto() {
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
     // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these seven tags to exist.
+    // `ClientEvent::AppEvent`, so nothing else forces these nine tags to exist.
     let _app_events: Vec<AppEventDto> = vec![
         AppEventDto::AppTemplatesChanged {
             templates: Vec::new(),
         },
         AppEventDto::AppDetailsChanged {
             details: app_details,
+        },
+        AppEventDto::AppQuestionnaireChanged {
+            app_id: String::new(),
+            revision: 0,
+            steps: Vec::new(),
+        },
+        AppEventDto::AppPlanChanged {
+            app_id: String::new(),
+            revision: 0,
+            plan: None,
         },
         AppEventDto::AppGenerationJobChanged {
             job: app_generation_job,
@@ -2026,4 +2073,23 @@ fn contract_index_covers_every_dto() {
         ix.contains_key("ClientEvent::TextDelta.text"),
         "the contract index must enumerate the contract leaves"
     );
+}
+
+/// `DesignValueDto::Deferred` carries no payload — unlike every other
+/// `DesignValueDto` variant, its wire form is the bare tag alone
+/// (`{ "kind": "deferred" }`, no `value` key). Pins that shape so a future
+/// change cannot silently attach a payload to the "let the model decide"
+/// sentinel.
+#[test]
+fn deferred_design_value_serialises_as_a_bare_tagged_variant() {
+    let json = serde_json::to_value(client_protocol::local_apps::DesignValueDto::Deferred)
+        .expect("serialise");
+    assert_eq!(
+        json,
+        serde_json::json!({ "kind": "deferred" }),
+        "Deferred carries no payload; the tag alone must round-trip"
+    );
+    let back: client_protocol::local_apps::DesignValueDto =
+        serde_json::from_value(json).expect("deserialise");
+    assert_eq!(back, client_protocol::local_apps::DesignValueDto::Deferred);
 }

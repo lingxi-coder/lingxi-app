@@ -20,6 +20,8 @@
                 "label": "Name",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -27,6 +29,8 @@
                 "label": "Purpose",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -34,6 +38,8 @@
                 "label": "Target users",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -49,6 +55,8 @@
                 "label": "Pages",
                 "field_type": "screen_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "screen_list",
                   "value": [
@@ -62,6 +70,8 @@
                 "label": "Features",
                 "field_type": "feature_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "feature_list",
                   "value": []
@@ -73,6 +83,8 @@
                 "label": "Metrics",
                 "field_type": "feature_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "feature_list",
                   "value": [
@@ -87,6 +99,8 @@
                 "label": "Filters",
                 "field_type": "feature_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "feature_list",
                   "value": []
@@ -98,6 +112,8 @@
                 "label": "Refresh",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "manual"
@@ -126,6 +142,8 @@
                 "label": "Collection fields",
                 "field_type": "data_field_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "data_field_list",
                   "value": [
@@ -167,6 +185,8 @@
                 "label": "Primary color",
                 "field_type": "color",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "color",
                   "value": "#3366FF"
@@ -178,6 +198,8 @@
                 "label": "Density",
                 "field_type": "density",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "density",
                   "value": "comfortable"
@@ -189,6 +211,8 @@
                 "label": "Layout",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "responsive"
@@ -217,6 +241,8 @@
                 "label": "HTTPS domains",
                 "field_type": "domain_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "domain_list",
                   "value": []
@@ -228,6 +254,8 @@
                 "label": "Enable app data",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": true
@@ -239,6 +267,8 @@
                 "label": "Design summary",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -292,6 +322,8 @@
                 "label": "Name",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -299,6 +331,8 @@
                 "label": "Purpose",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -306,6 +340,8 @@
                 "label": "Target users",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -321,6 +357,8 @@
                 "label": "Pages",
                 "field_type": "screen_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "screen_list",
                   "value": [
@@ -334,6 +372,8 @@
                 "label": "Features",
                 "field_type": "feature_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "feature_list",
                   "value": []
@@ -345,6 +385,8 @@
                 "label": "Entity name",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "short_text",
                   "value": "Item"
@@ -356,6 +398,8 @@
                 "label": "Statuses",
                 "field_type": "multiple_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "multiple_choice",
                   "value": [
@@ -370,6 +414,8 @@
                 "label": "Allow archiving",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": true
@@ -389,6 +435,8 @@
                 "label": "Collection fields",
                 "field_type": "data_field_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "data_field_list",
                   "value": [
@@ -433,6 +481,8 @@
                 "label": "Primary color",
                 "field_type": "color",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "color",
                   "value": "#3366FF"
@@ -444,6 +494,8 @@
                 "label": "Density",
                 "field_type": "density",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "density",
                   "value": "comfortable"
@@ -455,6 +507,8 @@
                 "label": "Layout",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "responsive"
@@ -483,6 +537,8 @@
                 "label": "HTTPS domains",
                 "field_type": "domain_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "domain_list",
                   "value": []
@@ -494,6 +550,8 @@
                 "label": "Enable app data",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": true
@@ -505,6 +563,8 @@
                 "label": "Design summary",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -561,6 +621,8 @@
                 "label": "Name",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -568,6 +630,8 @@
                 "label": "Purpose",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -575,6 +639,8 @@
                 "label": "Target users",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -590,6 +656,8 @@
                 "label": "Pages",
                 "field_type": "screen_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "screen_list",
                   "value": [
@@ -603,6 +671,8 @@
                 "label": "Features",
                 "field_type": "feature_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "feature_list",
                   "value": []
@@ -614,6 +684,8 @@
                 "label": "Content type",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "short_text",
                   "value": "Article"
@@ -625,6 +697,8 @@
                 "label": "Categories",
                 "field_type": "multiple_choice",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "multiple_choice",
                   "value": []
@@ -636,6 +710,8 @@
                 "label": "Presentation",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "grid"
@@ -656,6 +732,8 @@
                 "label": "Enable search",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": true
@@ -675,6 +753,8 @@
                 "label": "Collection fields",
                 "field_type": "data_field_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "data_field_list",
                   "value": [
@@ -723,6 +803,8 @@
                 "label": "Primary color",
                 "field_type": "color",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "color",
                   "value": "#3366FF"
@@ -734,6 +816,8 @@
                 "label": "Density",
                 "field_type": "density",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "density",
                   "value": "comfortable"
@@ -745,6 +829,8 @@
                 "label": "Layout",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "responsive"
@@ -773,6 +859,8 @@
                 "label": "HTTPS domains",
                 "field_type": "domain_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "domain_list",
                   "value": []
@@ -784,6 +872,8 @@
                 "label": "Enable app data",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": true
@@ -795,6 +885,8 @@
                 "label": "Design summary",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -855,6 +947,8 @@
                 "label": "Name",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -862,6 +956,8 @@
                 "label": "Purpose",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               },
               {
@@ -869,6 +965,8 @@
                 "label": "Target users",
                 "field_type": "short_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]
@@ -884,6 +982,8 @@
                 "label": "Pages",
                 "field_type": "screen_list",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "screen_list",
                   "value": [
@@ -897,6 +997,8 @@
                 "label": "Features",
                 "field_type": "feature_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "feature_list",
                   "value": []
@@ -908,6 +1010,8 @@
                 "label": "Result description",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "long_text",
                   "value": "Describe the result shown after submission."
@@ -919,6 +1023,8 @@
                 "label": "Behavior",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "save"
@@ -943,6 +1049,8 @@
                 "label": "Save submission history",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": false
@@ -962,6 +1070,8 @@
                 "label": "Collection fields",
                 "field_type": "data_field_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "data_field_list",
                   "value": [
@@ -1003,6 +1113,8 @@
                 "label": "Primary color",
                 "field_type": "color",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "color",
                   "value": "#3366FF"
@@ -1014,6 +1126,8 @@
                 "label": "Density",
                 "field_type": "density",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "density",
                   "value": "comfortable"
@@ -1025,6 +1139,8 @@
                 "label": "Layout",
                 "field_type": "single_choice",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "single_choice",
                   "value": "responsive"
@@ -1053,6 +1169,8 @@
                 "label": "HTTPS domains",
                 "field_type": "domain_list",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "domain_list",
                   "value": []
@@ -1064,6 +1182,8 @@
                 "label": "Enable app data",
                 "field_type": "boolean",
                 "required": false,
+                "allows_custom": false,
+                "allows_defer": false,
                 "default_value": {
                   "kind": "boolean",
                   "value": false
@@ -1075,6 +1195,8 @@
                 "label": "Design summary",
                 "field_type": "long_text",
                 "required": true,
+                "allows_custom": false,
+                "allows_defer": false,
                 "options": []
               }
             ]

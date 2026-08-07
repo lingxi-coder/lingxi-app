@@ -281,6 +281,7 @@ fn apps_changed_round_trips() {
         apps: vec![AppRecordDto {
             id: "habits-1a2b".to_string(),
             name: "Habits".to_string(),
+            brief: "Track daily habits".to_string(),
             created_at_ms: 1_750_000_000_000,
             updated_at_ms: 1_750_000_000_001,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -511,6 +512,20 @@ fn extended_local_app_events_round_trip() {
             },
         },
         ClientEvent::AppEvent {
+            event: AppEventDto::AppQuestionnaireChanged {
+                app_id: "habits-1a2b".to_string(),
+                revision: 2,
+                steps: vec![],
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppPlanChanged {
+                app_id: "habits-1a2b".to_string(),
+                revision: 3,
+                plan: None,
+            },
+        },
+        ClientEvent::AppEvent {
             event: AppEventDto::AppGenerationJobChanged {
                 job: AppGenerationJobDto {
                     id: "job-1".to_string(),
@@ -572,6 +587,8 @@ fn extended_local_app_events_round_trip() {
     // rename visible here.
     let expected_types = [
         "app_templates_changed",
+        "app_questionnaire_changed",
+        "app_plan_changed",
         "app_generation_job_changed",
         "app_bridge_response",
         "app_ui_request",
@@ -580,11 +597,13 @@ fn extended_local_app_events_round_trip() {
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 6] = [
+    let expected_leaves: [(&str, serde_json::Value); 8] = [
         (
             "/event/templates/0/kind",
             serde_json::Value::from("dashboard"),
         ),
+        ("/event/revision", serde_json::Value::from(2_u64)),
+        ("/event/revision", serde_json::Value::from(3_u64)),
         (
             "/event/job/continuation_seq",
             serde_json::Value::from(1_u64),

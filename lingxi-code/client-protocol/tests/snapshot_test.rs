@@ -59,9 +59,10 @@ use client_protocol::local_apps::{
     builtin_app_templates, AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
     AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
-    AppDataFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto,
-    AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppManifestDto, AppRecordDto,
-    AppRuntimeDetailsDto,
+    AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
+    AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
+    AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
+    AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto,
     AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
     AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
     AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
@@ -1341,6 +1342,7 @@ fn canonical_app_record() -> AppRecordDto {
     AppRecordDto {
         id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
+        brief: "A daily habit tracker".to_string(),
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
         workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1392,11 +1394,62 @@ fn canonical_app_manifest() -> AppManifestDto {
     }
 }
 
+/// The canonical authored questionnaire: one step with a text field that
+/// allows both a custom answer and deferring to the model.
+fn canonical_questionnaire() -> Vec<AppDesignStepDto> {
+    vec![AppDesignStepDto {
+        id: "basics".to_string(),
+        order: 1,
+        title: "Basics".to_string(),
+        description: None,
+        fields: vec![AppDesignFieldDto {
+            id: "accent".to_string(),
+            label: "Accent color".to_string(),
+            description: None,
+            field_type: AppDesignFieldTypeDto::SingleChoice,
+            required: true,
+            allows_custom: true,
+            allows_defer: true,
+            default_value: None,
+            options: vec![AppDesignFieldOptionDto {
+                value: "blue".to_string(),
+                label: "Blue".to_string(),
+            }],
+        }],
+    }]
+}
+
+/// The canonical derived plan.
+fn canonical_app_plan() -> AppPlanDto {
+    AppPlanDto {
+        collections: vec![AppDataCollectionDto {
+            id: "records".to_string(),
+            label: "Records".to_string(),
+            fields: vec![AppDataFieldDto {
+                id: "title".to_string(),
+                label: "Title".to_string(),
+                field_type: AppDataFieldTypeDto::Text,
+                required: true,
+                options: vec![],
+            }],
+            enabled_by_default: true,
+        }],
+        capabilities: vec![AppCapabilityKindDto::DataMutation],
+        domains: vec!["api.example.com".to_string()],
+        summary: "A habit tracker with a records collection.".to_string(),
+    }
+}
+
 fn canonical_app_details() -> AppDetailsDto {
     AppDetailsDto {
         app: canonical_app_record(),
         design_revision: 4,
-        design_fields: vec![],
+        design_fields: vec![AppDesignFieldValueDto {
+            field_id: "accent".to_string(),
+            value: DesignValueDto::Deferred,
+        }],
+        questionnaire: canonical_questionnaire(),
+        plan: Some(canonical_app_plan()),
         manifest: Some(canonical_app_manifest()),
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,

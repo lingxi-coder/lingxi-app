@@ -844,6 +844,16 @@ class LocalAppsViewModel(
                 }
             }
             is AppEventDto.AppDetailsChanged -> reduceDetails(event.details)
+            // TODO(local-apps#questionnaire, Task 18/19): no Android designer
+            // surface renders the LLM-authored questionnaire yet. Task 19
+            // will consume `event.steps`/`event.revision` here. Explicit
+            // no-op arm (not an `else`) so this `when` still breaks the
+            // moment a real case is added, removed, or renamed.
+            is AppEventDto.AppQuestionnaireChanged -> {}
+            // TODO(local-apps#questionnaire, Task 18/20): no Android plan
+            // confirmation screen exists yet. Task 20 will consume
+            // `event.plan`/`event.revision` here.
+            is AppEventDto.AppPlanChanged -> {}
             is AppEventDto.AppGenerationJobChanged -> reduceGenerationJob(event.job)
             is AppEventDto.AppBridgeResponse -> {
                 val response = event.response
@@ -1461,6 +1471,13 @@ private fun DesignValueDto.toUiValue(): LocalAppDesignValue = when (this) {
     is DesignValueDto.FeatureList -> LocalAppDesignValue.StringList(value)
     is DesignValueDto.DataFieldList -> LocalAppDesignValue.DataFields(value.map { it.toUiDataField() })
     is DesignValueDto.DomainList -> LocalAppDesignValue.StringList(value)
+    // TODO(local-apps#questionnaire, Task 18/19): "let the model decide" has
+    // no dedicated LocalAppDesignValue case yet — no Android designer surface
+    // renders it. Map onto an empty text value as a safe, non-crashing
+    // placeholder (an explicit arm, not a catch-all, so this `when` still
+    // breaks the moment a real case is added, removed, or renamed) until
+    // Task 19 gives it a real "let the model decide" UI.
+    is DesignValueDto.Deferred -> LocalAppDesignValue.Text("")
 }
 
 private fun LocalAppDataField.toBindingDataField(): AppDataFieldDto = AppDataFieldDto(

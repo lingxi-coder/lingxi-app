@@ -172,6 +172,14 @@ enum LocalAppsProtocolAdapter {
             .dataFields(value.map(dataField))
         case let .domainList(value):
             .domains(value)
+        // TODO(local-apps#questionnaire, Task 13/14): `.deferred` ("let the
+        // model decide") has no dedicated `LocalAppDesignValue` case yet — no
+        // iOS designer surface renders it. Map onto an empty text value as a
+        // safe, non-crashing placeholder (never a bare catch-all, so this
+        // switch still breaks the moment a real case is added or removed)
+        // until Task 14 gives it a real "let the model decide" UI.
+        case .deferred:
+            .text("")
         }
     }
 

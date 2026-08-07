@@ -784,6 +784,20 @@ final class LocalAppsStore {
                 }
                 replaceCheckpoints(details.checkpoints, appID: summary.id)
 
+            // TODO(local-apps#questionnaire, Task 13/14): no iOS designer
+            // surface renders the LLM-authored questionnaire yet. Task 14
+            // will consume `steps`/`revision` here to drive it. Explicit
+            // no-op arm (not a catch-all) so this switch still breaks the
+            // moment a real case is added, removed, or renamed.
+            case .appQuestionnaireChanged:
+                break
+
+            // TODO(local-apps#questionnaire, Task 13/15): no iOS plan
+            // confirmation sheet exists yet. Task 15 will consume
+            // `plan`/`revision` here.
+            case .appPlanChanged:
+                break
+
             case let .appGenerationJobChanged(job):
                 updateGenerationJob(job)
 

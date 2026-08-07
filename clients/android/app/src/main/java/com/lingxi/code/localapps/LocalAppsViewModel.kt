@@ -355,16 +355,23 @@ class LocalAppsViewModel(
      * `AppDesignerRequested` — the only event that populates `state.designer`
      * for that path — was never coming.
      *
-     * `GetAppDetails` alone is enough for every other case: `update_draft`
-     * does not check workflow state, so it seeds the draft for editing once
-     * `collecting_spec` is reached, and `reduceDetails` below creates
-     * `state.designer` the first time its reply lands for the app on this
-     * destination — the questionnaire form (`state.questionnaires[appId]`,
-     * delivered independently by `AppQuestionnaireChanged`) and the four
-     * intermediate/failure states `LocalAppDesignerScreen` renders while
-     * `isDesignerEditable(app.workflow)` is false both come from the SAME
-     * `state.apps`/`state.questionnaires` the screen already reads, so the
-     * designer simply waits rather than erroring.
+     * `GetAppDetails` alone is enough for every other case — NOT because
+     * `update_draft` skips a workflow check (it does not:
+     * `ensure_workflow("update_draft", &DRAFT_EDITABLE_STATES)`, state.rs) but
+     * because `GetAppDetails` is a pure read that never calls `update_draft`
+     * at all, and `questionnaire_ready` (the LLM-authoring completion)
+     * auto-transitions `authoring_questionnaire -> collecting_spec` on its
+     * own — which IS inside `DRAFT_EDITABLE_STATES` — with no client command
+     * required to get there. So the draft becomes editable server-side
+     * without this function ever having to ask for it, and `reduceDetails`
+     * below creates `state.designer` the first time a `GetAppDetails` reply
+     * lands for the app on this destination — the questionnaire form
+     * (`state.questionnaires[appId]`, delivered independently by
+     * `AppQuestionnaireChanged`) and the four intermediate/failure states
+     * `LocalAppDesignerScreen` renders while `isDesignerEditable(app.workflow)`
+     * is false both come from the SAME `state.apps`/`state.questionnaires`
+     * the screen already reads, so the designer simply waits rather than
+     * erroring.
      *
      * `generation_failed` is the one state where `open_app_designer` is both
      * legal and needed: generation usually fails on the DESIGN itself, and

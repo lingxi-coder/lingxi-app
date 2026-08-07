@@ -1671,8 +1671,11 @@ class LocalAppsViewModelTest {
      * moment the designer opens would arm the LATER plan-confirm gate before
      * `begin_planning` (the questionnaire's own terminal action) ever runs,
      * breaking every 生成方案 tap with `workflow_state_invalid`. `GetAppDetails`
-     * alone is enough to seed the draft — `update_draft` does not check
-     * workflow state.
+     * alone is enough to seed the draft — it is a pure read that never calls
+     * `update_draft` (which DOES check workflow state,
+     * `ensure_workflow("update_draft", &DRAFT_EDITABLE_STATES)`), and
+     * `collecting_spec` is already inside `DRAFT_EDITABLE_STATES` by the time
+     * the user can answer anything, with no client command needed to get there.
      */
     @Test
     fun `opening the designer while collecting spec never arms the confirm gate early`() = runTest {

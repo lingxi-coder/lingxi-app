@@ -60,6 +60,60 @@ class LocalAppsScreenTest {
     }
 
     @Test
+    fun `a single choice field's chip row never repeats its own picker's options`() {
+        // LocalAppDynamicField already renders every SingleChoice option as
+        // its own FilterChip row; chipsFor must not render the same option
+        // set a second time underneath it — only the genuinely new defer
+        // chip belongs here for choice kinds.
+        val field = designField(allowsDefer = true, options = listOf(LocalAppFieldOption("a", "A")))
+            .copy(kind = LocalAppFieldKind.SingleChoice)
+        assertEquals(listOf(DesignerChip.Defer), chipsFor(field))
+    }
+
+    @Test
+    fun `a multiple choice field's chip row never repeats its own picker's options`() {
+        val field = designField(allowsDefer = true, options = listOf(LocalAppFieldOption("a", "A")))
+            .copy(kind = LocalAppFieldKind.MultipleChoice)
+        assertEquals(listOf(DesignerChip.Defer), chipsFor(field))
+    }
+
+    /**
+     * The critical defect a review caught: `commitCustomChipText` used to
+     * send `LocalAppDesignValue.Text` for every field kind except
+     * `MultipleChoice`. For a `SingleChoice` field, that value "saves" fine
+     * (`apply_patch` inserts any shape blindly) but fails LATER at
+     * `begin_planning` -> `validate_answers` (questionnaire.rs):
+     * `SingleChoice.accepts(ShortText)` is false, so a `Text` answer for a
+     * `SingleChoice` field rejects with "answered with a value of the wrong
+     * kind" — a raw engine error at the exact 生成方案 tap this task exists
+     * to unblock. `allowsCustom` is legal on any field kind
+     * (`validate_field`, questionnaire.rs, ties it to nothing), so this is a
+     * real, reachable combination, not a hypothetical one.
+     */
+    @Test
+    fun `typing into the other box on a single choice field commits a choice value not text`() {
+        val field = designField(allowsCustom = true, options = listOf(LocalAppFieldOption("a", "A")))
+            .copy(kind = LocalAppFieldKind.SingleChoice)
+        val committed = commitCustomChipText(field, "自定义答案", value = null)
+        assertEquals(LocalAppDesignValue.Choice("自定义答案"), committed)
+    }
+
+    @Test
+    fun `typing into the other box on a multiple choice field keeps the checked options and appends text`() {
+        val field = designField(allowsCustom = true, options = listOf(LocalAppFieldOption("a", "A"), LocalAppFieldOption("b", "B")))
+            .copy(kind = LocalAppFieldKind.MultipleChoice)
+        val committed = commitCustomChipText(field, "自定义答案", value = LocalAppDesignValue.Choices(listOf("a")))
+        assertEquals(LocalAppDesignValue.Choices(listOf("a", "自定义答案")), committed)
+    }
+
+    @Test
+    fun `typing into the other box on a domain list field commits a string list value not text`() {
+        val field = designField(allowsCustom = true).copy(kind = LocalAppFieldKind.DomainList)
+        val committed = commitCustomChipText(field, "api.example.com", value = null)
+        assertEquals(LocalAppDesignValue.StringList(listOf("api.example.com")), committed)
+    }
+
+    @Test
     fun `choosing defer stores the deferred value rather than clearing the field`() {
         var recorded: LocalAppDesignValue? = null
         selectChip(designField(allowsDefer = true), DesignerChip.Defer) { recorded = it }

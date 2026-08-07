@@ -435,10 +435,22 @@ sealed interface DesignerChip {
  * when [LocalAppDesignField.allowsDefer]. `allowsCustom` does NOT add a chip
  * here — [showsCustomInput] renders it as an always-visible text box instead
  * (mirrors iOS's `DesignerFieldChips.chipValues`).
+ *
+ * For `SingleChoice`/`MultipleChoice` fields, the options are DELIBERATELY
+ * left out here: `LocalAppDynamicField`'s own `when (field.kind)` block
+ * above already renders every option once, as a `FilterChip` row or a
+ * `Checkbox` list. Including them again here would render the field's
+ * entire option set TWICE — this returns only the affordance that is
+ * actually new for those two kinds (the defer chip); `showsCustomInput`
+ * below is unaffected, since neither picker offers free-text entry.
  */
-internal fun chipsFor(field: LocalAppDesignField): List<DesignerChip> =
-    field.options.map { DesignerChip.Option(it.value) } +
-        if (field.allowsDefer) listOf(DesignerChip.Defer) else emptyList()
+internal fun chipsFor(field: LocalAppDesignField): List<DesignerChip> {
+    val optionChips = when (field.kind) {
+        LocalAppFieldKind.SingleChoice, LocalAppFieldKind.MultipleChoice -> emptyList()
+        else -> field.options.map { DesignerChip.Option(it.value) }
+    }
+    return optionChips + if (field.allowsDefer) listOf(DesignerChip.Defer) else emptyList()
+}
 
 /** Whether [field] renders the always-visible `Other…` free-text box. */
 internal fun showsCustomInput(field: LocalAppDesignField): Boolean = field.allowsCustom
@@ -864,17 +876,50 @@ private fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValue
     val optionValues = field.options.mapTo(hashSetOf()) { it.value }
     return when (value) {
         is LocalAppDesignValue.Text -> value.value.takeUnless { it in optionValues }.orEmpty()
+        is LocalAppDesignValue.Choice -> value.value.takeUnless { it in optionValues }.orEmpty()
         is LocalAppDesignValue.Choices -> value.values.firstOrNull { it !in optionValues }.orEmpty()
+        is LocalAppDesignValue.StringList -> value.values.firstOrNull { it !in optionValues }.orEmpty()
         else -> ""
     }
 }
 
-private fun commitCustomChipText(field: LocalAppDesignField, text: String, value: LocalAppDesignValue?): LocalAppDesignValue {
-    if (field.kind != LocalAppFieldKind.MultipleChoice) return LocalAppDesignValue.Text(text)
-    val optionValues = field.options.mapTo(hashSetOf()) { it.value }
-    val selectedOptions = (value as? LocalAppDesignValue.Choices)?.values.orEmpty().filter { it in optionValues }
-    return LocalAppDesignValue.Choices(if (text.isNotEmpty()) selectedOptions + text else selectedOptions)
-}
+/**
+ * Commits [text] as the value SHAPE [field]'s kind actually expects — NOT
+ * always `Text`. `allowsCustom` is legal on any field kind
+ * (`validate_field`, questionnaire.rs, ties it to nothing), so a
+ * `SingleChoice` field with `allowsCustom` must still commit a `Choice`
+ * value, a `ScreenList`/`FeatureList`/`DomainList` field a `StringList`, etc.
+ *
+ * The consequence of getting this wrong is not a crash here — `apply_patch`
+ * (state.rs) inserts whatever shape arrives blindly, so a wrong-kind draft
+ * "saves" fine. It surfaces later, at `begin_planning` ->
+ * `validate_answers` (questionnaire.rs): `SingleChoice.accepts(ShortText)`
+ * is false, so a `Text` sent for a `SingleChoice` field fails generation
+ * with "answered with a value of the wrong kind" — a raw engine rejection
+ * at the exact 生成方案 tap this task exists to unblock. Mirrors
+ * [toggledChipOption]'s per-kind dispatch above.
+ */
+internal fun commitCustomChipText(field: LocalAppDesignField, text: String, value: LocalAppDesignValue?): LocalAppDesignValue =
+    when (field.kind) {
+        LocalAppFieldKind.ShortText, LocalAppFieldKind.LongText, LocalAppFieldKind.Color ->
+            LocalAppDesignValue.Text(text)
+        LocalAppFieldKind.SingleChoice -> LocalAppDesignValue.Choice(text)
+        LocalAppFieldKind.MultipleChoice -> {
+            val optionValues = field.options.mapTo(hashSetOf()) { it.value }
+            val selectedOptions = (value as? LocalAppDesignValue.Choices)?.values.orEmpty().filter { it in optionValues }
+            LocalAppDesignValue.Choices(if (text.isNotEmpty()) selectedOptions + text else selectedOptions)
+        }
+        LocalAppFieldKind.ScreenList, LocalAppFieldKind.FeatureList, LocalAppFieldKind.DomainList -> {
+            val values = (value as? LocalAppDesignValue.StringList)?.values.orEmpty()
+            LocalAppDesignValue.StringList(if (text.isNotEmpty() && text !in values) values + text else values)
+        }
+        // No natural "custom text" shape for these three — no current
+        // questionnaire schema exercises `allowsCustom` on them — but this
+        // must still never fabricate an incompatible variant; preserve
+        // whatever value already exists rather than overwriting it with one.
+        LocalAppFieldKind.Boolean, LocalAppFieldKind.Density, LocalAppFieldKind.DataFieldList ->
+            value ?: field.emptyValue()
+    }
 
 @Composable
 private fun StringListEditor(

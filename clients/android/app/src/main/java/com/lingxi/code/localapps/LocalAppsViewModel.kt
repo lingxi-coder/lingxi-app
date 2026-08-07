@@ -12,13 +12,16 @@ import com.lingxi.code.bindings.AppCapabilityKindDto
 import com.lingxi.code.bindings.AppCreateOriginDto
 import com.lingxi.code.bindings.AppDataFieldDto
 import com.lingxi.code.bindings.AppDataFieldTypeDto
+import com.lingxi.code.bindings.AppDesignFieldDto
 import com.lingxi.code.bindings.AppDesignPatchDto
 import com.lingxi.code.bindings.AppDesignPatchOpDto
 import com.lingxi.code.bindings.AppDesignFieldTypeDto
+import com.lingxi.code.bindings.AppDesignStepDto
 import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.bindings.AppGenerationJobDto
 import com.lingxi.code.bindings.AppGenerationJobStateDto
+import com.lingxi.code.bindings.AppPlanDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeModeDto
@@ -48,13 +51,11 @@ class LocalAppsViewModel(
     distributionChannel: String = BuildConfig.DISTRIBUTION_CHANNEL,
     private val strings: LocalAppsStrings = DefaultLocalAppsStrings,
 ) : ViewModel() {
-    // `internal`, not `private`: local-apps#questionnaire Task 11 review —
-    // `createSelectedTemplate()`'s `state.templates` can ONLY be populated
-    // through `AppEventDto.AppTemplatesChanged`, which no longer exists on
-    // the wire (Task 5 deleted it with the static template catalog; see
-    // `reduceAppEvent`'s note). With no other public path to a non-empty
-    // `templates`, a same-module test needs direct access to seed it —
-    // this is that seam, kept as narrow as a single field's visibility.
+    // `internal`, not `private`: several same-module tests seed reducer-only
+    // state (e.g. `questionnaires`/`plans`, which only ever change through
+    // `AppEventDto.AppQuestionnaireChanged`/`AppPlanChanged`) directly rather
+    // than replaying a full event sequence — this is that seam, kept as
+    // narrow as a single field's visibility.
     internal val _uiState = MutableStateFlow(
         LocalAppsUiState(
             distributionMode = if (distributionChannel == "full") {
@@ -154,7 +155,7 @@ class LocalAppsViewModel(
         viewModelScope.launch {
             sourceFlow.collectLatest { bound ->
                 source = bound
-                _uiState.update { it.copy(loading = true, templatesLoading = true, error = null) }
+                _uiState.update { it.copy(loading = true, error = null) }
                 coroutineScope {
                     launch(start = CoroutineStart.UNDISPATCHED) {
                         bound.clientEvents.collect(::reduce)
@@ -176,14 +177,18 @@ class LocalAppsViewModel(
     fun onAction(action: LocalAppsAction) {
         when (action) {
             LocalAppsAction.Refresh -> submit { requestSnapshots(it) }
-            LocalAppsAction.Create -> _uiState.update {
-                it.copy(destination = LocalAppsDestination.Templates, createName = "", selectedTemplateKind = null)
-            }
+            // The template-picker create screen is gone (Task 18); a fresh
+            // `Create` just clears any stale draft name left over from a
+            // previous attempt. Task 20 owns the real create-entry UI.
+            LocalAppsAction.Create -> _uiState.update { it.copy(createName = "") }
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
-            is LocalAppsAction.FilterTemplate -> _uiState.update { it.copy(templateFilter = action.kind) }
             is LocalAppsAction.ChangeCreateName -> _uiState.update { it.copy(createName = action.name) }
-            is LocalAppsAction.SelectTemplate -> _uiState.update { it.copy(selectedTemplateKind = action.kind) }
-            LocalAppsAction.CreateSelectedTemplate -> createSelectedTemplate()
+            is LocalAppsAction.CreateFromBrief -> createFromBrief(action.brief)
+            is LocalAppsAction.UpdateBrief -> submit(ClientCommand.UpdateAppBrief(action.appId, action.brief))
+            is LocalAppsAction.RetryQuestionnaire -> submit(ClientCommand.RetryAppQuestionnaire(action.appId))
+            is LocalAppsAction.BeginPlanning -> submit(ClientCommand.BeginAppPlanning(action.appId))
+            is LocalAppsAction.RetryPlan -> submit(ClientCommand.RetryAppPlan(action.appId))
+            is LocalAppsAction.Revise -> submit(ClientCommand.RequestAppRevision(action.appId, action.prompt))
             is LocalAppsAction.OpenApp -> openApp(action.appId)
             is LocalAppsAction.OpenDesigner -> openDesigner(action.appId)
             is LocalAppsAction.ChangeStep -> _uiState.update { state ->
@@ -244,32 +249,28 @@ class LocalAppsViewModel(
         // total removal of the static template catalog).
     }
 
-    private fun createSelectedTemplate() {
-        val state = _uiState.value
-        val template = state.templates.firstOrNull { it.kind == state.selectedTemplateKind } ?: return
-        val name = state.createName.trim()
-        if (name.isEmpty()) return
-        pendingCreate = name to template.kind
-        // NOTE (local-apps#questionnaire, Task 5): `ClientCommand.CreateApp.template`
-        // was deleted alongside `AppTemplateKindDto` (human-partner ruling:
-        // total removal of the static template catalog) — the wire command no
-        // longer carries a template selection at all. This whole template-based
-        // create flow is superseded by the brief-based one; replacing it is
-        // Task 20's job, not this task's.
-        //
-        // NOTE (local-apps#questionnaire, Task 11): `brief` is now REQUIRED on
-        // the wire (it seeds the LLM questionnaire-authoring round trip the
-        // engine starts in the background right after `create_app` commits)
-        // and this legacy template picker collects no brief of its own —
-        // reusing `name` (the display name) is the SAME stopgap the engine
-        // side used before Task 11 wired a real brief input. Task 20 replaces
-        // this whole flow with the conversational one, which collects an
-        // actual brief from the user.
+    // NOTE (local-apps#questionnaire, Task 18): this replaces the deleted
+    // `createSelectedTemplate()`. `brief` is REQUIRED on the wire (it seeds
+    // the LLM questionnaire-authoring round trip `create_app` starts in the
+    // background) and is now a genuine parameter of `CreateFromBrief` rather
+    // than something this function fabricates — the fabrication itself
+    // (a caller passing the display name as the brief because there is no
+    // dedicated brief input yet) moved OUT of the ViewModel to the
+    // template-picker's minimal replacement dialog in `LocalAppsScreen.kt`
+    // (`CreateAppDialog`), which still collects only a single name field.
+    // Task 20 replaces that dialog with the real brief-collecting UI; see
+    // `LocalAppsViewModelTest`'s "create app fabricates the brief..." tripwire,
+    // migrated to dispatch through this action instead of the deleted one.
+    private fun createFromBrief(brief: String) {
+        val name = _uiState.value.createName.trim()
+        val trimmedBrief = brief.trim()
+        if (name.isEmpty() || trimmedBrief.isEmpty()) return
+        pendingCreate = name to trimmedBrief
         submit(
             ClientCommand.CreateApp(
                 name = name,
                 origin = AppCreateOriginDto.LIBRARY,
-                brief = name,
+                brief = trimmedBrief,
                 conversationId = null,
             ),
         )
@@ -304,7 +305,7 @@ class LocalAppsViewModel(
 
     private fun editField(action: LocalAppsAction.EditField) {
         val designer = _uiState.value.designer ?: return
-        val fieldKind = designer.template.steps
+        val fieldKind = _uiState.value.questionnaires[designer.appId].orEmpty()
             .asSequence()
             .flatMap { it.fields.asSequence() }
             .firstOrNull { it.id == action.fieldId }
@@ -718,7 +719,6 @@ class LocalAppsViewModel(
         _uiState.update { state ->
             when (state.destination) {
                 LocalAppsDestination.Library -> state
-                LocalAppsDestination.Templates -> state.copy(destination = LocalAppsDestination.Library)
                 is LocalAppsDestination.Designer,
                 is LocalAppsDestination.Preview,
                 is LocalAppsDestination.Details -> state.copy(destination = LocalAppsDestination.Library)
@@ -844,21 +844,33 @@ class LocalAppsViewModel(
             // NOTE (local-apps#questionnaire, Task 5): `AppEventDto.AppTemplatesChanged`
             // was deleted (human-partner ruling: total removal of the static
             // template catalog) — no case for it exists on the wire enum
-            // anymore, so there is nothing to match here. `templates`/
-            // `templatesLoading` on the ui-state and the `templateName` lookup
-            // below are now unreachable dead state; removing them is Task 18's
-            // job alongside the rest of the template-picker UI.
+            // anymore, so there is nothing to match here.
             is AppEventDto.AppDetailsChanged -> reduceDetails(event.details)
-            // TODO(local-apps#questionnaire, Task 18/19): no Android designer
-            // surface renders the LLM-authored questionnaire yet. Task 19
-            // will consume `event.steps`/`event.revision` here. Explicit
-            // no-op arm (not an `else`) so this `when` still breaks the
-            // moment a real case is added, removed, or renamed.
-            is AppEventDto.AppQuestionnaireChanged -> {}
-            // TODO(local-apps#questionnaire, Task 18/20): no Android plan
-            // confirmation screen exists yet. Task 20 will consume
-            // `event.plan`/`event.revision` here.
-            is AppEventDto.AppPlanChanged -> {}
+            // The LLM finished (or discarded) authoring the questionnaire.
+            // Stores the ordered steps under `questionnaires[appId]`, replacing
+            // whatever was there — a full replacement, not a merge, because a
+            // re-authored questionnaire (via `UpdateBrief`/`RetryQuestionnaire`)
+            // may drop, add, or reorder steps entirely. No Android designer
+            // surface renders this yet (Task 19's job); Task 18 only wires the
+            // data layer.
+            is AppEventDto.AppQuestionnaireChanged -> _uiState.update { state ->
+                state.copy(questionnaires = state.questionnaires + (event.appId to event.steps.map { it.toUiStep() }))
+            }
+            // The LLM finished (or discarded) deriving the plan. `event.plan ==
+            // null` means an answer edit voided a previously-derived plan —
+            // mirrored here by REMOVING the entry rather than storing null, so
+            // `state.plans[appId]` and "a plan exists" stay the same question.
+            // No Android plan-confirmation screen renders this yet (Task 20's
+            // job); Task 18 only wires the data layer.
+            is AppEventDto.AppPlanChanged -> _uiState.update { state ->
+                state.copy(
+                    plans = if (event.plan != null) {
+                        state.plans + (event.appId to event.plan.toUiPlan())
+                    } else {
+                        state.plans - event.appId
+                    },
+                )
+            }
             is AppEventDto.AppGenerationJobChanged -> reduceGenerationJob(event.job)
             is AppEventDto.AppBridgeResponse -> {
                 val response = event.response
@@ -966,10 +978,8 @@ class LocalAppsViewModel(
 
     private fun reduceDetails(details: com.lingxi.code.bindings.AppDetailsDto) {
         val state = _uiState.value
-        val templateNames = state.templates.associate { it.kind to it.name }
         val prior = state.apps.firstOrNull { it.id == details.app.id }
         val app = details.app.toUiApp(
-            templateNames = templateNames,
             runtime = details.runtime.toUiRuntime(),
             fallbackRuntime = prior?.runtime,
         )
@@ -981,26 +991,33 @@ class LocalAppsViewModel(
                 current.apps + app
             }
             val currentDesigner = current.designer
-            val template = current.templates.firstOrNull { it.kind == app.templateKind }
             current.copy(
                 apps = apps.sortedByDescending { it.updatedAtMs },
-                designer = when {
-                    currentDesigner?.appId != app.id -> currentDesigner
-                    // The gate this snapshot answers goes down unconditionally
-                    // below, so the banner it raised must go down with it —
-                    // `conflictRevision` is the sole input to
-                    // "…已重新加载，请检查后继续。", and the only two reducers that can
-                    // make 已重新加载 true are this one and [reduceDraftChanged],
-                    // which clears the banner in the same `copy` that replaces
-                    // `values`. Without a template the `values` below cannot
-                    // be replaced with the engine's, so leaving the banner up
-                    // would assert a reload that provably did not happen, over
-                    // the pre-conflict local values — exactly the state
-                    // [releaseConflictRefreshUnanswered] exists to prevent, and
-                    // the one exit that did not route through it.
-                    template == null -> currentDesigner.copy(conflictRevision = null)
-                    else -> currentDesigner.copy(
-                        template = template,
+                // A full details snapshot carries the questionnaire/plan too
+                // (not just live `AppQuestionnaireChanged`/`AppPlanChanged`
+                // events) — e.g. reopening an app after its designer/plan was
+                // authored while this ViewModel was not collecting events.
+                // Mirrors iOS's `LocalAppsStore.handle`'s `.appDetailsChanged`
+                // arm.
+                questionnaires = current.questionnaires + (app.id to details.questionnaire.map { it.toUiStep() }),
+                plans = if (details.plan != null) {
+                    current.plans + (app.id to details.plan.toUiPlan())
+                } else {
+                    current.plans - app.id
+                },
+                // The gate this snapshot answers goes down unconditionally, so
+                // the banner it raised must go down with it — `conflictRevision`
+                // is the sole input to "…已重新加载，请检查后继续。", and the only two
+                // reducers that can make 已重新加载 true are this one and
+                // [reduceDraftChanged], which clears the banner in the same
+                // `copy` that replaces `values`. There is no more template
+                // lookup gating this (Task 18: the questionnaire is looked up
+                // separately, by app id, not carried on the designer), so this
+                // snapshot always has enough to replace `values`.
+                designer = if (currentDesigner?.appId != app.id) {
+                    currentDesigner
+                } else {
+                    currentDesigner.copy(
                         revision = details.designRevision,
                         values = details.designFields.associate { it.fieldId to it.value.toUiValue() } + pendingValues,
                         conflictRevision = null,
@@ -1052,10 +1069,9 @@ class LocalAppsViewModel(
 
     private fun reduceApps(event: ClientEvent.AppsChanged) {
         val oldIds = _uiState.value.apps.mapTo(hashSetOf()) { it.id }
-        val templates = _uiState.value.templates.associateBy { it.kind }
         val apps = event.apps.map { record ->
             val prior = _uiState.value.apps.firstOrNull { it.id == record.id }
-            record.toUiApp(templates.mapValues { it.value.name }, fallbackRuntime = prior?.runtime)
+            record.toUiApp(fallbackRuntime = prior?.runtime)
         }.sortedByDescending { it.updatedAtMs }
         val liveIds = apps.mapTo(hashSetOf()) { it.id }
         // Release the draft machinery for apps that left the record set. Nothing
@@ -1148,8 +1164,20 @@ class LocalAppsViewModel(
         }
         if (queuePruned || flightPruned || gatePruned) pumpDraftEditQueue()
 
+        // Claims the app just created by [createFromBrief], to open its
+        // designer. `templateKind` is gone (Task 18), so this now matches on
+        // `name` + the `brief` recorded at create time — both of which
+        // `pendingCreate` holds, set from the exact strings `createFromBrief`
+        // sent on the wire. `it.id !in oldIds` is still checked first and is
+        // still doing the real work: it is what stops this from claiming a
+        // PRE-EXISTING app that merely happens to share a name+brief with the
+        // one just created (two apps from the same brief, e.g. a retry after
+        // a dropped reply) — name+brief alone cannot tell those apart, since
+        // neither is unique. Only a freshly-appeared id is eligible at all;
+        // name+brief then picks which of possibly several new ids (a second
+        // creation raced in) is THIS create's.
         val pending = pendingCreate ?: return
-        val created = apps.firstOrNull { it.id !in oldIds && it.name == pending.first && it.templateKind == pending.second } ?: return
+        val created = apps.firstOrNull { it.id !in oldIds && it.name == pending.first && it.brief == pending.second } ?: return
         pendingCreate = null
         openDesigner(created.id)
     }
@@ -1157,7 +1185,16 @@ class LocalAppsViewModel(
     private fun reduceDesignerRequested(event: ClientEvent.AppDesignerRequested) {
         val state = _uiState.value
         val app = state.apps.firstOrNull { it.id == event.appId } ?: return
-        val template = state.templates.firstOrNull { it.kind == app.templateKind } ?: return
+        // `open_app_designer` is only legal from `collecting_spec`/
+        // `generation_failed`, both of which require an authored
+        // questionnaire — so by the time this event arrives,
+        // `questionnaires[app.id]` is expected to already be populated by an
+        // earlier `AppQuestionnaireChanged`. Defaulting to empty rather than
+        // returning early keeps this reducer from silently dropping the
+        // designer-open gate on a race (e.g. a details refresh landing before
+        // the questionnaire does); the designer surface (Task 19) fills in
+        // once `state.questionnaires[app.id]` catches up.
+        val steps = state.questionnaires[app.id].orEmpty()
         _uiState.update {
             it.copy(
                 selectedAppId = app.id,
@@ -1165,10 +1202,9 @@ class LocalAppsViewModel(
                 designer = LocalAppDesigner(
                     appId = app.id,
                     appName = app.name,
-                    template = template,
                     revision = event.revision,
                     interactionId = event.interactionId,
-                    values = template.steps.flatMap { step -> step.fields }
+                    values = steps.flatMap { step -> step.fields }
                         .mapNotNull { field -> field.defaultValue?.let { field.id to it } }
                         .toMap(),
                 ),
@@ -1180,7 +1216,7 @@ class LocalAppsViewModel(
         _uiState.update { state ->
             val designer = state.designer ?: return@update state
             if (designer.appId != event.appId) return@update state
-            val fields = designer.template.steps.flatMap { it.fields }.associateBy { it.id }
+            val fields = state.questionnaires[designer.appId].orEmpty().flatMap { it.fields }.associateBy { it.id }
             val changes = event.patch.ops.mapNotNull { op ->
                 val set = op as? AppDesignPatchOpDto.Set ?: return@mapNotNull null
                 val after = set.value.toUiValue()
@@ -1252,7 +1288,7 @@ class LocalAppsViewModel(
  * rather than a screen the prune silently forgets.
  */
 private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
-    LocalAppsDestination.Library, LocalAppsDestination.Templates -> null
+    LocalAppsDestination.Library -> null
     is LocalAppsDestination.Designer -> appId
     is LocalAppsDestination.Preview -> appId
     is LocalAppsDestination.Details -> appId
@@ -1262,8 +1298,7 @@ private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
 // and the `toUiTemplateKind`/`toBindingTemplateKind`/`toUiTemplate` conversions
 // that used to live here were deleted from client-protocol (human-partner
 // ruling: total removal of the static template catalog). `LocalAppTemplate`
-// (the native UI model) and its screens still exist — replacing that UI with
-// the brief-based create flow is Task 18/19/20's job, not this task's.
+// (the native UI model) was deleted in Task 18 alongside them.
 
 // TODO(local-apps#questionnaire, Task 13/18): AUTHORING_QUESTIONNAIRE /
 // QUESTIONNAIRE_FAILED / PLANNING / PLAN_FAILED are new conversational-design
@@ -1309,28 +1344,68 @@ private fun AppRuntimeDetailsDto.toUiRuntime(): LocalAppRuntime = LocalAppRuntim
     recovery = recoveryState?.name?.lowercase(),
 )
 
-// NOTE (local-apps#questionnaire, Task 5): this conversion already does not
-// compile — `template` was removed from `AppRecordDto` back in Task 2 (the DTO
-// field, as opposed to the `AppTemplateKindDto`/`AppTemplateDto` types this
-// task deletes) and `LocalAppItem` was never updated to match. Pre-existing
-// breakage, not introduced here; left for Task 18 (Android data layer), which
-// is expected to replace `templateKind`/`templateName` with `brief` as part
-// of the real UI migration.
+// NOTE (local-apps#questionnaire, Task 18): `AppRecordDto.template` was
+// removed back in Task 2, and this conversion has not compiled since —
+// `LocalAppItem` is updated here to carry `brief` (already required on the
+// wire) instead of the deleted `templateKind`/`templateName`.
 private fun AppRecordDto.toUiApp(
-    templateNames: Map<String, String>,
     runtime: LocalAppRuntime? = null,
     fallbackRuntime: LocalAppRuntime? = null,
-): LocalAppItem {
-    val kind = template.toUiTemplateKind()
-    return LocalAppItem(
-        id = id,
-        name = name,
-        templateKind = kind,
-        templateName = templateNames[kind] ?: kind,
-        workflow = workflowState.toUiWorkflow(),
-        runtime = runtime ?: fallbackRuntime ?: LocalAppRuntime(),
-        updatedAtMs = updatedAtMs.toLong(),
-    )
+): LocalAppItem = LocalAppItem(
+    id = id,
+    name = name,
+    brief = brief,
+    workflow = workflowState.toUiWorkflow(),
+    runtime = runtime ?: fallbackRuntime ?: LocalAppRuntime(),
+    updatedAtMs = updatedAtMs.toLong(),
+)
+
+/**
+ * The LLM-authored questionnaire, one [ClientEvent.AppEvent]/
+ * [AppEventDto.AppQuestionnaireChanged] step at a time. Ordered the way
+ * `LocalAppTemplate.orderedSteps` used to order the static catalog's steps:
+ * by declared `order`, id as tiebreak (mirrors iOS's
+ * `LocalAppsProtocolAdapter.questionnaire`).
+ */
+private fun AppDesignStepDto.toUiStep(): LocalAppDesignStep = LocalAppDesignStep(
+    id = id,
+    order = order,
+    title = title,
+    description = description,
+    fields = fields.map { it.toUiField() },
+)
+
+private fun AppDesignFieldDto.toUiField(): LocalAppDesignField = LocalAppDesignField(
+    id = id,
+    label = label,
+    description = description,
+    kind = fieldType.toUiFieldKind(),
+    required = required,
+    allowsCustom = allowsCustom,
+    allowsDefer = allowsDefer,
+    defaultValue = defaultValue?.toUiValue(),
+    options = options.map { LocalAppFieldOption(value = it.value, label = it.label) },
+)
+
+private fun AppPlanDto.toUiPlan(): LocalAppPlan = LocalAppPlan(
+    collections = collections.map { collection ->
+        LocalAppCollectionSchema(
+            id = collection.id,
+            label = collection.label,
+            fields = collection.fields.map { it.toUiDataField() },
+            enabledByDefault = collection.enabledByDefault,
+        )
+    },
+    capabilities = capabilities.map { it.toUiCapabilityKind() },
+    domains = domains,
+    summary = summary,
+)
+
+private fun AppCapabilityKindDto.toUiCapabilityKind(): LocalAppCapabilityKind = when (this) {
+    AppCapabilityKindDto.DATA_MUTATION -> LocalAppCapabilityKind.DataMutation
+    AppCapabilityKindDto.UI_CONTROL -> LocalAppCapabilityKind.UiControl
+    AppCapabilityKindDto.NETWORK_DOMAIN -> LocalAppCapabilityKind.NetworkDomain
+    AppCapabilityKindDto.RESTORE_CHECKPOINT -> LocalAppCapabilityKind.RestoreCheckpoint
 }
 
 private fun AppDesignFieldTypeDto.toUiFieldKind(): LocalAppFieldKind = when (this) {

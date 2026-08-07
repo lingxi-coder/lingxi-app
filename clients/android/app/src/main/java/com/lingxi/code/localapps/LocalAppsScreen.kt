@@ -109,11 +109,6 @@ fun LocalAppsScreen(
                 onOpenDrawer = onOpenDrawer,
             )
 
-            LocalAppsDestination.Templates -> LocalAppTemplatePicker(
-                state = state,
-                onAction = onAction,
-            )
-
             is LocalAppsDestination.Designer -> LocalAppDesignerScreen(
                 state = state,
                 onAction = onAction,
@@ -159,6 +154,13 @@ private fun LocalAppsLibraryScreen(
     onAction: (LocalAppsAction) -> Unit,
     onOpenDrawer: () -> Unit,
 ) {
+    // Pure Compose-local UI state, not part of `LocalAppsUiState` — the
+    // template-picker route this replaces (local-apps#questionnaire, Task
+    // 18) is gone, and there is no dedicated create destination to hold
+    // "is the create dialog open" instead. This is the minimal working
+    // replacement, same spirit as iOS's Task 13 `.create` route note; Task 20
+    // owns the real create-entry UI.
+    var showCreateDialog by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -172,7 +174,7 @@ private fun LocalAppsLibraryScreen(
                     IconButton(onClick = { onAction(LocalAppsAction.Refresh) }) {
                         Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.local_apps_refresh))
                     }
-                    IconButton(onClick = { onAction(LocalAppsAction.Create) }) {
+                    IconButton(onClick = { onAction(LocalAppsAction.Create); showCreateDialog = true }) {
                         Icon(Icons.Rounded.Add, contentDescription = stringResource(R.string.local_apps_create))
                     }
                 },
@@ -191,34 +193,18 @@ private fun LocalAppsLibraryScreen(
                 onValueChange = { onAction(LocalAppsAction.Search(it)) },
                 label = { Text(stringResource(R.string.local_apps_search)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
             )
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(vertical = 12.dp),
-            ) {
-                item {
-                    FilterChip(
-                        selected = state.templateFilter == null,
-                        onClick = { onAction(LocalAppsAction.FilterTemplate(null)) },
-                        label = { Text(stringResource(R.string.local_apps_filter_all)) },
-                    )
-                }
-                items(state.templates, key = { it.kind }) { template ->
-                    FilterChip(
-                        selected = state.templateFilter == template.kind,
-                        onClick = { onAction(LocalAppsAction.FilterTemplate(template.kind)) },
-                        label = { Text(template.name) },
-                    )
-                }
-            }
 
             when {
                 state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
 
-                state.filteredApps.isEmpty() -> EmptyApps(onCreate = { onAction(LocalAppsAction.Create) })
+                state.filteredApps.isEmpty() -> EmptyApps(onCreate = {
+                    onAction(LocalAppsAction.Create)
+                    showCreateDialog = true
+                })
 
                 else -> LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -232,6 +218,53 @@ private fun LocalAppsLibraryScreen(
             }
         }
     }
+    if (showCreateDialog) {
+        CreateAppDialog(
+            name = state.createName,
+            onNameChange = { onAction(LocalAppsAction.ChangeCreateName(it)) },
+            onDismiss = { showCreateDialog = false },
+            onCreate = {
+                // NOTE (local-apps#questionnaire, Task 18/20): this dialog only
+                // collects a display name, so it sends that name as the brief
+                // too — the SAME stopgap `createSelectedTemplate()` used to
+                // make (see `LocalAppsViewModel.createFromBrief`'s doc and the
+                // `LocalAppsViewModelTest` tripwire pinning this exact
+                // fabrication). Task 20 replaces this dialog with the real
+                // brief-collecting create entry.
+                onAction(LocalAppsAction.CreateFromBrief(state.createName))
+                showCreateDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun CreateAppDialog(
+    name: String,
+    onNameChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onCreate: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.local_apps_create)) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = onNameChange,
+                label = { Text(stringResource(R.string.local_apps_name)) },
+                supportingText = { Text(stringResource(R.string.local_apps_create_name_hint)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            Button(enabled = name.isNotBlank(), onClick = onCreate) {
+                Text(stringResource(R.string.local_apps_create_and_design))
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+    )
 }
 
 @Composable
@@ -301,7 +334,13 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(app.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(app.templateName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        app.brief,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 AssistChip(onClick = {}, label = { Text(app.workflow.label()) })
                 Box {
@@ -360,75 +399,6 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalAppTemplatePicker(state: LocalAppsUiState, onAction: (LocalAppsAction) -> Unit) {
-    Scaffold(
-        topBar = { LocalAppsTopBar(stringResource(R.string.local_apps_templates_title), onBack = { onAction(LocalAppsAction.Back) }) },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp),
-        ) {
-            OutlinedTextField(
-                value = state.createName,
-                onValueChange = { onAction(LocalAppsAction.ChangeCreateName(it)) },
-                label = { Text(stringResource(R.string.local_apps_name)) },
-                supportingText = { Text(stringResource(R.string.local_apps_create_name_hint)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-            if (state.templatesLoading) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            } else if (state.templates.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(stringResource(R.string.local_apps_templates_not_loaded))
-                }
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(state.templates, key = { it.kind }) { template ->
-                        Card(
-                            onClick = { onAction(LocalAppsAction.SelectTemplate(template.kind)) },
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (state.selectedTemplateKind == template.kind) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainer
-                                },
-                            ),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Column(Modifier.padding(16.dp)) {
-                                Text(template.name, style = MaterialTheme.typography.titleMedium)
-                                Text(template.description, style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    stringResource(
-                                        R.string.local_apps_template_meta,
-                                        template.steps.size,
-                                        template.version.toString(),
-                                    ),
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            }
-                        }
-                    }
-                    item {
-                        Button(
-                            enabled = state.createName.isNotBlank() && state.selectedTemplateKind != null,
-                            onClick = { onAction(LocalAppsAction.CreateSelectedTemplate) },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text(stringResource(R.string.local_apps_create_and_design)) }
-                    }
-                    item { Spacer(Modifier.height(20.dp)) }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
 private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalAppsAction) -> Unit) {
     val designer = state.designer
     if (designer == null) {
@@ -437,7 +407,11 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
         }
         return
     }
-    val steps = designer.template.steps.sortedBy { it.order }
+    // The questionnaire is looked up by app id rather than carried on the
+    // designer session (local-apps#questionnaire, Task 18 — mirrors iOS's
+    // `LocalAppsStore.questionnaires`); a still-empty list here just means the
+    // `AppQuestionnaireChanged` snapshot has not landed yet.
+    val steps = state.questionnaires[designer.appId].orEmpty().sortedBy { it.order }
     val stepIndex = designer.stepIndex.coerceIn(0, (steps.size - 1).coerceAtLeast(0))
     val step = steps.getOrNull(stepIndex)
     val currentStepComplete = step?.fields?.all { field ->

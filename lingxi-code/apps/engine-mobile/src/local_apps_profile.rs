@@ -2,6 +2,7 @@
 
 use crate::local_apps_generation::{ClientGenerationJobObserver, MobileAppGenerationExecutor};
 use crate::local_apps_host::LocalAppsHostBroker;
+use crate::local_apps_llm::LocalAppsLlm;
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
@@ -109,6 +110,7 @@ impl ProfileApps {
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
         full_runtime: bool,
         runtime_root: Option<PathBuf>,
+        llm: Arc<LocalAppsLlm>,
     ) -> Result<Arc<Self>, AppError> {
         let client_events = Arc::new(ClientEventFanout::new());
         let host = LocalAppsHostBroker::new(
@@ -118,7 +120,7 @@ impl ProfileApps {
             full_runtime,
             runtime_root,
         );
-        let executor = MobileAppGenerationExecutor::new(mobile_linux, host.clone());
+        let executor = MobileAppGenerationExecutor::new(mobile_linux, host.clone(), llm);
         let generation = AppGenerationCoordinator::new_with_observer(
             root.clone(),
             clock.clone(),
@@ -153,6 +155,7 @@ pub(crate) async fn profile_apps(
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     full_runtime: bool,
     runtime_root: Option<PathBuf>,
+    llm: Arc<LocalAppsLlm>,
 ) -> Result<Arc<ProfileApps>, AppError> {
     let cell = {
         let mut profiles = registry()
@@ -171,6 +174,7 @@ pub(crate) async fn profile_apps(
                 mobile_linux,
                 full_runtime,
                 runtime_root,
+                llm,
             ))
             .await
             .map_err(|error| AppError::Io(format!("local-app profile load failed: {error}")))?
@@ -182,7 +186,17 @@ pub(crate) async fn profile_apps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_apps_llm::test_support::ScriptedModel;
     use local_apps::test_support::FixedClock;
+
+    /// Neither test below drives generation far enough to reach the LLM call
+    /// (see the comment on `generation_worker_survives_the_engine_runtime_
+    /// that_loaded_the_profile`), so an empty script is enough — any call
+    /// would fail loudly with "ran out of responses" rather than silently
+    /// returning something plausible.
+    fn no_op_llm() -> Arc<LocalAppsLlm> {
+        Arc::new(LocalAppsLlm::new(ScriptedModel::new(Vec::new())))
+    }
 
     #[tokio::test]
     async fn same_profile_root_reuses_one_app_service() {
@@ -194,12 +208,20 @@ mod tests {
             None,
             false,
             None,
+            no_op_llm(),
         )
         .await
         .expect("first profile");
-        let second = profile_apps(root, Arc::new(FixedClock::new(2_000)), None, false, None)
-            .await
-            .expect("second profile");
+        let second = profile_apps(
+            root,
+            Arc::new(FixedClock::new(2_000)),
+            None,
+            false,
+            None,
+            no_op_llm(),
+        )
+        .await
+        .expect("second profile");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first.service, &second.service));
@@ -216,9 +238,16 @@ mod tests {
             .build()
             .expect("engine runtime");
         let (profile, app_id) = engine_runtime.block_on(async {
-            let profile = profile_apps(root, Arc::new(FixedClock::new(1_000)), None, false, None)
-                .await
-                .expect("profile");
+            let profile = profile_apps(
+                root,
+                Arc::new(FixedClock::new(1_000)),
+                None,
+                false,
+                None,
+                no_op_llm(),
+            )
+            .await
+            .expect("profile");
             let record = profile
                 .service
                 .create_app(Some("Survivor"), "a test app", None)

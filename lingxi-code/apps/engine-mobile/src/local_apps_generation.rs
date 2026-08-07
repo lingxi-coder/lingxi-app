@@ -1,15 +1,17 @@
 //! Concrete mobile executor for the fixed local-app generation pipeline.
 
 use crate::local_apps_host::LocalAppsHostBroker;
+use crate::local_apps_llm::{LocalAppsLlm, SourceRequest};
+use crate::local_apps_sources::{FileWrite, MAX_GENERATED_TOTAL_BYTES};
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto};
 use local_apps::{
-    load_manifest, save_manifest, AppDataStore, AppError, AppGenerationExecutor, AppLayout,
-    AppManifest, AppService, DataCollectionSchema, DesignValue, GenerationJob,
-    GenerationJobObserver, GenerationJobStatus, GenerationRequest, GenerationRequestKind,
-    WorkspaceSourcePolicy,
+    load_manifest, save_manifest, validate_workspace_source, AppDataStore, AppError,
+    AppGenerationExecutor, AppLayout, AppManifest, AppService, DataCollectionSchema, DesignValue,
+    GenerationJob, GenerationJobObserver, GenerationJobStatus, GenerationRequest,
+    GenerationRequestKind, WorkspaceSourcePolicy, WRITABLE_ROOTS,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -89,17 +91,20 @@ pub(crate) struct MobileAppGenerationExecutor {
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     host: Arc<LocalAppsHostBroker>,
     service: OnceLock<Arc<AppService>>,
+    llm: Arc<LocalAppsLlm>,
 }
 
 impl MobileAppGenerationExecutor {
     pub(crate) fn new(
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
         host: Arc<LocalAppsHostBroker>,
+        llm: Arc<LocalAppsLlm>,
     ) -> Arc<Self> {
         Arc::new(Self {
             mobile_linux,
             host,
             service: OnceLock::new(),
+            llm,
         })
     }
 
@@ -328,26 +333,72 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
     async fn generate_source(
         &self,
         request: &GenerationRequest,
-        _layout: &AppLayout,
+        layout: &AppLayout,
     ) -> Result<(), AppError> {
+        // A restore reuses Git-restored source as-is: re-validating and
+        // rebuilding it is the whole job. Spending an LLM round trip here
+        // would be both wasteful (nothing changed) and wrong (it would ask
+        // the model to redo work a human already approved).
         if request.kind == GenerationRequestKind::Restore {
             return Ok(());
         }
-        // TODO(local-apps#questionnaire, Task 9): this used to render
-        // `components/AppShell.jsx` from a fixed per-`AppTemplateKind`
-        // scaffold (`render_app_shell_source` / `APP_SHELL_TEMPLATE` /
-        // `default_collection_fields`, deleted in Task 2 along with the core
-        // `AppTemplateKind` they switched on). Task 9 replaces this step with
-        // the real LLM source-writing call. Failing loudly here — instead of
-        // either a silent no-op (a `generating` app that never leaves that
-        // state) or a fabricated scaffold — makes the gap self-describing:
-        // any generation job now fails typed at this stage until Task 9
-        // lands.
-        Err(AppError::NotYetAvailable(
-            "local-app source generation is not yet wired to the LLM (Task 9 replaces the \
-             deleted template-driven AppShell scaffold with a real generation call)"
-                .into(),
-        ))
+        let service = self.service()?;
+        let record = service.record(&request.key.app_id).await?;
+        let draft = service.draft(&request.key.app_id).await?;
+        let plan = draft.plan.clone().ok_or_else(|| {
+            AppError::WorkflowStateInvalid("generation requires a confirmed plan".into())
+        })?;
+        let workspace = layout.root().join(layout.workspace_rel());
+
+        // A revision hands the model the tree it is editing — writes are an
+        // overlay (see `write_file(.., true)` below), not a replace-all, so
+        // the model needs to see what already exists to know what NOT to
+        // resend.
+        let (existing, existing_note) = if request.kind == GenerationRequestKind::Revision {
+            read_generated_tree(&workspace)?
+        } else {
+            (Vec::new(), None)
+        };
+
+        let mut source_request = SourceRequest {
+            brief: record.brief.clone(),
+            plan,
+            answers: draft.fields.clone(),
+            existing,
+            existing_note,
+            revision_prompt: request.prompt.clone(),
+            validator_feedback: None,
+        };
+
+        // One initial attempt plus at most two repairs. `validate_workspace_source`'s
+        // own error text is fed back as `validator_feedback` so the model sees
+        // exactly what it broke — far more useful than asking it to guess again
+        // from scratch.
+        const MAX_ATTEMPTS: usize = 3;
+        let mut last_error = None;
+        for _ in 0..MAX_ATTEMPTS {
+            let writes = self.llm.generate_sources(&source_request).await?;
+            // Overlay write, never a clear-then-write: the model names only
+            // the files it wants to create or replace, everything else in the
+            // workspace stays untouched. A "move the search box" edit should
+            // cost one file, not a full re-emission of the app — and a model
+            // that forgets to mention a file must not silently delete it.
+            for write in &writes {
+                write_file(&workspace, &write.path, write.contents.as_bytes(), true)?;
+            }
+            let policy = self.source_policy(request, layout).await?;
+            match validate_workspace_source(layout, &policy) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let message = format!("{error}");
+                    source_request.validator_feedback = Some(message);
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            AppError::Io("source generation exhausted its repair attempts".into())
+        }))
     }
 
     async fn source_policy(
@@ -525,6 +576,93 @@ fn write_file(root: &Path, relative: &str, bytes: &[u8], overwrite: bool) -> Res
         .map_err(|error| AppError::Io(format!("write template file {relative}: {error}")))
 }
 
+/// Walk the five writable roots and collect every current source file, so a
+/// revision pass sees what already exists before the model edits it.
+/// Bounded by [`MAX_GENERATED_TOTAL_BYTES`]: once the running total would
+/// exceed the budget, the (path-sorted) remainder is left out. The second
+/// return value, when `Some`, names how many files were omitted — the caller
+/// folds it into the model's PROMPT TEXT (`SourceRequest::existing_note`),
+/// never a fabricated [`FileWrite`], because a placeholder entry describing
+/// the omission would read to the model as a real file that exists in the
+/// workspace.
+fn read_generated_tree(workspace: &Path) -> Result<(Vec<FileWrite>, Option<String>), AppError> {
+    let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
+    for root in WRITABLE_ROOTS {
+        let root_path = workspace.join(root);
+        if root_path.is_dir() {
+            collect_generated_files(workspace, &root_path, &mut collected)?;
+        }
+    }
+    collected.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let total_files = collected.len();
+    let mut cutoff = total_files;
+    let mut running_bytes = 0usize;
+    for (index, (_, bytes)) in collected.iter().enumerate() {
+        if running_bytes.saturating_add(bytes.len()) > MAX_GENERATED_TOTAL_BYTES {
+            cutoff = index;
+            break;
+        }
+        running_bytes += bytes.len();
+    }
+
+    let omitted = total_files - cutoff;
+    let files = collected
+        .into_iter()
+        .take(cutoff)
+        .map(|(path, bytes)| FileWrite {
+            path,
+            contents: String::from_utf8_lossy(&bytes).into_owned(),
+        })
+        .collect();
+    let note = (omitted > 0).then(|| {
+        format!(
+            "现有源码树超过了 {MAX_GENERATED_TOTAL_BYTES} 字节的读取预算，按路径字典序\
+             截断，有 {omitted} 个文件的内容未在上面展示。它们仍然存在于工作区里，没有\
+             被删除——只是这次没有塞进 prompt，不要假设它们不存在。"
+        )
+    });
+    Ok((files, note))
+}
+
+/// Recursive `read_dir` walk collecting `(workspace-relative POSIX path,
+/// bytes)` for every regular file under `current`. Mirrors
+/// [`validate_workspace_source`]'s own walk (symlinks skipped, not
+/// followed) rather than trusting arbitrary workspace content.
+fn collect_generated_files(
+    workspace: &Path,
+    current: &Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), AppError> {
+    for entry in std::fs::read_dir(current)
+        .map_err(|error| AppError::Io(format!("read generated tree: {error}")))?
+    {
+        let entry = entry
+            .map_err(|error| AppError::Io(format!("read generated tree entry: {error}")))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| AppError::Io(format!("inspect generated entry: {error}")))?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_generated_files(workspace, &path, out)?;
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(workspace)
+            .map_err(|_| AppError::InvalidRequest("generated file escaped workspace".into()))?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| AppError::Io(format!("read {}: {error}", path.display())))?;
+        out.push((relative.to_string_lossy().replace('\\', "/"), bytes));
+    }
+    Ok(())
+}
+
 fn replace_build_source(workspace: &Path, build_root: &Path) -> Result<(), AppError> {
     if build_root.exists() {
         std::fs::remove_dir_all(build_root)
@@ -588,6 +726,7 @@ fn bounded_log(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_apps_llm::test_support::ScriptedModel;
     use client_adapter::MockSink;
     use client_protocol::events::ClientEvent;
     use client_protocol::local_apps::{
@@ -770,7 +909,8 @@ mod tests {
             Some(runtime_root),
         );
         let runtime = Arc::new(RecordingMobileLinuxRuntime::default());
-        let executor = MobileAppGenerationExecutor::new(Some(runtime.clone()), host);
+        let llm = Arc::new(LocalAppsLlm::new(ScriptedModel::new(Vec::new())));
+        let executor = MobileAppGenerationExecutor::new(Some(runtime.clone()), host, llm);
         let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
 
         executor.run_next_build(&layout, false).await.unwrap();
@@ -816,19 +956,68 @@ mod tests {
     // `render_app_shell_source` / `default_collection_fields` directly — the
     // per-`AppTemplateKind` scaffold renderer deleted in Task 2 (fix-forward
     // for the engine-mobile build) alongside the core `AppTemplateKind` it
-    // switched on. There is no smaller-scope replacement to assert against:
-    // Task 9 owns writing the real (LLM-driven) equivalent and its tests.
-    // `generate_source_reports_not_yet_available_until_task_9_wires_the_llm`
-    // below covers the NEW behavior at the level that still exists —
-    // `generate_source` failing typed — so app creation exercised by other
-    // tests fails loudly instead of silently wedging.
+    // switched on. There is no smaller-scope replacement to assert against.
+    // Task 9 replaced the typed `NotYetAvailable` stub that stood in their
+    // place with the real LLM-driven `generate_source` — the tests below
+    // exercise it via a `GenerationHarness` wrapping a `ScriptedModel`.
 
-    /// `generate_source` (the `AppGenerationExecutor` step that used to
-    /// render `components/AppShell.jsx` from the deleted template scaffold)
-    /// now fails typed `NotYetAvailable` for every non-restore job, since
-    /// Task 9 has not wired the real LLM source-writing call yet.
-    #[tokio::test]
-    async fn generate_source_reports_not_yet_available_until_task_9_wires_the_llm() {
+    /// Everything one `generate_source` test needs: a loaded `AppService`
+    /// with a confirmed plan, a `MobileAppGenerationExecutor` wired to a
+    /// `ScriptedModel`, and a scaffolded workspace (`prepare_scaffold` has
+    /// already run, matching the real pipeline's call order — without it
+    /// `validate_workspace_source`'s locked-file hash check has nothing to
+    /// compare against).
+    struct GenerationHarness {
+        // Kept alive for the harness's lifetime; the workspace lives under it.
+        _root: tempfile::TempDir,
+        executor: Arc<MobileAppGenerationExecutor>,
+        layout: AppLayout,
+        model: Arc<ScriptedModel>,
+        app_id: String,
+    }
+
+    impl GenerationHarness {
+        fn initial_request(&self) -> GenerationRequest {
+            GenerationRequest {
+                key: local_apps::GenerationJobKey {
+                    app_id: self.app_id.clone(),
+                    revision: 0,
+                    continuation_seq: 1,
+                },
+                kind: GenerationRequestKind::Initial,
+                prompt: None,
+            }
+        }
+
+        async fn read(&self, relative: &str) -> Option<String> {
+            let path = self
+                .layout
+                .root()
+                .join(self.layout.workspace_rel())
+                .join(relative);
+            tokio::fs::read_to_string(path).await.ok()
+        }
+
+        /// Write a file directly into the workspace, standing in for content
+        /// a previous generation left behind — used to prove a revision's
+        /// overlay write leaves files the model did not mention untouched.
+        async fn seed(&self, relative: &str, contents: &str) {
+            let workspace = self.layout.root().join(self.layout.workspace_rel());
+            write_file(&workspace, relative, contents.as_bytes(), true).expect("seed file");
+        }
+
+        fn model_calls(&self) -> usize {
+            self.model.call_count()
+        }
+
+        fn prompt_at(&self, index: usize) -> String {
+            self.model.prompt_at(index)
+        }
+    }
+
+    async fn generation_harness(
+        responses: Vec<Result<serde_json::Value, AppError>>,
+    ) -> GenerationHarness {
         let root = tempfile::tempdir().unwrap();
         let service = Arc::new(
             AppService::load(
@@ -858,42 +1047,189 @@ mod tests {
 
         let host =
             LocalAppsHostBroker::new(root.path().to_path_buf(), MockSink::arc(), None, false, None);
-        let executor = MobileAppGenerationExecutor::new(None, host);
+        let model = ScriptedModel::new(responses);
+        let llm = Arc::new(LocalAppsLlm::new(model.clone()));
+        let executor = MobileAppGenerationExecutor::new(None, host, llm);
         executor
             .attach_service(service.clone())
             .map_err(|_| "service already attached")
             .unwrap();
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).unwrap();
-        let key = local_apps::GenerationJobKey {
-            app_id: record.id.clone(),
-            revision: 0,
-            continuation_seq: 1,
-        };
-        let request = GenerationRequest {
-            key: key.clone(),
+
+        let scaffold_request = GenerationRequest {
+            key: local_apps::GenerationJobKey {
+                app_id: record.id.clone(),
+                revision: 0,
+                continuation_seq: 1,
+            },
             kind: GenerationRequestKind::Initial,
             prompt: None,
         };
-        let error = executor
-            .generate_source(&request, &layout)
-            .await
-            .expect_err("generate_source must fail until Task 9 wires the LLM");
-        assert_eq!(error.code(), local_apps::AppErrorCode::NotYetAvailable);
-        assert!(
-            format!("{error}").contains("Task 9"),
-            "the failure must name the task that fills the gap: {error}"
-        );
-
-        // A restore job is NOT source generation — it must stay a no-op.
-        let restore_request = GenerationRequest {
-            key,
-            kind: GenerationRequestKind::Restore,
-            prompt: None,
-        };
         executor
-            .generate_source(&restore_request, &layout)
+            .prepare_scaffold(&scaffold_request, &layout)
             .await
-            .expect("a restore job must not hit the not-yet-available gate");
+            .expect("scaffold prepared");
+
+        GenerationHarness {
+            _root: root,
+            executor,
+            layout,
+            model,
+            app_id: record.id,
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_source_writes_what_the_model_returned() {
+        let harness = generation_harness(vec![Ok(serde_json::json!({
+            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return <div/>}"}]
+        }))])
+        .await;
+
+        harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect("generation succeeds");
+
+        let written = harness.read("app/page.jsx").await.expect("the file landed");
+        assert!(written.contains("export default function P"));
+    }
+
+    #[tokio::test]
+    async fn a_restore_job_never_calls_the_model() {
+        let harness = generation_harness(Vec::new()).await;
+        let mut request = harness.initial_request();
+        request.kind = GenerationRequestKind::Restore;
+
+        harness
+            .executor
+            .generate_source(&request, &harness.layout)
+            .await
+            .expect("restore reuses existing source");
+
+        assert_eq!(harness.model_calls(), 0, "a restore must not spend an LLM round trip");
+    }
+
+    #[tokio::test]
+    async fn a_validation_failure_is_fed_back_and_the_second_attempt_can_succeed() {
+        let harness = generation_harness(vec![
+            // First attempt carries `eval` — the validator will reject it.
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export const x = eval('1')"}]
+            })),
+            // Second attempt is clean.
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            })),
+        ])
+        .await;
+
+        harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect("the repair pass succeeds");
+
+        assert_eq!(harness.model_calls(), 2, "exactly one repair round trip");
+        let second = harness.prompt_at(1);
+        assert!(
+            second.contains("eval"),
+            "the validator's own words must reach the repair pass: {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn three_consecutive_validation_failures_give_up() {
+        let dirty = || {
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export const x = eval('1')"}]
+            }))
+        };
+        let harness = generation_harness(vec![dirty(), dirty(), dirty()]).await;
+
+        harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect_err("the repair loop is bounded");
+
+        assert_eq!(
+            harness.model_calls(),
+            3,
+            "one initial attempt plus at most two repairs — never an unbounded loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revision_job_passes_the_prompt_and_the_existing_tree_to_the_model() {
+        let harness = generation_harness(vec![Ok(serde_json::json!({
+            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+        }))])
+        .await;
+        harness.seed("components/Old.jsx", "export const Old = 1").await;
+
+        let mut request = harness.initial_request();
+        request.kind = GenerationRequestKind::Revision;
+        request.prompt = Some("把搜索框挪到顶部".into());
+
+        harness
+            .executor
+            .generate_source(&request, &harness.layout)
+            .await
+            .expect("revision succeeds");
+
+        let prompt = harness.prompt_at(0);
+        assert!(prompt.contains("把搜索框挪到顶部"), "the user's words: {prompt}");
+        assert!(prompt.contains("components/Old.jsx"), "the existing tree: {prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_revision_leaves_files_the_model_did_not_mention_untouched() {
+        let harness = generation_harness(vec![Ok(serde_json::json!({
+            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+        }))])
+        .await;
+        harness.seed("components/Keep.jsx", "export const Keep = 1").await;
+
+        let mut request = harness.initial_request();
+        request.kind = GenerationRequestKind::Revision;
+        request.prompt = Some("把搜索框挪到顶部".into());
+
+        harness
+            .executor
+            .generate_source(&request, &harness.layout)
+            .await
+            .expect("revision succeeds");
+
+        assert_eq!(
+            harness.read("components/Keep.jsx").await.as_deref(),
+            Some("export const Keep = 1"),
+            "writes are an overlay — a one-line change must not require re-emitting the whole app"
+        );
+    }
+
+    #[test]
+    fn read_generated_tree_truncates_over_budget_and_notes_the_omission() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        // Five 1 MiB files comfortably exceed `MAX_GENERATED_TOTAL_BYTES` (4 MiB) once combined.
+        for index in 0..5 {
+            let bytes = vec![b'x'; 1024 * 1024];
+            write_file(&workspace, &format!("app/p{index}.jsx"), &bytes, true).unwrap();
+        }
+
+        let (files, note) = read_generated_tree(&workspace).expect("walk the workspace");
+
+        assert!(
+            note.as_deref().is_some_and(|note| note.contains('4')),
+            "a truncated tree must say so in the prompt text: {note:?}"
+        );
+        assert!(
+            files.len() < 5,
+            "a batch over budget must not silently include every file: {} files",
+            files.len()
+        );
     }
 
     #[tokio::test]

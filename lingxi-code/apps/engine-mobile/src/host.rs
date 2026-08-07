@@ -92,6 +92,7 @@ use traits::{
 use crate::{
     local_apps_generation::{lower_job, ClientGenerationJobObserver, MobileAppGenerationExecutor},
     local_apps_host::LocalAppsHostBroker,
+    local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::{profile_apps, ProfileApps},
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
@@ -419,6 +420,13 @@ pub struct MobileRuntime {
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
+    /// The local-app generator's LLM seam (Task 9): an [`ApiServiceModel`]
+    /// over the SAME `api_service`/default model/profile the main
+    /// conversation uses — no second routing table. Retained here so
+    /// `build_mobile_engine_inner` can hand it to `profile_apps` after this
+    /// function returns (the process-wide profile registry is loaded outside
+    /// this per-connection builder).
+    pub(crate) local_apps_llm: Arc<LocalAppsLlm>,
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -1137,6 +1145,19 @@ async fn build_mobile_inner_with_ask(
         settings_max_retries,
         settings_backoff_ms,
     ));
+    // Task 9: the local-app generator's three LLM calls (author/plan/write
+    // source) ride the SAME `api_service` — routing, auth, retry — as the
+    // main conversation, via `ApiService::messages_create_side_query`
+    // (the same forced-tool-call mechanism `sidequery::ProviderSideQueryClient`
+    // uses below). `default_model_id`/`default_model_profile` are the bare
+    // model id and provider profile `orch_cfg.model` itself is set from a few
+    // lines down — the local-app generator has no separate model selection of
+    // its own.
+    let local_apps_llm = Arc::new(LocalAppsLlm::new(Arc::new(ApiServiceModel::new(
+        api_service.clone(),
+        default_model_id.clone(),
+        default_model_profile.clone(),
+    ))));
     let provider_adapter = Arc::new(ProviderApiAdapter::new(api_service.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
@@ -1940,6 +1961,7 @@ async fn build_mobile_inner_with_ask(
         mobile_linux,
         mcp_registry,
         local_apps_mcp,
+        local_apps_llm,
     })
 }
 
@@ -5355,6 +5377,7 @@ pub fn build_mobile_engine_inner(
         inner.mobile_linux.clone(),
         firer_cfg.local_apps_full_runtime,
         firer_cfg.local_apps_runtime_root.clone(),
+        inner.local_apps_llm.clone(),
     ));
     let (
         local_apps,
@@ -5398,8 +5421,11 @@ pub fn build_mobile_engine_inner(
                 firer_cfg.local_apps_full_runtime,
                 firer_cfg.local_apps_runtime_root.clone(),
             );
-            let executor =
-                MobileAppGenerationExecutor::new(inner.mobile_linux.clone(), host.clone());
+            let executor = MobileAppGenerationExecutor::new(
+                inner.mobile_linux.clone(),
+                host.clone(),
+                inner.local_apps_llm.clone(),
+            );
             let generation = AppGenerationCoordinator::new_with_observer(
                 mobile_apps_data_root(&firer_cfg),
                 firer_platform.clock(),

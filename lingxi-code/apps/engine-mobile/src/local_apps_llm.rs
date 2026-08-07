@@ -162,6 +162,18 @@ pub struct SourceRequest {
     ///
     /// 修订时的现有源码；初次生成为空。
     pub existing: Vec<FileWrite>,
+    /// A note about the `existing` dump above — e.g. how many files were left
+    /// out because the tree exceeded the read budget. Kept separate from
+    /// `revision_prompt` (the user's own words) and never a fabricated
+    /// `FileWrite`: a placeholder entry describing the omission would read to
+    /// the model as a real file that exists in the workspace, when it is
+    /// really just missing from this prompt.
+    ///
+    /// 关于上面 `existing` 转储的说明——例如因为超出读取预算而省略了多少个
+    /// 文件。与 `revision_prompt`（用户原话）分开存放，也绝不伪造一个
+    /// `FileWrite`：一个描述"被省略"的占位条目会被模型读成工作区里真实存在
+    /// 的文件，而它其实只是没被塞进这次 prompt。
+    pub existing_note: Option<String>,
     /// The user's own natural-language revision request.
     ///
     /// 用户的自然语言修改要求。
@@ -277,12 +289,22 @@ impl LocalAppsLlm {
                 user.push_str(&format!("--- {} ---\n{}\n", file.path, file.contents));
             }
         }
+        if let Some(note) = &request.existing_note {
+            user.push_str(&format!("\n\n{note}"));
+        }
         if let Some(prompt) = &request.revision_prompt {
             user.push_str(&format!("\n\n用户要求的修改：\n{prompt}"));
         }
         if let Some(feedback) = &request.validator_feedback {
+            // "完整文件" alone reads two ways — "the whole app" (pulls against
+            // the overlay-write ruling) or "each file's full contents, not a
+            // patch" (the intended meaning). Spelled out so only the second
+            // reading survives: only the files touched by the fix, each given
+            // in full, everything else left unsent.
             user.push_str(&format!(
-                "\n\n上一次生成没有通过校验，原文如下。请修正后重新给出完整文件：\n{feedback}"
+                "\n\n上一次生成没有通过校验，原文如下。请修正问题，只需重新给出改动涉及的\
+                 那些文件——每个文件都给出完整内容（不是补丁片段），没有改动的文件无需重新\
+                 发送：\n{feedback}"
             ));
         }
         let value = self
@@ -490,24 +512,45 @@ fn sources_schema() -> serde_json::Value {
     })
 }
 
+/// Test double for [`LocalAppsModel`]: replays scripted responses in order
+/// and records every prompt it was asked. Shared beyond this module's own
+/// tests — the generation executor's repair-loop tests and the profile
+/// registry's wiring tests reach it via `crate::local_apps_llm::test_support`
+/// to drive [`LocalAppsLlm`] without a real `ApiService`.
+///
+/// 供 [`LocalAppsModel`] 使用的测试替身：按顺序吐出预置响应，并记录每次
+/// 收到的 prompt。不止本模块自己的测试在用——生成执行器的修复循环测试、
+/// profile 注册表的接线测试都经 `crate::local_apps_llm::test_support`
+/// 复用它，绕开真实 `ApiService` 驱动 [`LocalAppsLlm`]。
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
+pub(crate) mod test_support {
+    use super::{AppError, LocalAppsModel};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
 
     /// 按顺序吐出预置响应的假模型。
-    struct ScriptedModel {
+    pub(crate) struct ScriptedModel {
         responses: Mutex<Vec<Result<serde_json::Value, AppError>>>,
         prompts: Mutex<Vec<String>>,
     }
 
     impl ScriptedModel {
-        fn new(responses: Vec<Result<serde_json::Value, AppError>>) -> Arc<Self> {
+        pub(crate) fn new(responses: Vec<Result<serde_json::Value, AppError>>) -> Arc<Self> {
             Arc::new(Self { responses: Mutex::new(responses), prompts: Mutex::new(Vec::new()) })
+        }
+
+        /// How many times `structured` has been called so far.
+        pub(crate) fn call_count(&self) -> usize {
+            self.prompts.lock().expect("lock").len()
+        }
+
+        /// The `index`-th call's user prompt (0-based, call order).
+        pub(crate) fn prompt_at(&self, index: usize) -> String {
+            self.prompts.lock().expect("lock")[index].clone()
         }
     }
 
-    #[async_trait::async_trait]
+    #[async_trait]
     impl LocalAppsModel for ScriptedModel {
         async fn structured(
             &self,
@@ -524,6 +567,12 @@ mod tests {
             responses.remove(0)
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::ScriptedModel;
+    use super::*;
 
     fn good_questionnaire() -> serde_json::Value {
         serde_json::json!({
@@ -635,11 +684,10 @@ mod tests {
         let model = ScriptedModel::new(vec![Ok(good_questionnaire())]);
         let llm = LocalAppsLlm::new(model.clone());
         llm.author_questionnaire("一个带标签的记事本").await.expect("authoring");
-        let prompts = model.prompts.lock().expect("lock");
+        let prompt = model.prompt_at(0);
         assert!(
-            prompts[0].contains("一个带标签的记事本"),
-            "the user's own words must reach the model verbatim: {}",
-            prompts[0]
+            prompt.contains("一个带标签的记事本"),
+            "the user's own words must reach the model verbatim: {prompt}"
         );
     }
 
@@ -683,8 +731,8 @@ mod tests {
         let mut request = initial_request();
         request.revision_prompt = Some("把搜索框挪到顶部".into());
         llm.generate_sources(&request).await.expect("revision");
-        let prompts = model.prompts.lock().expect("lock");
-        assert!(prompts[0].contains("把搜索框挪到顶部"), "got {}", prompts[0]);
+        let prompt = model.prompt_at(0);
+        assert!(prompt.contains("把搜索框挪到顶部"), "got {prompt}");
     }
 
     #[tokio::test]
@@ -694,8 +742,8 @@ mod tests {
         let mut request = initial_request();
         request.validator_feedback = Some("app/page.jsx uses eval()".into());
         llm.generate_sources(&request).await.expect("repair");
-        let prompts = model.prompts.lock().expect("lock");
-        assert!(prompts[0].contains("eval()"), "got {}", prompts[0]);
+        let prompt = model.prompt_at(0);
+        assert!(prompt.contains("eval()"), "got {prompt}");
     }
 
     #[tokio::test]
@@ -727,6 +775,7 @@ mod tests {
             },
             answers: BTreeMap::new(),
             existing: Vec::new(),
+            existing_note: None,
             revision_prompt: None,
             validator_feedback: None,
         }

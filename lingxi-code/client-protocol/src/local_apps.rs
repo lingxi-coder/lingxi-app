@@ -705,6 +705,7 @@ pub enum AppEventDto {
     AppPlanChanged {
         app_id: String,
         revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<AppPlanDto>,
     },
     AppGenerationJobChanged {

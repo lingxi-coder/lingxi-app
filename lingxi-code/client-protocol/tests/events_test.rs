@@ -651,6 +651,50 @@ fn extended_local_app_events_round_trip() {
     assert_eq!(back, runtime);
 }
 
+/// `AppPlanChanged.plan` — parity review finding: this was the ONLY `Option`
+/// field in the crate missing `#[serde(default, skip_serializing_if =
+/// "Option::is_none")]`. A symmetric `to_value` → `from_value` round-trip
+/// (as `extended_local_app_events_round_trip` above does) cannot see this
+/// class of bug, because `to_value` on a bare `Option<T>` field produces
+/// `"plan": null`, which `from_value` happily reads back — the break only
+/// shows up in the TWO asymmetric checks below: (1) `None` must OMIT the key,
+/// not serialize it as `null`; (2) a wire payload that OMITS the key entirely
+/// (exactly what an honest client following the house convention sends) must
+/// still deserialize the whole event, not fail with "missing field `plan`".
+#[test]
+fn app_plan_changed_omits_none_plan_and_accepts_a_missing_key() {
+    let ev = ClientEvent::AppEvent {
+        event: AppEventDto::AppPlanChanged {
+            app_id: "habits-1a2b".to_string(),
+            revision: 3,
+            plan: None,
+        },
+    };
+    let json = serde_json::to_value(&ev).expect("serialize AppPlanChanged");
+    assert!(
+        json["event"].get("plan").is_none(),
+        "a None plan must be skipped from the wire, not serialized as null"
+    );
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppPlanChanged");
+    assert_eq!(back, ev);
+
+    // A wire payload that OMITS `plan` entirely — not a synthetic `null` —
+    // is what an honest client actually sends. Without `#[serde(default)]`
+    // this fails the WHOLE event with "missing field `plan`", not just the
+    // one field.
+    let wire_without_plan = serde_json::json!({
+        "type": "app_event",
+        "event": {
+            "type": "app_plan_changed",
+            "app_id": "habits-1a2b",
+            "revision": 3
+        }
+    });
+    let raised: ClientEvent = serde_json::from_value(wire_without_plan)
+        .expect("a client that omits `plan` must not fail the whole event");
+    assert_eq!(raised, ev);
+}
+
 /// `AppPreviewReady` — delivers the pending preview `interaction_id`; `url`
 /// stays `None` (skipped) until the phase-4 runtime serves the app.
 #[test]

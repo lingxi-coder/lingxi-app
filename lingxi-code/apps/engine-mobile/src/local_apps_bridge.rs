@@ -731,6 +731,14 @@ mod tests {
     use super::*;
     use local_apps::AppWorkflowState;
 
+    // Hand-maintained, same honest weakness as `every_app_event_arm_lowers_field_exact`'s
+    // list further down (see its comment): a genuinely NEW `DesignValue`
+    // variant forces a compile error into `lower_design_value`/
+    // `raise_design_value`'s matches, but that compile error does NOT, by
+    // itself, force a new entry into this list — `patch_round_trips_through_dto_for_every_value_kind`
+    // below would silently stop covering the new variant. Whoever adds the
+    // next variant should add a case here too, but the compiler will not
+    // make them.
     fn every_design_value() -> Vec<DesignValue> {
         vec![
             DesignValue::ShortText("t".into()),

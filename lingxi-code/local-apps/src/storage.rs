@@ -1621,31 +1621,52 @@ mod tests {
 
     /// Same legalization, reached through a pending suggestion's patch
     /// instead of a live field: an LLM-proposed patch may itself propose
-    /// deferring a field, and that must also survive a reload.
+    /// deferring a field. Drives a REAL round trip (`store_suggestion` ->
+    /// `save_full` -> `load_all`), not just a direct call to
+    /// `ensure_no_deferred_design_values` — that function does not inspect
+    /// `pending_suggestion` at all (only `questionnaire[*].fields[*].default_value`
+    /// remains gated; see its doc), so a direct call would pass for a reason
+    /// unrelated to this test's stated subject and would keep passing even if
+    /// pending-suggestion handling were deleted outright. Going through the
+    /// real store is what actually proves a saved pending suggestion carrying
+    /// a `Deferred` op reloads intact (parity review finding).
     #[test]
-    fn a_deferred_value_in_a_pending_suggestion_patch_passes_the_guard() {
-        let draft = AppDesignDraft {
-            schema_version: APPS_SCHEMA_VERSION,
-            revision: 1,
-            questionnaire: Vec::new(),
-            fields: std::collections::BTreeMap::new(),
-            plan: None,
-            plan_for_revision: None,
-            pending_suggestion: Some(crate::types::AppDesignSuggestion {
-                suggestion_id: "sugg-1".into(),
-                patch: crate::types::AppDesignPatch {
-                    ops: vec![AppDesignPatchOp::Set {
-                        field_id: "tone".into(),
-                        value: DesignValue::Deferred,
-                    }],
-                    note: None,
-                },
-                based_on_revision: 1,
-            }),
-            confirmed_revision: None,
-        };
-        ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft)
-            .expect("a deferred value in a pending suggestion is legal");
+    fn a_deferred_value_in_a_pending_suggestion_patch_persists_and_reloads_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app("kkkk1111");
+        app.store_suggestion(
+            "sugg-1".into(),
+            crate::types::AppDesignPatch {
+                ops: vec![AppDesignPatchOp::Set {
+                    field_id: "tone".into(),
+                    value: DesignValue::Deferred,
+                }],
+                note: None,
+            },
+            1_700_000_000_000,
+        )
+        .expect("store_suggestion succeeds from collecting_spec");
+        save_full(dir.path(), &[app]);
+
+        let reloaded = load_all(dir.path())
+            .expect("a deferred value in a pending suggestion must reload cleanly");
+        let reloaded_app = reloaded
+            .iter()
+            .find(|state| state.record.id == "kkkk1111")
+            .expect("app present after reload");
+        let suggestion = reloaded_app
+            .draft
+            .pending_suggestion
+            .as_ref()
+            .expect("the pending suggestion must survive the round trip");
+        assert_eq!(
+            suggestion.patch.ops,
+            vec![AppDesignPatchOp::Set {
+                field_id: "tone".into(),
+                value: DesignValue::Deferred,
+            }],
+            "the deferred op must survive the round trip byte-for-byte"
+        );
     }
 
     /// The THIRD `DesignValue`-bearing location `AppDesignDraft` grew in Task

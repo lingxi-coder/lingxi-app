@@ -444,6 +444,26 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/app_questionnaire_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppQuestionnaireChanged {
+                    app_id: "habits-1a2b".to_string(),
+                    revision: 2,
+                    steps: canonical_questionnaire(),
+                },
+            },
+        ),
+        (
+            "event/app_plan_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppPlanChanged {
+                    app_id: "habits-1a2b".to_string(),
+                    revision: 3,
+                    plan: Some(canonical_app_plan()),
+                },
+            },
+        ),
+        (
             "event/app_designer_requested.json",
             ClientEvent::AppDesignerRequested {
                 app_id: "habits-1a2b".to_string(),

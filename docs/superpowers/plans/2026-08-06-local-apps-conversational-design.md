@@ -3380,7 +3380,13 @@ Expected: 装完依赖后**失败**，且失败原因是 `template` 缺失（而
 
 - [ ] **Step 3: 更新 snapshots.test.ts**
 
-删除 `validateAppTemplateKind` 及其两个调用点、`validateAppTemplate`、`app_templates_changed` 与 `list_app_templates` 分支；给 `AppRecord` 加 `isString(o['brief'])` 断言；补 `AppPlan` 校验器。`:1136` 与 `:1144` 那两个 `assert.equal(files.length, N)` 的期望数字必须按实际 golden 数量更新——它们是"有没有人偷偷加/删 snapshot"的哨兵，改错了哨兵就哑了。
+删除 `validateAppTemplateKind` 及其**三个**调用点（`:418`、`:492`，以及 `validateCommand` 的 `create_app` 分支 `:697`）、`validateAppTemplate`、`app_templates_changed` 与 `list_app_templates` 分支；给 `AppRecord` 加 `isString(o['brief'])` 断言；补 `AppPlan` 校验器。
+
+`:1136` 与 `:1144` 那两个 `assert.equal(files.length, N)` 的期望数字**必须**更新：T5 删掉了 `command/list_app_templates.json` 与 `event/app_templates_changed.json`，实际数量已从 51/58 变成 **50/57**。它们是"有没有人偷偷加/删 snapshot"的哨兵，数字错了哨兵就哑了——落地前用 `ls lingxi-code/client-protocol/snapshots/command | wc -l` 实测，不要照抄这里的数字。
+
+另外 `protocol.ts:37` 仍把 `CLIENT_PROTOCOL_VERSION` 钉在 `'1.2.0'`，而 `client.ts:234` 会**硬拒绝**握手不兼容的连接。Rust 侧现在是 `3.0.0`（T2 的破坏性删除 1→2，T5 的目录删除 2→3）。这一处不改，TS 客户端连不上。
+
+⚠️ 这套 TS 测试**从 T2 起就是红的**，不是本任务弄红的——`validateAppRecord:492` 要求 `template`，而 `apps_changed.json` 在 T2 就已经没有它了。所以 Step 1 装完依赖第一次跑必然失败，那是预期的起点，不是新问题。
 
 - [ ] **Step 4: 跑通**
 

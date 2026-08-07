@@ -47,10 +47,7 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::local_apps::{
-    AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppEventDto, AppTemplateKindDto,
-    DesignValueDto,
-};
+use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppEventDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -95,8 +92,9 @@ use traits::{
 use crate::{
     local_apps_generation::{lower_job, ClientGenerationJobObserver, MobileAppGenerationExecutor},
     local_apps_host::LocalAppsHostBroker,
+    local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
-    local_apps_profile::{profile_apps, ProfileApps},
+    local_apps_profile::{profile_apps, ProfileApps, SharedLlm},
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
     mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
 };
@@ -422,6 +420,13 @@ pub struct MobileRuntime {
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
+    /// The local-app generator's LLM seam (Task 9): an [`ApiServiceModel`]
+    /// over the SAME `api_service`/default model/profile the main
+    /// conversation uses — no second routing table. Retained here so
+    /// `build_mobile_engine_inner` can hand it to `profile_apps` after this
+    /// function returns (the process-wide profile registry is loaded outside
+    /// this per-connection builder).
+    pub(crate) local_apps_llm: Arc<LocalAppsLlm>,
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -1140,6 +1145,19 @@ async fn build_mobile_inner_with_ask(
         settings_max_retries,
         settings_backoff_ms,
     ));
+    // Task 9: the local-app generator's three LLM calls (author/plan/write
+    // source) ride the SAME `api_service` — routing, auth, retry — as the
+    // main conversation, via `ApiService::messages_create_side_query`
+    // (the same forced-tool-call mechanism `sidequery::ProviderSideQueryClient`
+    // uses below). `default_model_id`/`default_model_profile` are the bare
+    // model id and provider profile `orch_cfg.model` itself is set from a few
+    // lines down — the local-app generator has no separate model selection of
+    // its own.
+    let local_apps_llm = Arc::new(LocalAppsLlm::new(Arc::new(ApiServiceModel::new(
+        api_service.clone(),
+        default_model_id.clone(),
+        default_model_profile.clone(),
+    ))));
     let provider_adapter = Arc::new(ProviderApiAdapter::new(api_service.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
@@ -1982,6 +2000,7 @@ async fn build_mobile_inner_with_ask(
         mobile_linux,
         mcp_registry,
         local_apps_mcp,
+        local_apps_llm,
     })
 }
 
@@ -2041,6 +2060,59 @@ pub enum MobileEngineError {
 /// listener) survive an in-place orchestrator swap on New / Resume (§0.5); F3-05
 /// adds the async `submit` that resolves the parked permission gate from inbound
 /// commands and drives the turn on the owned runtime.
+/// Test-only bookkeeping for the fire-and-forget authoring/planning tasks
+/// [`MobileEngineHandle::spawn_authoring`] / [`MobileEngineHandle::spawn_planning`]
+/// launch. Production drops their `JoinHandle` outright — the whole point of
+/// those triggers is that `submit(CreateApp)` etc. return before the LLM round
+/// trip lands — but a test needs a deterministic way to wait for that round
+/// trip to settle without sleeping (a poll loop would work but is exactly the
+/// kind of flake-prone timing dependency §0's ban on sleeps exists to avoid).
+/// Compiles to a true no-op outside `cfg(test)`, so this can never accumulate
+/// handles in a long-running process.
+#[cfg(test)]
+#[derive(Default)]
+struct LocalAppsBackgroundTracker(StdMutex<Vec<tokio::task::JoinHandle<()>>>);
+
+#[cfg(test)]
+impl LocalAppsBackgroundTracker {
+    fn track(&self, handle: tokio::task::JoinHandle<()>) {
+        self.0
+            .lock()
+            .expect("local-apps background tracker poisoned")
+            .push(handle);
+    }
+
+    /// Await every handle queued so far, INCLUDING ones a just-awaited task
+    /// itself queued (e.g. `update_brief` re-triggering authoring) — loops
+    /// until a full pass finds nothing new.
+    async fn settle(&self) {
+        loop {
+            let handles: Vec<_> = {
+                let mut guard = self
+                    .0
+                    .lock()
+                    .expect("local-apps background tracker poisoned");
+                std::mem::take(&mut *guard)
+            };
+            if handles.is_empty() {
+                break;
+            }
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Default)]
+struct LocalAppsBackgroundTracker;
+
+#[cfg(not(test))]
+impl LocalAppsBackgroundTracker {
+    fn track(&self, _handle: tokio::task::JoinHandle<()>) {}
+}
+
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
@@ -2121,6 +2193,8 @@ pub struct MobileEngineHandle {
     app_client_subscription: Option<u64>,
     app_domain_subscription: Option<local_apps::AppEventSubscription>,
     app_domain_observer: Option<Arc<crate::local_apps_bridge::SinkAppEventObserver>>,
+    /// See [`LocalAppsBackgroundTracker`] — a true no-op outside `cfg(test)`.
+    local_apps_background: LocalAppsBackgroundTracker,
 }
 
 impl Drop for MobileEngineHandle {
@@ -2732,6 +2806,24 @@ impl MobileEngineHandle {
         self.local_apps.clone()
     }
 
+    /// Test-only seam: swap the profile's [`LocalAppsLlm`] for a scripted
+    /// double, exercising the SAME [`SharedLlm::replace`] path a real
+    /// reconnect / `/model` switch takes (Task 11's `profile_apps` fix), so
+    /// authoring/planning tests are deterministic without a network.
+    #[cfg(test)]
+    fn set_local_apps_model(&self, model: Arc<dyn crate::local_apps_llm::LocalAppsModel>) {
+        if let Some(profile) = &self.profile_apps {
+            profile.llm.replace(Arc::new(LocalAppsLlm::new(model)));
+        }
+    }
+
+    /// Test-only: await every authoring/planning task spawned so far. See
+    /// [`LocalAppsBackgroundTracker`].
+    #[cfg(test)]
+    async fn settle_local_apps(&self) {
+        self.local_apps_background.settle().await;
+    }
+
     /// The live service, or emit the boot-time load failure and yield `None`.
     async fn local_apps_or_report(&self, app_id: Option<&str>) -> Option<Arc<AppService>> {
         match &self.local_apps {
@@ -2760,68 +2852,6 @@ impl MobileEngineHandle {
     fn emit_app_event(&self, event: AppEventDto) {
         self.app_emissions
             .enqueue_engine(ClientEvent::AppEvent { event });
-    }
-
-    fn suggested_template_kind(template: local_apps::AppTemplateKind) -> AppTemplateKindDto {
-        match template {
-            local_apps::AppTemplateKind::Dashboard => AppTemplateKindDto::Dashboard,
-            local_apps::AppTemplateKind::CrudTracker => AppTemplateKindDto::CrudTracker,
-            local_apps::AppTemplateKind::ContentShowcase => AppTemplateKindDto::ContentShowcase,
-            local_apps::AppTemplateKind::FormUtility => AppTemplateKindDto::FormUtility,
-        }
-    }
-
-    fn build_design_suggestion(
-        record: &local_apps::AppRecord,
-        draft: &local_apps::AppDesignDraft,
-        prompt: Option<&str>,
-    ) -> AppDesignPatchDto {
-        let mut ops = Vec::new();
-        let template = crate::local_apps_bridge::builtin_templates()
-            .into_iter()
-            .find(|template| template.kind == Self::suggested_template_kind(record.template));
-
-        if let Some(template) = template {
-            for field in template
-                .steps
-                .into_iter()
-                .flat_map(|step| step.fields.into_iter())
-            {
-                if draft.fields.contains_key(&field.id) {
-                    continue;
-                }
-                let value = match field.id.as_str() {
-                    "name" => Some(DesignValueDto::ShortText {
-                        value: record.name.clone(),
-                    }),
-                    "purpose" => prompt
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| DesignValueDto::LongText {
-                            value: value.trim().to_string(),
-                        }),
-                    "final_summary" => {
-                        let summary = prompt
-                            .filter(|value| !value.trim().is_empty())
-                            .map(str::trim)
-                            .map(ToOwned::to_owned)
-                            .unwrap_or_else(|| format!("{} for local use", record.name));
-                        Some(DesignValueDto::LongText { value: summary })
-                    }
-                    _ => field.default_value,
-                };
-                if let Some(value) = value {
-                    ops.push(AppDesignPatchOpDto::Set {
-                        field_id: field.id,
-                        value,
-                    });
-                }
-            }
-        }
-
-        AppDesignPatchDto {
-            ops,
-            note: Some("Suggested defaults based on the selected template.".into()),
-        }
     }
 
     /// Post-mutation `AppsChanged` snapshot: every successful mutation
@@ -2853,17 +2883,31 @@ impl MobileEngineHandle {
         }
     }
 
+    /// As [`Self::join_app_mutation`], but the task also reports ITS OWN
+    /// mutation's outcome — used by the four handlers below that gate a
+    /// SEPARATE, un-joined background LLM round trip (authoring/planning) on
+    /// it. `T` is `Option<u64>` at every call site: `Some(epoch)` on success
+    /// (the `llm_round` the mutation just bumped to, handed straight to the
+    /// freshly spawned task), `None` on failure. A cancelled join (runtime
+    /// shutting down) reports `T::default()` (`None`): there is nothing left
+    /// to trigger.
+    async fn join_app_mutation_outcome<T: Default>(task: tokio::task::JoinHandle<T>) -> T {
+        match task.await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if error.is_panic() {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                T::default()
+            }
+        }
+    }
+
     async fn handle_list_apps(&self) {
         let Some(service) = self.local_apps_or_report(None).await else {
             return;
         };
         Self::emit_apps_snapshot(&service).await;
-    }
-
-    async fn handle_list_app_templates(&self) {
-        self.emit_app_event(AppEventDto::AppTemplatesChanged {
-            templates: crate::local_apps_bridge::builtin_templates(),
-        });
     }
 
     async fn handle_get_app_details(&self, app_id: String) {
@@ -2902,19 +2946,12 @@ impl MobileEngineHandle {
     async fn handle_create_app(
         &self,
         name: &str,
-        template: AppTemplateKindDto,
         origin: AppCreateOriginDto,
+        brief: &str,
         conversation_id: Option<String>,
     ) {
         let Some(service) = self.local_apps_or_report(None).await else {
             return;
-        };
-        let template = match crate::local_apps_bridge::raise_template(template) {
-            Ok(template) => template,
-            Err(error) => {
-                self.emit_app_failure(None, &error).await;
-                return;
-            }
         };
         // Raising the origin is fallible like every other inbound DTO raise
         // (W1): an unknown `#[non_exhaustive]` future origin must fail typed
@@ -2932,10 +2969,201 @@ impl MobileEngineHandle {
         // match — see `AppCreateOrigin::conversation_binding`).
         let conversation_id = origin.conversation_binding(conversation_id);
         // Success needs no extra emit: `create_app` announces the new record
-        // set via its own `AppsChanged` domain event.
-        if let Err(error) = service.create_app(name, template, conversation_id).await {
-            self.emit_app_failure(None, &error).await;
+        // set via its own `AppsChanged` domain event. `brief` is the LLM's
+        // real seed now (Task 11) — `name` is a display label, never the
+        // spec the questionnaire gets authored from; see
+        // `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
+        match service.create_app(Some(name), brief, conversation_id).await {
+            Ok(record) => {
+                let epoch = record.llm_round;
+                self.trigger_authoring(&service, record.id, epoch);
+            }
+            Err(error) => self.emit_app_failure(None, &error).await,
         }
+    }
+
+    async fn handle_update_app_brief(&self, app_id: String, brief: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.update_brief(&task_app_id, &brief).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
+                }
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_authoring(&service, app_id, epoch);
+        }
+    }
+
+    async fn handle_retry_app_questionnaire(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.retry_questionnaire(&task_app_id).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
+                }
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_authoring(&service, app_id, epoch);
+        }
+    }
+
+    async fn handle_begin_app_planning(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        // `begin_planning` validates the collected answers are self-consistent
+        // BEFORE flipping to `planning` — a failure here never starts the
+        // background plan round trip.
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.begin_planning(&task_app_id).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
+                }
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_planning(&service, app_id, epoch);
+        }
+    }
+
+    async fn handle_retry_app_plan(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.retry_plan(&task_app_id).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
+                }
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_planning(&service, app_id, epoch);
+        }
+    }
+
+    /// Kick off background questionnaire authoring for `app_id`, fire-and-
+    /// forget from the caller's perspective: `submit` has already returned
+    /// (or is about to) by the time the LLM round trip lands. The eventual
+    /// `questionnaire_ready` / `questionnaire_failed` transition and its
+    /// `AppsChanged` snapshot ride the same app-emission channel as every
+    /// other app event. Delegates to the shared
+    /// [`crate::local_apps_profile::spawn_authoring`] — see its doc for why
+    /// this is a free function and why it runs on
+    /// [`crate::local_apps_profile::worker_runtime`] rather than
+    /// `self.runtime`.
+    fn trigger_authoring(&self, service: &Arc<AppService>, app_id: String, epoch: u64) {
+        // `self.local_apps` was `Ok` (checked by every caller via
+        // `local_apps_or_report`) iff `self.profile_apps` is `Some` — both are
+        // set together from the same `loaded_profile` match at build time.
+        // `debug_assert!` because a violation here is the SAME permanent
+        // hang this whole task exists to close, just via a different door —
+        // cheap enough to check even in release (a `tracing::error!` fires
+        // there too), since silently returning is exactly the failure mode
+        // under review.
+        let Some(profile) = &self.profile_apps else {
+            debug_assert!(
+                false,
+                "trigger_authoring called with local_apps Ok but profile_apps None"
+            );
+            tracing::error!(
+                app_id,
+                "local-apps profile unavailable; authoring was not triggered — the app is \
+                 stuck in authoring_questionnaire with no recovery until an engine restart"
+            );
+            return;
+        };
+        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
+            Arc::new(self.app_emissions.clone());
+        let handle = crate::local_apps_profile::spawn_authoring(
+            service.clone(),
+            profile.llm.current(),
+            notifier,
+            app_id,
+            epoch,
+        );
+        self.local_apps_background.track(handle);
+    }
+
+    /// As [`Self::trigger_authoring`], for background plan derivation.
+    fn trigger_planning(&self, service: &Arc<AppService>, app_id: String, epoch: u64) {
+        let Some(profile) = &self.profile_apps else {
+            debug_assert!(
+                false,
+                "trigger_planning called with local_apps Ok but profile_apps None"
+            );
+            tracing::error!(
+                app_id,
+                "local-apps profile unavailable; planning was not triggered — the app is \
+                 stuck in planning with no recovery until an engine restart"
+            );
+            return;
+        };
+        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
+            Arc::new(self.app_emissions.clone());
+        let handle = crate::local_apps_profile::spawn_planning(
+            service.clone(),
+            profile.llm.current(),
+            notifier,
+            app_id,
+            epoch,
+        );
+        self.local_apps_background.track(handle);
     }
 
     // The seven mutate-then-announce handlers below are cancellation-atomic:
@@ -3028,56 +3256,31 @@ impl MobileEngineHandle {
     async fn handle_request_app_design_suggestion(
         &self,
         app_id: String,
-        expected_revision: u64,
-        prompt: Option<String>,
+        _expected_revision: u64,
+        _prompt: Option<String>,
     ) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let record = match service.record(&app_id).await {
-            Ok(record) => record,
-            Err(error) => {
-                self.emit_app_failure(Some(app_id), &error).await;
-                return;
-            }
-        };
-        let draft = match service.draft(&app_id).await {
-            Ok(draft) => draft,
-            Err(error) => {
-                self.emit_app_failure(Some(app_id), &error).await;
-                return;
-            }
-        };
-        if draft.revision != expected_revision {
-            self.emit_app_failure(
-                Some(app_id),
-                &AppError::RevisionConflict {
-                    expected: expected_revision,
-                    actual: draft.revision,
-                },
-            )
-            .await;
+        // TODO(local-apps#questionnaire, Task 8): this used to build a
+        // suggested patch (`build_design_suggestion`, deleted here) by
+        // looking up the app's `AppTemplateKind` in the static built-in
+        // template catalog — the core no longer has a per-app template at
+        // all (Task 2), so that lookup has no input anymore. Task 8 replaces
+        // it with a real LLM-driven suggestion call. No existing test
+        // exercises this command (`RequestAppDesignSuggestion` is dispatched
+        // only from here; the design-suggestion tests in this file drive
+        // `AppService::store_suggestion` directly, bypassing this handler
+        // entirely), so failing loudly here is a pure gap-close, not a
+        // behavior regression.
+        if self.local_apps_or_report(Some(&app_id)).await.is_none() {
             return;
         }
-        let patch_dto = Self::build_design_suggestion(&record, &draft, prompt.as_deref());
-        let patch = match crate::local_apps_bridge::raise_patch(patch_dto) {
-            Ok(patch) => patch,
-            Err(error) => {
-                self.emit_app_failure(Some(app_id), &error).await;
-                return;
-            }
-        };
-        let emissions = self.app_emissions.clone();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.store_suggestion(&app_id, patch).await {
-                Ok(_suggestion) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
+        self.emit_app_failure(
+            Some(app_id),
+            &AppError::NotYetAvailable(
+                "agent design suggestions are not yet wired to the LLM (Task 8 replaces the \
+                 template-driven suggester)"
+                    .into(),
+            ),
+        )
         .await;
     }
 
@@ -3531,6 +3734,18 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
                     })?;
+                // The local-app LLM stages (author/plan/write-source) ride
+                // their OWN `ApiServiceModel`, not the orchestrator's model
+                // selection — without this they would stay silently pinned
+                // to whatever was live at engine build time even after a
+                // `/model` switch. `local_apps_llm` is stable for this
+                // connection's whole lifetime (only a reconnect gets a new
+                // one, via `profile_apps`'s `SharedLlm::replace`), so
+                // mutating it in place here is exactly the model every
+                // future authoring/planning/generation call will read.
+                self.inner
+                    .local_apps_llm
+                    .set_model(model_id.clone(), profile.clone());
                 let snapshot = handle.get_status_snapshot().await;
                 let selected =
                     traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
@@ -3784,22 +3999,34 @@ impl MobileEngineHandle {
                 self.handle_list_apps().await;
                 Ok(())
             }
-            ClientCommand::ListAppTemplates => {
-                self.handle_list_app_templates().await;
-                Ok(())
-            }
             ClientCommand::GetAppDetails { app_id } => {
                 self.handle_get_app_details(app_id).await;
                 Ok(())
             }
             ClientCommand::CreateApp {
                 name,
-                template,
                 origin,
+                brief,
                 conversation_id,
             } => {
-                self.handle_create_app(&name, template, origin, conversation_id)
+                self.handle_create_app(&name, origin, &brief, conversation_id)
                     .await;
+                Ok(())
+            }
+            ClientCommand::UpdateAppBrief { app_id, brief } => {
+                self.handle_update_app_brief(app_id, brief).await;
+                Ok(())
+            }
+            ClientCommand::RetryAppQuestionnaire { app_id } => {
+                self.handle_retry_app_questionnaire(app_id).await;
+                Ok(())
+            }
+            ClientCommand::BeginAppPlanning { app_id } => {
+                self.handle_begin_app_planning(app_id).await;
+                Ok(())
+            }
+            ClientCommand::RetryAppPlan { app_id } => {
+                self.handle_retry_app_plan(app_id).await;
                 Ok(())
             }
             ClientCommand::OpenAppDesigner { app_id } => {
@@ -5489,6 +5716,7 @@ pub fn build_mobile_engine_inner(
         inner.mobile_linux.clone(),
         firer_cfg.local_apps_full_runtime,
         firer_cfg.local_apps_runtime_root.clone(),
+        inner.local_apps_llm.clone(),
     ));
     let (
         local_apps,
@@ -5532,8 +5760,11 @@ pub fn build_mobile_engine_inner(
                 firer_cfg.local_apps_full_runtime,
                 firer_cfg.local_apps_runtime_root.clone(),
             );
-            let executor =
-                MobileAppGenerationExecutor::new(inner.mobile_linux.clone(), host.clone());
+            let executor = MobileAppGenerationExecutor::new(
+                inner.mobile_linux.clone(),
+                host.clone(),
+                Arc::new(SharedLlm::new(inner.local_apps_llm.clone())),
+            );
             let generation = AppGenerationCoordinator::new_with_observer(
                 mobile_apps_data_root(&firer_cfg),
                 firer_platform.clock(),
@@ -5604,6 +5835,7 @@ pub fn build_mobile_engine_inner(
         app_client_subscription,
         app_domain_subscription,
         app_domain_observer,
+        local_apps_background: LocalAppsBackgroundTracker::default(),
     }))
 }
 
@@ -6225,6 +6457,7 @@ mod tests {
     // ── F3-05: the async `submit` FFI entry point ───────────────────────────
 
     use super::{build_mobile_engine, MobileEngineHandle};
+    use crate::local_apps_llm::test_support::ScriptedModel;
     use client_protocol::commands::ClientCommand;
     use client_protocol::error::ClientError;
     use client_protocol::events::ClientEvent as Ev;
@@ -6234,6 +6467,14 @@ mod tests {
     /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
     /// handle plus the recording listener so a test can read back delivered
     /// events.
+    ///
+    /// Task 11: `CreateApp` (and friends) now trigger a REAL background
+    /// authoring/planning round trip. Off-device tests have no network, so
+    /// this installs a deterministic, always-fails-fast local-apps model
+    /// (zero scripted responses ⇒ an immediate, in-process
+    /// `AppError::Io`, no I/O) instead of leaving every caller race a real
+    /// `api.anthropic.com` request — a test that wants a scripted success
+    /// overrides it via `set_local_apps_model` before triggering.
     fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
         let platform: Arc<dyn traits::Platform> =
             Arc::new(HostFakePlatform::new(root.to_path_buf()));
@@ -6243,6 +6484,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
         (handle, listener)
     }
 
@@ -6259,6 +6501,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
         (handle, listener)
     }
 
@@ -7454,7 +7697,7 @@ mod tests {
 
     use client_protocol::local_apps::{
         AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
-        AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto, DesignValueDto,
+        AppRuntimeStateDto, AppWorkflowStateDto, DesignValueDto,
     };
 
     /// Drain and return every event delivered to the fake listener so far.
@@ -7492,29 +7735,46 @@ mod tests {
         })
     }
 
+    /// Task 11: `CreateApp` triggers a REAL background authoring round trip,
+    /// which `build_submit_handle`'s default test double fails immediately
+    /// (no scripted response) — deterministically, but concurrently with the
+    /// caller. Many tests below need `collecting_spec` for scaffolding
+    /// unrelated to authoring itself; this settles that background failure
+    /// FIRST (so nothing races the reset), resets to
+    /// `authoring_questionnaire` directly on the service (bypassing
+    /// `submit`, so no SECOND background round trip triggers), then splices
+    /// the fixture questionnaire exactly as `advance_to_collecting_spec`
+    /// always has.
+    async fn seed_collecting_spec(
+        handle: &MobileEngineHandle,
+        service: &local_apps::AppService,
+        app_id: &str,
+    ) -> local_apps::AppRecord {
+        handle.settle_local_apps().await;
+        service
+            .retry_questionnaire(app_id)
+            .await
+            .expect("reset to authoring_questionnaire for test scaffolding");
+        local_apps::test_support::advance_to_collecting_spec(service, app_id).await
+    }
+
+    /// (local-apps#questionnaire, Task 5, coordinator ruling: total removal of
+    /// the static template catalog): this test used to also cover
+    /// `ListAppTemplates` → `AppTemplatesChanged` before the FIRST assertion
+    /// below; that command/event pair is deleted along with the catalog, so
+    /// the test is renamed to describe what it still covers — `CreateApp` →
+    /// `AppsChanged` and `GetAppDetails` → `AppDetailsChanged`.
     #[test]
-    fn local_apps_templates_and_details_round_trip_through_submit() {
+    fn local_apps_create_and_details_round_trip_through_submit() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
             handle
-                .submit(ClientCommand::ListAppTemplates)
-                .await
-                .expect("submit(ListAppTemplates)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppEvent {
-                    event: AppEventDto::AppTemplatesChanged { templates }
-                } if templates.len() == 4
-            )));
-
-            handle
                 .submit(ClientCommand::CreateApp {
                     name: "Tracker".into(),
-                    template: AppTemplateKindDto::CrudTracker,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -7543,6 +7803,322 @@ mod tests {
         });
     }
 
+    /// PINS the Task 11 fix: `ClientCommand::CreateApp` now carries a real
+    /// `brief` field, and `handle_create_app` persists the CALLER-SUPPLIED
+    /// brief — not `name` doubling as the brief (the deliberate placeholder
+    /// this test used to pin, `create_app_persists_name_as_brief_until_
+    /// task_11_adds_a_real_one`, until this task landed). All three LLM
+    /// stages read `AppRecord.brief`, so a client-created app must author
+    /// its questionnaire from the caller's real spec, not a bare display
+    /// name.
+    ///
+    /// Mirrors `create_persists_the_caller_supplied_brief_and_does_not_
+    /// overwrite_a_supplied_name` in `local_apps_mcp.rs` (Task 10's side of
+    /// this same fix): `name` and `brief` are asserted UNEQUAL and both
+    /// checked, so this cannot pass by conflating them back together. The
+    /// `NAME` fixture stays longer than `AppService::create_app`'s 24-char
+    /// placeholder cut so a regression to `create_app(None, brief, ..)`
+    /// (`name` silently dropped) is visible too: it would come back as the
+    /// brief's own 24-char prefix instead of `NAME`.
+    #[test]
+    fn create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name() {
+        const NAME: &str = "Habit Tracker Deluxe Edition";
+        const BRIEF: &str = "一个记事本 app，用来跟踪每天的习惯打卡";
+        assert!(
+            NAME.chars().count() > 24,
+            "test fixture must exceed the placeholder cut to be meaningful"
+        );
+        assert_ne!(
+            NAME, BRIEF,
+            "name and brief must be distinct fixtures so the test cannot pass by \
+             conflating them"
+        );
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: NAME.into(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: BRIEF.into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            let service = handle.local_apps().expect("local-apps service");
+            let record = service.record(&app_id).await.expect("record");
+            assert_eq!(
+                record.name, NAME,
+                "a caller-supplied name must not be silently overwritten"
+            );
+            assert_eq!(
+                record.brief, BRIEF,
+                "the brief the caller supplied is the brief that gets stored — not the \
+                 name, not empty, not anything else"
+            );
+        });
+    }
+
+    // ── Task 11: host-orchestrated authoring / planning triggers ────────────
+
+    /// A valid `emit_questionnaire` tool payload — one step, one deferrable
+    /// multiple-choice field, matching `local_apps_llm.rs`'s own fixture
+    /// shape (already exercised there against the real validator).
+    fn good_questionnaire() -> serde_json::Value {
+        serde_json::json!({
+            "suggestedName": "记事本",
+            "steps": [{
+                "id": "basics", "order": 0, "title": "功能",
+                "fields": [{
+                    "id": "features", "label": "需要哪些功能",
+                    "fieldType": "multiple_choice", "required": true,
+                    "allowsCustom": true, "allowsDefer": true,
+                    "options": [{"value": "list", "label": "笔记列表"}]
+                }]
+            }]
+        })
+    }
+
+    /// A second, DIFFERENT valid questionnaire (distinct step id) — proves a
+    /// re-authoring round trip actually replaced the old questionnaire
+    /// rather than coincidentally matching it.
+    fn other_questionnaire() -> serde_json::Value {
+        serde_json::json!({
+            "suggestedName": "待办清单",
+            "steps": [{
+                "id": "todo_basics", "order": 0, "title": "任务",
+                "fields": [{
+                    "id": "priority", "label": "需要区分优先级吗",
+                    "fieldType": "boolean", "required": true,
+                    "allowsCustom": false, "allowsDefer": true,
+                    "options": []
+                }]
+            }]
+        })
+    }
+
+    /// A valid `emit_plan` tool payload, matching `local_apps_llm.rs`'s own
+    /// fixture shape.
+    fn good_plan() -> serde_json::Value {
+        serde_json::json!({
+            "summary": "一个记事本，帮你记录日常想法。",
+            "collections": [{
+                "id": "notes", "name": "笔记",
+                "fields": [{"id": "title", "label": "标题", "kind": "text", "required": true}]
+            }],
+            "capabilities": ["data_mutation"],
+            "domains": []
+        })
+    }
+
+    /// `CreateApp` starts authoring in the background; once it settles, the
+    /// app has moved past `authoring_questionnaire` to `collecting_spec` and
+    /// the LLM's suggested name has replaced the create-time placeholder.
+    #[test]
+    fn creating_an_app_drives_authoring_to_collecting_spec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![Ok(good_questionnaire())]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            let service = handle.local_apps().expect("local-apps service");
+            let record = service.record(&app_id).await.expect("record");
+            assert_eq!(
+                record.workflow_state,
+                local_apps::AppWorkflowState::CollectingSpec
+            );
+            assert_eq!(
+                record.name, "记事本",
+                "the suggested name replaced the create-time placeholder"
+            );
+        });
+    }
+
+    /// A model failure during authoring fails closed — `questionnaire_failed`,
+    /// never a silent fallback — and `RetryAppQuestionnaire` recovers from
+    /// there once the model is available again.
+    #[test]
+    fn a_model_failure_lands_in_questionnaire_failed_and_stays_retryable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![
+            Err(local_apps::AppError::LlmUnavailable("offline".into())),
+            Ok(good_questionnaire()),
+        ]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            let service = handle.local_apps().expect("local-apps service");
+            assert_eq!(
+                service.record(&app_id).await.expect("record").workflow_state,
+                local_apps::AppWorkflowState::QuestionnaireFailed
+            );
+
+            handle
+                .submit(ClientCommand::RetryAppQuestionnaire {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(RetryAppQuestionnaire)");
+            handle.settle_local_apps().await;
+            assert_eq!(
+                service.record(&app_id).await.expect("record").workflow_state,
+                local_apps::AppWorkflowState::CollectingSpec
+            );
+        });
+    }
+
+    /// `BeginAppPlanning` validates the answers, starts planning in the
+    /// background, and — once it settles — opens the spec-confirmation gate
+    /// with a plan stamped against the current draft revision.
+    #[test]
+    fn beginning_planning_drives_through_to_the_confirmation_gate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![
+            Ok(good_questionnaire()),
+            Ok(good_plan()),
+        ]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: AppDesignPatchDto {
+                        ops: vec![AppDesignPatchOpDto::Set {
+                            field_id: "features".into(),
+                            value: DesignValueDto::MultipleChoice {
+                                value: vec!["list".into()],
+                            },
+                        }],
+                        note: None,
+                    },
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft)");
+
+            handle
+                .submit(ClientCommand::BeginAppPlanning {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(BeginAppPlanning)");
+            handle.settle_local_apps().await;
+
+            let service = handle.local_apps().expect("local-apps service");
+            let record = service.record(&app_id).await.expect("record");
+            assert_eq!(
+                record.workflow_state,
+                local_apps::AppWorkflowState::AwaitingSpecConfirmation
+            );
+            let draft = service.draft(&app_id).await.expect("draft");
+            assert_eq!(draft.plan_for_revision, Some(draft.revision));
+        });
+    }
+
+    /// `UpdateAppBrief` discards the old questionnaire/answers and
+    /// re-authors from scratch — once it settles, the draft carries the
+    /// FRESH questionnaire, not the one authored from the original brief.
+    #[test]
+    fn changing_the_brief_reauthors_the_questionnaire() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![
+            Ok(good_questionnaire()),
+            Ok(other_questionnaire()),
+        ]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            handle
+                .submit(ClientCommand::UpdateAppBrief {
+                    app_id: app_id.clone(),
+                    brief: "改成一个待办清单".into(),
+                })
+                .await
+                .expect("submit(UpdateAppBrief)");
+            handle.settle_local_apps().await;
+
+            let service = handle.local_apps().expect("local-apps service");
+            let draft = service.draft(&app_id).await.expect("draft");
+            assert_eq!(
+                draft.questionnaire[0].id, "todo_basics",
+                "a fresh questionnaire replaced the old one"
+            );
+            assert!(draft.fields.is_empty());
+        });
+    }
+
     /// Index of the first event matching `pred`, or a panic naming what was
     /// expected and the whole batch. The app surface delivers through ONE
     /// ordered channel (channel order = commit order), so multi-event batches
@@ -7564,23 +8140,40 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Habit Tracker".into(),
-                    template: AppTemplateKindDto::CrudTracker,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: Some("conv-ignored".into()),
                 })
                 .await
                 .expect("submit(CreateApp)");
+            // Task 11: `CreateApp` triggers a background authoring round trip.
+            // `build_submit_handle`'s default model has no scripted response,
+            // so it fails immediately and deterministically —
+            // `settle_local_apps` waits for that to land BEFORE any event/
+            // state read below, so `workflow_state` is read once settled
+            // rather than raced against the still-running background task.
+            handle.settle_local_apps().await;
             let events = drain_events(&handle, &listener).await;
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             assert_eq!(apps.len(), 1);
             assert_eq!(apps[0].name, "Habit Tracker");
-            assert_eq!(apps[0].workflow_state, AppWorkflowStateDto::CollectingSpec);
+            assert_eq!(
+                apps[0].workflow_state,
+                AppWorkflowStateDto::QuestionnaireFailed,
+                "the default test double has no scripted response, so background \
+                 authoring fails immediately"
+            );
             assert_eq!(
                 apps[0].conversation_id, None,
                 "a library-origin create binds no conversation"
             );
             let app_id = apps[0].id.clone();
             assert_eq!(apps[0].workspace_rel, format!("apps/{app_id}/workspace"));
+
+            // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
+            // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
 
             // Open the designer gate; the interaction id reaches the client
             // ONLY through this event (spec §I gating).
@@ -7745,6 +8338,7 @@ mod tests {
                 "failed confirms must not advance the workflow"
             );
 
+            local_apps::test_support::stamp_fresh_plan(&service, &app_id).await;
             // The exact pending id + the current revision confirms → generating.
             handle
                 .submit(ClientCommand::ConfirmAppDesign {
@@ -7878,8 +8472,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Board".into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Chat,
+                    brief: "a test app".into(),
                     conversation_id: Some("conv-7".into()),
                 })
                 .await
@@ -7987,8 +8581,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Persist".into(),
-                    template: AppTemplateKindDto::FormUtility,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -7996,6 +8590,8 @@ mod tests {
             let events = drain_events(&handle, &listener).await;
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             let app_id = apps[0].id.clone();
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::UpdateAppDesignDraft {
                     app_id: app_id.clone(),
@@ -8063,8 +8659,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Moodboard".into(),
-                    template: AppTemplateKindDto::ContentShowcase,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8074,6 +8670,11 @@ mod tests {
                 [0]
             .id
             .clone();
+
+            // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
+            // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
 
             // The designer gate opens at revision 0; its interaction id
             // reaches the client only through this event.
@@ -8115,7 +8716,6 @@ mod tests {
             // An agent-side suggestion (AppService seam — the phase-3 designer
             // agent drives this) is announced with the id the apply command
             // must echo.
-            let service = handle.local_apps().expect("local-apps service");
             let suggestion = service
                 .store_suggestion(
                     &app_id,
@@ -8306,8 +8906,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Gallery".into(),
-                    template: AppTemplateKindDto::ContentShowcase,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8317,6 +8917,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
 
             handle
                 .submit(ClientCommand::OpenAppDesigner {
@@ -8332,6 +8934,7 @@ mod tests {
                     _ => None,
                 })
                 .expect("AppDesignerRequested must be emitted");
+            local_apps::test_support::stamp_fresh_plan(&service, &app_id).await;
             handle
                 .submit(ClientCommand::ConfirmAppDesign {
                     app_id: app_id.clone(),
@@ -8344,7 +8947,6 @@ mod tests {
 
             // The generation/validation seams (phase 3 drives them) open the
             // preview gate.
-            let service = handle.local_apps().expect("local-apps service");
             service
                 .generation_complete(&app_id)
                 .await
@@ -8493,6 +9095,10 @@ mod tests {
         let handle =
             build_mobile_engine(test_config(tmp.path()), platform, listener_dyn, perm_sink)
                 .expect("build_mobile_engine failed");
+        // See `build_submit_handle`'s doc: a deterministic, no-network local-
+        // apps model so `seed_collecting_spec` below never races (or hangs
+        // on) a real `api.anthropic.com` request.
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
         *listener.engine.lock().unwrap() = Some(handle.clone());
 
         handle.runtime().block_on(async {
@@ -8502,8 +9108,8 @@ mod tests {
                 handle
                     .submit(ClientCommand::CreateApp {
                         name: "Reentrant".into(),
-                        template: AppTemplateKindDto::Dashboard,
                         origin: AppCreateOriginDto::Library,
+                        brief: "a test app".into(),
                         conversation_id: None,
                     })
                     .await
@@ -8513,6 +9119,8 @@ mod tests {
                     .expect("CreateApp must announce AppsChanged")[0]
                     .id
                     .clone();
+                let service = handle.local_apps().expect("local-apps service");
+                seed_collecting_spec(&handle, &service, &app_id).await;
 
                 // Delivering AppDesignerRequested makes the listener drive
                 // the draft edit from inside `on_event`; both the outer and
@@ -8574,8 +9182,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Sweep".into(),
-                    template: AppTemplateKindDto::CrudTracker,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8585,6 +9193,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8592,7 +9202,6 @@ mod tests {
                 .await
                 .expect("submit(OpenAppDesigner)");
             drain_events(&handle, &listener).await;
-            let service = handle.local_apps().expect("local-apps service");
 
             /// Highest yield offset in the sweep; this one is the deterministic
             /// anchor (see below) rather than another timing probe.
@@ -8703,8 +9312,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Telemetry".into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8804,8 +9413,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Conflicted".into(),
-                    template: AppTemplateKindDto::ContentShowcase,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8815,6 +9424,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8829,7 +9440,6 @@ mod tests {
                 })
                 .await
                 .expect("submit(UpdateAppDesignDraft)");
-            let service = handle.local_apps().expect("local-apps service");
             let suggestion = service
                 .store_suggestion(
                     &app_id,
@@ -8912,8 +9522,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Fifo".into(),
-                    template: AppTemplateKindDto::FormUtility,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8923,6 +9533,8 @@ mod tests {
                 [0]
             .id
             .clone();
+            let service = handle.local_apps().expect("local-apps service");
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8990,13 +9602,15 @@ mod tests {
                 .await
                 .expect("seed service");
                 let record = service
-                    .create_app("Queued", local_apps::AppTemplateKind::Dashboard, None)
+                    .create_app(Some("Queued"), "a test app", None)
                     .await
                     .expect("create app");
+                local_apps::test_support::advance_to_collecting_spec(&service, &record.id).await;
                 let gate = service
                     .open_designer(&record.id)
                     .await
                     .expect("open designer");
+                local_apps::test_support::stamp_fresh_plan(&service, &record.id).await;
                 service
                     .confirm_design(&record.id, &gate.interaction_id, 0)
                     .await
@@ -9075,8 +9689,8 @@ mod tests {
             handle
                 .submit(ClientCommand::CreateApp {
                     name: "Habit Tracker".into(),
-                    template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await

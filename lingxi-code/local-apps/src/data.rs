@@ -1271,7 +1271,7 @@ fn set_private_directory_permissions(_path: &std::path::Path) -> Result<(), AppE
 mod tests {
     use super::*;
     use crate::manifest::{DataCollectionSchema, DataFieldSchema};
-    use crate::types::{AppTemplateKind, APPS_SCHEMA_VERSION};
+    use crate::types::APPS_SCHEMA_VERSION;
     use serde_json::json;
 
     fn manifest() -> AppManifest {
@@ -1280,7 +1280,6 @@ mod tests {
             app_id: "abcd1234".into(),
             revision: 1,
             name: "Tracker".into(),
-            template: AppTemplateKind::CrudTracker,
             collections: vec![DataCollectionSchema {
                 id: "items".into(),
                 name: "Items".into(),

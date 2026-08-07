@@ -13,48 +13,22 @@ use std::fmt;
 /// Schema version stamped on every persisted local-apps file.
 pub const APPS_SCHEMA_VERSION: u32 = 1;
 
-/// Which scaffold template an app is designed from.
-///
-/// Per-template design-schema content (and validation against it) is phase 3;
-/// in phase 1 the template is an opaque tag on the record and draft.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AppTemplateKind {
-    /// Read-mostly metric/dashboard app.
-    Dashboard,
-    /// Create/read/update/delete tracker.
-    CrudTracker,
-    /// Content/gallery showcase.
-    ContentShowcase,
-    /// Single-purpose form utility.
-    FormUtility,
-}
-
-impl AppTemplateKind {
-    /// Canonical `snake_case` name (the persisted/wire value).
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Dashboard => "dashboard",
-            Self::CrudTracker => "crud_tracker",
-            Self::ContentShowcase => "content_showcase",
-            Self::FormUtility => "form_utility",
-        }
-    }
-}
-
-impl fmt::Display for AppTemplateKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// Designer/generation workflow state of an app (spec §B state machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppWorkflowState {
+    /// LLM is authoring the questionnaire for this brief. Designer is
+    /// read-only.
+    AuthoringQuestionnaire,
+    /// Authoring failed; retryable, or the brief can be changed and
+    /// re-authored.
+    QuestionnaireFailed,
     /// Draft is being filled in; no confirmation gate is open.
     CollectingSpec,
+    /// LLM is deriving the plan from the answers. Designer is read-only.
+    Planning,
+    /// Planning failed; retryable.
+    PlanFailed,
     /// The designer interaction is pending user confirmation.
     AwaitingSpecConfirmation,
     /// Code generation is running (phase 3 drives this).
@@ -79,7 +53,11 @@ impl AppWorkflowState {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::AuthoringQuestionnaire => "authoring_questionnaire",
+            Self::QuestionnaireFailed => "questionnaire_failed",
             Self::CollectingSpec => "collecting_spec",
+            Self::Planning => "planning",
+            Self::PlanFailed => "plan_failed",
             Self::AwaitingSpecConfirmation => "awaiting_spec_confirmation",
             Self::Generating => "generating",
             Self::Validating => "validating",
@@ -145,8 +123,13 @@ pub struct AppRecord {
     pub id: String,
     /// User-facing display name.
     pub name: String,
-    /// Template the app is designed from.
-    pub template: AppTemplateKind,
+    /// One-line description the user gave at creation time. All three LLM
+    /// stages (authoring the questionnaire, planning, writing source) read
+    /// it. Stored ONCE — the list page displays it, a failed questionnaire
+    /// authoring retries from it, and `generate_source` already calls
+    /// `service.record()` to reach it. Storing a second copy would
+    /// inevitably drift.
+    pub brief: String,
     /// Creation time, epoch milliseconds.
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
@@ -159,6 +142,37 @@ pub struct AppRecord {
     /// Workspace directory relative to the data root, always
     /// `apps/<id>/workspace` with forward slashes.
     pub workspace_rel: String,
+    /// Monotonic counter bumped every time the app ENTERS
+    /// `authoring_questionnaire` or `planning` (`AppState::create`,
+    /// `retry_questionnaire`, `update_brief`, `begin_planning`,
+    /// `retry_plan`). The engine captures this value when it spawns the
+    /// background LLM round trip for that entry and passes it back to
+    /// `questionnaire_ready`/`questionnaire_failed`/`plan_ready`/
+    /// `plan_failed`, which reject a round whose epoch no longer matches
+    /// the CURRENT one as a silent no-op (not a fail-close).
+    ///
+    /// Exists because `retry_questionnaire`/`retry_plan`/`update_brief` all
+    /// admit their OWN in-progress state as a valid source (the manual
+    /// escape hatch for a stuck app) — without an epoch, a user retrying
+    /// while the original round trip is still genuinely alive (just slow,
+    /// not dead) spawns a SECOND task racing the first for the SAME
+    /// workflow-state guard, and whichever finishes last wins even if it is
+    /// the STALE one — silently overwriting a fresh questionnaire/plan with
+    /// a stale one, with no error surfaced anywhere. The epoch makes that
+    /// race decidable: only the round the CURRENT epoch names may commit.
+    ///
+    /// Deliberately `#[serde(skip)]` — NOT persisted. Correctness only
+    /// requires comparing two epochs captured within the SAME live
+    /// process: a background task's `Arc<AppService>` and this counter both
+    /// live only as long as the process does, and `AppService::load`'s
+    /// `fail_interrupted_llm_rounds` sweep already guarantees no task from a
+    /// PRIOR process ever survives to race a new one after a restart.
+    /// Skipping it keeps the on-disk schema — and the `serde_compat.rs`
+    /// byte-for-byte goldens — untouched by a purely in-process bookkeeping
+    /// field; every reload starts back at `0`, which is always < any epoch
+    /// a live task could ever present.
+    #[serde(skip)]
+    pub llm_round: u64,
 }
 
 /// Density choice for [`DesignValue::Density`].
@@ -201,6 +215,8 @@ pub enum DesignValue {
     DataFieldList(Vec<crate::manifest::DataFieldSchema>),
     /// HTTPS host names declared for the native network bridge.
     DomainList(Vec<String>),
+    /// The user explicitly chose to let the LLM decide this field.
+    Deferred,
 }
 
 /// One patch operation against the draft field map.
@@ -256,13 +272,23 @@ pub struct AppDesignSuggestion {
 pub struct AppDesignDraft {
     /// Persisted schema version ([`APPS_SCHEMA_VERSION`]).
     pub schema_version: u32,
-    /// Template the draft belongs to.
-    pub template: AppTemplateKind,
     /// Monotonic edit counter; bumped by every applied field change.
     pub revision: u64,
-    /// Schema-agnostic field map (validated against the template in phase 3).
+    /// The questionnaire the LLM authored. Immutable once authoring
+    /// succeeds.
+    #[serde(default)]
+    pub questionnaire: Vec<crate::questionnaire::AppDesignStep>,
+    /// Schema-agnostic answer map, keyed by [`crate::questionnaire::AppDesignField::id`].
     #[serde(default)]
     pub fields: BTreeMap<String, DesignValue>,
+    /// The "will create" summary shown on the confirmation page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::questionnaire::AppPlan>,
+    /// Which revision `plan` was computed against. Any further answer edit
+    /// invalidates it — the same staleness guard
+    /// [`AppDesignSuggestion::based_on_revision`] uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_for_revision: Option<u64>,
     /// At most one agent suggestion awaiting application.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_suggestion: Option<AppDesignSuggestion>,
@@ -516,10 +542,6 @@ mod tests {
     #[test]
     fn enums_serialize_to_spec_snake_case_strings() {
         assert_eq!(
-            serde_json::to_string(&AppTemplateKind::CrudTracker).unwrap(),
-            "\"crud_tracker\""
-        );
-        assert_eq!(
             serde_json::to_string(&AppWorkflowState::AwaitingSpecConfirmation).unwrap(),
             "\"awaiting_spec_confirmation\""
         );
@@ -594,17 +616,22 @@ mod tests {
         let record = AppRecord {
             id: "abc123".into(),
             name: "Habits".into(),
-            template: AppTemplateKind::Dashboard,
+            brief: "Track daily habits".into(),
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
             workflow_state: AppWorkflowState::CollectingSpec,
             conversation_id: None,
             workspace_rel: "apps/abc123/workspace".into(),
+            // `#[serde(skip)]` (process-lifetime only, see its doc) — `0`
+            // so the round-trip equality below holds; a real round trip
+            // always comes back `0` regardless of what's written here.
+            llm_round: 0,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"createdAtMs\":1700000000000"));
         assert!(json.contains("\"workflowState\":\"collecting_spec\""));
         assert!(json.contains("\"workspaceRel\":\"apps/abc123/workspace\""));
+        assert!(json.contains("\"brief\":\"Track daily habits\""));
         assert!(!json.contains("conversationId"));
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
@@ -616,9 +643,11 @@ mod tests {
         fields.insert("title".to_string(), DesignValue::ShortText("T".into()));
         let draft = AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
-            template: AppTemplateKind::FormUtility,
             revision: 4,
+            questionnaire: Vec::new(),
             fields,
+            plan: None,
+            plan_for_revision: None,
             pending_suggestion: Some(AppDesignSuggestion {
                 suggestion_id: "sugg-1".into(),
                 patch: AppDesignPatch {
@@ -633,6 +662,8 @@ mod tests {
         assert!(json.contains("\"schemaVersion\":1"));
         assert!(json.contains("\"basedOnRevision\":4"));
         assert!(!json.contains("confirmedRevision"));
+        assert!(!json.contains("\"plan\""));
+        assert!(!json.contains("planForRevision"));
         let back: AppDesignDraft = serde_json::from_str(&json).unwrap();
         assert_eq!(back, draft);
 

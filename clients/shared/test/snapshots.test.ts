@@ -177,16 +177,14 @@ function validatePermissionMode(v: unknown): void {
 
 // ── local_apps.rs validators (bare-string enums + kind/op-tagged DTOs) ────────
 
-function validateAppTemplateKind(v: unknown): void {
-  assert.ok(
-    ['dashboard', 'crud_tracker', 'content_showcase', 'form_utility'].includes(v as string),
-  );
-}
-
 function validateAppWorkflowState(v: unknown): void {
   assert.ok(
     [
+      'authoring_questionnaire',
+      'questionnaire_failed',
       'collecting_spec',
+      'planning',
+      'plan_failed',
       'awaiting_spec_confirmation',
       'generating',
       'validating',
@@ -219,6 +217,8 @@ function validateAppErrorCode(v: unknown): void {
       'storage_corrupt',
       'invalid_request',
       'io',
+      'llm_unavailable',
+      'llm_output_rejected',
     ].includes(v as string),
   );
 }
@@ -260,6 +260,8 @@ function validateDesignValue(v: unknown): void {
       break;
     case 'density':
       assert.ok(['compact', 'comfortable'].includes(o['value'] as string));
+      break;
+    case 'deferred':
       break;
     default:
       assert.fail(`unknown DesignValueDto kind: ${String(o['kind'])}`);
@@ -314,7 +316,13 @@ function validateAppDataCollection(v: unknown): void {
 
 function validateAppDesignField(v: unknown): void {
   const o = rec(v);
-  assert.ok(isString(o['id']) && isString(o['label']) && isBool(o['required']));
+  assert.ok(
+    isString(o['id']) &&
+      isString(o['label']) &&
+      isBool(o['required']) &&
+      isBool(o['allows_custom']) &&
+      isBool(o['allows_defer']),
+  );
   assert.ok(
     [
       'short_text',
@@ -339,20 +347,29 @@ function validateAppDesignField(v: unknown): void {
   }
 }
 
-function validateAppTemplate(v: unknown): void {
+function validateAppDesignStep(v: unknown): void {
+  const s = rec(v);
+  assert.ok(isString(s['id']) && isNumber(s['order']) && isString(s['title']));
+  if ('description' in s) assert.ok(isString(s['description']));
+  assert.ok(Array.isArray(s['fields']));
+  for (const f of s['fields'] as unknown[]) validateAppDesignField(f);
+}
+
+function validateAppPlan(v: unknown): void {
   const o = rec(v);
-  validateAppTemplateKind(o['kind']);
-  assert.ok(isNumber(o['version']) && isString(o['name']) && isString(o['description']));
-  assert.ok(Array.isArray(o['steps']));
-  for (const step of o['steps'] as unknown[]) {
-    const s = rec(step);
-    assert.ok(isString(s['id']) && isNumber(s['order']) && isString(s['title']));
-    if ('description' in s) assert.ok(isString(s['description']));
-    assert.ok(Array.isArray(s['fields']));
-    for (const f of s['fields'] as unknown[]) validateAppDesignField(f);
-  }
   assert.ok(Array.isArray(o['collections']));
   for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
+  assert.ok(Array.isArray(o['capabilities']));
+  for (const cap of o['capabilities'] as unknown[]) {
+    assert.ok(
+      ['data_mutation', 'ui_control', 'network_domain', 'restore_checkpoint'].includes(
+        cap as string,
+      ),
+    );
+  }
+  assert.ok(Array.isArray(o['domains']));
+  for (const d of o['domains'] as unknown[]) assert.ok(isString(d));
+  assert.ok(isString(o['summary']));
 }
 
 function validateAppRuntimeDetails(v: unknown): void {
@@ -415,7 +432,6 @@ function validateAppManifest(v: unknown): void {
       isString(o['name']) &&
       isNumber(o['design_revision']),
   );
-  validateAppTemplateKind(o['template']);
   assert.ok(Array.isArray(o['collections']));
   for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
   assert.ok(Array.isArray(o['allowed_domains']));
@@ -485,11 +501,11 @@ function validateAppRecord(v: unknown): void {
   assert.ok(
     isString(o['id']) &&
       isString(o['name']) &&
+      isString(o['brief']) &&
       isNumber(o['created_at_ms']) &&
       isNumber(o['updated_at_ms']) &&
       isString(o['workspace_rel']),
   );
-  validateAppTemplateKind(o['template']);
   validateAppWorkflowState(o['workflow_state']);
   if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
 }
@@ -510,6 +526,9 @@ function validateAppDetails(v: unknown): void {
     assert.ok(isString(p['field_id']));
     validateDesignValue(p['value']);
   }
+  assert.ok(Array.isArray(o['questionnaire']));
+  for (const step of o['questionnaire'] as unknown[]) validateAppDesignStep(step);
+  if ('plan' in o) validateAppPlan(o['plan']);
   if ('manifest' in o) validateAppManifest(o['manifest']);
   validateAppRuntimeDetails(o['runtime']);
   if ('generation_job' in o) validateAppGenerationJob(o['generation_job']);
@@ -520,12 +539,17 @@ function validateAppDetails(v: unknown): void {
 function validateAppEvent(v: unknown): void {
   const o = rec(v);
   switch (o['type']) {
-    case 'app_templates_changed':
-      assert.ok(Array.isArray(o['templates']));
-      for (const tpl of o['templates'] as unknown[]) validateAppTemplate(tpl);
-      break;
     case 'app_details_changed':
       validateAppDetails(o['details']);
+      break;
+    case 'app_questionnaire_changed':
+      assert.ok(isString(o['app_id']) && isNumber(o['revision']));
+      assert.ok(Array.isArray(o['steps']));
+      for (const step of o['steps'] as unknown[]) validateAppDesignStep(step);
+      break;
+    case 'app_plan_changed':
+      assert.ok(isString(o['app_id']) && isNumber(o['revision']));
+      if ('plan' in o) validateAppPlan(o['plan']);
       break;
     case 'app_generation_job_changed':
       validateAppGenerationJob(o['job']);
@@ -690,13 +714,14 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isString(o['task_id']));
       break;
     case 'list_apps':
-    case 'list_app_templates':
       break;
     case 'create_app':
-      assert.ok(isString(o['name']));
-      validateAppTemplateKind(o['template']);
+      assert.ok(isString(o['name']) && isString(o['brief']));
       validateAppCreateOrigin(o['origin']);
       if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
+      break;
+    case 'update_app_brief':
+      assert.ok(isString(o['app_id']) && isString(o['brief']));
       break;
     case 'open_app_designer':
     case 'cancel_app_design':
@@ -705,6 +730,9 @@ function validateCommand(name: string, v: unknown): void {
     case 'restart_app':
     case 'get_app_details':
     case 'retry_app_generation':
+    case 'retry_app_questionnaire':
+    case 'begin_app_planning':
+    case 'retry_app_plan':
     case 'reset_app_permissions':
     case 'list_app_checkpoints':
     case 'delete_app':
@@ -1133,7 +1161,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 51, `expected 51 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 54, `expected 54 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1141,7 +1169,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 58, `expected 58 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 59, `expected 59 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

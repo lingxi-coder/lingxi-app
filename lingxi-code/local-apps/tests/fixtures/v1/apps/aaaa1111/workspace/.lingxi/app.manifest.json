@@ -3,13 +3,6 @@
   "appId": "aaaa1111",
   "revision": 0,
   "name": "Fixture Maximal",
-  "template": "crud_tracker",
-  "collections": [
-    {
-      "id": "items",
-      "name": "Items",
-      "fields": []
-    }
-  ],
+  "collections": [],
   "allowedDomains": []
 }

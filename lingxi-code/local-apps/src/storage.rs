@@ -56,9 +56,9 @@ use crate::error::AppError;
 use crate::ids;
 use crate::state::AppState;
 use crate::types::{
-    AppContinuationKind, AppDesignDraft, AppInteractionKind, AppInteractionRequest,
-    AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
-    APPS_SCHEMA_VERSION,
+    AppContinuationKind, AppDesignDraft, AppDesignPatchOp, AppInteractionKind,
+    AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState,
+    AppWorkflowState, DesignValue, APPS_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -296,6 +296,44 @@ fn ensure_schema_version(rel: &Path, found: u32) -> Result<(), AppError> {
     }
 }
 
+// `DesignValue::Deferred` ("let the model decide") is now a legitimate value
+// in TWO of the three places `AppDesignDraft` can carry a `DesignValue`:
+// `fields` (a real answer) and `pending_suggestion`'s patch ops (an
+// LLM-proposed patch may itself propose deferring a field) — both write
+// through `service::validate_design_value`, which now accepts it (see that
+// function's doc). This is what lets `engine-mobile`'s
+// `lower_design_value`/`raise_design_value` map it to/from the wire
+// `DesignValueDto::Deferred` (client-protocol) instead of treating it as
+// unreachable.
+//
+// The THIRD location — `questionnaire[*].fields[*].default_value` — stays
+// gated. A field's own authored DEFAULT is not an answer; it is validated by
+// `validate_questionnaire`'s `AppDesignFieldType::accepts`, which has no arm
+// for `Deferred` (a *validated* questionnaire can never carry one there).
+// Nothing on this LOAD path calls `validate_questionnaire` yet, so a
+// hand-edited or newer-build document could still smuggle a `Deferred`
+// default past a bare `serde_json::from_str` — reject it here, the same way
+// every other per-app invariant in `load_all` fails loudly instead of
+// laundering bad data into memory. When a future task wires
+// `validate_questionnaire` into the load path itself, this check becomes
+// redundant with it (not wrong) — leave it as the defense-in-depth layer.
+fn ensure_no_deferred_design_values(draft_rel: &Path, draft: &AppDesignDraft) -> Result<(), AppError> {
+    let is_deferred = |value: &DesignValue| matches!(value, DesignValue::Deferred);
+    let has_deferred_default = draft.questionnaire.iter().any(|step| {
+        step.fields
+            .iter()
+            .any(|field| field.default_value.as_ref().is_some_and(is_deferred))
+    });
+    if has_deferred_default {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: a questionnaire field default value is deferred, which is never a legal \
+             default (only an answer)",
+            draft_rel.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Load every app from disk. A missing index means an empty store; a corrupt
 /// index or per-app document fails with `storage_corrupt` rather than
 /// silently dropping apps.
@@ -325,8 +363,25 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         Err(FsError::NotFound(_)) => return Ok(Vec::new()),
         Err(error) => return Err(load_read_error(&index_rel, &error)),
     };
-    let index: AppIndexFile = serde_json::from_str(&body)
-        .map_err(|error| AppError::StorageCorrupt(format!("apps/index.json: {error}")))?;
+    let index: AppIndexFile = serde_json::from_str(&body).map_err(|error| {
+        // A template-era `apps/index.json` fails to parse (it lacks the
+        // now-required `brief` field) like any other shape drift — but unlike
+        // an ordinary corruption, this ISN'T a bug to report, it's an
+        // intentionally unreadable legacy format: give a message that says so
+        // instead of leaking the raw serde path. The check is on the raw
+        // bytes, not the (already-failed) typed value, so it fires
+        // regardless of where in the document the old `"template"` field
+        // happened to sit.
+        if body.as_bytes().windows(10).any(|w| w == b"\"template\"") {
+            AppError::StorageCorrupt(
+                "此版本不再支持模版时代的 app 记录（apps/index.json 含 template 字段）；\
+                 请删除 apps/ 目录后重新创建应用 / no longer supports template-era app records"
+                    .into(),
+            )
+        } else {
+            AppError::StorageCorrupt(format!("apps/index.json: {error}"))
+        }
+    })?;
     ensure_schema_version(&index_rel, index.schema_version)?;
 
     let mut apps = Vec::with_capacity(index.apps.len());
@@ -357,6 +412,7 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         let draft_rel = design_spec_rel(&record.id);
         let draft: AppDesignDraft = read_doc(root, &draft_rel)?;
         ensure_schema_version(&draft_rel, draft.schema_version)?;
+        ensure_no_deferred_design_values(&draft_rel, &draft)?;
 
         let interactions = load_interactions(root, &record.id)?;
 
@@ -653,8 +709,14 @@ pub(crate) fn resolve_gate_evidence(app: &mut AppState) -> bool {
         // `open_designer` accepts GenerationFailed as well as CollectingSpec
         // (state.rs), so a crash between the interactions.json and the mirror
         // writes can leave either source state with the gate already armed.
+        // `plan_ready` (Task 3) arms the SAME Designer gate from `Planning` —
+        // a crash in that same write window must repair forward here too, or
+        // a torn `plan_ready` wedges `confirm_design` behind a source state
+        // this table never resolves.
         (
-            AppWorkflowState::CollectingSpec | AppWorkflowState::GenerationFailed,
+            AppWorkflowState::CollectingSpec
+            | AppWorkflowState::GenerationFailed
+            | AppWorkflowState::Planning,
             Some(AppInteractionKind::Designer),
         ) => Some(AppWorkflowState::AwaitingSpecConfirmation),
         (AppWorkflowState::Validating, Some(AppInteractionKind::Preview)) => {
@@ -1041,16 +1103,53 @@ fn sweep_trash(root: &Path) {
 mod tests {
     use super::*;
     use crate::error::AppErrorCode;
-    use crate::types::AppTemplateKind;
+    use crate::questionnaire::{
+        AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignStep,
+    };
 
+    fn one_step() -> Vec<AppDesignStep> {
+        vec![AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "basics".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "tone".into(),
+                label: "tone".into(),
+                description: None,
+                field_type: AppDesignFieldType::SingleChoice,
+                required: false,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: None,
+                options: vec![AppDesignFieldOption {
+                    value: "a".into(),
+                    label: "A".into(),
+                }],
+            }],
+        }]
+    }
+
+    /// A fresh app fast-forwarded straight to `collecting_spec` — none of
+    /// these storage goldens exercise questionnaire authoring itself, they
+    /// pin document persistence/load-repair, so the fixture just needs to
+    /// clear `open_designer`'s `collecting_spec | generation_failed` gate.
     fn new_app(id: &str) -> AppState {
-        AppState::create(
+        let mut app = AppState::create(
             id.into(),
             format!("App {id}"),
-            AppTemplateKind::CrudTracker,
+            "a test app".into(),
             Some("conv-9".into()),
             1_700_000_000_000,
-        )
+        );
+        app.questionnaire_ready(one_step(), None, 1, 1_700_000_000_000)
+            .expect("fixture questionnaire is valid");
+        // `llm_round` is `#[serde(skip)]` (process-lifetime only, see its
+        // doc) — a disk round trip always comes back `0`. Zero it here too
+        // so an in-memory fixture compares equal to its own reload; these
+        // storage goldens pin document persistence, not this field.
+        app.record.llm_round = 0;
+        app
     }
 
     fn save_full(root: &Path, apps: &[AppState]) {
@@ -1110,6 +1209,33 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
     }
 
+    // The brief's Step-1 pseudocode drives this through a
+    // `crate::test_support::memory_fs()` / `load_index` seam that does not
+    // exist in this codebase (there is no injected-fs test double here, and
+    // the loader is `load_all(root: &Path)`, not `load_index`). Adapted to
+    // the ACTUAL harness the rest of this module already uses (a real
+    // tempdir + `std::fs::write` + `load_all`), which is the same pattern
+    // `corrupt_index_is_storage_corrupt_not_silent_reset` above uses — the
+    // behavior under test (a readable error instead of a raw serde path) is
+    // unchanged.
+    #[test]
+    fn a_template_era_index_reports_a_readable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("apps")).unwrap();
+        std::fs::write(
+            dir.path().join("apps/index.json"),
+            br#"{"schemaVersion":1,"apps":[{"id":"old","name":"Old","template":"dashboard","createdAtMs":1,"updatedAtMs":1,"workflowState":"ready","workspaceRel":"apps/old/workspace"}]}"#,
+        )
+        .unwrap();
+
+        let error = load_all(dir.path()).expect_err("a template-era index is not loadable");
+        let message = format!("{error}");
+        assert!(
+            message.contains("不再支持") || message.contains("no longer supports"),
+            "the error explains WHY rather than leaking a serde path: {message}"
+        );
+    }
+
     #[test]
     fn unsupported_schema_version_is_storage_corrupt() {
         let dir = tempfile::tempdir().unwrap();
@@ -1132,7 +1258,7 @@ mod tests {
             "apps": [{
                 "id": "../../escape",
                 "name": "evil",
-                "template": "dashboard",
+                "brief": "an evil app",
                 "createdAtMs": 1,
                 "updatedAtMs": 1,
                 "workflowState": "collecting_spec",
@@ -1164,7 +1290,7 @@ mod tests {
                 "apps": [{
                     "id": "aaaa1111",
                     "name": "sneaky",
-                    "template": "dashboard",
+                    "brief": "a sneaky app",
                     "createdAtMs": 1,
                     "updatedAtMs": 1,
                     "workflowState": "collecting_spec",
@@ -1468,6 +1594,169 @@ mod tests {
                 "{doc}: {err}"
             );
         }
+    }
+
+    /// `Deferred` ("let the model decide") is now a legitimate persisted
+    /// `fields` value (Task 2 made it a real draft answer; the sibling
+    /// write-side gate `service::validate_design_value` now accepts it too —
+    /// see that function's doc). A live app's draft is saved normally with a
+    /// `Deferred` field, then the store is reloaded from disk: this must
+    /// round-trip cleanly, not fail `storage_corrupt` the way it used to
+    /// before this gate was lifted.
+    #[test]
+    fn a_deferred_field_persists_and_reloads_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app("kkkk1111");
+        app.draft
+            .fields
+            .insert("tone".to_string(), DesignValue::Deferred);
+        save_full(dir.path(), &[app]);
+
+        let reloaded = load_all(dir.path()).expect("a deferred field must reload cleanly");
+        let reloaded_app = reloaded
+            .iter()
+            .find(|state| state.record.id == "kkkk1111")
+            .expect("app present after reload");
+        assert_eq!(
+            reloaded_app.draft.fields.get("tone"),
+            Some(&DesignValue::Deferred),
+            "the deferred answer must survive the round trip byte-for-byte"
+        );
+    }
+
+    /// Same legalization, reached through a pending suggestion's patch
+    /// instead of a live field: an LLM-proposed patch may itself propose
+    /// deferring a field. Drives a REAL round trip (`store_suggestion` ->
+    /// `save_full` -> `load_all`), not just a direct call to
+    /// `ensure_no_deferred_design_values` — that function does not inspect
+    /// `pending_suggestion` at all (only `questionnaire[*].fields[*].default_value`
+    /// remains gated; see its doc), so a direct call would pass for a reason
+    /// unrelated to this test's stated subject and would keep passing even if
+    /// pending-suggestion handling were deleted outright. Going through the
+    /// real store is what actually proves a saved pending suggestion carrying
+    /// a `Deferred` op reloads intact (parity review finding).
+    #[test]
+    fn a_deferred_value_in_a_pending_suggestion_patch_persists_and_reloads_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app("kkkk1111");
+        app.store_suggestion(
+            "sugg-1".into(),
+            crate::types::AppDesignPatch {
+                ops: vec![AppDesignPatchOp::Set {
+                    field_id: "tone".into(),
+                    value: DesignValue::Deferred,
+                }],
+                note: None,
+            },
+            1_700_000_000_000,
+        )
+        .expect("store_suggestion succeeds from collecting_spec");
+        save_full(dir.path(), &[app]);
+
+        let reloaded = load_all(dir.path())
+            .expect("a deferred value in a pending suggestion must reload cleanly");
+        let reloaded_app = reloaded
+            .iter()
+            .find(|state| state.record.id == "kkkk1111")
+            .expect("app present after reload");
+        let suggestion = reloaded_app
+            .draft
+            .pending_suggestion
+            .as_ref()
+            .expect("the pending suggestion must survive the round trip");
+        assert_eq!(
+            suggestion.patch.ops,
+            vec![AppDesignPatchOp::Set {
+                field_id: "tone".into(),
+                value: DesignValue::Deferred,
+            }],
+            "the deferred op must survive the round trip byte-for-byte"
+        );
+    }
+
+    /// The THIRD `DesignValue`-bearing location `AppDesignDraft` grew in Task
+    /// 2 — a questionnaire field's `default_value` — is covered by the same
+    /// guard, not just `fields` and the pending suggestion.
+    #[test]
+    fn a_deferred_questionnaire_default_value_is_storage_corrupt_at_load() {
+        let draft = AppDesignDraft {
+            schema_version: APPS_SCHEMA_VERSION,
+            revision: 0,
+            questionnaire: vec![crate::questionnaire::AppDesignStep {
+                id: "basics".into(),
+                order: 0,
+                title: "Basics".into(),
+                description: None,
+                fields: vec![crate::questionnaire::AppDesignField {
+                    id: "tone".into(),
+                    label: "Tone".into(),
+                    description: None,
+                    field_type: crate::questionnaire::AppDesignFieldType::ShortText,
+                    required: false,
+                    allows_custom: false,
+                    allows_defer: true,
+                    default_value: Some(DesignValue::Deferred),
+                    options: Vec::new(),
+                }],
+            }],
+            fields: std::collections::BTreeMap::new(),
+            plan: None,
+            plan_for_revision: None,
+            pending_suggestion: None,
+            confirmed_revision: None,
+        };
+        let err =
+            ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
+        assert!(err.to_string().contains("questionnaire"), "{err}");
+    }
+
+    /// A draft with no `Deferred` value anywhere (the common case, including
+    /// an empty `fields` map and no pending suggestion) is unaffected.
+    ///
+    /// The questionnaire carries a REAL step with a POPULATED, legal
+    /// non-`Deferred` `default_value` — not an empty `questionnaire: Vec::new()`
+    /// — so this is honest coverage of the new third arm
+    /// (`ensure_no_deferred_design_values`'s questionnaire check), not a
+    /// vacuous pass: a guard that rejected every populated `default_value`
+    /// regardless of its variant (e.g. `is_some()` instead of
+    /// `is_some_and(is_deferred)`) would still pass a test whose
+    /// `questionnaire` is empty, and review flagged exactly that. Verified by
+    /// hand: mutating the real `is_some_and(is_deferred)` to `is_some()` in
+    /// `ensure_no_deferred_design_values` turns this test red (see
+    /// `task-2-report.md`'s mutation-check writeup for the exact output).
+    #[test]
+    fn a_draft_without_any_deferred_value_passes_the_guard() {
+        let draft = AppDesignDraft {
+            schema_version: APPS_SCHEMA_VERSION,
+            revision: 1,
+            questionnaire: vec![crate::questionnaire::AppDesignStep {
+                id: "basics".into(),
+                order: 0,
+                title: "Basics".into(),
+                description: None,
+                fields: vec![crate::questionnaire::AppDesignField {
+                    id: "tone".into(),
+                    label: "Tone".into(),
+                    description: None,
+                    field_type: crate::questionnaire::AppDesignFieldType::ShortText,
+                    required: false,
+                    allows_custom: false,
+                    allows_defer: true,
+                    default_value: Some(DesignValue::ShortText("playful".into())),
+                    options: Vec::new(),
+                }],
+            }],
+            fields: std::collections::BTreeMap::from([(
+                "tone".to_string(),
+                DesignValue::ShortText("playful".into()),
+            )]),
+            plan: None,
+            plan_for_revision: None,
+            pending_suggestion: None,
+            confirmed_revision: None,
+        };
+        ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap();
     }
 
     /// A document above [`MAX_DOC_BYTES`] is out of contract: it must fail

@@ -56,14 +56,15 @@ use client_protocol::listings::{
     SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
-    builtin_app_templates, AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
+    AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
     AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
-    AppDataFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto,
-    AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppManifestDto, AppRecordDto,
-    AppRuntimeDetailsDto,
+    AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
+    AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
+    AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
+    AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto,
     AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
+    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
     AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -435,18 +436,30 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
-            "event/app_templates_changed.json",
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppTemplatesChanged {
-                    templates: builtin_app_templates(),
-                },
-            },
-        ),
-        (
             "event/app_details_changed.json",
             ClientEvent::AppEvent {
                 event: AppEventDto::AppDetailsChanged {
                     details: canonical_app_details(),
+                },
+            },
+        ),
+        (
+            "event/app_questionnaire_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppQuestionnaireChanged {
+                    app_id: "habits-1a2b".to_string(),
+                    revision: 2,
+                    steps: canonical_questionnaire(),
+                },
+            },
+        ),
+        (
+            "event/app_plan_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppPlanChanged {
+                    app_id: "habits-1a2b".to_string(),
+                    revision: 3,
+                    plan: Some(canonical_app_plan()),
                 },
             },
         ),
@@ -811,10 +824,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ),
         ("command/list_apps.json", ClientCommand::ListApps),
         (
-            "command/list_app_templates.json",
-            ClientCommand::ListAppTemplates,
-        ),
-        (
             "command/get_app_details.json",
             ClientCommand::GetAppDetails {
                 app_id: "habits-1a2b".to_string(),
@@ -824,9 +833,34 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/create_app.json",
             ClientCommand::CreateApp {
                 name: "Habits".to_string(),
-                template: AppTemplateKindDto::Dashboard,
                 origin: AppCreateOriginDto::Chat,
+                brief: "Track daily habits with streaks".to_string(),
                 conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+            },
+        ),
+        (
+            "command/update_app_brief.json",
+            ClientCommand::UpdateAppBrief {
+                app_id: "habits-1a2b".to_string(),
+                brief: "A todo list instead".to_string(),
+            },
+        ),
+        (
+            "command/retry_app_questionnaire.json",
+            ClientCommand::RetryAppQuestionnaire {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/begin_app_planning.json",
+            ClientCommand::BeginAppPlanning {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/retry_app_plan.json",
+            ClientCommand::RetryAppPlan {
+                app_id: "habits-1a2b".to_string(),
             },
         ),
         (
@@ -1341,7 +1375,7 @@ fn canonical_app_record() -> AppRecordDto {
     AppRecordDto {
         id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
-        template: AppTemplateKindDto::Dashboard,
+        brief: "A daily habit tracker".to_string(),
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
         workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1376,7 +1410,6 @@ fn canonical_app_manifest() -> AppManifestDto {
         schema_version: 1,
         app_id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
-        template: AppTemplateKindDto::Dashboard,
         design_revision: 4,
         collections: vec![AppDataCollectionDto {
             id: "records".to_string(),
@@ -1394,11 +1427,62 @@ fn canonical_app_manifest() -> AppManifestDto {
     }
 }
 
+/// The canonical authored questionnaire: one step with a text field that
+/// allows both a custom answer and deferring to the model.
+fn canonical_questionnaire() -> Vec<AppDesignStepDto> {
+    vec![AppDesignStepDto {
+        id: "basics".to_string(),
+        order: 1,
+        title: "Basics".to_string(),
+        description: None,
+        fields: vec![AppDesignFieldDto {
+            id: "accent".to_string(),
+            label: "Accent color".to_string(),
+            description: None,
+            field_type: AppDesignFieldTypeDto::SingleChoice,
+            required: true,
+            allows_custom: true,
+            allows_defer: true,
+            default_value: None,
+            options: vec![AppDesignFieldOptionDto {
+                value: "blue".to_string(),
+                label: "Blue".to_string(),
+            }],
+        }],
+    }]
+}
+
+/// The canonical derived plan.
+fn canonical_app_plan() -> AppPlanDto {
+    AppPlanDto {
+        collections: vec![AppDataCollectionDto {
+            id: "records".to_string(),
+            label: "Records".to_string(),
+            fields: vec![AppDataFieldDto {
+                id: "title".to_string(),
+                label: "Title".to_string(),
+                field_type: AppDataFieldTypeDto::Text,
+                required: true,
+                options: vec![],
+            }],
+            enabled_by_default: true,
+        }],
+        capabilities: vec![AppCapabilityKindDto::DataMutation],
+        domains: vec!["api.example.com".to_string()],
+        summary: "A habit tracker with a records collection.".to_string(),
+    }
+}
+
 fn canonical_app_details() -> AppDetailsDto {
     AppDetailsDto {
         app: canonical_app_record(),
         design_revision: 4,
-        design_fields: vec![],
+        design_fields: vec![AppDesignFieldValueDto {
+            field_id: "accent".to_string(),
+            value: DesignValueDto::Deferred,
+        }],
+        questionnaire: canonical_questionnaire(),
+        plan: Some(canonical_app_plan()),
         manifest: Some(canonical_app_manifest()),
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,

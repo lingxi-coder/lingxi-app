@@ -24,7 +24,7 @@ struct LocalAppsDrawerSection: View {
                     onOpenApp(app.id)
                 } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: app.templateKind.systemImage)
+                        Image(systemName: localAppIconSystemName)
                             .font(.system(size: 16))
                             .foregroundStyle(theme.accent)
                             .frame(width: 30, height: 30)

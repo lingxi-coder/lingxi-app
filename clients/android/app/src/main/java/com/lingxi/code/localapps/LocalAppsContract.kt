@@ -32,15 +32,28 @@ fun localAppsStrings(context: Context): LocalAppsStrings =
 data class LocalAppItem(
     val id: String,
     val name: String,
-    val templateKind: String,
-    val templateName: String,
+    /**
+     * One-line description the user gave at creation time — the seed the LLM
+     * authors the questionnaire from. Replaces `templateKind`/`templateName`
+     * (local-apps#questionnaire, Task 18): there is no more static template
+     * catalog to classify an app by.
+     */
+    val brief: String,
     val workflow: LocalAppWorkflow,
     val runtime: LocalAppRuntime = LocalAppRuntime(),
     val updatedAtMs: Long,
 )
 
 enum class LocalAppWorkflow {
+    /** The LLM is authoring the questionnaire from the brief. A fresh app always starts here. */
+    AuthoringQuestionnaire,
+    /** Authoring the questionnaire failed; a user-initiated retry (or a changed brief) is required. */
+    QuestionnaireFailed,
     CollectingSpec,
+    /** The LLM is deriving a plan from the collected answers. */
+    Planning,
+    /** Deriving the plan failed; a user-initiated retry is required. */
+    PlanFailed,
     AwaitingSpecConfirmation,
     Generating,
     Validating,
@@ -64,14 +77,13 @@ data class LocalAppRuntime(
     val recovery: String? = null,
 )
 
-@Immutable
-data class LocalAppTemplate(
-    val kind: String,
-    val version: UInt,
-    val name: String,
-    val description: String,
-    val steps: List<LocalAppDesignStep>,
-)
+// NOTE (local-apps#questionnaire, Task 18): `LocalAppTemplate` (the static
+// per-template wrapper — kind/version/name/description around a `steps`
+// list) is deleted here (human-partner ruling: total removal of the static
+// template catalog, T2/T5). `LocalAppQuestionnaire` below replaces it — the
+// LLM-authored questionnaire is just an ordered bag of steps, with no
+// catalog entry wrapping it.
+typealias LocalAppQuestionnaire = List<LocalAppDesignStep>
 
 @Immutable
 data class LocalAppDesignStep(
@@ -106,6 +118,10 @@ data class LocalAppDesignField(
     val description: String?,
     val kind: LocalAppFieldKind,
     val required: Boolean,
+    /** Renders an `Other…` free-text box (mirrors `AppDesignFieldDto.allowsCustom`). */
+    val allowsCustom: Boolean = false,
+    /** Renders "let the model decide" (mirrors `AppDesignFieldDto.allowsDefer`). */
+    val allowsDefer: Boolean = false,
     val defaultValue: LocalAppDesignValue?,
     val options: List<LocalAppFieldOption>,
 )
@@ -151,6 +167,16 @@ sealed interface LocalAppDesignValue {
 
     @Immutable
     data class DataFields(val values: List<LocalAppDataField>) : LocalAppDesignValue
+
+    /**
+     * The user explicitly chose to let the model decide, via the 「由你决定」
+     * chip (mirrors `DesignValueDto.Deferred`). This is a real ANSWER, not a
+     * cleared field — the core gate (`local-apps` questionnaire.rs) and the
+     * client gate below both treat it as satisfying a required field, exactly
+     * like iOS's `LocalAppDesignValue.deferred` /
+     * `LocalAppDesignerGate.isSatisfied`.
+     */
+    data object Deferred : LocalAppDesignValue
 }
 
 @Immutable
@@ -173,7 +199,6 @@ data class LocalAppSuggestedChange(
 data class LocalAppDesigner(
     val appId: String,
     val appName: String,
-    val template: LocalAppTemplate,
     val stepIndex: Int = 0,
     val revision: ULong = 0u,
     val interactionId: String? = null,
@@ -196,6 +221,32 @@ data class LocalAppCollectionSchema(
     val label: String,
     val fields: List<LocalAppDataField>,
     val enabledByDefault: Boolean,
+)
+
+/**
+ * One capability kind the plan asks the user to grant, mirrors
+ * `AppCapabilityKindDto`. Distinct from [LocalAppAuthorizationDecision]
+ * (once/session/always/deny), which is the user's ANSWER to a capability
+ * prompt, not the capability itself.
+ */
+enum class LocalAppCapabilityKind { DataMutation, UiControl, NetworkDomain, RestoreCheckpoint }
+
+/**
+ * The LLM-derived plan awaiting confirmation (local-apps#questionnaire, Task
+ * 1/18). Replaces the deleted `LocalAppTemplate`: a template was a
+ * human-authored, static catalog entry; a plan is authored per-app from the
+ * questionnaire answers, and is voided the moment an answer changes
+ * underneath it (mirrors `LocalAppsUiState.plans`'s reducer in
+ * [LocalAppsViewModel]).
+ */
+@Immutable
+data class LocalAppPlan(
+    val collections: List<LocalAppCollectionSchema>,
+    val capabilities: List<LocalAppCapabilityKind>,
+    /** External HTTPS host names the app may request. */
+    val domains: List<String>,
+    /** Human-readable summary, including what every deferred field was finally decided as. */
+    val summary: String,
 )
 
 @Immutable
@@ -257,7 +308,6 @@ enum class LocalAppDetailsTab { Preview, Data, Code, History, PermissionsLogs }
 
 sealed interface LocalAppsDestination {
     data object Library : LocalAppsDestination
-    data object Templates : LocalAppsDestination
     data class Designer(val appId: String) : LocalAppsDestination
     data class Preview(val appId: String) : LocalAppsDestination
     data class Details(val appId: String, val tab: LocalAppDetailsTab = LocalAppDetailsTab.Preview) : LocalAppsDestination
@@ -266,14 +316,22 @@ sealed interface LocalAppsDestination {
 @Immutable
 data class LocalAppsUiState(
     val loading: Boolean = true,
-    val templatesLoading: Boolean = true,
     val apps: List<LocalAppItem> = emptyList(),
-    val templates: List<LocalAppTemplate> = emptyList(),
+    /**
+     * The LLM-authored questionnaire per app (local-apps#questionnaire, Task
+     * 18). Replaces the deleted static `templates` cache — the questionnaire
+     * is authored per-app from its brief, not looked up from a catalog.
+     */
+    val questionnaires: Map<String, LocalAppQuestionnaire> = emptyMap(),
+    /**
+     * The LLM-derived plan awaiting confirmation, keyed by app id. Cleared by
+     * the engine (and mirrored here) the moment an answer edit invalidates a
+     * previously-derived plan.
+     */
+    val plans: Map<String, LocalAppPlan> = emptyMap(),
     val destination: LocalAppsDestination = LocalAppsDestination.Library,
     val query: String = "",
-    val templateFilter: String? = null,
     val createName: String = "",
-    val selectedTemplateKind: String? = null,
     val designer: LocalAppDesigner? = null,
     val generation: Map<String, LocalAppGeneration> = emptyMap(),
     val details: Map<String, LocalAppDetails> = emptyMap(),
@@ -288,8 +346,7 @@ data class LocalAppsUiState(
 ) {
     val filteredApps: List<LocalAppItem>
         get() = apps.filter { app ->
-            (templateFilter == null || app.templateKind == templateFilter) &&
-                (query.isBlank() || app.name.contains(query.trim(), ignoreCase = true))
+            query.isBlank() || app.name.contains(query.trim(), ignoreCase = true)
         }
 
     /**
@@ -305,10 +362,25 @@ sealed interface LocalAppsAction {
     data object Refresh : LocalAppsAction
     data object Create : LocalAppsAction
     data class Search(val query: String) : LocalAppsAction
-    data class FilterTemplate(val kind: String?) : LocalAppsAction
     data class ChangeCreateName(val name: String) : LocalAppsAction
-    data class SelectTemplate(val kind: String) : LocalAppsAction
-    data object CreateSelectedTemplate : LocalAppsAction
+    /** Creates a new app from a one-line brief — replaces the deleted template picker. */
+    data class CreateFromBrief(val brief: String) : LocalAppsAction
+    /** Replaces an app's brief and re-authors its questionnaire from scratch. */
+    data class UpdateBrief(val appId: String, val brief: String) : LocalAppsAction
+    /** Retries questionnaire authoring after it failed, reusing the same brief. */
+    data class RetryQuestionnaire(val appId: String) : LocalAppsAction
+    /** Begins planning from the collected answers. */
+    data class BeginPlanning(val appId: String) : LocalAppsAction
+    /** Retries planning after it failed, reusing the same answers. */
+    data class RetryPlan(val appId: String) : LocalAppsAction
+    /** Requests a revision pass with a free-text prompt (the persistent iteration input). */
+    data class Revise(val appId: String, val prompt: String) : LocalAppsAction
+    /**
+     * Backs out of the plan-confirmation gate (`awaiting_spec_confirmation ->
+     * collecting_spec`, `cancel_design`) — the plan-confirmation screen's
+     * "返回修改" exit (local-apps#questionnaire, Task 20).
+     */
+    data class CancelDesign(val appId: String) : LocalAppsAction
     data class OpenApp(val appId: String) : LocalAppsAction
     data class OpenDesigner(val appId: String) : LocalAppsAction
     data class ChangeStep(val index: Int) : LocalAppsAction
@@ -324,7 +396,6 @@ sealed interface LocalAppsAction {
     data class ResetPermissions(val appId: String) : LocalAppsAction
     data class RestoreCheckpoint(val appId: String, val checkpointId: String) : LocalAppsAction
     data class ApprovePreview(val appId: String) : LocalAppsAction
-    data class SubmitRevision(val appId: String, val feedback: String) : LocalAppsAction
     data class BridgeRequest(val message: LocalAppBridgeMessage) : LocalAppsAction
     data class AcknowledgeBridgeResult(val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
@@ -354,4 +425,21 @@ internal fun LocalAppDesignValue.readable(strings: LocalAppsStrings = DefaultLoc
     }
     is LocalAppDesignValue.StringList -> values.joinToString("、")
     is LocalAppDesignValue.DataFields -> values.joinToString("、") { it.label }
+    is LocalAppDesignValue.Deferred -> strings.resolve(R.string.local_apps_value_deferred, "由你决定")
+}
+
+/**
+ * Human-readable label for a plan capability kind — the plan-confirmation
+ * screen's permissions section (local-apps#questionnaire, Task 20). Mirrors
+ * iOS's `LocalAppPlanConfirmView.capabilityLine(_:)`.
+ */
+internal fun LocalAppCapabilityKind.readable(strings: LocalAppsStrings = DefaultLocalAppsStrings): String = when (this) {
+    LocalAppCapabilityKind.DataMutation ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_data_mutation, "数据修改")
+    LocalAppCapabilityKind.UiControl ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_ui_control, "界面控制")
+    LocalAppCapabilityKind.NetworkDomain ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_network_domain, "网络访问")
+    LocalAppCapabilityKind.RestoreCheckpoint ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_restore_checkpoint, "恢复检查点")
 }

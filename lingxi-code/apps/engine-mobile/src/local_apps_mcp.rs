@@ -6,8 +6,7 @@
 //! stdio or remote transport surface.
 
 use async_trait::async_trait;
-use client_protocol::local_apps::builtin_app_templates;
-use local_apps::{AppService, AppTemplateKind};
+use local_apps::AppService;
 use protocol::McpConnectionId;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -36,6 +35,19 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn inspect_ui(&self, input: Value) -> Result<Value, String>;
     async fn act_on_ui(&self, input: Value) -> Result<Value, String>;
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String>;
+    /// Kick off background questionnaire authoring for `app_id`, fire-and-
+    /// forget — mirrors `host.rs`'s wire-client trigger exactly (same shared
+    /// `spawn_authoring`), so an MCP-created app does not sit in
+    /// `authoring_questionnaire` forever with the tool description's own
+    /// claim ("start[s] the LLM-authored design questionnaire") having been
+    /// false the whole time. Never fails the caller: the `create` tool call
+    /// already committed the record before this runs, and the app stays
+    /// recoverable (load-time sweep, `retry_questionnaire`) even if THIS
+    /// call is dropped entirely (host capability not yet attached). `epoch`
+    /// MUST be the `llm_round` the `create_app` call that produced `app_id`
+    /// returned — captured synchronously, never re-read later (see
+    /// [`local_apps::AppRecord::llm_round`]'s doc).
+    async fn trigger_authoring(&self, app_id: String, epoch: u64);
 }
 
 /// Mobile-local implementation of the MCP transport boundary.
@@ -179,8 +191,20 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record and open its human design wizard. This never confirms the design or starts generation.",
-                json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":200},"template":{"enum":["dashboard","crud_tracker","content_showcase","form_utility"]},"conversation_id":{"type":"string","maxLength":128}},"required":["name","template"],"additionalProperties":false}),
+                "Create a local app from a one-line description and start the LLM-authored design questionnaire. This never confirms the design or starts generation.",
+                json!({"type":"object","properties":{
+                    "brief":{"type":"string","minLength":1,"maxLength":2000},
+                    "name":{"type":"string","minLength":1,"maxLength":200},
+                    "conversation_id":{"type":"string","maxLength":128}
+                },"required":["brief"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "revise",
+                "Ask for a revision of a generated app in the user's own words. The app rebuilds and re-opens the preview gate; the user still approves it.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "prompt":{"type":"string","minLength":1,"maxLength":4000}
+                },"required":["app_id","prompt"],"additionalProperties":false}),
             ),
             Self::tool(
                 "propose_design",
@@ -315,12 +339,14 @@ impl LocalAppsMcpTransport {
                 }
                 let total = apps.len();
                 apps.truncate(limit);
+                // NOTE (local-apps#questionnaire, Task 5): `"templates"` used to
+                // carry `builtin_app_templates()` here — deleted alongside the
+                // static template catalog (human-partner ruling: total removal).
                 Self::result(json!({
                     "apps": apps,
                     "count": apps.len(),
                     "total": total,
                     "has_more": total > apps.len(),
-                    "templates": builtin_app_templates()
                 }))
             }
             "get" => {
@@ -346,27 +372,50 @@ impl LocalAppsMcpTransport {
                 }))
             }
             "create" => {
-                let name = Self::required_string(&input, "name")?;
-                let template: AppTemplateKind =
-                    serde_json::from_value(input.get("template").cloned().unwrap_or(Value::Null))
-                        .map_err(|_| McpError::Internal("unsupported app template".into()))?;
+                let brief = Self::required_string(&input, "brief")?;
+                // A fresh app starts in `authoring_questionnaire` (Task 3),
+                // not `collecting_spec` — `open_designer` requires
+                // `collecting_spec | generation_failed` and would refuse it.
+                // This tool does not open the designer gate itself; the
+                // questionnaire-authoring LLM round trip (Task 4/8) carries
+                // the app to `collecting_spec` on its own.
+                let name = input.get("name").and_then(Value::as_str);
                 let conversation_id = input
                     .get("conversation_id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
-                let record = match service.create_app(name, template, conversation_id).await {
+                let record = match service.create_app(name, brief, conversation_id).await {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
-                let interaction = match service.open_designer(&record.id).await {
-                    Ok(interaction) => interaction,
-                    Err(error) => return Ok(Self::app_error(error)),
-                };
+                // Fire-and-forget, same as the wire-client `CreateApp` path
+                // (`host.rs`'s `handle_create_app` — both call the SAME
+                // shared `spawn_authoring`): the record already committed
+                // above, so a missing/unattached host capability here does
+                // NOT fail this call — `retry_questionnaire` and the
+                // load-time sweep both still recover the app if this is
+                // dropped.
+                if let Ok(host) = self.host() {
+                    host.trigger_authoring(record.id.clone(), record.llm_round).await;
+                } else {
+                    tracing::warn!(
+                        app_id = %record.id,
+                        "local-apps host capability unavailable; questionnaire authoring was \
+                         not triggered from MCP create — retry_questionnaire can still recover it"
+                    );
+                }
                 Self::result(json!({
                     "app": record,
-                    "designer": interaction,
-                    "next_step": "Wait for the user to complete and confirm the design wizard."
+                    "next_step": "The app is being set up; wait for its questionnaire before designing."
                 }))
+            }
+            "revise" => {
+                let app_id = Self::required_string(&input, "app_id")?;
+                let prompt = Self::required_string(&input, "prompt")?;
+                match service.request_revision(app_id, prompt).await {
+                    Ok(()) => Self::result(json!({ "app_id": app_id, "state": "revising" })),
+                    Err(error) => Self::app_error(error),
+                }
             }
             "propose_design" => {
                 let app_id = Self::required_string(&input, "app_id")?;
@@ -593,6 +642,7 @@ mod tests {
                 "list",
                 "get",
                 "create",
+                "revise",
                 "propose_design",
                 "manage_runtime",
                 "query_data",
@@ -614,37 +664,304 @@ mod tests {
         assert!(!schemas.contains("package_manager"));
         assert!(schemas.contains("click"));
         assert!(schemas.contains("reload"));
+        // The four static template kinds were deleted from the codebase
+        // entirely in Task 5; the schema must not still promise a deleted
+        // enum to the model as a mandatory `create` argument.
+        assert!(!schemas.contains("template"));
+        assert!(!schemas.contains("dashboard"));
+        assert!(!schemas.contains("crud_tracker"));
+        assert!(!schemas.contains("content_showcase"));
+        assert!(!schemas.contains("form_utility"));
+        let create = tools
+            .iter()
+            .find(|tool| tool.tool_name == "create")
+            .expect("create is declared");
+        let create_schema = create.input_schema.to_string();
+        assert!(
+            create_schema.contains("brief"),
+            "create takes a brief: {create_schema}"
+        );
+        let descriptions = tools
+            .iter()
+            .map(|tool| tool.description.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            !descriptions.contains("wizard"),
+            "no tool description should promise the removed human design wizard: {descriptions}"
+        );
+        assert!(
+            !descriptions.contains("five-step") && !descriptions.contains("five step"),
+            "no tool description should promise a removed five-step flow: {descriptions}"
+        );
     }
 
-    async fn attached_transport(root: &std::path::Path) -> LocalAppsMcpTransport {
+    async fn attached_transport(
+        root: &std::path::Path,
+    ) -> (LocalAppsMcpTransport, Arc<AppService>) {
         let transport = LocalAppsMcpTransport::new(root.to_path_buf());
-        let service = AppService::load(
-            root,
-            Arc::new(local_apps::test_support::FixedClock::new(1)),
-            Arc::new(local_apps::NoopContinuationSink),
-            Arc::new(local_apps::NoopAppEventObserver),
-        )
-        .await
-        .expect("load app service");
-        assert!(transport.attach_service(Arc::new(service)).is_ok());
-        transport
+        let service = Arc::new(
+            AppService::load(
+                root,
+                Arc::new(local_apps::test_support::FixedClock::new(1)),
+                Arc::new(local_apps::NoopContinuationSink),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("load app service"),
+        );
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        (transport, service)
+    }
+
+    /// PINS the truth Task 10 was required to confront: `create` now takes a
+    /// real, caller-supplied `brief`, and a caller-supplied `name` is
+    /// honored rather than silently overwritten with the brief (or vice
+    /// versa). This replaces the previous pin
+    /// (`create_persists_name_as_brief_until_task_10_adds_a_real_one`), which
+    /// asserted the deliberately-wrong placeholder behavior (`brief ==
+    /// name`) that stood in until this task landed. The two fixture strings
+    /// are asserted UNEQUAL so this test cannot pass if `name` and `brief`
+    /// get conflated again.
+    ///
+    /// The fixture name is deliberately LONGER than `AppService::create_app`'s
+    /// 24-char placeholder cut: a regression to `create_app(None, brief, ..)`
+    /// (`name` silently dropped from the `create` tool call) would come back
+    /// as the brief's own 24-char prefix instead of `NAME`, which differs
+    /// from `NAME` by construction — so this test only stays green when
+    /// `name` really does survive through the explicit path.
+    #[tokio::test]
+    async fn create_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name() {
+        const NAME: &str = "Habit Tracker Deluxe Edition";
+        const BRIEF: &str = "一个记事本 app，用来跟踪每天的习惯打卡";
+        assert!(
+            NAME.chars().count() > 24,
+            "test fixture must exceed the placeholder cut to be meaningful"
+        );
+        assert_ne!(
+            NAME, BRIEF,
+            "name and brief must be distinct fixtures so the test cannot pass by conflating them"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        let created = transport
+            .call("create", json!({"name": NAME, "brief": BRIEF}))
+            .await
+            .expect("create");
+        let app = &created.structured_content.expect("structured")["app"];
+        assert_eq!(
+            app["name"], NAME,
+            "a caller-supplied name must not be silently overwritten"
+        );
+        assert_eq!(
+            app["brief"], BRIEF,
+            "the brief the caller supplied is the brief that gets stored — not the name, \
+             not a template tag, not anything else"
+        );
     }
 
     #[tokio::test]
-    async fn propose_design_accepts_the_protocol_snake_case_patch_wire() {
+    async fn create_takes_a_brief_instead_of_a_template() {
         let root = tempfile::tempdir().unwrap();
-        let transport = attached_transport(root.path()).await;
+        let (transport, _service) = attached_transport(root.path()).await;
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("a brief alone creates an app");
+        let app = &result.structured_content.expect("structured")["app"];
+        assert!(app["id"].as_str().is_some(), "got {app}");
+        assert_eq!(app["brief"], "一个记事本 app");
+    }
+
+    /// A minimal [`LocalAppsMcpHost`] double that only records
+    /// `trigger_authoring` calls — every other method is unreachable from
+    /// the `create` tool and panics if ever called.
+    struct RecordingAuthoringHost {
+        calls: StdMutex<Vec<(String, u64)>>,
+    }
+
+    #[async_trait]
+    impl LocalAppsMcpHost for RecordingAuthoringHost {
+        async fn manage_runtime(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn query_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn mutate_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn inspect_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn act_on_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn trigger_authoring(&self, app_id: String, epoch: u64) {
+            self.calls.lock().expect("lock").push((app_id, epoch));
+        }
+    }
+
+    /// PINS the Critical-1 fix from the Task 11 review: `create` used to
+    /// persist a record and stop — nothing ever started the questionnaire
+    /// authoring the tool's own `next_step` text claims is happening, so an
+    /// agent that believed it and polled `get` would poll forever. `create`
+    /// must reach the attached host's `trigger_authoring` with the NEW app's
+    /// id, the same way `host.rs`'s wire-client `CreateApp` path does.
+    #[tokio::test]
+    async fn create_triggers_background_authoring_via_the_attached_host() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        let host = Arc::new(RecordingAuthoringHost {
+            calls: StdMutex::new(Vec::new()),
+        });
+        assert!(transport
+            .attach_host(host.clone() as Arc<dyn LocalAppsMcpHost>)
+            .is_ok());
+
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("create");
+        let app = &result.structured_content.expect("structured")["app"];
+        let app_id = app["id"].as_str().expect("id").to_string();
+
+        assert_eq!(
+            host.calls.lock().expect("lock").as_slice(),
+            &[(app_id, 1)],
+            "create must trigger background authoring for the app it just persisted, \
+             with the fresh app's first llm_round epoch"
+        );
+    }
+
+    /// A `create` call still succeeds and returns the persisted record even
+    /// when NO host capability is attached (e.g. a build wiring gap) — the
+    /// record is real and recoverable (`retry_questionnaire`, the load-time
+    /// sweep) even though authoring did not start yet.
+    #[tokio::test]
+    async fn create_still_succeeds_when_no_host_is_attached_to_trigger_authoring() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = attached_transport(root.path()).await;
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("create must not fail just because authoring couldn't be triggered");
+        let app = &result.structured_content.expect("structured")["app"];
+        let app_id = app["id"].as_str().expect("id").to_string();
+        assert_eq!(
+            service.record(&app_id).await.expect("record").workflow_state,
+            local_apps::AppWorkflowState::AuthoringQuestionnaire
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_legacy_template_only_argument() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        // `template` no longer exists as a concept; sending it (without the
+        // now-required `brief`) must fail rather than silently proceed.
+        let error = transport
+            .call("create", json!({ "name": "N", "template": "dashboard" }))
+            .await
+            .expect_err("brief is required; a template-only payload has none");
+        let message = error.to_string();
+        assert!(
+            message.contains("brief"),
+            "the rejection should name the missing brief: {message}"
+        );
+    }
+
+    /// Drives a freshly created app all the way to `ready`, matching
+    /// `AppState::request_revision`'s `awaiting_preview_confirmation | ready`
+    /// precondition (`local-apps/src/state.rs`), by calling the same
+    /// `AppService` steps the coordinator/generator drive in production
+    /// (`questionnaire_ready` via the shared `advance_to_collecting_spec`
+    /// test helper, then `begin_planning` -> `plan_ready` -> `confirm_design`
+    /// -> `generation_complete` -> `validation_passed` -> `confirm_preview`).
+    async fn drive_to_ready(service: &AppService, app_id: &str) {
+        local_apps::test_support::advance_to_collecting_spec(service, app_id).await;
+        let epoch = service
+            .begin_planning(app_id)
+            .await
+            .expect("begin_planning");
+        let plan = local_apps::AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: Vec::new(),
+            summary: "a test plan".into(),
+        };
+        let designer = service
+            .plan_ready(app_id, plan, epoch)
+            .await
+            .expect("plan_ready")
+            .expect("fresh epoch must not be rejected as stale");
+        service
+            .confirm_design(app_id, &designer.interaction_id, designer.revision)
+            .await
+            .expect("confirm_design");
+        service
+            .generation_complete(app_id)
+            .await
+            .expect("generation_complete");
+        let preview = service
+            .validation_passed(app_id)
+            .await
+            .expect("validation_passed");
+        service
+            .confirm_preview(app_id, &preview.interaction_id, preview.revision)
+            .await
+            .expect("confirm_preview");
+    }
+
+    #[tokio::test]
+    async fn revise_is_exposed_and_reaches_the_service() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = attached_transport(root.path()).await;
         let created = transport
-            .call(
-                "create",
-                json!({"name": "Habits", "template": "dashboard"}),
-            )
+            .call("create", json!({ "brief": "一个记事本" }))
             .await
             .expect("create");
         let app_id = created.structured_content.expect("structured")["app"]["id"]
             .as_str()
             .expect("app id")
             .to_string();
+        drive_to_ready(&service, &app_id).await;
+
+        let result = transport
+            .call(
+                "revise",
+                json!({ "app_id": app_id, "prompt": "把搜索框挪到顶部" }),
+            )
+            .await
+            .expect("revise is callable on a ready app");
+        assert!(!result.is_error, "got {result:?}");
+        assert_eq!(
+            service.record(&app_id).await.expect("record").workflow_state,
+            local_apps::AppWorkflowState::Revising,
+            "revise must actually reach AppService::request_revision, not just accept the call"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_design_accepts_the_protocol_snake_case_patch_wire() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = attached_transport(root.path()).await;
+        let created = transport
+            .call("create", json!({"name": "Habits", "brief": "habit tracker"}))
+            .await
+            .expect("create");
+        let app_id = created.structured_content.expect("structured")["app"]["id"]
+            .as_str()
+            .expect("app id")
+            .to_string();
+        // `store_suggestion` needs a draft-editable state; a fresh app
+        // starts in `authoring_questionnaire` (Task 3) until Task 4/8 wire
+        // the real questionnaire-authoring round trip.
+        local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
 
         let result = transport
             .call(
@@ -667,12 +984,12 @@ mod tests {
     #[tokio::test]
     async fn list_reports_truncation_instead_of_claiming_a_complete_library() {
         let root = tempfile::tempdir().unwrap();
-        let transport = attached_transport(root.path()).await;
+        let (transport, _service) = attached_transport(root.path()).await;
         for index in 0..3 {
             transport
                 .call(
                     "create",
-                    json!({"name": format!("App {index}"), "template": "dashboard"}),
+                    json!({"name": format!("App {index}"), "brief": "a test app"}),
                 )
                 .await
                 .expect("create");

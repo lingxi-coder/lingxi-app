@@ -8,6 +8,7 @@
 //! exception is [`AppEvent::DesignConflict`], which the spec requires to be
 //! emitted alongside the `revision_conflict` error on draft edits.
 
+use crate::questionnaire::{AppDesignStep, AppPlan};
 use crate::types::{
     AppCheckpoint, AppDesignPatch, AppGenerationProgress, AppRecord, AppRuntimeRecord,
     AppWorkflowState, DesignValue,
@@ -25,6 +26,24 @@ pub enum AppEvent {
     AppsChanged {
         /// Every app record, in stored order.
         apps: Vec<AppRecord>,
+    },
+    /// The questionnaire is ready or was cleared (`steps` empty).
+    QuestionnaireChanged {
+        /// App whose questionnaire changed.
+        app_id: String,
+        /// Draft revision at the time of the change.
+        revision: u64,
+        /// The full step list, or empty when cleared.
+        steps: Vec<AppDesignStep>,
+    },
+    /// The plan is ready or was invalidated (`plan: None`).
+    PlanChanged {
+        /// App whose plan changed.
+        app_id: String,
+        /// Draft revision at the time of the change.
+        revision: u64,
+        /// The plan, or `None` when invalidated.
+        plan: Option<AppPlan>,
     },
     /// A designer gate opened; the client needs `interaction_id` to confirm.
     DesignerRequested {

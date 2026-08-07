@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "template": "crud_tracker",
   "revision": 1,
+  "questionnaire": [],
   "fields": {
     "accent": {
       "kind": "color",
@@ -50,7 +50,7 @@
     }
   },
   "pendingSuggestion": {
-    "suggestionId": "sugg-64c982f9a897",
+    "suggestionId": "sugg-a87290bde485",
     "patch": {
       "ops": [
         {

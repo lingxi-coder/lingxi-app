@@ -11,12 +11,11 @@
 
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::local_apps::{
-    builtin_app_templates, AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto,
-    AppCheckpointDto, AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto,
-    AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto,
-    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto, DesignValueDto,
+    AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
+    AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
+    AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto, AppRuntimeModeDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
+    AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use std::collections::HashMap;
@@ -274,14 +273,14 @@ fn usage_update_round_trips() {
 }
 
 /// `AppsChanged` — carries the full local-app record set (bare-string
-/// template/state enums; an absent `conversation_id` skipped).
+/// state enum; an absent `conversation_id` skipped).
 #[test]
 fn apps_changed_round_trips() {
     let ev = ClientEvent::AppsChanged {
         apps: vec![AppRecordDto {
             id: "habits-1a2b".to_string(),
             name: "Habits".to_string(),
-            template: AppTemplateKindDto::Dashboard,
+            brief: "Track daily habits".to_string(),
             created_at_ms: 1_750_000_000_000,
             updated_at_ms: 1_750_000_000_001,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -292,7 +291,6 @@ fn apps_changed_round_trips() {
     let json = serde_json::to_value(&ev).expect("serialize AppsChanged");
     assert_eq!(json["type"], "apps_changed");
     assert_eq!(json["apps"][0]["id"], "habits-1a2b");
-    assert_eq!(json["apps"][0]["template"], "dashboard");
     assert_eq!(json["apps"][0]["workflow_state"], "collecting_spec");
     assert!(
         json["apps"][0].get("conversation_id").is_none(),
@@ -508,8 +506,17 @@ fn app_runtime_changed_round_trips() {
 fn extended_local_app_events_round_trip() {
     let events = vec![
         ClientEvent::AppEvent {
-            event: AppEventDto::AppTemplatesChanged {
-                templates: builtin_app_templates(),
+            event: AppEventDto::AppQuestionnaireChanged {
+                app_id: "habits-1a2b".to_string(),
+                revision: 2,
+                steps: vec![],
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppPlanChanged {
+                app_id: "habits-1a2b".to_string(),
+                revision: 3,
+                plan: None,
             },
         },
         ClientEvent::AppEvent {
@@ -573,7 +580,8 @@ fn extended_local_app_events_round_trip() {
     // directions and still succeeds, so the literals below are what make a
     // rename visible here.
     let expected_types = [
-        "app_templates_changed",
+        "app_questionnaire_changed",
+        "app_plan_changed",
         "app_generation_job_changed",
         "app_bridge_response",
         "app_ui_request",
@@ -582,11 +590,9 @@ fn extended_local_app_events_round_trip() {
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 6] = [
-        (
-            "/event/templates/0/kind",
-            serde_json::Value::from("dashboard"),
-        ),
+    let expected_leaves: [(&str, serde_json::Value); 7] = [
+        ("/event/revision", serde_json::Value::from(2_u64)),
+        ("/event/revision", serde_json::Value::from(3_u64)),
         (
             "/event/job/continuation_seq",
             serde_json::Value::from(1_u64),
@@ -643,6 +649,50 @@ fn extended_local_app_events_round_trip() {
     assert_eq!(json["details"]["mode"], "next_production");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize extended runtime");
     assert_eq!(back, runtime);
+}
+
+/// `AppPlanChanged.plan` — parity review finding: this was the ONLY `Option`
+/// field in the crate missing `#[serde(default, skip_serializing_if =
+/// "Option::is_none")]`. A symmetric `to_value` → `from_value` round-trip
+/// (as `extended_local_app_events_round_trip` above does) cannot see this
+/// class of bug, because `to_value` on a bare `Option<T>` field produces
+/// `"plan": null`, which `from_value` happily reads back — the break only
+/// shows up in the TWO asymmetric checks below: (1) `None` must OMIT the key,
+/// not serialize it as `null`; (2) a wire payload that OMITS the key entirely
+/// (exactly what an honest client following the house convention sends) must
+/// still deserialize the whole event, not fail with "missing field `plan`".
+#[test]
+fn app_plan_changed_omits_none_plan_and_accepts_a_missing_key() {
+    let ev = ClientEvent::AppEvent {
+        event: AppEventDto::AppPlanChanged {
+            app_id: "habits-1a2b".to_string(),
+            revision: 3,
+            plan: None,
+        },
+    };
+    let json = serde_json::to_value(&ev).expect("serialize AppPlanChanged");
+    assert!(
+        json["event"].get("plan").is_none(),
+        "a None plan must be skipped from the wire, not serialized as null"
+    );
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppPlanChanged");
+    assert_eq!(back, ev);
+
+    // A wire payload that OMITS `plan` entirely — not a synthetic `null` —
+    // is what an honest client actually sends. Without `#[serde(default)]`
+    // this fails the WHOLE event with "missing field `plan`", not just the
+    // one field.
+    let wire_without_plan = serde_json::json!({
+        "type": "app_event",
+        "event": {
+            "type": "app_plan_changed",
+            "app_id": "habits-1a2b",
+            "revision": 3
+        }
+    });
+    let raised: ClientEvent = serde_json::from_value(wire_without_plan)
+        .expect("a client that omits `plan` must not fail the whole event");
+    assert_eq!(raised, ev);
 }
 
 /// `AppPreviewReady` — delivers the pending preview `interaction_id`; `url`

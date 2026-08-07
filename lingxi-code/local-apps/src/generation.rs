@@ -957,8 +957,8 @@ mod tests {
     use super::*;
     use crate::events::NoopAppEventObserver;
     use crate::storage;
-    use crate::test_support::FixedClock;
-    use crate::types::{AppDesignPatch, AppDesignPatchOp, AppTemplateKind, DesignValue};
+    use crate::test_support::{advance_to_collecting_spec, stamp_fresh_plan, FixedClock};
+    use crate::types::{AppDesignPatch, AppDesignPatchOp, DesignValue};
     use sha2::Digest;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1083,9 +1083,10 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", AppTemplateKind::CrudTracker, None)
+            .create_app(Some("Tasks"), "a test app", None)
             .await
             .unwrap();
+        let app = advance_to_collecting_spec(&service, &app.id).await;
         service
             .update_draft(
                 &app.id,
@@ -1101,6 +1102,7 @@ mod tests {
             .await
             .unwrap();
         let gate = service.open_designer(&app.id).await.unwrap();
+        stamp_fresh_plan(&service, &app.id).await;
         service
             .confirm_design(&app.id, &gate.interaction_id, 1)
             .await
@@ -1144,10 +1146,12 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", AppTemplateKind::CrudTracker, None)
+            .create_app(Some("Tasks"), "a test app", None)
             .await
             .unwrap();
+        let app = advance_to_collecting_spec(&service, &app.id).await;
         let gate = service.open_designer(&app.id).await.unwrap();
+        stamp_fresh_plan(&service, &app.id).await;
         service
             .confirm_design(&app.id, &gate.interaction_id, 0)
             .await
@@ -1212,10 +1216,12 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", AppTemplateKind::CrudTracker, None)
+            .create_app(Some("Tasks"), "a test app", None)
             .await
             .unwrap();
+        let app = advance_to_collecting_spec(&service, &app.id).await;
         let gate = service.open_designer(&app.id).await.unwrap();
+        stamp_fresh_plan(&service, &app.id).await;
         service
             .confirm_design(&app.id, &gate.interaction_id, 0)
             .await
@@ -1270,9 +1276,10 @@ mod tests {
             .unwrap(),
         );
         let app = service
-            .create_app("Interrupted", AppTemplateKind::Dashboard, None)
+            .create_app(Some("Interrupted"), "a test app", None)
             .await
             .unwrap();
+        let app = advance_to_collecting_spec(&service, &app.id).await;
         service
             .update_draft(
                 &app.id,
@@ -1288,6 +1295,7 @@ mod tests {
             .await
             .unwrap();
         let gate = service.open_designer(&app.id).await.unwrap();
+        stamp_fresh_plan(&service, &app.id).await;
         service
             .confirm_design(&app.id, &gate.interaction_id, 1)
             .await

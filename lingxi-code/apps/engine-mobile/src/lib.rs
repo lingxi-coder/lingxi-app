@@ -56,10 +56,20 @@ mod local_apps_bridge;
 mod local_apps_generation;
 #[cfg(feature = "uniffi")]
 mod local_apps_host;
+// LOCAL-APPS (conversational design, Task 8): the three LLM calls — author
+// the questionnaire, derive the plan, write the app's source. Behind the
+// `LocalAppsModel` seam so the three calls unit-test with a scripted fake and
+// zero network. uniffi-gated like its siblings: it names `llm-client`'s
+// `ApiService` (for `ApiServiceModel`) and `local-apps`'s validators, both of
+// which are pulled only under this feature.
+#[cfg(feature = "uniffi")]
+mod local_apps_llm;
 #[cfg(feature = "uniffi")]
 mod local_apps_mcp;
 #[cfg(feature = "uniffi")]
 mod local_apps_profile;
+#[cfg(feature = "uniffi")]
+mod local_apps_sources;
 
 #[cfg(feature = "uniffi")]
 pub use host::{

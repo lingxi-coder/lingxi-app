@@ -4,31 +4,70 @@ import WebKit
 
 @MainActor
 final class LocalAppsStoreTests: XCTestCase {
-    func testInstallsRustOwnedTemplatesInStableNameOrder() {
-        let store = LocalAppsStore()
-        store.installTemplates([
-            template(id: "z", name: "Zulu", kind: .dashboard),
-            template(id: "a", name: "Alpha", kind: .crudTracker),
-        ])
-
-        XCTAssertEqual(store.templates.map(\.name), ["Alpha", "Zulu"])
-        XCTAssertTrue(store.templates.allSatisfy { $0.steps.count == 5 })
-    }
-
-    func testFilteringUsesTemplateAndLocalizedSearch() {
+    func testFilteringUsesLocalizedSearch() {
         let store = LocalAppsStore()
         #if canImport(engine_mobileFFI)
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "订单跟踪", template: .crudTracker),
-                app(id: "metrics", name: "Metrics", template: .dashboard),
+                app(id: "tracker", name: "订单跟踪", brief: "跟踪订单状态"),
+                app(id: "metrics", name: "Metrics", brief: "查看运营指标"),
             ]))
         #endif
 
-        store.templateFilter = .crudTracker
         store.searchQuery = "订单"
 
         XCTAssertEqual(store.filteredApps.map(\.id), ["tracker"])
     }
+
+    #if canImport(engine_mobileFFI)
+        func testQuestionnaireEventReplacesTheStoredSteps() {
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appQuestionnaireChanged(
+                appId: "a",
+                revision: 1,
+                steps: [oneStepDTO()]
+            )))
+
+            XCTAssertEqual(store.questionnaires["a"]?.count, 1)
+            XCTAssertEqual(store.questionnaires["a"]?.first?.fields.first?.allowsDefer, true)
+        }
+
+        func testPlanEventStoresAndClears() {
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appPlanChanged(appId: "a", revision: 2, plan: onePlanDTO())))
+            XCTAssertEqual(store.plans["a"]?.summary, "记事本")
+
+            store.handle(event: .appEvent(event: .appPlanChanged(appId: "a", revision: 3, plan: nil)))
+            XCTAssertNil(store.plans["a"], "an answer edit voids the plan on the client too")
+        }
+
+        /// `.deferred` ("let the model decide") must survive the trip through
+        /// the REAL edit path — `edit()` -> `flushNextEdit` ->
+        /// `LocalAppsProtocolAdapter.designValue(_:fieldType:)` — for a field
+        /// type other than `.shortText`. `designValue(_:fieldType:)` checks
+        /// `.deferred` before ever consulting `fieldType`, so a `.shortText`
+        /// field could not have distinguished "fieldType is ignored" from
+        /// "fieldType happens to be right"; `.multipleChoice` here rules that
+        /// out and additionally exercises the non-debounced edit path (see
+        /// `edit(field:value:appID:)`: only `.shortText`/`.longText` debounce).
+        func testDeferredAnswerRoundTripsThroughTheRealEditPathForANonShortTextField() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+            store.handle(event: .appDesignerRequested(appId: "tracker", interactionId: "gate-1", revision: 5))
+            store.edit(
+                field: designField(id: "tone", type: .multipleChoice),
+                value: .deferred,
+                appID: "tracker"
+            )
+            try await waitUntil("the deferred draft patch") { draftPatches(submitted).count == 1 }
+
+            guard case let .set(fieldId, value) = draftPatches(submitted).first?.patch.ops.first else {
+                return XCTFail("Expected a set op")
+            }
+            XCTAssertEqual(fieldId, "tone")
+            XCTAssertEqual(value, .deferred)
+        }
+    #endif
 
     #if canImport(engine_mobileFFI)
         func testDesignerEventsPreserveQueuedStateAndSuggestionDiff() {
@@ -55,7 +94,13 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.suggestions["tracker"]?.changes.first?.newValue, .text("Sales Orders"))
         }
 
-        func testAppEventInstallsDynamicTemplateContract() {
+        /// Replaces the deleted `testAppEventInstallsDynamicTemplateContract`
+        /// (local-apps#questionnaire, Task 13: the static template catalog it
+        /// exercised no longer exists) with equivalent coverage of the LLM-
+        /// authored questionnaire event: a `dataFieldList` default value and
+        /// the new `allowsCustom`/`allowsDefer` flags must all survive the
+        /// DTO → `LocalAppDesignStep` mapping.
+        func testQuestionnaireEventMapsFieldsIncludingDataFieldListDefaults() {
             let store = LocalAppsStore()
             let fields = [
                 AppDesignFieldDto(
@@ -64,6 +109,8 @@ final class LocalAppsStoreTests: XCTestCase {
                     description: "由 Rust 下发",
                     fieldType: .dataFieldList,
                     required: true,
+                    allowsCustom: false,
+                    allowsDefer: true,
                     defaultValue: .dataFieldList(value: [
                         AppDataFieldDto(
                             id: "title",
@@ -85,34 +132,23 @@ final class LocalAppsStoreTests: XCTestCase {
                     fields: index == 2 ? fields : []
                 )
             }
-            store.handle(event: .appEvent(event: .appTemplatesChanged(templates: [
-                AppTemplateDto(
-                    kind: .crudTracker,
-                    version: 3,
-                    name: "CRUD Tracker",
-                    description: "Tracker",
-                    steps: steps,
-                    collections: [
-                        AppDataCollectionDto(
-                            id: "items",
-                            label: "Items",
-                            fields: [],
-                            enabledByDefault: true
-                        ),
-                    ]
-                ),
-            ])))
+            store.handle(event: .appEvent(event: .appQuestionnaireChanged(
+                appId: "tracker",
+                revision: 3,
+                steps: steps
+            )))
 
-            XCTAssertEqual(store.templates.first?.version, 3)
-            XCTAssertEqual(store.templates.first?.orderedSteps.count, 5)
-            XCTAssertEqual(store.templates.first?.orderedSteps[2].fields.first?.type, .dataFieldList)
+            XCTAssertEqual(store.questionnaires["tracker"]?.count, 5)
+            XCTAssertEqual(store.questionnaires["tracker"]?[2].fields.first?.type, .dataFieldList)
+            XCTAssertEqual(store.questionnaires["tracker"]?[2].fields.first?.allowsDefer, true)
+            XCTAssertEqual(store.questionnaires["tracker"]?[2].fields.first?.allowsCustom, false)
             XCTAssertEqual(
-                store.templates.first?.orderedSteps[2].fields.first?.defaultValue,
+                store.questionnaires["tracker"]?[2].fields.first?.defaultValue,
                 .dataFields([
                     LocalAppDataField(
                         id: "title",
-                        name: "标题",
-                        type: .text,
+                        label: "标题",
+                        fieldType: .text,
                         required: true,
                         options: []
                     ),
@@ -185,7 +221,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "Tracker", template: .crudTracker),
+                app(id: "tracker", name: "Tracker", brief: "跟踪任务"),
             ]))
             store.handle(event: .appRuntimeChanged(
                 appId: "tracker",
@@ -198,7 +234,6 @@ final class LocalAppsStoreTests: XCTestCase {
             await store.sceneWillEnterForeground()
 
             XCTAssertTrue(submitted.contains { if case .listApps = $0 { true } else { false } })
-            XCTAssertTrue(submitted.contains { if case .listAppTemplates = $0 { true } else { false } })
             XCTAssertTrue(submitted.contains {
                 if case let .getAppDetails(appId) = $0 { return appId == "tracker" }
                 return false
@@ -334,6 +369,157 @@ final class LocalAppsStoreTests: XCTestCase {
 
             XCTAssertEqual(store.runtimes["tracker"]?.url?.absoluteString, "http://127.0.0.1:43123")
             XCTAssertEqual(store.previews["tracker"]?.url?.absoluteString, "http://127.0.0.1:43123")
+        }
+
+        // review NEW-1: `AppService::resync_pending_gates` re-announces the
+        // pending gate of EVERY app at engine bootstrap (service.rs), not
+        // just a gate that just opened this session. `PreviewReady` must not
+        // unconditionally arm cross-screen navigation, or a relaunch with a
+        // stale `awaiting_preview_confirmation` app hijacks the screen into
+        // the local-apps cover for an app the user never touched.
+        func testPreviewReadyDoesNotHijackNavigationOnALoadTimeReannouncement() {
+            let store = LocalAppsStore()
+            // No `appGenerationProgress`/`appGenerationJobChanged` preceded
+            // this — exactly what a bootstrap resync looks like: the gate
+            // announcement arrives cold, with no live job in this process.
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-2",
+                revision: 7,
+                url: nil
+            ))
+
+            XCTAssertNil(store.requestedPresentationAppID)
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
+        // The F2 fix this must not regress: a generation that actually ran
+        // this session still routes the user to the gate it just opened.
+        func testPreviewReadyStillArmsNavigationForALiveSessionGeneration() {
+            let store = LocalAppsStore()
+            store.handle(event: .appGenerationProgress(
+                appId: "tracker",
+                stage: "scaffold",
+                percent: 60,
+                detail: nil
+            ))
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-2",
+                revision: 7,
+                url: nil
+            ))
+
+            XCTAssertEqual(store.requestedPresentationAppID, "tracker")
+            // Consumed exactly once — a cold cover's `.task` reads this to
+            // land directly on `.preview` instead of `.details`; a second
+            // read (e.g. a re-render) must not resurrect it.
+            XCTAssertTrue(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
+        // review NEW-1, round 2: gating on `generationProgress` (round 1's
+        // fix) was still wrong — `appDetailsChanged` also populates that map
+        // whenever it mirrors a snapshot's `generationJob`, which happens
+        // just from opening an app's DETAIL screen (`LocalAppDetailView.task`
+        // -> `getDetails`), no live run required. An app parked at
+        // `awaiting_preview_confirmation` keeps its durable job forever
+        // (`AppService::load_jobs`), so `handle_get_app_details` attaches it
+        // on every fetch. This pins that merely viewing the details of a
+        // long-parked app must not, on a LATER gate re-announcement, make it
+        // look like a live generation.
+        func testAPersistedJobSeenOnlyViaAppDetailsDoesNotArmNavigation() {
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appDetailsChanged(details: AppDetailsDto(
+                app: app(id: "tracker", name: "Tracker"),
+                designRevision: 1,
+                designFields: [],
+                questionnaire: [],
+                plan: nil,
+                manifest: nil,
+                runtime: AppRuntimeDetailsDto(
+                    state: .stopped,
+                    mode: .nextProduction,
+                    loopbackUrl: nil,
+                    suspensionReason: nil,
+                    recoveryState: .recovered,
+                    lastError: nil
+                ),
+                generationJob: AppGenerationJobDto(
+                    id: "job-1",
+                    appId: "tracker",
+                    revision: 1,
+                    continuationSeq: 1,
+                    state: .awaitingApproval,
+                    percent: nil,
+                    detail: nil,
+                    logRel: nil,
+                    updatedAtMs: 1
+                ),
+                checkpoints: []
+            ))))
+            // Sanity: the details snapshot really did mirror the job into
+            // the map the round-1 fix (wrongly) gated on — otherwise this
+            // test would pass for the wrong reason.
+            XCTAssertNotNil(
+                store.generationProgress["tracker"],
+                "sanity: appDetailsChanged mirrors a persisted job into generationProgress"
+            )
+
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1,
+                url: nil
+            ))
+
+            XCTAssertNil(store.requestedPresentationAppID)
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
+        // review NEW-1, round 2: the within-session variant. A generation
+        // that really did run this session correctly arms navigation once
+        // (regression guard above) — but if the SAME still-pending gate is
+        // re-announced a second time later in the same process (a project or
+        // provider switch re-wires the engine source and re-runs
+        // `resync_pending_gates` without recreating this store — `RootView`'s
+        // `@State private var localAppsStore` is not reset by either), the
+        // second announcement must not re-arm just because the app WAS live
+        // earlier this session.
+        func testASecondReannouncementInTheSameSessionDoesNotReArmAfterTheFirstConsumedIt() {
+            let store = LocalAppsStore()
+            store.handle(event: .appGenerationProgress(
+                appId: "tracker",
+                stage: "scaffold",
+                percent: 60,
+                detail: nil
+            ))
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1,
+                url: nil
+            ))
+            XCTAssertEqual(store.requestedPresentationAppID, "tracker", "the first, genuinely live announcement arms")
+            _ = store.consumePendingPreviewRouteAppID(appID: "tracker")
+            // Mirrors `RootView`'s `onChange` consuming this synchronously in
+            // production — without this, the field would trivially still
+            // read "tracker" from the first event regardless of whether the
+            // second event re-armed it, making the assertion below vacuous.
+            _ = store.consumeRequestedPresentationAppID()
+
+            // A second resync re-announces the SAME still-unconfirmed gate —
+            // no new `appGenerationProgress` precedes it, because nothing is
+            // running; it is a replay, exactly like the cold-bootstrap case.
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1,
+                url: nil
+            ))
+
+            XCTAssertNil(store.requestedPresentationAppID, "a replay of an already-consumed gate must not re-arm")
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
         }
 
         func testFailedRuntimeLabelCarriesTheEngineReason() {
@@ -733,7 +919,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "Tracker", template: .crudTracker),
+                app(id: "tracker", name: "Tracker", brief: "跟踪任务"),
             ]))
             store.handle(event: .appRuntimeChanged(
                 appId: "tracker",
@@ -886,6 +1072,124 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertFalse(LocalAppDesignerGate.canConfirm([step1, step5], values: values))
     }
 
+    /// `.deferred` ("let the model decide") must satisfy a required field
+    /// the same way a real answer does — the questionnaire's "let the LLM
+    /// decide" affordance must not silently block the confirm gate. Checked
+    /// against a genuinely missing answer on the same field/step so this
+    /// cannot pass merely because everything happens to satisfy the gate.
+    func testDeferredSatisfiesARequiredFieldGate() {
+        let step = LocalAppDesignStep(
+            id: "style",
+            order: 0,
+            title: "风格",
+            description: "",
+            fields: [designField(id: "tone", type: .singleChoice)]
+        )
+
+        XCTAssertTrue(
+            LocalAppDesignerGate.isSatisfied(step, values: ["tone": .deferred]),
+            ".deferred must satisfy a required field, not read as missing"
+        )
+        XCTAssertFalse(
+            LocalAppDesignerGate.isSatisfied(step, values: [:]),
+            "a genuinely missing answer must still block the gate"
+        )
+    }
+
+    // MARK: - DesignerFieldChips / LocalAppDesignerView.isEditable
+    //
+    // Adapted from the brief's Swift-Testing (`@Test`/`#expect`) pseudocode to
+    // this file's established XCTest conventions, same as Task 13's designer
+    // tests above. `DesignerFieldChips`'s testable surface
+    // (`chipValues`/`showsCustomInput`/`select(_:)`) is deliberately
+    // state-independent so it is exercisable here without a live view host,
+    // the same reason `LocalAppDesignerGate` lives outside the
+    // `#if canImport(engine_mobileFFI)` block above.
+
+    func testAFieldThatAllowsDeferOffersTheDeferChip() {
+        let field = designField(allowsDefer: true)
+        XCTAssertTrue(DesignerFieldChips(field: field).chipValues.contains(.deferred))
+
+        // Not vacuously true: a field that does NOT allow defer must not
+        // offer the chip either.
+        let withoutDefer = designField(allowsDefer: false)
+        XCTAssertFalse(DesignerFieldChips(field: withoutDefer).chipValues.contains(.deferred))
+    }
+
+    func testAFieldThatAllowsCustomOffersTheOtherBox() {
+        let field = designField(allowsCustom: true)
+        XCTAssertTrue(DesignerFieldChips(field: field).showsCustomInput)
+
+        let withoutCustom = designField(allowsCustom: false)
+        XCTAssertFalse(DesignerFieldChips(field: withoutCustom).showsCustomInput)
+    }
+
+    /// `.deferred` is an answer, not an absence — selecting 「由你决定」
+    /// must send `LocalAppDesignValue.deferred`, never clear the field
+    /// (local-apps#questionnaire, Task 1/13/14).
+    func testChoosingDeferStoresTheDeferredValueRatherThanClearingTheField() {
+        var recorded: LocalAppDesignValue?
+        let chips = DesignerFieldChips(field: designField(allowsDefer: true)) { recorded = $0 }
+        chips.select(.deferred)
+        XCTAssertEqual(recorded, .deferred, "defer is an answer, not an absence")
+    }
+
+    func testSelectingAnOptionChipSetsASingleChoiceFieldsTextValue() {
+        let field = LocalAppDesignField(
+            id: "tone",
+            label: "语气",
+            description: "",
+            type: .singleChoice,
+            required: true,
+            allowsCustom: false,
+            allowsDefer: false,
+            defaultValue: nil,
+            options: [LocalAppDesignOption(value: "playful", label: "俏皮")]
+        )
+        var recorded: LocalAppDesignValue?
+        let chips = DesignerFieldChips(field: field) { recorded = $0 }
+        chips.select(.option("playful"))
+        XCTAssertEqual(recorded, .text("playful"))
+    }
+
+    /// A second tap on an already-selected chip removes it — the chips ARE
+    /// the multi-select editor now, not an additive-only list.
+    func testSelectingAnOptionChipTwiceTogglesAMultipleChoiceFieldsMembership() {
+        let field = LocalAppDesignField(
+            id: "features",
+            label: "需要哪些功能",
+            description: "",
+            type: .multipleChoice,
+            required: true,
+            allowsCustom: false,
+            allowsDefer: false,
+            defaultValue: nil,
+            options: [LocalAppDesignOption(value: "list", label: "笔记列表")]
+        )
+        var recorded: LocalAppDesignValue?
+        let chips = DesignerFieldChips(field: field, value: .strings(["list"])) { recorded = $0 }
+        chips.select(.option("list"))
+        XCTAssertEqual(recorded, .strings([]))
+    }
+
+    /// The designer's answering form is only interactive at `collectingSpec`
+    /// — while an LLM round trip owns the draft (`authoringQuestionnaire`/
+    /// `planning`) a concurrent edit would race it.
+    func testTheDesignerIsReadOnlyWhileTheModelIsWorking() {
+        for workflow: LocalAppWorkflow in [.authoringQuestionnaire, .planning] {
+            XCTAssertFalse(LocalAppDesignerView.isEditable(workflow), "\(workflow) must be read-only")
+        }
+        XCTAssertTrue(LocalAppDesignerView.isEditable(.collectingSpec))
+    }
+
+    /// The two failure states must NOT be silently treated as editable —
+    /// each renders its own retry UI instead (`unavailableView(for:)`).
+    func testTheTwoFailureStatesAreAlsoReadOnly() {
+        for workflow: LocalAppWorkflow in [.questionnaireFailed, .planFailed] {
+            XCTAssertFalse(LocalAppDesignerView.isEditable(workflow), "\(workflow) must be read-only")
+        }
+    }
+
     /// A pasted URL or a typed capital used to reach the engine verbatim and
     /// come back as a raw English `invalid_request`.
     func testDomainNormalizationMirrorsTheManifestContract() {
@@ -898,20 +1202,92 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertNil(LocalAppDomainPolicy.normalize("api_example.com"))
     }
 
-    private func dataField(id: String) -> LocalAppDataField {
-        LocalAppDataField(id: id, name: id, type: .text, required: false, options: [])
+    // MARK: - LocalAppPlanConfirmView
+    //
+    // Adapted from the brief's Swift-Testing (`@Test`/`#expect`) pseudocode to
+    // this file's established XCTest conventions, same as the
+    // `DesignerFieldChips`/`isEditable` tests above. `LocalAppPlanConfirmView`
+    // never touches `LocalAppsStore`/FFI directly — it takes plain closures —
+    // so it lives here outside the `#if canImport(engine_mobileFFI)` block too.
+
+    func testThePlanSheetListsEveryCollectionAndField() {
+        let view = LocalAppPlanConfirmView(plan: notesPlan(), onConfirm: {}, onBack: {})
+        XCTAssertTrue(view.summaryLines.contains { $0.contains("notes") && $0.contains("title") })
     }
 
-    private func designField(id: String, type: LocalAppFieldType) -> LocalAppDesignField {
-        LocalAppDesignField(
-            id: id,
-            label: id,
-            description: "",
-            type: type,
-            required: true,
-            defaultValue: nil,
-            options: []
+    func testThePlanSheetNamesTheDomainsItWillAllow() {
+        let view = LocalAppPlanConfirmView(plan: planWithDomain("api.example.com"), onConfirm: {}, onBack: {})
+        XCTAssertTrue(view.summaryLines.contains { $0.contains("api.example.com") })
+    }
+
+    func testThePlanSheetSaysSoWhenNoNetworkAccessIsRequested() {
+        let view = LocalAppPlanConfirmView(plan: notesPlan(), onConfirm: {}, onBack: {})
+        XCTAssertTrue(
+            view.summaryLines.contains { $0.contains("不访问网络") },
+            "silence about network access reads as an omission, not as a guarantee"
         )
+    }
+
+    func testTheSheetHasExactlyTwoExits() {
+        let view = LocalAppPlanConfirmView(plan: notesPlan(), onConfirm: {}, onBack: {})
+        XCTAssertEqual(view.actionTitles, ["返回修改", "确认并生成"])
+    }
+
+    /// The sheet's capability section must also say something when the plan
+    /// requests none, mirroring the domain section's "silence reads as an
+    /// omission" reasoning — not asserted by the brief, but the same logic
+    /// applies and the copy exists (`local_apps_plan_confirm_no_capabilities`).
+    func testThePlanSheetSaysSoWhenNoCapabilitiesAreRequested() {
+        let plan = notesPlan()
+        XCTAssertTrue(plan.capabilities.isEmpty, "fixture sanity check")
+        let view = LocalAppPlanConfirmView(plan: plan, onConfirm: {}, onBack: {})
+        XCTAssertTrue(view.summaryLines.contains { $0.contains("无需额外权限") })
+    }
+
+    // MARK: - Task 16: create entry point + persistent revision input
+
+    /// `LocalAppCreateView` (Task 13's replacement for the deleted
+    /// `LocalAppCreateSheet`) refuses a whitespace-only brief — the same
+    /// empty-input-refused acceptance criterion the brief's now-stale
+    /// `theCreateSheetRefusesAnEmptyDescription` targeted, adapted to the
+    /// view that actually exists.
+    func testTheCreateViewRefusesAWhitespaceOnlyBrief() {
+        var view = LocalAppCreateView(store: makeStore(), path: .constant([]))
+        view.brief = "   \n  "
+        XCTAssertFalse(view.canSubmit)
+    }
+
+    func testTheCreateViewAcceptsANonEmptyBrief() {
+        var view = LocalAppCreateView(store: makeStore(), path: .constant([]))
+        view.brief = "a shared grocery list for my household"
+        XCTAssertTrue(view.canSubmit)
+    }
+
+    /// `showsRevisionInput` must mirror `AppState::request_revision`'s
+    /// accepted source states exactly (`lingxi-code/local-apps/src/state.rs`
+    /// `ensure_workflow("request_revision", &[AwaitingPreviewConfirmation,
+    /// Ready])`) — enumerating every `LocalAppWorkflow` case, not just the
+    /// four the original brief named, so a future workflow addition can't
+    /// silently widen or narrow the gate without this test noticing.
+    func testShowsRevisionInputMatchesExactlyTheStatesTheEngineAccepts() {
+        let accepting: Set<LocalAppWorkflow> = [.ready, .awaitingPreviewConfirmation]
+        for workflow in LocalAppWorkflow.allCases {
+            XCTAssertEqual(
+                LocalAppDetailView.showsRevisionInput(for: workflow),
+                accepting.contains(workflow),
+                "workflow \(workflow) diverged from AppState::request_revision's accepted states"
+            )
+        }
+    }
+
+    func testAReadyAppShowsAPersistentRevisionInput() {
+        XCTAssertTrue(LocalAppDetailView.showsRevisionInput(for: .ready))
+        XCTAssertTrue(LocalAppDetailView.showsRevisionInput(for: .awaitingPreviewConfirmation))
+    }
+
+    func testAnAppStillGeneratingDoesNotShowTheRevisionInput() {
+        XCTAssertFalse(LocalAppDetailView.showsRevisionInput(for: .generating))
+        XCTAssertFalse(LocalAppDetailView.showsRevisionInput(for: .authoringQuestionnaire))
     }
 
     #if canImport(engine_mobileFFI)
@@ -1001,40 +1377,16 @@ final class LocalAppsStoreTests: XCTestCase {
         }
     #endif
 
-    private func template(
-        id: String,
-        name: String,
-        kind: LocalAppTemplateKind
-    ) -> LocalAppTemplate {
-        LocalAppTemplate(
-            id: id,
-            kind: kind,
-            version: 1,
-            name: name,
-            description: "Description",
-            steps: (0 ..< 5).map { index in
-                LocalAppDesignStep(
-                    id: "step-\(index)",
-                    order: index,
-                    title: "Step \(index)",
-                    description: "",
-                    fields: []
-                )
-            },
-            collections: []
-        )
-    }
-
     #if canImport(engine_mobileFFI)
         private func app(
             id: String,
             name: String,
-            template: AppTemplateKindDto
+            brief: String = "简介"
         ) -> AppRecordDto {
             AppRecordDto(
                 id: id,
                 name: name,
-                template: template,
+                brief: brief,
                 createdAtMs: 1,
                 updatedAtMs: 2,
                 workflowState: .collectingSpec,

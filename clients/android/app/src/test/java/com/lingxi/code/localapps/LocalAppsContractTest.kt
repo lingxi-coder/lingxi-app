@@ -5,34 +5,44 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class LocalAppsContractTest {
-    private val template = LocalAppTemplate(
-        kind = "crud_tracker",
-        version = 1u,
-        name = "CRUD Tracker",
-        description = "Tracker",
-        steps = emptyList(),
-    )
-
     private fun state(
         query: String = "",
-        filter: String? = null,
     ) = LocalAppsUiState(
         loading = false,
-        templatesLoading = false,
-        templates = listOf(template),
         apps = listOf(
-            LocalAppItem("a", "客户跟进", "crud_tracker", "CRUD Tracker", LocalAppWorkflow.Ready, updatedAtMs = 2),
-            LocalAppItem("b", "运营看板", "dashboard", "Dashboard", LocalAppWorkflow.Generating, updatedAtMs = 1),
+            LocalAppItem("a", "客户跟进", brief = "记录客户跟进情况", LocalAppWorkflow.Ready, updatedAtMs = 2),
+            LocalAppItem("b", "运营看板", brief = "运营数据看板", LocalAppWorkflow.Generating, updatedAtMs = 1),
         ),
         query = query,
-        templateFilter = filter,
         distributionMode = LocalAppRuntimeMode.StaticExport,
     )
 
+    // Was `filteredApps_combinesNameSearchAndTemplateFilter`: the template
+    // filter half of that name is gone along with `templateFilter`/
+    // `LocalAppItem.templateKind` (local-apps#questionnaire, Task 18) — the
+    // step 1 brief's `an app item carries the brief instead of a template
+    // kind` / `filtering no longer depends on a template kind` tests below
+    // cover the replacement directly. This migrates the surviving half: name
+    // search still narrows `filteredApps`.
     @Test
-    fun filteredApps_combinesNameSearchAndTemplateFilter() {
-        assertEquals(listOf("a"), state(query = "客户", filter = "crud_tracker").filteredApps.map { it.id })
-        assertEquals(emptyList<LocalAppItem>(), state(query = "看板", filter = "crud_tracker").filteredApps)
+    fun `filteredApps narrows by name search`() {
+        assertEquals(listOf("a"), state(query = "客户").filteredApps.map { it.id })
+        assertEquals(emptyList<LocalAppItem>(), state(query = "不存在").filteredApps)
+    }
+
+    @Test
+    fun `an app item carries the brief instead of a template kind`() {
+        val item = LocalAppItem(id = "a", name = "记事本", brief = "一个记事本 app", workflow = LocalAppWorkflow.Ready, updatedAtMs = 0)
+        assertEquals("一个记事本 app", item.brief)
+    }
+
+    @Test
+    fun `filtering no longer depends on a template kind`() {
+        val state = LocalAppsUiState(
+            apps = listOf(LocalAppItem(id = "a", name = "N", brief = "b", workflow = LocalAppWorkflow.Ready, updatedAtMs = 0)),
+            distributionMode = LocalAppRuntimeMode.StaticExport,
+        )
+        assertEquals(1, state.filteredApps.size)
     }
 
     @Test
@@ -43,8 +53,7 @@ class LocalAppsContractTest {
                 LocalAppItem(
                     "a",
                     "客户跟进",
-                    "crud_tracker",
-                    "CRUD Tracker",
+                    "记录客户跟进情况",
                     LocalAppWorkflow.AwaitingPreviewConfirmation,
                     runtime = running,
                     updatedAtMs = 2,

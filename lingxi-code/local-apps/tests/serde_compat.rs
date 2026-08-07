@@ -48,7 +48,7 @@ use local_apps::{
     AppContinuationKind, AppDesignDraft, AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion,
     AppEventObserver, AppInteractionKind, AppInteractionRequest, AppInteractions, AppLayout,
     AppManifest, AppPermissions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppService,
-    AppState, AppTemplateKind, AppWorkflowState, ContinuationSink, DensityLevel, DesignValue,
+    AppState, AppWorkflowState, ContinuationSink, DensityLevel, DesignValue,
     NoopAppEventObserver, RecordingContinuationSink, APPS_SCHEMA_VERSION,
 };
 use std::collections::BTreeMap;
@@ -89,13 +89,13 @@ fn seed_app(
     existing: &mut Vec<AppState>,
     id: &str,
     name: &str,
-    template: AppTemplateKind,
+    brief: &str,
     conversation_id: Option<String>,
 ) {
     let app = AppState::create(
         id.to_string(),
         name.to_string(),
-        template,
+        brief.to_string(),
         conversation_id,
         T0,
     );
@@ -104,7 +104,7 @@ fn seed_app(
     // document; both are pinned like the other five. Each writer creates the
     // layout skeleton itself, so no separate `initialize` is needed.
     let layout = AppLayout::new(root, id).expect("seed layout");
-    save_manifest(&layout, &AppManifest::for_new_app(id, name, template)).expect("seed manifest");
+    save_manifest(&layout, &AppManifest::for_new_app(id, name)).expect("seed manifest");
     save_permissions(&layout, &AppPermissions::default()).expect("seed permissions");
     existing.push(app);
     let records: Vec<AppRecord> = existing.iter().map(|app| app.record.clone()).collect();
@@ -159,7 +159,7 @@ async fn drive_canonical_store(root: &Path) {
         &mut seeded,
         "aaaa1111",
         "Fixture Maximal",
-        AppTemplateKind::CrudTracker,
+        "a fixture app with every design-value kind",
         Some("conv-fixture-1".to_string()),
     );
     seed_app(
@@ -167,7 +167,7 @@ async fn drive_canonical_store(root: &Path) {
         &mut seeded,
         "bbbb2222",
         "Fixture Minimal",
-        AppTemplateKind::Dashboard,
+        "a minimal fixture app",
         None,
     );
 
@@ -338,18 +338,22 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
         record: AppRecord {
             id: "aaaa1111".to_string(),
             name: "Fixture Maximal".to_string(),
-            template: AppTemplateKind::CrudTracker,
+            brief: "a fixture app with every design-value kind".to_string(),
             created_at_ms: T0,
             updated_at_ms: T0 + 700,
             workflow_state: AppWorkflowState::AwaitingPreviewConfirmation,
             conversation_id: Some("conv-fixture-1".to_string()),
             workspace_rel: "apps/aaaa1111/workspace".to_string(),
+            // `#[serde(skip)]` — never on disk, always `0` after a load.
+            llm_round: 0,
         },
         draft: AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
-            template: AppTemplateKind::CrudTracker,
             revision: 1,
+            questionnaire: Vec::new(),
             fields: maximal_fields,
+            plan: None,
+            plan_for_revision: None,
             pending_suggestion: Some(AppDesignSuggestion {
                 suggestion_id: suggestion_id.clone(),
                 patch: AppDesignPatch {
@@ -419,18 +423,22 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
         record: AppRecord {
             id: "bbbb2222".to_string(),
             name: "Fixture Minimal".to_string(),
-            template: AppTemplateKind::Dashboard,
+            brief: "a minimal fixture app".to_string(),
             created_at_ms: T0,
             updated_at_ms: T0 + 900,
             workflow_state: AppWorkflowState::CollectingSpec,
             conversation_id: None,
             workspace_rel: "apps/bbbb2222/workspace".to_string(),
+            // `#[serde(skip)]` — never on disk, always `0` after a load.
+            llm_round: 0,
         },
         draft: AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
-            template: AppTemplateKind::Dashboard,
             revision: 0,
+            questionnaire: Vec::new(),
             fields: BTreeMap::new(),
+            plan: None,
+            plan_for_revision: None,
             pending_suggestion: None,
             confirmed_revision: None,
         },
@@ -474,7 +482,7 @@ fn write_store(root: &Path, states: &[AppState]) {
         let layout = AppLayout::new(root, app.record.id.clone()).expect("target layout");
         save_manifest(
             &layout,
-            &AppManifest::for_new_app(&app.record.id, &app.record.name, app.record.template),
+            &AppManifest::for_new_app(&app.record.id, &app.record.name),
         )
         .expect("save manifest");
         save_permissions(&layout, &AppPermissions::default()).expect("save permissions");

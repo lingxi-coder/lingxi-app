@@ -554,7 +554,6 @@ pub(crate) fn seed_legacy_checkpoint(workspace: &Path, created_at_ms: u64) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AppTemplateKind;
     use std::fs;
 
     fn layout(root: &Path) -> AppLayout {
@@ -863,6 +862,5 @@ mod tests {
         ] {
             assert_eq!(parse_kind(kind_name(kind)), Some(kind));
         }
-        let _ = AppTemplateKind::Dashboard;
     }
 }

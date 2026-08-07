@@ -3,7 +3,7 @@
   "app": {
     "id": "bbbb2222",
     "name": "Fixture Minimal",
-    "template": "dashboard",
+    "brief": "a minimal fixture app",
     "createdAtMs": 1753000000000,
     "updatedAtMs": 1753000000900,
     "workflowState": "collecting_spec",

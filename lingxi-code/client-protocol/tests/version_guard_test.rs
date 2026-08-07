@@ -93,6 +93,18 @@ fn major_of(version: &str) -> u64 {
         .unwrap_or_else(|| panic!("version {version:?} has no numeric major component"))
 }
 
+/// Whether a BREAKING contract change is legitimately covered by a version
+/// bump: the CURRENT major must exceed the major blessed alongside the
+/// CHECKED-IN index — never a literal pin. A literal (`current_major > 1`)
+/// is only correct until the first bump ever lands: once
+/// `CLIENT_PROTOCOL_VERSION` is permanently `2.x.x` or higher, a literal `> 1`
+/// is permanently `true` and a SECOND breaking change with no bump at all
+/// would sail through ungated. Pulled out as its own pure function so the
+/// regression has a direct unit test below, independent of disk I/O.
+fn major_was_bumped_past(current_major: u64, blessed_major: u64) -> bool {
+    current_major > blessed_major
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // On-disk index
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +113,46 @@ fn index_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("snapshots")
         .join("contract_index.json")
+}
+
+/// Sidecar recording the `CLIENT_PROTOCOL_VERSION` MAJOR that was current the
+/// last time `contract_index.json` was blessed. LOAD-BEARING (finding,
+/// post-Task-2 review): the breaking-change threshold must travel with the
+/// version, not be a literal pin — `assert!(current_major > 1)` looks correct
+/// the day it's written but is silently permanent once any bump ever lands: a
+/// SECOND breaking change after `CLIENT_PROTOCOL_VERSION` is already `2.x.x`
+/// would satisfy `2 > 1` with no bump at all. Comparing against the major
+/// blessed alongside the CHECKED-IN index (this file), the same way the index
+/// itself is a checked-in/current diff, means every future breaking change —
+/// not just the first one — is gated.
+fn blessed_major_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("snapshots")
+        .join("blessed_major.txt")
+}
+
+/// Read the major recorded at the last bless. `None` only for a repo that
+/// predates this sidecar (never happens post-bootstrap: every bless from here
+/// on writes it in lockstep with `contract_index.json`).
+fn read_blessed_major() -> Option<u64> {
+    let raw = fs::read_to_string(blessed_major_path()).ok()?;
+    Some(raw.trim().parse().unwrap_or_else(|error| {
+        panic!(
+            "{} does not contain a valid integer major: {error}",
+            blessed_major_path().display()
+        )
+    }))
+}
+
+/// Write the blessed major (used under `BLESS=1`, alongside `write_index`,
+/// on EVERY bless — additive or breaking — so the sidecar always reflects
+/// the major of whatever contract is currently checked in.
+fn write_blessed_major(major: u64) {
+    let path = blessed_major_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create snapshots dir");
+    }
+    fs::write(&path, format!("{major}\n")).expect("write blessed_major.txt");
 }
 
 fn bless() -> bool {
@@ -568,16 +620,30 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::ListApps", "list_apps");
 
-    put("ClientCommand::ListAppTemplates", "list_app_templates");
-
     put("ClientCommand::GetAppDetails", "get_app_details");
     put("ClientCommand::GetAppDetails.app_id", "String");
 
     put("ClientCommand::CreateApp", "create_app");
     put("ClientCommand::CreateApp.name", "String");
-    put("ClientCommand::CreateApp.template", "AppTemplateKindDto");
     put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
+    put("ClientCommand::CreateApp.brief", "String");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
+
+    put("ClientCommand::UpdateAppBrief", "update_app_brief");
+    put("ClientCommand::UpdateAppBrief.app_id", "String");
+    put("ClientCommand::UpdateAppBrief.brief", "String");
+
+    put(
+        "ClientCommand::RetryAppQuestionnaire",
+        "retry_app_questionnaire",
+    );
+    put("ClientCommand::RetryAppQuestionnaire.app_id", "String");
+
+    put("ClientCommand::BeginAppPlanning", "begin_app_planning");
+    put("ClientCommand::BeginAppPlanning.app_id", "String");
+
+    put("ClientCommand::RetryAppPlan", "retry_app_plan");
+    put("ClientCommand::RetryAppPlan.app_id", "String");
 
     put("ClientCommand::OpenAppDesigner", "open_app_designer");
     put("ClientCommand::OpenAppDesigner.app_id", "String");
@@ -947,12 +1013,17 @@ fn current_contract_index() -> ContractIndex {
     put("CoordinatorWorkerDto.status", "String");
 
     // ── Local-apps DTOs (local_apps.rs) ───────────────────────────────────
-    put("AppTemplateKindDto::Dashboard", "dashboard");
-    put("AppTemplateKindDto::CrudTracker", "crud_tracker");
-    put("AppTemplateKindDto::ContentShowcase", "content_showcase");
-    put("AppTemplateKindDto::FormUtility", "form_utility");
-
+    put(
+        "AppWorkflowStateDto::AuthoringQuestionnaire",
+        "authoring_questionnaire",
+    );
+    put(
+        "AppWorkflowStateDto::QuestionnaireFailed",
+        "questionnaire_failed",
+    );
     put("AppWorkflowStateDto::CollectingSpec", "collecting_spec");
+    put("AppWorkflowStateDto::Planning", "planning");
+    put("AppWorkflowStateDto::PlanFailed", "plan_failed");
     put(
         "AppWorkflowStateDto::AwaitingSpecConfirmation",
         "awaiting_spec_confirmation",
@@ -989,6 +1060,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppErrorCodeDto::StorageCorrupt", "storage_corrupt");
     put("AppErrorCodeDto::InvalidRequest", "invalid_request");
     put("AppErrorCodeDto::Io", "io");
+    put("AppErrorCodeDto::LlmUnavailable", "llm_unavailable");
+    put("AppErrorCodeDto::LlmOutputRejected", "llm_output_rejected");
 
     put("AppCheckpointKindDto::ScaffoldCreated", "scaffold_created");
     put(
@@ -1042,6 +1115,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppDesignFieldDto.description", "Option<String>");
     put("AppDesignFieldDto.field_type", "AppDesignFieldTypeDto");
     put("AppDesignFieldDto.required", "bool");
+    put("AppDesignFieldDto.allows_custom", "bool");
+    put("AppDesignFieldDto.allows_defer", "bool");
     put("AppDesignFieldDto.default_value", "Option<DesignValueDto>");
     put("AppDesignFieldDto.options", "Vec<AppDesignFieldOptionDto>");
 
@@ -1051,16 +1126,14 @@ fn current_contract_index() -> ContractIndex {
     put("AppDesignStepDto.description", "Option<String>");
     put("AppDesignStepDto.fields", "Vec<AppDesignFieldDto>");
 
-    put("AppTemplateDto.kind", "AppTemplateKindDto");
-    put("AppTemplateDto.version", "u32");
-    put("AppTemplateDto.name", "String");
-    put("AppTemplateDto.description", "String");
-    put("AppTemplateDto.steps", "Vec<AppDesignStepDto>");
-    put("AppTemplateDto.collections", "Vec<AppDataCollectionDto>");
+    put("AppPlanDto.collections", "Vec<AppDataCollectionDto>");
+    put("AppPlanDto.capabilities", "Vec<AppCapabilityKindDto>");
+    put("AppPlanDto.domains", "Vec<String>");
+    put("AppPlanDto.summary", "String");
 
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
-    put("AppRecordDto.template", "AppTemplateKindDto");
+    put("AppRecordDto.brief", "String");
     put("AppRecordDto.created_at_ms", "u64");
     put("AppRecordDto.updated_at_ms", "u64");
     put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
@@ -1092,6 +1165,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put("DesignValueDto::DomainList", "domain_list");
     put("DesignValueDto::DomainList.value", "Vec<String>");
+    put("DesignValueDto::Deferred", "deferred");
 
     put("AppDesignPatchOpDto::Set", "set");
     put("AppDesignPatchOpDto::Set.field_id", "String");
@@ -1163,7 +1237,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.schema_version", "u32");
     put("AppManifestDto.app_id", "String");
     put("AppManifestDto.name", "String");
-    put("AppManifestDto.template", "AppTemplateKindDto");
     put("AppManifestDto.design_revision", "u64");
     put("AppManifestDto.collections", "Vec<AppDataCollectionDto>");
     put("AppManifestDto.allowed_domains", "Vec<String>");
@@ -1187,6 +1260,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppDetailsDto.app", "AppRecordDto");
     put("AppDetailsDto.design_revision", "u64");
     put("AppDetailsDto.design_fields", "Vec<AppDesignFieldValueDto>");
+    put("AppDetailsDto.questionnaire", "Vec<AppDesignStepDto>");
+    put("AppDetailsDto.plan", "Option<AppPlanDto>");
     put("AppDetailsDto.manifest", "Option<AppManifestDto>");
     put("AppDetailsDto.runtime", "AppRuntimeDetailsDto");
     put(
@@ -1250,13 +1325,22 @@ fn current_contract_index() -> ContractIndex {
     put("AppAuthorizationDecisionDto::AllowSession", "allow_session");
     put("AppAuthorizationDecisionDto::AllowAlways", "allow_always");
 
-    put("AppEventDto::AppTemplatesChanged", "app_templates_changed");
-    put(
-        "AppEventDto::AppTemplatesChanged.templates",
-        "Vec<AppTemplateDto>",
-    );
     put("AppEventDto::AppDetailsChanged", "app_details_changed");
     put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
+    put(
+        "AppEventDto::AppQuestionnaireChanged",
+        "app_questionnaire_changed",
+    );
+    put("AppEventDto::AppQuestionnaireChanged.app_id", "String");
+    put("AppEventDto::AppQuestionnaireChanged.revision", "u64");
+    put(
+        "AppEventDto::AppQuestionnaireChanged.steps",
+        "Vec<AppDesignStepDto>",
+    );
+    put("AppEventDto::AppPlanChanged", "app_plan_changed");
+    put("AppEventDto::AppPlanChanged.app_id", "String");
+    put("AppEventDto::AppPlanChanged.revision", "u64");
+    put("AppEventDto::AppPlanChanged.plan", "Option<AppPlanDto>");
     put(
         "AppEventDto::AppGenerationJobChanged",
         "app_generation_job_changed",
@@ -1361,6 +1445,42 @@ fn retyping_a_field_requires_major_bump() {
     );
 }
 
+/// Regression for the post-Task-2 review finding: the breaking-change
+/// threshold must travel with the version, not be a literal pin. A literal
+/// `current_major > 1` is true forever once the major has EVER been bumped
+/// past 1 — so a SECOND breaking change landing while `CLIENT_PROTOCOL_VERSION`
+/// is already e.g. `2.0.0`, with no further bump, must still be REJECTED.
+/// `major_was_bumped_past` compares against the major blessed alongside the
+/// checked-in index instead, so it keeps gating every subsequent breaking
+/// change, not just the first one.
+#[test]
+fn a_second_breaking_change_with_no_further_bump_is_still_rejected() {
+    // The exact failure sequence the review described: a first breaking
+    // change bumped 1 -> 2 (blessed_major becomes 2). A SECOND breaking
+    // change lands with CLIENT_PROTOCOL_VERSION still at major 2 — a literal
+    // `current_major > 1` would wrongly pass (`2 > 1`); the real check must
+    // reject it (`2` does not exceed the blessed `2`).
+    assert!(
+        !major_was_bumped_past(2, 2),
+        "a second breaking change must still be rejected when the major did not move again"
+    );
+    // The properly-bumped case (2 -> 3) must pass.
+    assert!(
+        major_was_bumped_past(3, 2),
+        "a genuine further bump past the blessed major must be accepted"
+    );
+    // The original (first-ever) bump this guard was written for must still work.
+    assert!(
+        major_was_bumped_past(2, 1),
+        "the original 1 -> 2 bump must still be accepted"
+    );
+    // A missing/no-op bump at the foundation pin must still be rejected.
+    assert!(
+        !major_was_bumped_past(1, 1),
+        "no bump at all must be rejected"
+    );
+}
+
 /// Adding a NEW optional field is a COMPATIBLE (additive) change ⇒ the
 /// classifier returns `Compatible`, so NO major bump is required.
 #[test]
@@ -1424,9 +1544,14 @@ fn identical_index_is_compatible() {
 #[test]
 fn current_contract_matches_index_or_version_bumped() {
     let current = current_contract_index();
+    let current_major = major_of(CLIENT_PROTOCOL_VERSION);
 
     if bless() {
         write_index(&current);
+        // Always in lockstep with the index, not just on a breaking bless:
+        // the sidecar's job is to answer "what major was checked in", which
+        // must stay true after an additive-only re-bless too.
+        write_blessed_major(current_major);
         return;
     }
 
@@ -1445,7 +1570,6 @@ fn current_contract_matches_index_or_version_bumped() {
 
     // The contract changed. Classify the change.
     let verdict = classify(&checked_in, &current);
-    let current_major = major_of(CLIENT_PROTOCOL_VERSION);
 
     match verdict {
         Compatibility::Compatible => {
@@ -1460,17 +1584,30 @@ fn current_contract_matches_index_or_version_bumped() {
             );
         }
         Compatibility::Breaking => {
-            // We need a major bump. The checked-in index records the contract as
-            // of the LAST blessed version. We can only compare against the
-            // CURRENT version constant; require it to be > 1 (the foundation
-            // pin) — i.e. a deliberate major bump must have happened.
+            // We need a major bump. THE THRESHOLD TRAVELS WITH THE VERSION:
+            // compare against the major that was blessed alongside the
+            // CHECKED-IN index (`blessed_major_path()`), never a literal pin
+            // — a literal (e.g. `> 1`) is correct only until the FIRST bump
+            // ever lands, then stays true forever and stops gating anything
+            // (finding: this guard shipped with exactly that bug once
+            // `CLIENT_PROTOCOL_VERSION` first became `2.x.x`).
+            let blessed_major = read_blessed_major().unwrap_or_else(|| {
+                panic!(
+                    "missing `{}` (the major recorded at the last bless); regenerate with \
+                     `BLESS=1 cargo test -p client-protocol --test version_guard_test`",
+                    blessed_major_path().display()
+                )
+            });
             assert!(
-                current_major > 1,
+                major_was_bumped_past(current_major, blessed_major),
                 "BREAKING contract change detected (a removed / renamed / retyped \
-                 entry) but `CLIENT_PROTOCOL_VERSION` is still {CLIENT_PROTOCOL_VERSION:?} \
-                 (major {current_major}). Per decision §0.10 a breaking change REQUIRES \
-                 a major bump. Bump the major in `client-protocol/src/version.rs`, then \
-                 re-bless with `BLESS=1 cargo test -p client-protocol --test version_guard_test`."
+                 entry) but `CLIENT_PROTOCOL_VERSION`'s major ({current_major}, from \
+                 {CLIENT_PROTOCOL_VERSION:?}) does not exceed the major blessed alongside \
+                 the checked-in contract index ({blessed_major}, from `{}`). Per decision \
+                 §0.10 a breaking change REQUIRES a major bump PAST the last blessed one. \
+                 Bump the major in `client-protocol/src/version.rs`, then re-bless with \
+                 `BLESS=1 cargo test -p client-protocol --test version_guard_test`.",
+                blessed_major_path().display()
             );
         }
     }
@@ -1515,9 +1652,9 @@ fn contract_index_covers_every_dto() {
         AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
         AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
         AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
-        AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+        AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
         AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-        AppTemplateDto, AppTemplateKindDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
+        AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
         AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -1706,7 +1843,7 @@ fn contract_index_covers_every_dto() {
         AppRecordDto {
             id: String::new(),
             name: String::new(),
-            template: AppTemplateKindDto::Dashboard,
+            brief: String::new(),
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1772,6 +1909,8 @@ fn contract_index_covers_every_dto() {
         description: None,
         field_type: AppDesignFieldTypeDto::ShortText,
         required: false,
+        allows_custom: false,
+        allows_defer: false,
         default_value: None,
         options: Vec::new(),
     };
@@ -1782,13 +1921,11 @@ fn contract_index_covers_every_dto() {
         description: None,
         fields: Vec::new(),
     };
-    let _app_template = AppTemplateDto {
-        kind: AppTemplateKindDto::CrudTracker,
-        version: 0,
-        name: String::new(),
-        description: String::new(),
-        steps: Vec::new(),
+    let _app_plan = AppPlanDto {
         collections: Vec::new(),
+        capabilities: Vec::new(),
+        domains: Vec::new(),
+        summary: String::new(),
     };
     let app_generation_job = AppGenerationJobDto {
         id: String::new(),
@@ -1805,7 +1942,6 @@ fn contract_index_covers_every_dto() {
         schema_version: 0,
         app_id: String::new(),
         name: String::new(),
-        template: AppTemplateKindDto::ContentShowcase,
         design_revision: 0,
         collections: Vec::new(),
         allowed_domains: Vec::new(),
@@ -1826,7 +1962,7 @@ fn contract_index_covers_every_dto() {
         app: AppRecordDto {
             id: String::new(),
             name: String::new(),
-            template: AppTemplateKindDto::FormUtility,
+            brief: String::new(),
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1835,6 +1971,8 @@ fn contract_index_covers_every_dto() {
         },
         design_revision: 0,
         design_fields: Vec::new(),
+        questionnaire: Vec::new(),
+        plan: None,
         manifest: None,
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,
@@ -1881,13 +2019,21 @@ fn contract_index_covers_every_dto() {
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
     // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these seven tags to exist.
+    // `ClientEvent::AppEvent`, so nothing else forces these eight tags to
+    // exist.
     let _app_events: Vec<AppEventDto> = vec![
-        AppEventDto::AppTemplatesChanged {
-            templates: Vec::new(),
-        },
         AppEventDto::AppDetailsChanged {
             details: app_details,
+        },
+        AppEventDto::AppQuestionnaireChanged {
+            app_id: String::new(),
+            revision: 0,
+            steps: Vec::new(),
+        },
+        AppEventDto::AppPlanChanged {
+            app_id: String::new(),
+            revision: 0,
+            plan: None,
         },
         AppEventDto::AppGenerationJobChanged {
             job: app_generation_job,
@@ -1914,4 +2060,23 @@ fn contract_index_covers_every_dto() {
         ix.contains_key("ClientEvent::TextDelta.text"),
         "the contract index must enumerate the contract leaves"
     );
+}
+
+/// `DesignValueDto::Deferred` carries no payload — unlike every other
+/// `DesignValueDto` variant, its wire form is the bare tag alone
+/// (`{ "kind": "deferred" }`, no `value` key). Pins that shape so a future
+/// change cannot silently attach a payload to the "let the model decide"
+/// sentinel.
+#[test]
+fn deferred_design_value_serialises_as_a_bare_tagged_variant() {
+    let json = serde_json::to_value(client_protocol::local_apps::DesignValueDto::Deferred)
+        .expect("serialise");
+    assert_eq!(
+        json,
+        serde_json::json!({ "kind": "deferred" }),
+        "Deferred carries no payload; the tag alone must round-trip"
+    );
+    let back: client_protocol::local_apps::DesignValueDto =
+        serde_json::from_value(json).expect("deserialise");
+    assert_eq!(back, client_protocol::local_apps::DesignValueDto::Deferred);
 }

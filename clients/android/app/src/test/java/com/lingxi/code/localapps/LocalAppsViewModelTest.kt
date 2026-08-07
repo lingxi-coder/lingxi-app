@@ -11,11 +11,10 @@ import com.lingxi.code.bindings.AppDetailsDto
 import com.lingxi.code.bindings.AppDesignFieldValueDto
 import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppEventDto
+import com.lingxi.code.bindings.AppPlanDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
-import com.lingxi.code.bindings.AppTemplateDto
-import com.lingxi.code.bindings.AppTemplateKindDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppUiTargetDto
@@ -32,6 +31,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -40,6 +40,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -64,6 +65,146 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /// PERMANENT GUARD (local-apps#questionnaire, Task 11 review Fix 2;
+    /// converted from a red-until-fixed tripwire by Task 20). The Rust side
+    /// pinned the display-name-as-brief fabrication with a NAMED,
+    /// red-until-fixed test
+    /// (`create_app_persists_name_as_brief_until_task_11_adds_a_real_one`,
+    /// since renamed once Task 11 landed the real brief). Android's
+    /// `createSelectedTemplate()` was given the SAME stopgap
+    /// (`brief = name`) with only a `NOTE`, no mechanism forcing anyone to
+    /// notice when it should stop being true — this test was that mechanism,
+    /// red for nine tasks (`ChangeCreateName("My Habit App")` then
+    /// `CreateFromBrief("My Habit App")`, asserting `sent.brief != sent.name`
+    /// on two IDENTICAL strings — an assertion that could only ever fail).
+    ///
+    /// Task 20 deletes the fabrication rather than papering over the
+    /// assertion: `LocalAppsViewModel.createFromBrief` now sends `name`
+    /// EMPTY on every create (never the display text of anything), and
+    /// `AppService::create_app` (service.rs) derives the display name from
+    /// the brief itself when the caller's name is empty — mirrors iOS's
+    /// `LocalAppsStore.createApp(brief:)` exactly. There is no longer a
+    /// display-name input on the real create screen at all (`CreateAppDialog`
+    /// in `LocalAppsScreen.kt` collects only the brief) — `ChangeCreateName`
+    /// is dispatched here only because a handful of OTHER tests below still
+    /// exercise it to probe `pendingCreates` matching; it has no effect on
+    /// what goes out on the wire.
+    ///
+    /// Inverted into a permanent guard: proves BOTH directions of the
+    /// fabrication stay dead — the brief reaches the wire completely
+    /// unchanged (not paraphrased, not truncated to a name-like string), and
+    /// `name` is never anything the client invented from it.
+    @Test
+    fun `create app sends the real brief unmodified and fabricates no display name`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val brief = "一个能记录每天喝水量的小工具，支持提醒和每周汇总"
+            // Mirrors the real create screen (`CreateAppDialog`): a single
+            // description field, submit dispatches `CreateFromBrief` alone.
+            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief))
+            runCurrent()
+
+            val sent = source.commands.filterIsInstance<ClientCommand.CreateApp>().singleOrNull()
+                ?: throw AssertionError("CreateFromBrief must submit ClientCommand.CreateApp")
+            assertEquals("the brief must reach the wire verbatim, not paraphrased or truncated", brief, sent.brief)
+            assertTrue(
+                "the client must not fabricate a display name — AppService::create_app " +
+                    "derives one from the brief itself when name is empty (service.rs); " +
+                    "this is the exact fabrication local-apps#questionnaire Tasks 10/11 " +
+                    "spent two review rounds eliminating on the Rust side, now eliminated " +
+                    "on the client instead of merely hidden behind a passing assertion",
+                sent.name.isEmpty(),
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `a questionnaire event replaces the stored steps`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppQuestionnaireChanged(
+                        appId = APP_ID,
+                        revision = 1u,
+                        steps = listOf(basicsStepDto(allowsDefer = true)),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(1, viewModel.uiState.value.questionnaires[APP_ID]?.size)
+            assertTrue(viewModel.uiState.value.questionnaires[APP_ID]!!.first().fields.first().allowsDefer)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `a null plan event clears the stored plan`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppPlanChanged(appId = APP_ID, revision = 2u, plan = onePlanDto())))
+            runCurrent()
+            assertNotNull(viewModel.uiState.value.plans[APP_ID])
+
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppPlanChanged(appId = APP_ID, revision = 3u, plan = null)))
+            runCurrent()
+            assertNull("an answer edit voids the plan on the client too", viewModel.uiState.value.plans[APP_ID])
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `creating an app sends only the brief`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("记事本"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本 app"))
+            runCurrent()
+
+            val sent = source.commands.filterIsInstance<ClientCommand.CreateApp>().single()
+            assertEquals("一个记事本 app", sent.brief)
+            // `ClientCommand.CreateApp` has no `template` argument at all any
+            // more (it was deleted in Task 5 with `AppTemplateKindDto`) — a
+            // compile-time guarantee stronger than a runtime `sent.has(...)`
+            // check could give.
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun `draft edits debounce serialize and recover revision conflicts`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -76,7 +217,10 @@ class LocalAppsViewModelTest {
             runCurrent()
 
             assertTrue(source.commands.contains(ClientCommand.ListApps))
-            assertTrue(source.commands.contains(ClientCommand.ListAppTemplates))
+            // NOTE (local-apps#questionnaire, Task 5): `ClientCommand.ListAppTemplates`
+            // was deleted with the static template catalog — startup requests
+            // only `ListApps` now; the questionnaire arrives per-app, later,
+            // via `AppEventDto.AppQuestionnaireChanged`.
             seedDesigner(source)
             runCurrent()
 
@@ -127,6 +271,8 @@ class LocalAppsViewModelTest {
                             designFields = listOf(
                                 AppDesignFieldValueDto("purpose", DesignValueDto.ShortText("external")),
                             ),
+                            questionnaire = emptyList(),
+                            plan = null,
                             manifest = null,
                             runtime = AppRuntimeDetailsDto(
                                 state = AppRuntimeStateDto.STOPPED,
@@ -194,6 +340,119 @@ class LocalAppsViewModelTest {
             assertEquals(1uL, confirm.revision)
             assertEquals("designer-1", confirm.interactionId)
             assertEquals(1, source.updateCommands().size)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The plan-confirmation screen's "返回修改" exit (local-apps#questionnaire,
+     * Task 20) — `cancel_design` (state.rs) needs only the app id, no
+     * interaction id, so unlike `ConfirmDesign` there is nothing to drain or
+     * cache first. Also refreshes the details snapshot: `reduceDesignerRequested`
+     * seeded `designer.values` from bare field defaults when this gate armed
+     * (its only source of answers — see its own doc), discarding whatever the
+     * user had actually last saved; without this refresh, landing back on the
+     * step form would show every answer visually reset, even though the
+     * engine's own `draft.fields` was never touched by `cancel_design`.
+     */
+    @Test
+    fun `cancel design sends CancelAppDesign and refreshes the draft`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.CancelDesign(APP_ID))
+            runCurrent()
+
+            val cancel = source.commands.filterIsInstance<ClientCommand.CancelAppDesign>().single()
+            assertEquals(APP_ID, cancel.appId)
+            val refresh = source.commands.filterIsInstance<ClientCommand.GetAppDetails>().single()
+            assertEquals(APP_ID, refresh.appId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The regression this refresh exists to prevent: reaching
+     * `collecting_spec` a SECOND time (via `cancel_design`, after the plan
+     * gate already reset `designer.values` to bare defaults) must show the
+     * user's real last-saved answer, not the default it was wiped to.
+     */
+    @Test
+    fun `cancelling the design restores the real saved answer, not the field default`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            // Mirrors the plan gate arming (`AppDesignerRequested`):
+            // `reduceDesignerRequested` seeds `designer.values` from each
+            // field's bare default (`""` for `purpose`'s `ShortText`), which
+            // is NOT the user's real saved answer ("external", per
+            // `appDetails` below).
+            seedDesigner(source)
+            runCurrent()
+            assertEquals(
+                "sanity: the plan gate seeds only the field's bare default",
+                LocalAppDesignValue.Text(""),
+                viewModel.uiState.value.designer?.values?.get("purpose"),
+            )
+
+            viewModel.onAction(LocalAppsAction.CancelDesign(APP_ID))
+            runCurrent()
+
+            // The details refresh `cancelDesign` requested lands, carrying the
+            // engine's real stored answer.
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppDetailsChanged(appDetails(designRevision = 0u)),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(
+                LocalAppDesignValue.Text("external"),
+                viewModel.uiState.value.designer?.values?.get("purpose"),
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The persistent revision input's submit action (local-apps#questionnaire,
+     * Task 20) — used by both the `ready` (Details) and
+     * `awaitingPreviewConfirmation` (Preview) destinations. Replaces the
+     * former `SubmitRevision` action, which dispatched the identical
+     * `RequestAppRevision` command under a second name; consolidated to one.
+     */
+    @Test
+    fun `revise sends the free-text prompt as a revision request`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.Revise(APP_ID, "把标题字体调大一点"))
+            runCurrent()
+
+            val revise = source.commands.filterIsInstance<ClientCommand.RequestAppRevision>().single()
+            assertEquals(APP_ID, revise.appId)
+            assertEquals("把标题字体调大一点", revise.prompt)
         } finally {
             Dispatchers.resetMain()
         }
@@ -786,6 +1045,15 @@ class LocalAppsViewModelTest {
 
             // The surviving app's designer opens and its edits reach the engine
             // on the production 15 s budget — no watchdog, no clock manipulation.
+            // Each app is authored its OWN questionnaire now (Task 18: no more
+            // shared static catalog every CRUD_TRACKER app resolved fields
+            // from), so OTHER_APP_ID needs its own `AppQuestionnaireChanged`
+            // before its designer can be edited.
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppQuestionnaireChanged(appId = OTHER_APP_ID, revision = 0u, steps = listOf(basicsStepDto())),
+                ),
+            )
             source.emit(ClientEvent.AppDesignerRequested(OTHER_APP_ID, interactionId = "designer-2", revision = 0u))
             runCurrent()
             viewModel.onAction(
@@ -960,14 +1228,21 @@ class LocalAppsViewModelTest {
     }
 
     /**
-     * The gate is released by a details snapshot whether or not that snapshot can
-     * reload the designer, so the banner it raised has to come down on both exits.
-     * `conflictRevision` renders "…已重新加载，请检查后继续。"; a template list that
-     * no longer carries this app's kind leaves `values` exactly as they were, so a
-     * surviving banner asserts a reload that did not happen.
+     * The gate is released by a details snapshot unconditionally, so the
+     * banner it raised has to come down with it. `conflictRevision` renders
+     * "…已重新加载，请检查后继续。".
+     *
+     * Was `a details snapshot with no matching template still takes the
+     * conflict banner down`: the "no matching template" half of that scenario
+     * no longer exists (local-apps#questionnaire, Task 18) — `reduceDetails`
+     * does not look up a template before replacing `values` any more (the
+     * questionnaire is looked up separately, by app id, not carried on the
+     * designer), so there is no "snapshot arrived but could not reload"
+     * branch left to cover. This migrates the surviving assertion: a details
+     * snapshot always takes the banner down.
      */
     @Test
-    fun `a details snapshot with no matching template still takes the conflict banner down`() = runTest {
+    fun `a details snapshot always takes the conflict banner down`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -988,11 +1263,6 @@ class LocalAppsViewModelTest {
             source.emit(ClientEvent.AppDesignConflict(APP_ID, expectedRevision = 0u, actualRevision = 2u))
             runCurrent()
             assertEquals(2uL, viewModel.uiState.value.designer?.conflictRevision)
-
-            // The template catalogue is replaced by one that no longer carries
-            // CRUD_TRACKER, so the snapshot below cannot replace `values`.
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppTemplatesChanged(emptyList())))
-            runCurrent()
 
             source.emit(ClientEvent.AppEvent(AppEventDto.AppDetailsChanged(appDetails(designRevision = 2u))))
             runCurrent()
@@ -1038,7 +1308,14 @@ class LocalAppsViewModelTest {
             runCurrent()
 
             // The user leaves app A's designer for app B's before the 400 ms
-            // debounce fires.
+            // debounce fires. Each app is authored its OWN questionnaire now
+            // (Task 18), so OTHER_APP_ID needs its own
+            // `AppQuestionnaireChanged` before its designer can be edited.
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppQuestionnaireChanged(appId = OTHER_APP_ID, revision = 0u, steps = listOf(basicsStepDto())),
+                ),
+            )
             source.emit(ClientEvent.AppDesignerRequested(OTHER_APP_ID, interactionId = "designer-2", revision = 0u))
             runCurrent()
             assertEquals(OTHER_APP_ID, viewModel.uiState.value.designer?.appId)
@@ -1454,44 +1731,227 @@ class LocalAppsViewModelTest {
         }
     }
 
-    private fun seedDesigner(source: RecordingSource) {
-        source.emit(
-            ClientEvent.AppEvent(
-                AppEventDto.AppTemplatesChanged(
+    /**
+     * The core bug local-apps#questionnaire Task 19 fixes: `state.rs` makes
+     * `authoring_questionnaire` the initial workflow for every new app, and
+     * `open_designer` is illegal from there — so claiming a just-created app
+     * and unconditionally issuing `OpenAppDesigner` (the old `openDesigner`)
+     * rejected with `WORKFLOW_STATE_INVALID` on EVERY single create, every
+     * time, with the raw Rust string surfacing in the generic error dialog
+     * and the designer stuck on an infinite spinner underneath. This is not a
+     * race to reproduce — it is the app's very first workflow state.
+     */
+    @Test
+    fun `claiming a just-created app never issues a doomed open_app_designer`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("记事本"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本 app"))
+            runCurrent()
+
+            // The engine's own creation ack: a fresh app always starts in
+            // authoring_questionnaire (state.rs), never collecting_spec.
+            source.emit(
+                ClientEvent.AppsChanged(
                     listOf(
-                        AppTemplateDto(
-                            kind = AppTemplateKindDto.CRUD_TRACKER,
-                            version = 1u,
-                            name = "CRUD Tracker",
-                            description = "",
-                            steps = listOf(
-                                AppDesignStepDto(
-                                    id = "basics",
-                                    order = 1u,
-                                    title = "基础",
-                                    description = null,
-                                    fields = listOf(
-                                        AppDesignFieldDto(
-                                            id = "purpose",
-                                            label = "用途",
-                                            description = null,
-                                            fieldType = AppDesignFieldTypeDto.SHORT_TEXT,
-                                            required = true,
-                                            defaultValue = DesignValueDto.ShortText(""),
-                                            options = emptyList(),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                            collections = emptyList(),
+                        appRecord(
+                            name = "记事本",
+                            brief = "一个记事本 app",
+                            workflow = AppWorkflowStateDto.AUTHORING_QUESTIONNAIRE,
                         ),
                     ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(
+                "the claim must still navigate to the designer, which now waits instead of erroring",
+                LocalAppsDestination.Designer(APP_ID),
+                viewModel.uiState.value.destination,
+            )
+            assertTrue(
+                "open_app_designer is illegal from authoring_questionnaire and must never be sent",
+                source.commands.none { it is ClientCommand.OpenAppDesigner },
+            )
+            assertNull("no WORKFLOW_STATE_INVALID from the engine, so no raw-string error dialog", viewModel.uiState.value.error)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `open_designer` (state.rs) unconditionally advances
+     * `collecting_spec -> awaiting_spec_confirmation`; sending it eagerly the
+     * moment the designer opens would arm the LATER plan-confirm gate before
+     * `begin_planning` (the questionnaire's own terminal action) ever runs,
+     * breaking every 生成方案 tap with `workflow_state_invalid`. `GetAppDetails`
+     * alone is enough to seed the draft — it is a pure read that never calls
+     * `update_draft` (which DOES check workflow state,
+     * `ensure_workflow("update_draft", &DRAFT_EDITABLE_STATES)`), and
+     * `collecting_spec` is already inside `DRAFT_EDITABLE_STATES` by the time
+     * the user can answer anything, with no client command needed to get there.
+     */
+    @Test
+    fun `opening the designer while collecting spec never arms the confirm gate early`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.COLLECTING_SPEC))))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenDesigner(APP_ID))
+            runCurrent()
+
+            assertTrue(source.commands.any { it is ClientCommand.GetAppDetails })
+            assertTrue(
+                "open_app_designer would prematurely arm awaiting_spec_confirmation",
+                source.commands.none { it is ClientCommand.OpenAppDesigner },
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `open_designer` IS legal (and needed) from `generation_failed`: it
+     * re-arms the confirm gate so a plan that failed generation can be
+     * re-confirmed. Mirrors iOS's `LocalAppDesignerView.prepare()`'s
+     * `.generationFailed` case.
+     */
+    @Test
+    fun `opening the designer after a failed generation re-arms the confirm gate`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.GENERATION_FAILED))))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenDesigner(APP_ID))
+            runCurrent()
+
+            assertTrue(source.commands.any { it is ClientCommand.OpenAppDesigner })
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `pendingCreate` used to be a single overwritable slot (local-apps#questionnaire,
+     * Task 19). A second create in flight before the first's `AppsChanged` ack
+     * arrived silently replaced it, so the first app's own ack no longer
+     * matched anything and its claim — and its `openDesigner` navigation —
+     * was silently dropped. `pendingCreates` is a queue now; each create gets
+     * its own entry, consumed independently.
+     */
+    @Test
+    fun `a second create in flight does not clobber the first pending claim`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("笔记 A"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("笔记 A 的简介"))
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("笔记 B"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("笔记 B 的简介"))
+            runCurrent()
+
+            // A's own creation ack arrives alone, before B's — the scalar bug
+            // used to drop this claim because the single slot had already
+            // been overwritten by B's pending entry.
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "a-id", name = "笔记 A", brief = "笔记 A 的简介")),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(LocalAppsDestination.Designer("a-id"), viewModel.uiState.value.destination)
+
+            // B's own ack then arrives on its own and must still be claimed —
+            // its pending entry was not consumed by A's claim.
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(id = "a-id", name = "笔记 A", brief = "笔记 A 的简介"),
+                        appRecord(id = "b-id", name = "笔记 B", brief = "笔记 B 的简介"),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(LocalAppsDestination.Designer("b-id"), viewModel.uiState.value.destination)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    private fun seedDesigner(source: RecordingSource) {
+        // NOTE (local-apps#questionnaire, Task 18): the static template
+        // catalogue (`AppEventDto.AppTemplatesChanged`) is gone — a
+        // questionnaire is authored per-app and arrives as
+        // `AppEventDto.AppQuestionnaireChanged`, an ordered bag of steps with
+        // no catalogue wrapper (no `kind`/`version`/`name`/`description`).
+        source.emit(
+            ClientEvent.AppEvent(
+                AppEventDto.AppQuestionnaireChanged(
+                    appId = APP_ID,
+                    revision = 0u,
+                    steps = listOf(basicsStepDto()),
                 ),
             ),
         )
         source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
         source.emit(ClientEvent.AppDesignerRequested(APP_ID, interactionId = "designer-1", revision = 0u))
     }
+
+    private fun basicsStepDto(fieldId: String = "purpose", allowsDefer: Boolean = false) = AppDesignStepDto(
+        id = "basics",
+        order = 1u,
+        title = "基础",
+        description = null,
+        fields = listOf(
+            AppDesignFieldDto(
+                id = fieldId,
+                label = "用途",
+                description = null,
+                fieldType = AppDesignFieldTypeDto.SHORT_TEXT,
+                required = true,
+                allowsCustom = false,
+                allowsDefer = allowsDefer,
+                defaultValue = DesignValueDto.ShortText(""),
+                options = emptyList(),
+            ),
+        ),
+    )
+
+    private fun onePlanDto() = AppPlanDto(
+        collections = emptyList(),
+        capabilities = emptyList(),
+        domains = emptyList(),
+        summary = "一个客户跟进应用",
+    )
 
     private fun RecordingSource.updateCommands(): List<ClientCommand.UpdateAppDesignDraft> =
         commands.filterIsInstance<ClientCommand.UpdateAppDesignDraft>()
@@ -1511,10 +1971,11 @@ class LocalAppsViewModelTest {
         id: String = APP_ID,
         name: String = "客户跟进",
         workflow: AppWorkflowStateDto = AppWorkflowStateDto.COLLECTING_SPEC,
+        brief: String = "记录客户跟进情况",
     ) = AppRecordDto(
         id = id,
         name = name,
-        template = AppTemplateKindDto.CRUD_TRACKER,
+        brief = brief,
         createdAtMs = 1u,
         updatedAtMs = 2u,
         workflowState = workflow,
@@ -1526,6 +1987,8 @@ class LocalAppsViewModelTest {
         app = appRecord(),
         designRevision = designRevision,
         designFields = listOf(AppDesignFieldValueDto("purpose", DesignValueDto.ShortText("external"))),
+        questionnaire = listOf(basicsStepDto()),
+        plan = null,
         manifest = null,
         runtime = AppRuntimeDetailsDto(
             state = AppRuntimeStateDto.STOPPED,

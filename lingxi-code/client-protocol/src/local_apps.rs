@@ -9,7 +9,7 @@
 //! Serde conventions (decision §0.1) with two DELIBERATE departures, both
 //! following the [`crate::computer_access::AccessTierDto`] precedent of staying
 //! byte-identical to the source contract:
-//! - the fieldless enums ([`AppTemplateKindDto`], [`AppWorkflowStateDto`],
+//! - the fieldless enums ([`AppWorkflowStateDto`],
 //!   [`AppRuntimeStateDto`], [`AppCreateOriginDto`], [`AppErrorCodeDto`],
 //!   [`AppCheckpointKindDto`], [`DensityLevelDto`]) ride as bare wire STRINGS
 //!   (`"dashboard"`, `"collecting_spec"`, `"not_found"`, …) — a plain
@@ -37,24 +37,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which scaffold template an app is designed from — mirrors the core
-/// `AppTemplateKind`. A bare wire STRING (`"dashboard"`, …; see the module
-/// doc). `#[non_exhaustive]` so a future template is additive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AppTemplateKindDto {
-    /// Read-mostly metric/dashboard app.
-    Dashboard,
-    /// Create/read/update/delete tracker.
-    CrudTracker,
-    /// Content/gallery showcase.
-    ContentShowcase,
-    /// Single-purpose form utility.
-    FormUtility,
-}
-
 /// Designer/generation workflow state of an app — mirrors the core
 /// `AppWorkflowState` (spec §B state machine). A bare wire STRING
 /// (`"collecting_spec"`, …). `#[non_exhaustive]` so a future state is additive.
@@ -63,8 +45,18 @@ pub enum AppTemplateKindDto {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AppWorkflowStateDto {
+    /// LLM is authoring the questionnaire for this brief. Designer is
+    /// read-only.
+    AuthoringQuestionnaire,
+    /// Authoring failed; retryable, or the brief can be changed and
+    /// re-authored.
+    QuestionnaireFailed,
     /// Draft is being filled in; no confirmation gate is open.
     CollectingSpec,
+    /// LLM is deriving the plan from the answers. Designer is read-only.
+    Planning,
+    /// Planning failed; retryable.
+    PlanFailed,
     /// The designer interaction is pending user confirmation.
     AwaitingSpecConfirmation,
     /// Code generation is running.
@@ -145,6 +137,10 @@ pub enum AppErrorCodeDto {
     InvalidRequest,
     /// Underlying I/O failure.
     Io,
+    /// The model is unreachable: offline, unauthenticated, or timed out.
+    LlmUnavailable,
+    /// The model's output failed validation (bad shape or over a limit).
+    LlmOutputRejected,
 }
 
 /// Why a checkpoint was recorded — mirrors the core `AppCheckpointKind` (git
@@ -216,7 +212,7 @@ pub struct AppDataCollectionDto {
     pub id: String,
     pub label: String,
     pub fields: Vec<AppDataFieldDto>,
-    /// Whether this template enables the collection by default.
+    /// Whether the plan enables this collection by default.
     pub enabled_by_default: bool,
 }
 
@@ -257,6 +253,12 @@ pub struct AppDesignFieldDto {
     pub description: Option<String>,
     pub field_type: AppDesignFieldTypeDto,
     pub required: bool,
+    /// 渲染 `Other…` 自由文本框。
+    #[serde(default)]
+    pub allows_custom: bool,
+    /// 渲染「由你决定」。
+    #[serde(default)]
+    pub allows_defer: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_value: Option<DesignValueDto>,
     pub options: Vec<AppDesignFieldOptionDto>,
@@ -274,16 +276,16 @@ pub struct AppDesignStepDto {
     pub fields: Vec<AppDesignFieldDto>,
 }
 
-/// A versioned, server-owned template definition returned to mobile clients.
+/// 确认页展示的「将创建」摘要。由 LLM 从答案推导，经 `local-apps` 校验。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppTemplateDto {
-    pub kind: AppTemplateKindDto,
-    pub version: u32,
-    pub name: String,
-    pub description: String,
-    pub steps: Vec<AppDesignStepDto>,
+pub struct AppPlanDto {
     pub collections: Vec<AppDataCollectionDto>,
+    pub capabilities: Vec<AppCapabilityKindDto>,
+    /// 外部 HTTPS 主机名。
+    pub domains: Vec<String>,
+    /// 给用户读的一段人话；每个被 defer 的字段最终定成什么写在这里。
+    pub summary: String,
 }
 
 /// One app row — the lowered core `AppRecord`. Carried by
@@ -295,8 +297,8 @@ pub struct AppRecordDto {
     pub id: String,
     /// User-facing display name.
     pub name: String,
-    /// Template the app is designed from.
-    pub template: AppTemplateKindDto,
+    /// One-line description the user gave at creation time.
+    pub brief: String,
     /// Creation time, epoch milliseconds.
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
@@ -371,6 +373,12 @@ pub enum DesignValueDto {
     DataFieldList { value: Vec<AppDataFieldDto> },
     /// HTTPS host names an app may request through the native network bridge.
     DomainList { value: Vec<String> },
+    /// The user explicitly chose to let the LLM decide this field. Carries no
+    /// payload — `{ "kind": "deferred" }` is the complete wire form. Mirrors
+    /// the core `DesignValue::Deferred` (local-apps#questionnaire, Task 1/2);
+    /// `local-apps` and `engine-mobile` gate every write/load/lowering path
+    /// so this variant only ever appears once a legitimate answer exists.
+    Deferred,
 }
 
 /// One patch operation against the draft field map — mirrors the core
@@ -508,7 +516,6 @@ pub struct AppManifestDto {
     pub schema_version: u32,
     pub app_id: String,
     pub name: String,
-    pub template: AppTemplateKindDto,
     pub design_revision: u64,
     pub collections: Vec<AppDataCollectionDto>,
     pub allowed_domains: Vec<String>,
@@ -538,6 +545,12 @@ pub struct AppDetailsDto {
     pub app: AppRecordDto,
     pub design_revision: u64,
     pub design_fields: Vec<AppDesignFieldValueDto>,
+    /// The LLM-authored questionnaire driving the designer. Empty before
+    /// authoring completes.
+    pub questionnaire: Vec<AppDesignStepDto>,
+    /// The LLM-derived plan awaiting confirmation, if one has been authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AppPlanDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<AppManifestDto>,
     pub runtime: AppRuntimeDetailsDto,
@@ -679,11 +692,21 @@ pub enum AppAuthorizationDecisionDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AppEventDto {
-    AppTemplatesChanged {
-        templates: Vec<AppTemplateDto>,
-    },
     AppDetailsChanged {
         details: AppDetailsDto,
+    },
+    /// The LLM finished (or discarded) authoring the questionnaire.
+    AppQuestionnaireChanged {
+        app_id: String,
+        revision: u64,
+        steps: Vec<AppDesignStepDto>,
+    },
+    /// The LLM finished (or discarded) deriving the plan.
+    AppPlanChanged {
+        app_id: String,
+        revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<AppPlanDto>,
     },
     AppGenerationJobChanged {
         job: AppGenerationJobDto,
@@ -701,486 +724,4 @@ pub enum AppEventDto {
         app_id: String,
         checkpoints: Vec<AppCheckpointDto>,
     },
-}
-
-/// Canonical version-one templates. Mobile clients must render these records
-/// instead of duplicating template fields in Swift or Kotlin.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn builtin_app_templates() -> Vec<AppTemplateDto> {
-    vec![
-        template(
-            AppTemplateKindDto::Dashboard,
-            "Dashboard",
-            "A metric dashboard with filters and controlled refresh.",
-            vec![
-                field(
-                    "metrics",
-                    "Metrics",
-                    AppDesignFieldTypeDto::FeatureList,
-                    true,
-                    Some(DesignValueDto::FeatureList {
-                        value: vec!["Total records".into(), "Recent activity".into()],
-                    }),
-                    vec![],
-                ),
-                field(
-                    "filters",
-                    "Filters",
-                    AppDesignFieldTypeDto::FeatureList,
-                    false,
-                    Some(DesignValueDto::FeatureList { value: vec![] }),
-                    vec![],
-                ),
-                field(
-                    "refresh_policy",
-                    "Refresh",
-                    AppDesignFieldTypeDto::SingleChoice,
-                    true,
-                    Some(DesignValueDto::SingleChoice {
-                        value: "manual".into(),
-                    }),
-                    options(&[("manual", "Manual"), ("on_open", "When opened")]),
-                ),
-            ],
-            collection(
-                "records",
-                "Records",
-                true,
-                vec![
-                    data_field("label", "Label", AppDataFieldTypeDto::Text, true, vec![]),
-                    data_field("value", "Value", AppDataFieldTypeDto::Decimal, true, vec![]),
-                    data_field(
-                        "recorded_at",
-                        "Recorded at",
-                        AppDataFieldTypeDto::DateTime,
-                        true,
-                        vec![],
-                    ),
-                ],
-            ),
-        ),
-        template(
-            AppTemplateKindDto::CrudTracker,
-            "CRUD Tracker",
-            "A tracker for creating, editing, filtering and archiving records.",
-            vec![
-                field(
-                    "entity_name",
-                    "Entity name",
-                    AppDesignFieldTypeDto::ShortText,
-                    true,
-                    Some(DesignValueDto::ShortText {
-                        value: "Item".into(),
-                    }),
-                    vec![],
-                ),
-                field(
-                    "statuses",
-                    "Statuses",
-                    AppDesignFieldTypeDto::MultipleChoice,
-                    true,
-                    Some(DesignValueDto::MultipleChoice {
-                        value: vec!["todo".into(), "done".into()],
-                    }),
-                    vec![],
-                ),
-                field(
-                    "allow_archive",
-                    "Allow archiving",
-                    AppDesignFieldTypeDto::Boolean,
-                    false,
-                    Some(DesignValueDto::Boolean { value: true }),
-                    vec![],
-                ),
-            ],
-            collection(
-                "items",
-                "Items",
-                true,
-                vec![
-                    data_field("title", "Title", AppDataFieldTypeDto::Text, true, vec![]),
-                    data_field(
-                        "notes",
-                        "Notes",
-                        AppDataFieldTypeDto::LongText,
-                        false,
-                        vec![],
-                    ),
-                    data_field(
-                        "status",
-                        "Status",
-                        AppDataFieldTypeDto::Enum,
-                        true,
-                        vec!["todo".into(), "done".into()],
-                    ),
-                ],
-            ),
-        ),
-        template(
-            AppTemplateKindDto::ContentShowcase,
-            "Content Showcase",
-            "A searchable grid or list for presenting categorized content.",
-            vec![
-                field(
-                    "content_type",
-                    "Content type",
-                    AppDesignFieldTypeDto::ShortText,
-                    true,
-                    Some(DesignValueDto::ShortText {
-                        value: "Article".into(),
-                    }),
-                    vec![],
-                ),
-                field(
-                    "categories",
-                    "Categories",
-                    AppDesignFieldTypeDto::MultipleChoice,
-                    false,
-                    Some(DesignValueDto::MultipleChoice { value: vec![] }),
-                    vec![],
-                ),
-                field(
-                    "presentation",
-                    "Presentation",
-                    AppDesignFieldTypeDto::SingleChoice,
-                    true,
-                    Some(DesignValueDto::SingleChoice {
-                        value: "grid".into(),
-                    }),
-                    options(&[("grid", "Grid"), ("list", "List")]),
-                ),
-                field(
-                    "enable_search",
-                    "Enable search",
-                    AppDesignFieldTypeDto::Boolean,
-                    false,
-                    Some(DesignValueDto::Boolean { value: true }),
-                    vec![],
-                ),
-            ],
-            collection(
-                "entries",
-                "Entries",
-                true,
-                vec![
-                    data_field("title", "Title", AppDataFieldTypeDto::Text, true, vec![]),
-                    data_field(
-                        "category",
-                        "Category",
-                        AppDataFieldTypeDto::Text,
-                        false,
-                        vec![],
-                    ),
-                    data_field("body", "Body", AppDataFieldTypeDto::LongText, true, vec![]),
-                    data_field(
-                        "image",
-                        "Image",
-                        AppDataFieldTypeDto::ImageRef,
-                        false,
-                        vec![],
-                    ),
-                ],
-            ),
-        ),
-        template(
-            AppTemplateKindDto::FormUtility,
-            "Form Utility",
-            "A focused form that saves, calculates or generates a result.",
-            vec![
-                field(
-                    "result_description",
-                    "Result description",
-                    AppDesignFieldTypeDto::LongText,
-                    true,
-                    Some(DesignValueDto::LongText {
-                        value: "Describe the result shown after submission.".into(),
-                    }),
-                    vec![],
-                ),
-                field(
-                    "behavior",
-                    "Behavior",
-                    AppDesignFieldTypeDto::SingleChoice,
-                    true,
-                    Some(DesignValueDto::SingleChoice {
-                        value: "save".into(),
-                    }),
-                    options(&[
-                        ("save", "Save"),
-                        ("calculate", "Calculate"),
-                        ("generate", "Generate"),
-                    ]),
-                ),
-                field(
-                    "save_history",
-                    "Save submission history",
-                    AppDesignFieldTypeDto::Boolean,
-                    false,
-                    Some(DesignValueDto::Boolean { value: false }),
-                    vec![],
-                ),
-            ],
-            collection(
-                "submissions",
-                "Submissions",
-                false,
-                vec![
-                    data_field(
-                        "input",
-                        "Input",
-                        AppDataFieldTypeDto::LongText,
-                        true,
-                        vec![],
-                    ),
-                    data_field(
-                        "result",
-                        "Result",
-                        AppDataFieldTypeDto::LongText,
-                        false,
-                        vec![],
-                    ),
-                    data_field(
-                        "submitted_at",
-                        "Submitted at",
-                        AppDataFieldTypeDto::DateTime,
-                        true,
-                        vec![],
-                    ),
-                ],
-            ),
-        ),
-    ]
-}
-
-#[allow(clippy::too_many_lines)]
-fn template(
-    kind: AppTemplateKindDto,
-    name: &str,
-    description: &str,
-    structure_fields: Vec<AppDesignFieldDto>,
-    collection: AppDataCollectionDto,
-) -> AppTemplateDto {
-    let collection_fields = collection.fields.clone();
-    AppTemplateDto {
-        kind,
-        version: 1,
-        name: name.into(),
-        description: description.into(),
-        steps: vec![
-            AppDesignStepDto {
-                id: "basic".into(),
-                order: 1,
-                title: "Basics".into(),
-                description: Some("Name the app and define who it serves.".into()),
-                fields: vec![
-                    field(
-                        "name",
-                        "Name",
-                        AppDesignFieldTypeDto::ShortText,
-                        true,
-                        None,
-                        vec![],
-                    ),
-                    field(
-                        "purpose",
-                        "Purpose",
-                        AppDesignFieldTypeDto::LongText,
-                        true,
-                        None,
-                        vec![],
-                    ),
-                    field(
-                        "target_users",
-                        "Target users",
-                        AppDesignFieldTypeDto::ShortText,
-                        true,
-                        None,
-                        vec![],
-                    ),
-                ],
-            },
-            AppDesignStepDto {
-                id: "structure".into(),
-                order: 2,
-                title: "Structure".into(),
-                description: Some("Choose pages, features and template behavior.".into()),
-                fields: {
-                    let mut fields = vec![
-                        field(
-                            "pages",
-                            "Pages",
-                            AppDesignFieldTypeDto::ScreenList,
-                            true,
-                            Some(DesignValueDto::ScreenList {
-                                value: vec!["Home".into()],
-                            }),
-                            vec![],
-                        ),
-                        field(
-                            "features",
-                            "Features",
-                            AppDesignFieldTypeDto::FeatureList,
-                            false,
-                            Some(DesignValueDto::FeatureList { value: vec![] }),
-                            vec![],
-                        ),
-                    ];
-                    fields.extend(structure_fields);
-                    fields
-                },
-            },
-            AppDesignStepDto {
-                id: "data".into(),
-                order: 3,
-                title: "Data".into(),
-                description: Some(format!(
-                    "Define fields for the {} collection.",
-                    collection.id
-                )),
-                fields: vec![field(
-                    "collection_fields",
-                    "Collection fields",
-                    AppDesignFieldTypeDto::DataFieldList,
-                    collection.enabled_by_default,
-                    Some(DesignValueDto::DataFieldList {
-                        value: collection_fields,
-                    }),
-                    vec![],
-                )],
-            },
-            AppDesignStepDto {
-                id: "appearance".into(),
-                order: 4,
-                title: "Appearance".into(),
-                description: Some("Choose color, density and layout.".into()),
-                fields: vec![
-                    field(
-                        "primary_color",
-                        "Primary color",
-                        AppDesignFieldTypeDto::Color,
-                        true,
-                        Some(DesignValueDto::Color {
-                            value: "#3366FF".into(),
-                        }),
-                        vec![],
-                    ),
-                    field(
-                        "density",
-                        "Density",
-                        AppDesignFieldTypeDto::Density,
-                        true,
-                        Some(DesignValueDto::Density {
-                            value: DensityLevelDto::Comfortable,
-                        }),
-                        vec![],
-                    ),
-                    field(
-                        "layout",
-                        "Layout",
-                        AppDesignFieldTypeDto::SingleChoice,
-                        true,
-                        Some(DesignValueDto::SingleChoice {
-                            value: "responsive".into(),
-                        }),
-                        options(&[("responsive", "Responsive"), ("compact", "Compact")]),
-                    ),
-                ],
-            },
-            AppDesignStepDto {
-                id: "permissions".into(),
-                order: 5,
-                title: "Permissions & confirmation".into(),
-                description: Some("Review data and network access before generation.".into()),
-                fields: vec![
-                    field(
-                        "network_domains",
-                        "HTTPS domains",
-                        AppDesignFieldTypeDto::DomainList,
-                        false,
-                        Some(DesignValueDto::DomainList { value: vec![] }),
-                        vec![],
-                    ),
-                    field(
-                        "data_enabled",
-                        "Enable app data",
-                        AppDesignFieldTypeDto::Boolean,
-                        false,
-                        Some(DesignValueDto::Boolean {
-                            value: collection.enabled_by_default,
-                        }),
-                        vec![],
-                    ),
-                    field(
-                        "final_summary",
-                        "Design summary",
-                        AppDesignFieldTypeDto::LongText,
-                        true,
-                        None,
-                        vec![],
-                    ),
-                ],
-            },
-        ],
-        collections: vec![collection],
-    }
-}
-
-fn field(
-    id: &str,
-    label: &str,
-    field_type: AppDesignFieldTypeDto,
-    required: bool,
-    default_value: Option<DesignValueDto>,
-    options: Vec<AppDesignFieldOptionDto>,
-) -> AppDesignFieldDto {
-    AppDesignFieldDto {
-        id: id.into(),
-        label: label.into(),
-        description: None,
-        field_type,
-        required,
-        default_value,
-        options,
-    }
-}
-
-fn collection(
-    id: &str,
-    label: &str,
-    enabled_by_default: bool,
-    fields: Vec<AppDataFieldDto>,
-) -> AppDataCollectionDto {
-    AppDataCollectionDto {
-        id: id.into(),
-        label: label.into(),
-        fields,
-        enabled_by_default,
-    }
-}
-
-fn data_field(
-    id: &str,
-    label: &str,
-    field_type: AppDataFieldTypeDto,
-    required: bool,
-    options: Vec<String>,
-) -> AppDataFieldDto {
-    AppDataFieldDto {
-        id: id.into(),
-        label: label.into(),
-        field_type,
-        required,
-        options,
-    }
-}
-
-fn options(values: &[(&str, &str)]) -> Vec<AppDesignFieldOptionDto> {
-    values
-        .iter()
-        .map(|(value, label)| AppDesignFieldOptionDto {
-            value: (*value).into(),
-            label: (*label).into(),
-        })
-        .collect()
 }

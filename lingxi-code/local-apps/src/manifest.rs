@@ -6,7 +6,7 @@
 
 use crate::error::AppError;
 use crate::ids;
-use crate::types::{AppTemplateKind, APPS_SCHEMA_VERSION};
+use crate::types::APPS_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -101,8 +101,6 @@ pub struct AppManifest {
     pub revision: u64,
     /// User-facing app name.
     pub name: String,
-    /// Scaffold template family.
-    pub template: AppTemplateKind,
     /// Native data collections.
     #[serde(default)]
     pub collections: Vec<DataCollectionSchema>,
@@ -113,36 +111,16 @@ pub struct AppManifest {
 
 impl AppManifest {
     /// Build the initial native contract for a newly-created application.
-    /// Template-specific collection ids are stable from the first write so
-    /// generated code and the data bridge never need to guess them.
+    /// Collections start empty — they are filled in from the LLM-authored
+    /// plan, validated by `questionnaire::validate_plan`, once one exists.
     #[must_use]
-    pub fn for_new_app(
-        app_id: impl Into<String>,
-        name: impl Into<String>,
-        template: AppTemplateKind,
-    ) -> Self {
-        let collection = match template {
-            AppTemplateKind::Dashboard => Some(("records", "Records")),
-            AppTemplateKind::CrudTracker => Some(("items", "Items")),
-            AppTemplateKind::ContentShowcase => Some(("entries", "Entries")),
-            // Form history is a designer opt-in; do not create it before the
-            // user chooses to retain submissions.
-            AppTemplateKind::FormUtility => None,
-        };
+    pub fn for_new_app(app_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             schema_version: APPS_SCHEMA_VERSION,
             app_id: app_id.into(),
             revision: 0,
             name: name.into(),
-            template,
-            collections: collection
-                .map(|(id, name)| DataCollectionSchema {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    fields: Vec::new(),
-                })
-                .into_iter()
-                .collect(),
+            collections: Vec::new(),
             allowed_domains: Vec::new(),
         }
     }
@@ -556,7 +534,6 @@ mod tests {
             app_id: "abcd1234".into(),
             revision: 1,
             name: "Tasks".into(),
-            template: AppTemplateKind::CrudTracker,
             collections: vec![DataCollectionSchema {
                 id: "items".into(),
                 name: "Items".into(),
@@ -604,20 +581,12 @@ mod tests {
     }
 
     #[test]
-    fn new_app_manifest_uses_stable_template_collection_ids() {
-        for (template, expected) in [
-            (AppTemplateKind::Dashboard, Some("records")),
-            (AppTemplateKind::CrudTracker, Some("items")),
-            (AppTemplateKind::ContentShowcase, Some("entries")),
-            (AppTemplateKind::FormUtility, None),
-        ] {
-            let manifest = AppManifest::for_new_app("abcd1234", "App", template);
-            manifest.validate().unwrap();
-            assert_eq!(
-                manifest.collections.first().map(|item| item.id.as_str()),
-                expected
-            );
-        }
+    fn a_new_app_manifest_declares_no_collections() {
+        let manifest = AppManifest::for_new_app("notes", "Notes");
+        assert!(
+            manifest.collections.is_empty(),
+            "collections now come from the LLM plan, not from a template"
+        );
     }
 
     #[cfg(unix)]

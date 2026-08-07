@@ -1,7 +1,12 @@
 import SwiftUI
 
 enum LocalAppsRoute: Hashable {
-    case templates
+    /// The brief-input create screen (local-apps#questionnaire, Task 13:
+    /// replaces the deleted static template picker — there is no more
+    /// catalog to pick from, only a one-line brief to collect). Task 16
+    /// owns the real "创建入口" experience; this is the minimal working
+    /// replacement needed to keep the create flow functional.
+    case create
     case designer(String)
     case details(String)
     case preview(String)
@@ -24,7 +29,13 @@ struct LocalAppsRootView: View {
         .task {
             await store.refresh()
             if let initialAppID {
-                path = [store.hasPendingUIRequest(appID: initialAppID) ? .preview(initialAppID) : .details(initialAppID)]
+                // Either an inbound UI-automation request, or a preview gate
+                // this session's own generation just armed (review NEW-1) —
+                // both mean the user should land straight on the gate rather
+                // than one tap short at `.details`.
+                let shouldOpenPreview = store.hasPendingUIRequest(appID: initialAppID)
+                    || store.consumePendingPreviewRouteAppID(appID: initialAppID)
+                path = [shouldOpenPreview ? .preview(initialAppID) : .details(initialAppID)]
             }
         }
         .alert(
@@ -54,8 +65,8 @@ struct LocalAppsRootView: View {
     @ViewBuilder
     private func destination(_ route: LocalAppsRoute) -> some View {
         switch route {
-        case .templates:
-            LocalAppTemplatePickerView(store: store, path: $path)
+        case .create:
+            LocalAppCreateView(store: store, path: $path)
         case let .designer(appID):
             LocalAppDesignerView(store: store, appID: appID, path: $path)
         case let .details(appID):
@@ -161,16 +172,8 @@ private struct LocalAppsLibraryScreen: View {
                 Button("common_close", action: onDismiss)
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                Menu {
-                    Button("local_apps_templates_all") { store.templateFilter = nil }
-                    ForEach(LocalAppTemplateKind.allCases, id: \.rawValue) { kind in
-                        Button(templateFilterLabel(kind)) { store.templateFilter = kind }
-                    }
-                } label: {
-                    Label("local_apps_filter", systemImage: "line.3.horizontal.decrease.circle")
-                }
                 Button {
-                    path.append(.templates)
+                    path.append(.create)
                 } label: {
                     Label("local_apps_create", systemImage: "plus")
                 }
@@ -215,14 +218,20 @@ private struct LocalAppsLibraryScreen: View {
         } description: {
             Text(store.isRefreshing ? String(localized: "local_apps_empty_loading") : String(localized: "local_apps_empty_hint"))
         } actions: {
-            Button("local_apps_templates_title") { path.append(.templates) }
+            Button("local_apps_create") { path.append(.create) }
                 .buttonStyle(.borderedProminent)
         }
     }
 
     private func open(_ app: LocalAppSummary) {
         switch app.workflow {
-        case .collectingSpec, .awaitingSpecConfirmation:
+        // `LocalAppDesignerView` owns all of these (local-apps#questionnaire,
+        // Task 14) — the busy/failure states get their own screen there
+        // instead of the generic details view, with retry actions for the
+        // two failure states wired to the store.
+        case .collectingSpec, .awaitingSpecConfirmation,
+             .authoringQuestionnaire, .questionnaireFailed,
+             .planning, .planFailed:
             path.append(.designer(app.id))
         case .awaitingPreviewConfirmation:
             path.append(.preview(app.id))
@@ -234,10 +243,6 @@ private struct LocalAppsLibraryScreen: View {
     private func openCreatedAppIfNeeded() {
         guard let appID = store.consumeCreatedAppID() else { return }
         path = [.designer(appID)]
-    }
-
-    private func templateFilterLabel(_ kind: LocalAppTemplateKind) -> String {
-        store.templates.first(where: { $0.kind == kind })?.name ?? kind.rawValue
     }
 }
 
@@ -253,7 +258,7 @@ private struct LocalAppLibraryRow: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: 14) {
-                Image(systemName: app.templateKind.systemImage)
+                Image(systemName: localAppIconSystemName)
                     .font(.title3)
                     .foregroundStyle(theme.accent)
                     .frame(width: 42, height: 42)
@@ -303,124 +308,59 @@ private struct LocalAppLibraryRow: View {
     }
 }
 
-struct LocalAppTemplatePickerView: View {
-    @Environment(\.theme) private var theme
+/// Collects the one-line brief `createApp(brief:)` needs and nothing else —
+/// no display name, no template. Replaces the deleted static template
+/// picker + its create sheet (local-apps#questionnaire, Task 2/5/13): there
+/// is no more catalog to choose from, only a brief for the LLM to author a
+/// questionnaire from. Task 16 ("iOS 创建入口与常驻迭代输入") owns the real,
+/// polished create entry point; this is the minimal working replacement that
+/// keeps the create flow honest (it sends a REAL brief, not the app name
+/// relabeled — see `LocalAppsStore.createApp(brief:)`) until then.
+struct LocalAppCreateView: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
 
-    @State private var selectedTemplate: LocalAppTemplate?
-
-    var body: some View {
-        Group {
-            if store.templates.isEmpty {
-                ContentUnavailableView {
-                    Label("local_apps_templates_loading", systemImage: "square.stack.3d.up")
-                } description: {
-                    Text("local_apps_templates_loading_detail")
-                } actions: {
-                    Button("common_retry") { Task { await store.refresh() } }
-                }
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(store.templates) { template in
-                            Button {
-                                selectedTemplate = template
-                            } label: {
-                                HStack(spacing: 14) {
-                                    Image(systemName: template.kind.systemImage)
-                                        .font(.title2)
-                                        .foregroundStyle(theme.accent)
-                                        .frame(width: 48, height: 48)
-                                        .background(theme.accent.opacity(0.12), in: .rect(cornerRadius: 13))
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        Text(template.name)
-                                            .font(.headline)
-                                            .foregroundStyle(theme.text)
-                                        Text(template.description)
-                                            .font(.subheadline)
-                                            .foregroundStyle(theme.text3)
-                                            .multilineTextAlignment(.leading)
-                                        Text("local_apps_template_steps \(template.orderedSteps.count) \(template.version)")
-                                            .font(.caption)
-                                            .foregroundStyle(theme.text4)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .foregroundStyle(theme.text4)
-                                }
-                                .padding(14)
-                                .background(theme.surface, in: .rect(cornerRadius: 16))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 16)
-                                        .stroke(theme.border, lineWidth: 0.5)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding()
-                }
-                .background(theme.windowBg)
-            }
-        }
-        .navigationTitle("local_apps_templates_title")
-        .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $selectedTemplate) { template in
-            LocalAppCreateSheet(store: store, template: template, path: $path)
-        }
-    }
-}
-
-private struct LocalAppCreateSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Bindable var store: LocalAppsStore
-    let template: LocalAppTemplate
-    @Binding var path: [LocalAppsRoute]
-
-    @State private var name = ""
+    @State var brief = ""
     @State private var creating = false
 
+    /// Test-facing mirror of the toolbar button's guard below (minus the
+    /// transient `creating` flag) — same source of truth `body` disables on,
+    /// not a parallel description of it. `createApp(brief:)` itself repeats
+    /// this same empty check server-side, so this is belt-and-suspenders,
+    /// not the only gate.
+    var canSubmit: Bool {
+        !brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("local_apps_title") {
-                    TextField("local_apps_name", text: $name)
-                        .textInputAutocapitalization(.never)
-                    LabeledContent("local_apps_template", value: template.name)
-                    Text(template.description)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Section {
-                    Text("local_apps_create_detail")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+        Form {
+            Section("local_apps_create_brief_section") {
+                TextEditor(text: $brief)
+                    .frame(minHeight: 120)
+                Text("local_apps_create_brief_detail")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .navigationTitle("local_apps_create")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("common_cancel", action: dismiss.callAsFunction)
+        }
+        .navigationTitle("local_apps_create")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(creating ? "local_apps_creating" : "local_apps_create") {
+                    Task { await create() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(creating ? "local_apps_creating" : "local_apps_create") {
-                        Task { await create() }
-                    }
-                    .disabled(creating || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+                .disabled(creating || !canSubmit)
+                .accessibilityIdentifier("local-apps.create.submit")
             }
         }
     }
 
     private func create() async {
         creating = true
-        let succeeded = await store.createApp(name: name, template: template)
+        let succeeded = await store.createApp(brief: brief)
         creating = false
-        if succeeded {
-            dismiss()
-            if !path.isEmpty { path.removeLast() }
+        if succeeded, !path.isEmpty {
+            path.removeLast()
         }
     }
 }

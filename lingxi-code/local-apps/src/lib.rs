@@ -34,6 +34,7 @@ pub mod generation;
 pub mod ids;
 pub mod manifest;
 pub mod permissions;
+pub mod questionnaire;
 pub mod service;
 pub mod source_validator;
 pub mod state;
@@ -67,13 +68,17 @@ pub use permissions::{
     load_permissions, save_permissions, AppCapability, AppPermissions, PermissionDecision,
     SessionPermissions,
 };
+pub use questionnaire::{
+    validate_answers, validate_plan, validate_questionnaire, AppDesignField,
+    AppDesignFieldOption, AppDesignFieldType, AppDesignStep, AppPlan,
+};
 pub use service::AppService;
-pub use source_validator::{validate_workspace_source, WorkspaceSourcePolicy};
+pub use source_validator::{validate_workspace_source, WorkspaceSourcePolicy, WRITABLE_ROOTS};
 pub use state::{runtime_transition_allowed, AppState, DRAFT_EDITABLE_STATES};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppContinuationKind, AppDesignDraft,
     AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress,
     AppInteractionKind, AppInteractionRequest, AppInteractions, AppPreview, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppTemplateKind, AppWorkflowState,
-    DensityLevel, DesignValue, APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, DensityLevel,
+    DesignValue, APPS_SCHEMA_VERSION,
 };

@@ -38,14 +38,19 @@ final class LocalAppsStore {
     }
 
     private struct PendingCreation {
-        let name: String
-        let template: LocalAppTemplateKind
         let knownAppIDs: Set<String>
     }
 
     private(set) var apps: [LocalAppSummary] = []
-    private(set) var templates: [LocalAppTemplate] = []
     private(set) var designers: [String: LocalAppDesignerSession] = [:]
+    /// The LLM-authored questionnaire per app (local-apps#questionnaire, Task
+    /// 13). Replaces the deleted static `templates` cache — the questionnaire
+    /// is authored per-app from its brief, not looked up from a catalog.
+    private(set) var questionnaires: [String: [LocalAppDesignStep]] = [:]
+    /// The LLM-derived plan awaiting confirmation, keyed by app id. Cleared by
+    /// the engine (and mirrored here) the moment an answer edit invalidates a
+    /// previously-derived plan.
+    private(set) var plans: [String: LocalAppPlan] = [:]
     private(set) var suggestions: [String: LocalAppSuggestionDiff] = [:]
     private(set) var previews: [String: LocalAppPreviewSession] = [:]
     private(set) var runtimes: [String: LocalAppRuntimeStatus] = [:]
@@ -58,24 +63,57 @@ final class LocalAppsStore {
     private(set) var pendingPermission: LocalAppPermissionPrompt?
     private(set) var requestedPresentationAppID: String?
     private(set) var activeUIRequestAppID: String?
+    /// Set alongside `requestedPresentationAppID` only for a preview gate
+    /// armed by a live generation this session (see `appPreviewReady`'s use
+    /// of `liveGenerationAppIDs`). `requestedPresentationAppID` itself is
+    /// consumed synchronously by `RootView`'s `onChange` before a cold
+    /// `LocalAppsRootView`'s `.task` ever runs, so it cannot be read there;
+    /// this field survives until `consumePendingPreviewRouteAppID` reads it.
+    private(set) var pendingPreviewRouteAppID: String?
 
     var searchQuery = ""
-    var templateFilter: LocalAppTemplateKind?
 
     @ObservationIgnored private var debounceTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingEdits: [String: [String: PendingEdit]] = [:]
     @ObservationIgnored private var inFlightEdits: [String: PendingEdit] = [:]
     @ObservationIgnored private var runningBeforeSuspension = Set<String>()
     @ObservationIgnored private var pendingCreation: PendingCreation?
+    /// App ids with a generation actively reporting progress IN THIS
+    /// PROCESS this session — inserted ONLY by `appGenerationProgress` and
+    /// `appGenerationJobChanged`, never by `appDetailsChanged`'s mirroring
+    /// of a snapshot's `generationJob` (review NEW-1, round 2).
+    ///
+    /// `generationProgress` (the `@Observable` map the UI renders progress
+    /// from) has TWO producers: live stage reports, AND `appDetailsChanged`
+    /// attaching whatever durable job the engine still has on disk for an
+    /// app the user merely opened the detail screen for
+    /// (`AppService::load_jobs`/`handle_get_app_details`, `host.rs:2891`) —
+    /// an app parked at `awaiting_preview_confirmation` keeps a durable job
+    /// in `AwaitingApproval` forever, so simply viewing its detail screen
+    /// populated `generationProgress` for it even though nothing was
+    /// running. Gating `appPreviewReady`'s navigation on `generationProgress`
+    /// alone (the round-1 fix) was therefore still wrong: a bootstrap resync
+    /// AFTER the user had merely looked at that app's details this session
+    /// would incorrectly arm navigation. This set has exactly one producer
+    /// (a truly live job) and is consumed (removed) the moment a
+    /// `PreviewReady` for that app uses it — see `appPreviewReady`'s handler
+    /// — so a LATER re-announcement of the same still-pending gate (e.g. a
+    /// second `resync_pending_gates` from a project/provider switch that
+    /// re-wires the engine source without recreating this store) no longer
+    /// finds a stale "live" marker either.
+    @ObservationIgnored private var liveGenerationAppIDs = Set<String>()
     /// Apps for which an `open_app_designer` has been sent and whose gate has
     /// not come back yet.
     ///
     /// `open_designer` is only legal from `collecting_spec`/`generation_failed`;
     /// the first one to land moves the app to `awaiting_spec_confirmation` and
-    /// the engine rejects every later one outright. Creation has two callers by
-    /// construction — the `appsChanged` handler opens the designer, and setting
-    /// `createdAppIDForDesigner` in the same tick pushes the view whose
-    /// `prepare()` opens it too — so one of them was always the loser.
+    /// the engine rejects every later one outright. `openDesigner(appID:)` can
+    /// still be invoked more than once as a view re-renders or re-appears
+    /// (e.g. the designer's `prepare()` running again), so this marker still
+    /// spans send → gate-arrival even though creation itself no longer opens
+    /// the designer eagerly (local-apps#questionnaire, Task 13: a freshly
+    /// created app starts in `authoring_questionnaire`, not `collecting_spec`,
+    /// so an immediate open would just be rejected).
     ///
     /// A guard on `apps.first(where:)?.workflow` cannot catch this: the summary
     /// the view reads comes from the very `appsChanged` batch that triggered the
@@ -103,12 +141,10 @@ final class LocalAppsStore {
 
     var filteredApps: [LocalAppSummary] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return apps }
         return apps.filter { app in
-            let matchesTemplate = templateFilter == nil || app.templateKind == templateFilter
-            let matchesText = query.isEmpty
-                || app.name.localizedStandardContains(query)
+            app.name.localizedStandardContains(query)
                 || app.workflow.label.localizedStandardContains(query)
-            return matchesTemplate && matchesText
         }
     }
 
@@ -126,15 +162,27 @@ final class LocalAppsStore {
                     $0.updatedAt > $1.updatedAt
                 }
                 apps = updatedApps
+                // `createApp(brief:)` sends an empty `name`, letting the engine
+                // derive the display name from the brief (`AppService::create_app`,
+                // first 24 chars) — so the created row can no longer be matched by
+                // name. A single pending creation only ever produces one new id, so
+                // "not in the pre-create snapshot" is sufficient on its own.
                 if let pendingCreation,
-                   let created = updatedApps.first(where: {
-                       !pendingCreation.knownAppIDs.contains($0.id)
-                           && $0.name == pendingCreation.name
-                           && $0.templateKind == pendingCreation.template
-                   }) {
+                   let created = updatedApps.first(where: { !pendingCreation.knownAppIDs.contains($0.id) }) {
                     self.pendingCreation = nil
                     createdAppIDForDesigner = created.id
-                    Task { await openDesigner(appID: created.id) }
+                    // A freshly created app starts in `authoring_questionnaire`,
+                    // not `collecting_spec` — `open_designer` is only legal from
+                    // the latter (and from `generation_failed`). This dictionary
+                    // entry still fires the navigation to `.designer(appID)`
+                    // (LocalAppsLibraryView.openCreatedAppIfNeeded) immediately,
+                    // but LocalAppDesignerView.prepare() is what actually decides
+                    // whether to call `openDesigner` — it now no-ops while the
+                    // workflow is still `.generating`-mapped and retries itself
+                    // via `.task(id: app?.workflow)` once the questionnaire
+                    // arrives, instead of eagerly issuing a doomed command
+                    // (caught in Task 13 review: this exact path fired on every
+                    // app creation).
                 }
                 lastRefreshAt = .now
                 isRefreshing = false
@@ -203,9 +251,24 @@ final class LocalAppsStore {
                 flushNextEdit(appID: appId)
 
             case let .appWorkflowChanged(appId, state, detail):
+                let workflow = LocalAppsProtocolAdapter.workflow(state)
                 updateApp(appID: appId) { app in
-                    app.workflow = LocalAppsProtocolAdapter.workflow(state)
+                    app.workflow = workflow
                     app.updatedAt = .now
+                }
+                if workflow == .generating {
+                    // The engine's own ACCEPTANCE of `confirm_design` — not
+                    // `confirmDesign()`'s `send()` returning `true`, which only
+                    // means the command didn't throw on dispatch (review
+                    // Important 1). `confirm_design` consumes the pending
+                    // interaction server-side (`self.interactions.pending =
+                    // None`, state.rs) whenever it lands here; `retry_generation`
+                    // reaches `.generating` too and never needed one. Either
+                    // way a cached `interactionID` is stale once the workflow
+                    // is actually `.generating` — clear it here so
+                    // `prepare()`'s top-level reentry guard is not wedged by an
+                    // id that no longer corresponds to any live interaction.
+                    designers[appId]?.interactionID = nil
                 }
                 if let detail, !detail.isEmpty { errorMessage = detail }
 
@@ -215,6 +278,10 @@ final class LocalAppsStore {
                     percent: percent,
                     detail: detail
                 )
+                // A live stage report — see `liveGenerationAppIDs`'s doc
+                // comment for why this is a DIFFERENT signal from the map
+                // above.
+                liveGenerationAppIDs.insert(appId)
 
             case let .appRuntimeChanged(appId, state, details, lastError):
                 runtimes[appId] = LocalAppsProtocolAdapter.runtime(
@@ -243,6 +310,55 @@ final class LocalAppsStore {
                 if case .running = runtimes[appId] {
                     runtimes[appId] = .running(previewURL)
                 }
+                // Mirrors `appUiRequest`'s use of this same field below: the
+                // preview confirm gate just armed for `appId`, so route the
+                // app the same way an inbound UI-automation request already
+                // does (`RootView`'s `onChange(of: requestedPresentationAppID)`
+                // -> `navigation.openLocalApps`). Previously only
+                // `appUiRequest` set this, so a user who confirmed a design
+                // and was not already sitting on `.preview(appId)` (e.g. they
+                // backed out of the local-apps cover, or `LocalAppDesignerView`
+                // never navigates `path` on its own) had no way back to the
+                // gate that just opened except manually re-tapping the app row
+                // from the library (review F2).
+                //
+                // BUT `PreviewReady` is not a one-shot live event:
+                // `AppService::resync_pending_gates` (service.rs) re-announces
+                // the pending gate of every app at engine bootstrap, on the
+                // documented assumption that clients treat gate announcements
+                // idempotently. Unconditionally arming navigation here breaks
+                // that assumption — an app that has sat at
+                // `awaiting_preview_confirmation` for days gets its gate
+                // replayed on every relaunch, hijacking the screen into the
+                // local-apps cover for an app the user never touched this
+                // session (review NEW-1). Two parked apps in the same
+                // bootstrap batch each fire this, so the cover is presented,
+                // its `path` reset, and re-presented.
+                //
+                // Gate on `liveGenerationAppIDs`, NOT `generationProgress`
+                // (round-1 fix used the latter and was still wrong — see
+                // `liveGenerationAppIDs`'s doc comment for the full story):
+                // `generationProgress` also gets populated just by
+                // `appDetailsChanged` mirroring a durable job the engine
+                // still has on disk, which happens merely from opening an
+                // app's detail screen — nothing live required. Removing
+                // (not just reading) on match also closes the within-session
+                // repeat: a SECOND `resync_pending_gates` later in the same
+                // process (e.g. a project/provider switch that re-wires the
+                // engine source without recreating this store) re-announces
+                // the same still-pending gate, and must not re-arm just
+                // because this app WAS live earlier this session.
+                if liveGenerationAppIDs.remove(appId) != nil {
+                    requestedPresentationAppID = appId
+                    // Lets a COLD local-apps cover (its `.task` runs after
+                    // `requestedPresentationAppID` has already been consumed
+                    // by `RootView`'s synchronous `onChange`) land straight on
+                    // `.preview(appId)` instead of one tap short at
+                    // `.details(appId)` — see
+                    // `LocalAppsLibraryView.swift`'s use of
+                    // `consumePendingPreviewRouteAppID`.
+                    pendingPreviewRouteAppID = appId
+                }
 
             case let .appCheckpointCreated(appId, checkpoint):
                 let item = LocalAppsProtocolAdapter.checkpoint(checkpoint)
@@ -252,7 +368,10 @@ final class LocalAppsStore {
                 checkpoints[appId] = values.sorted { $0.createdAt > $1.createdAt }
 
             case let .appOperationFailed(appId, code, message):
-                if let appId { generationProgress[appId] = nil }
+                if let appId {
+                    generationProgress[appId] = nil
+                    liveGenerationAppIDs.remove(appId)
+                }
                 isRefreshing = false
                 // A failed open never produces a gate, so nothing else would
                 // clear the marker and the app could never be opened again.
@@ -297,16 +416,6 @@ final class LocalAppsStore {
         }
     #endif
 
-    func installTemplates(_ values: [LocalAppTemplate]) {
-        templates = values.sorted { lhs, rhs in
-            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
-    }
-
-    func template(for app: LocalAppSummary) -> LocalAppTemplate? {
-        templates.first { $0.kind == app.templateKind }
-    }
-
     func app(id: String) -> LocalAppSummary? {
         apps.first { $0.id == id }
     }
@@ -329,6 +438,16 @@ final class LocalAppsStore {
         activeUIRequestAppID == appID
     }
 
+    /// One-shot read of a preview gate armed this session for `appID` (see
+    /// `pendingPreviewRouteAppID`'s doc comment). Consumes on match so a
+    /// later cold-open of the same app doesn't spuriously skip to
+    /// `.preview` again.
+    func consumePendingPreviewRouteAppID(appID: String) -> Bool {
+        guard pendingPreviewRouteAppID == appID else { return false }
+        pendingPreviewRouteAppID = nil
+        return true
+    }
+
     func refresh() async {
         #if canImport(engine_mobileFFI)
             guard let submitCommand else {
@@ -338,7 +457,6 @@ final class LocalAppsStore {
             isRefreshing = true
             do {
                 try await submitCommand(.listApps)
-                try await submitCommand(.listAppTemplates)
             } catch {
                 isRefreshing = false
                 errorMessage = error.localizedDescription
@@ -355,23 +473,28 @@ final class LocalAppsStore {
         }
     }
 
-    func createApp(name: String, template: LocalAppTemplate) async -> Bool {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Creates an app from a real one-line brief — no display name is
+    /// collected here. `name` goes over the wire empty, and `AppService::
+    /// create_app` derives a display name from the brief itself (first 24
+    /// characters) when none is supplied. This replaces the old
+    /// `createApp(name:template:)`, which sent the app's display NAME as its
+    /// BRIEF — the exact fabrication the Rust side spent two tasks
+    /// eliminating (local-apps#questionnaire, Task 11). A dedicated name
+    /// input is Task 16's "创建入口" job; this method itself no longer
+    /// fabricates anything.
+    func createApp(brief: String) async -> Bool {
+        let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            errorMessage = String(localized: "local_apps_error_name_required")
+            errorMessage = String(localized: "local_apps_error_brief_required")
             return false
         }
         #if canImport(engine_mobileFFI)
-            pendingCreation = PendingCreation(
-                name: trimmed,
-                template: template.kind,
-                knownAppIDs: Set(apps.map(\.id))
-            )
+            pendingCreation = PendingCreation(knownAppIDs: Set(apps.map(\.id)))
             let succeeded = await send(
                 .createApp(
-                    name: trimmed,
-                    template: LocalAppsProtocolAdapter.templateKind(template.kind),
+                    name: "",
                     origin: .library,
+                    brief: trimmed,
                     conversationId: nil
                 )
             )
@@ -380,6 +503,47 @@ final class LocalAppsStore {
         #else
             errorMessage = String(localized: "local_apps_error_engine_unavailable")
             return false
+        #endif
+    }
+
+    /// Replaces an app's brief and re-authors its questionnaire from scratch,
+    /// discarding any prior questionnaire/answers/plan. Valid from
+    /// `collecting_spec`, `questionnaire_failed`, or `plan_failed`.
+    func updateBrief(appID: String, brief: String) async -> Bool {
+        let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = String(localized: "local_apps_error_brief_required")
+            return false
+        }
+        #if canImport(engine_mobileFFI)
+            return await send(.updateAppBrief(appId: appID, brief: trimmed))
+        #else
+            return false
+        #endif
+    }
+
+    /// Retries questionnaire authoring after it failed, reusing the same brief.
+    func retryQuestionnaire(appID: String) async {
+        #if canImport(engine_mobileFFI)
+            _ = await send(.retryAppQuestionnaire(appId: appID))
+        #endif
+    }
+
+    /// Begins planning from the collected answers (`collecting_spec ->
+    /// planning`). The engine validates the answers are self-consistent
+    /// before starting the background plan round trip.
+    func beginPlanning(appID: String) async -> Bool {
+        #if canImport(engine_mobileFFI)
+            return await send(.beginAppPlanning(appId: appID))
+        #else
+            return false
+        #endif
+    }
+
+    /// Retries planning after it failed, reusing the same answers.
+    func retryPlan(appID: String) async {
+        #if canImport(engine_mobileFFI)
+            _ = await send(.retryAppPlan(appId: appID))
         #endif
     }
 
@@ -506,6 +670,17 @@ final class LocalAppsStore {
                 errorMessage = String(localized: "local_apps_error_design_unsaved")
                 return false
             }
+            // NOTE: `send()` returning `true` means the FFI call didn't throw —
+            // i.e. the command was *submitted*, not that the engine accepted
+            // it. `confirm_design` can still be refused (`validate_pending`,
+            // `ensure_current_revision`, the plan-freshness check), surfacing
+            // only as a later `appOperationFailed`. The cached `interactionID`
+            // must therefore NOT be cleared here on dispatch — see the
+            // `appWorkflowChanged` handler below, which clears it only once
+            // the workflow actually reaches `.generating` (review Important 1
+            // on an earlier revision of this method, which cleared here and
+            // could wedge `prepare()`'s reentry guard for the rest of the
+            // session on a rejected confirm).
             return await send(
                 .confirmAppDesign(
                     appId: appID,
@@ -746,9 +921,6 @@ final class LocalAppsStore {
     #if canImport(engine_mobileFFI)
         private func handleAppEvent(_ event: AppEventDto) {
             switch event {
-            case let .appTemplatesChanged(templates):
-                installTemplates(templates.map(LocalAppsProtocolAdapter.template))
-
             case let .appDetailsChanged(details):
                 let summary = LocalAppsProtocolAdapter.app(details.app)
                 upsertApp(summary)
@@ -771,6 +943,13 @@ final class LocalAppsStore {
                     fields: fields,
                     currentStep: existing?.currentStep ?? 0
                 )
+                // The full-details snapshot carries its own questionnaire/plan
+                // (Task 6's bridge lowering), independent of the incremental
+                // `appQuestionnaireChanged`/`appPlanChanged` events below — a
+                // caller that only ever calls `getDetails` (e.g. on relaunch,
+                // before any incremental event has arrived) must still see them.
+                questionnaires[summary.id] = LocalAppsProtocolAdapter.questionnaire(details.questionnaire)
+                plans[summary.id] = details.plan.map(LocalAppsProtocolAdapter.plan)
                 runtimes[summary.id] = LocalAppsProtocolAdapter.runtime(
                     details.runtime.state,
                     details: details.runtime,
@@ -784,8 +963,27 @@ final class LocalAppsStore {
                 }
                 replaceCheckpoints(details.checkpoints, appID: summary.id)
 
+            case let .appQuestionnaireChanged(appId, _, steps):
+                questionnaires[appId] = LocalAppsProtocolAdapter.questionnaire(steps)
+
+            // An answer edit voids a previously-derived plan on the engine
+            // side too (see `local-apps` `update_draft`), announced here with
+            // `plan: nil` — mirror that by clearing the client's copy rather
+            // than leaving a stale plan on screen.
+            case let .appPlanChanged(appId, _, plan):
+                plans[appId] = plan.map(LocalAppsProtocolAdapter.plan)
+
             case let .appGenerationJobChanged(job):
                 updateGenerationJob(job)
+                // Unlike `appDetailsChanged`'s call to the same helper just
+                // above (a passive snapshot mirror), this event is only ever
+                // emitted for a job actually progressing in this process —
+                // see `liveGenerationAppIDs`'s doc comment. Do NOT hoist this
+                // insert into `updateGenerationJob` itself: that would also
+                // fire for the `appDetailsChanged` call site, which is
+                // exactly the false-positive producer this set exists to
+                // exclude.
+                liveGenerationAppIDs.insert(job.appId)
 
             case let .appBridgeResponse(response):
                 LocalAppWebViewRegistry.shared.resolveBridge(

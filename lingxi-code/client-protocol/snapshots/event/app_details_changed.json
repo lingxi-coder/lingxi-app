@@ -6,7 +6,7 @@
       "app": {
         "id": "habits-1a2b",
         "name": "Habits",
-        "template": "dashboard",
+        "brief": "A daily habit tracker",
         "created_at_ms": 1750000000000,
         "updated_at_ms": 1750000000001,
         "workflow_state": "collecting_spec",
@@ -14,12 +14,66 @@
         "workspace_rel": "apps/habits-1a2b/workspace"
       },
       "design_revision": 4,
-      "design_fields": [],
+      "design_fields": [
+        {
+          "field_id": "accent",
+          "value": {
+            "kind": "deferred"
+          }
+        }
+      ],
+      "questionnaire": [
+        {
+          "id": "basics",
+          "order": 1,
+          "title": "Basics",
+          "fields": [
+            {
+              "id": "accent",
+              "label": "Accent color",
+              "field_type": "single_choice",
+              "required": true,
+              "allows_custom": true,
+              "allows_defer": true,
+              "options": [
+                {
+                  "value": "blue",
+                  "label": "Blue"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "plan": {
+        "collections": [
+          {
+            "id": "records",
+            "label": "Records",
+            "fields": [
+              {
+                "id": "title",
+                "label": "Title",
+                "field_type": "text",
+                "required": true,
+                "options": []
+              }
+            ],
+            "enabled_by_default": true
+          }
+        ],
+        "capabilities": [
+          "data_mutation"
+        ],
+        "domains": [
+          "api.example.com"
+        ],
+        "summary": "A habit tracker with a records collection."
+      },
       "manifest": {
         "schema_version": 1,
         "app_id": "habits-1a2b",
         "name": "Habits",
-        "template": "dashboard",
         "design_revision": 4,
         "collections": [
           {

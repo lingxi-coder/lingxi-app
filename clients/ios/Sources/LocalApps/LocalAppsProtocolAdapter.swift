@@ -2,18 +2,12 @@ import Foundation
 
 #if canImport(engine_mobileFFI)
 enum LocalAppsProtocolAdapter {
-    static func template(_ dto: AppTemplateDto) -> LocalAppTemplate {
-        let kind = templateKind(dto.kind)
-        return LocalAppTemplate(
-            id: kind.rawValue,
-            kind: kind,
-            version: UInt64(dto.version),
-            name: dto.name,
-            description: dto.description,
-            steps: dto.steps.map(designStep),
-            collections: dto.collections.map(collection)
-        )
-    }
+    // NOTE (local-apps#questionnaire, Task 13): `AppTemplateDto`/`AppTemplateKindDto`
+    // and the static template catalog they backed were deleted from
+    // client-protocol back in Task 5 (human-partner ruling: total removal).
+    // `LocalAppTemplate`/`LocalAppTemplateKind` (the native UI models) and the
+    // template-picker create screen are deleted here too; the questionnaire/plan
+    // this file now maps replace them.
 
     static func designStep(_ dto: AppDesignStepDto) -> LocalAppDesignStep {
         LocalAppDesignStep(
@@ -25,6 +19,14 @@ enum LocalAppsProtocolAdapter {
         )
     }
 
+    /// The LLM-authored questionnaire, ordered the way `LocalAppTemplate.orderedSteps`
+    /// used to order the static catalog's steps: by declared order, id as tiebreak.
+    static func questionnaire(_ steps: [AppDesignStepDto]) -> [LocalAppDesignStep] {
+        steps.map(designStep).sorted { lhs, rhs in
+            lhs.order == rhs.order ? lhs.id < rhs.id : lhs.order < rhs.order
+        }
+    }
+
     static func designField(_ dto: AppDesignFieldDto) -> LocalAppDesignField {
         LocalAppDesignField(
             id: dto.id,
@@ -32,6 +34,8 @@ enum LocalAppsProtocolAdapter {
             description: dto.description ?? "",
             type: designFieldType(dto.fieldType),
             required: dto.required,
+            allowsCustom: dto.allowsCustom,
+            allowsDefer: dto.allowsDefer,
             defaultValue: dto.defaultValue.map(designValue),
             options: dto.options.map {
                 LocalAppDesignOption(value: $0.value, label: $0.label)
@@ -55,10 +59,10 @@ enum LocalAppsProtocolAdapter {
         }
     }
 
-    static func collection(_ dto: AppDataCollectionDto) -> LocalAppCollectionSchema {
-        LocalAppCollectionSchema(
+    static func collection(_ dto: AppDataCollectionDto) -> LocalAppDataCollection {
+        LocalAppDataCollection(
             id: dto.id,
-            name: dto.label,
+            label: dto.label,
             fields: dto.fields.map(dataField),
             enabledByDefault: dto.enabledByDefault
         )
@@ -67,10 +71,28 @@ enum LocalAppsProtocolAdapter {
     static func dataField(_ dto: AppDataFieldDto) -> LocalAppDataField {
         LocalAppDataField(
             id: dto.id,
-            name: dto.label,
-            type: dataFieldType(dto.fieldType),
+            label: dto.label,
+            fieldType: dataFieldType(dto.fieldType),
             required: dto.required,
             options: dto.options
+        )
+    }
+
+    static func planCapability(_ dto: AppCapabilityKindDto) -> LocalAppCapabilityKind {
+        switch dto {
+        case .dataMutation: .dataMutation
+        case .uiControl: .uiControl
+        case .networkDomain: .networkDomain
+        case .restoreCheckpoint: .restoreCheckpoint
+        }
+    }
+
+    static func plan(_ dto: AppPlanDto) -> LocalAppPlan {
+        LocalAppPlan(
+            collections: dto.collections.map(collection),
+            capabilities: dto.capabilities.map(planCapability),
+            domains: dto.domains,
+            summary: dto.summary
         )
     }
 
@@ -104,34 +126,29 @@ enum LocalAppsProtocolAdapter {
         LocalAppSummary(
             id: dto.id,
             name: dto.name,
-            templateKind: templateKind(dto.template),
+            brief: dto.brief,
             updatedAt: Date(timeIntervalSince1970: TimeInterval(dto.updatedAtMs) / 1_000),
             workflow: workflow(dto.workflowState),
             workspaceRelativePath: dto.workspaceRel
         )
     }
 
-    static func templateKind(_ dto: AppTemplateKindDto) -> LocalAppTemplateKind {
-        switch dto {
-        case .dashboard: .dashboard
-        case .crudTracker: .crudTracker
-        case .contentShowcase: .contentShowcase
-        case .formUtility: .formUtility
-        }
-    }
-
-    static func templateKind(_ value: LocalAppTemplateKind) -> AppTemplateKindDto {
-        switch value {
-        case .dashboard: .dashboard
-        case .crudTracker: .crudTracker
-        case .contentShowcase: .contentShowcase
-        case .formUtility: .formUtility
-        }
-    }
-
     static func workflow(_ dto: AppWorkflowStateDto) -> LocalAppWorkflow {
         switch dto {
+        // (local-apps#questionnaire, Task 14, closing the Task 13-review
+        // TODO that lived here): `authoringQuestionnaire`/`questionnaireFailed`/
+        // `planning`/`planFailed` used to collapse onto `.generating`/
+        // `.generationFailed` by KIND. That collapse was more than a display
+        // nicety — it let `LocalAppDesignerView.prepare()`'s `.generationFailed`
+        // arm call `store.openDesigner(appID:)` for an app that was actually in
+        // `questionnaire_failed`/`plan_failed`, neither of which `open_designer`
+        // accepts (state.rs:491-501), so the call failed server-side. Each DTO
+        // case now maps 1:1 onto its own `LocalAppWorkflow` case instead.
+        case .authoringQuestionnaire: .authoringQuestionnaire
+        case .questionnaireFailed: .questionnaireFailed
         case .collectingSpec: .collectingSpec
+        case .planning: .planning
+        case .planFailed: .planFailed
         case .awaitingSpecConfirmation: .awaitingSpecConfirmation
         case .generating: .generating
         case .validating: .validating
@@ -159,32 +176,47 @@ enum LocalAppsProtocolAdapter {
             .dataFields(value.map(dataField))
         case let .domainList(value):
             .domains(value)
+        case .deferred:
+            .deferred
         }
     }
 
     static func designValue(_ value: LocalAppDesignValue, fieldType: LocalAppFieldType) -> DesignValueDto? {
+        // `.deferred` ("let the model decide") is legal on any field the
+        // questionnaire marks `allowsDefer`, regardless of that field's
+        // declared type — it carries no payload, so the type-specific
+        // dispatch below does not apply to it. Checked first so it always
+        // wins over the `(fieldType, value)` match.
+        if case .deferred = value { return .deferred }
+        // A `return` is required on every arm below now that the function
+        // body has more than one statement — Swift only treats a `switch`'s
+        // per-case trailing expressions as implicit returns when the switch
+        // is the SOLE statement in the body (SE-0380). The `.deferred`
+        // early-return above ends that, so without `return` each case here
+        // is parsed as a discarded expression statement and `.shortText(...)`
+        // etc. fail to type-check for lack of a contextual type.
         switch (fieldType, value) {
-        case (.shortText, let .text(value)): .shortText(value: value)
-        case (.longText, let .text(value)): .longText(value: value)
-        case (.singleChoice, let .text(value)): .singleChoice(value: value)
-        case (.multipleChoice, let .strings(value)): .multipleChoice(value: value)
-        case (.boolean, let .boolean(value)): .boolean(value: value)
-        case (.color, let .color(value)): .color(value: value)
-        case (.density, let .density(value)): .density(value: value == "compact" ? .compact : .comfortable)
-        case (.screenList, let .strings(value)): .screenList(value: value)
-        case (.featureList, let .strings(value)): .featureList(value: value)
-        case (.domainList, let .domains(value)): .domainList(value: value)
+        case (.shortText, let .text(value)): return .shortText(value: value)
+        case (.longText, let .text(value)): return .longText(value: value)
+        case (.singleChoice, let .text(value)): return .singleChoice(value: value)
+        case (.multipleChoice, let .strings(value)): return .multipleChoice(value: value)
+        case (.boolean, let .boolean(value)): return .boolean(value: value)
+        case (.color, let .color(value)): return .color(value: value)
+        case (.density, let .density(value)): return .density(value: value == "compact" ? .compact : .comfortable)
+        case (.screenList, let .strings(value)): return .screenList(value: value)
+        case (.featureList, let .strings(value)): return .featureList(value: value)
+        case (.domainList, let .domains(value)): return .domainList(value: value)
         case (.dataFieldList, let .dataFields(fields)):
-            .dataFieldList(value: fields.map {
+            return .dataFieldList(value: fields.map {
                 AppDataFieldDto(
                     id: $0.id,
-                    label: $0.name,
-                    fieldType: dataFieldType($0.type),
+                    label: $0.label,
+                    fieldType: dataFieldType($0.fieldType),
                     required: $0.required,
                     options: $0.options
                 )
             })
-        default: nil
+        default: return nil
         }
     }
 

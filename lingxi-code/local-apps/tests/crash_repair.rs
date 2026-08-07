@@ -15,23 +15,72 @@ use local_apps::storage::{
 };
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    AppContinuationKind, AppEventObserver, AppInteractionKind, AppInteractions, AppService,
-    AppState, AppTemplateKind, AppWorkflowState, ContinuationSink, RecordingAppEventObserver,
-    RecordingContinuationSink, APPS_SCHEMA_VERSION,
+    AppContinuationKind, AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignStep,
+    AppEventObserver, AppInteractionKind, AppInteractions, AppPlan, AppService, AppState,
+    AppWorkflowState, ContinuationSink, RecordingAppEventObserver, RecordingContinuationSink,
+    APPS_SCHEMA_VERSION,
 };
 use std::path::Path;
 use std::sync::Arc;
 
 const T0: u64 = 1_753_000_000_000;
 
+fn one_step() -> Vec<AppDesignStep> {
+    vec![AppDesignStep {
+        id: "basics".into(),
+        order: 0,
+        title: "basics".into(),
+        description: None,
+        fields: vec![AppDesignField {
+            id: "tone".into(),
+            label: "tone".into(),
+            description: None,
+            field_type: AppDesignFieldType::SingleChoice,
+            required: false,
+            allows_custom: false,
+            allows_defer: false,
+            default_value: None,
+            options: vec![AppDesignFieldOption {
+                value: "a".into(),
+                label: "A".into(),
+            }],
+        }],
+    }]
+}
+
+/// A fresh app fast-forwarded straight to `collecting_spec` WITH an
+/// already-computed plan matching the current revision — none of these
+/// crash-repair goldens exercise questionnaire authoring or planning
+/// themselves, they pin the torn-write repair machinery, so the fixture
+/// just needs to satisfy `confirm_design`'s plan-freshness gate without
+/// ever touching `update_draft` (which would invalidate it again).
 fn fresh_app(id: &str) -> AppState {
-    AppState::create(
+    let mut app = AppState::create(
         id.into(),
         format!("App {id}"),
-        AppTemplateKind::Dashboard,
+        "a test app".into(),
         None,
         T0,
-    )
+    );
+    app.questionnaire_ready(one_step(), None, 1, T0)
+        .expect("fixture questionnaire is valid");
+    app.draft.plan = Some(a_plan());
+    app.draft.plan_for_revision = Some(app.draft.revision);
+    // `llm_round` is `#[serde(skip)]` (process-lifetime only) — a disk
+    // round trip always comes back `0`. Zero it here too so an in-memory
+    // fixture compares equal to its own reload; these crash-repair goldens
+    // pin document persistence, not this field.
+    app.record.llm_round = 0;
+    app
+}
+
+fn a_plan() -> AppPlan {
+    AppPlan {
+        collections: Vec::new(),
+        capabilities: Vec::new(),
+        domains: Vec::new(),
+        summary: "s".into(),
+    }
 }
 
 /// Persist the full consistent store — the committed state BEFORE the torn
@@ -152,6 +201,35 @@ fn torn_open_designer_repairs_to_awaiting_spec_confirmation() {
     assert_eq!(pending.interaction_id, "int-1");
     // The repaired gate is actually satisfiable.
     app.confirm_design("int-1", 0, T0 + 3).expect("confirmable");
+}
+
+/// `plan_ready` (Task 3) arms the SAME Designer gate `open_designer` does,
+/// but from `Planning` — a third source state the repair table's
+/// `(CollectingSpec | GenerationFailed, Some(Designer))` pattern originally
+/// missed. A crash in this window would otherwise wedge `confirm_design`
+/// behind a `Planning` record the table never resolves.
+#[test]
+fn torn_plan_ready_repairs_to_awaiting_spec_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut before = fresh_app("aaaa1111");
+    let epoch = before.begin_planning(T0 + 1).unwrap();
+    let mut after = before.clone();
+    after
+        .plan_ready(a_plan(), "int-1".into(), epoch, T0 + 2)
+        .unwrap()
+        .expect("fresh epoch must not be rejected as stale");
+    tear(dir.path(), &before, &after, &Tear::AfterInteractions);
+
+    let mut app = load_repaired(dir.path());
+    assert_eq!(
+        app.record.workflow_state,
+        AppWorkflowState::AwaitingSpecConfirmation
+    );
+    let pending = app.interactions.pending.clone().expect("gate survives");
+    assert_eq!(pending.interaction_id, "int-1");
+    // The repaired gate is actually satisfiable.
+    app.confirm_design("int-1", app.draft.revision, T0 + 3)
+        .expect("confirmable");
 }
 
 /// `open_designer` is also the escape hatch out of `generation_failed`, so

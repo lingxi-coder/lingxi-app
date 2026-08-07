@@ -14,8 +14,8 @@ use crate::local_apps_sources::{screen_writes, FileWrite};
 use async_trait::async_trait;
 use llm_client::{ApiService, ContentBlock, ToolChoice};
 use local_apps::questionnaire::{
-    validate_plan, validate_questionnaire, AppDesignStep, AppPlan, MAX_COLLECTIONS, MAX_DOMAINS,
-    MAX_FIELDS_PER_STEP, MAX_OPTIONS, MAX_STEPS,
+    normalize_plan, validate_plan, validate_questionnaire, AppDesignStep, AppPlan,
+    MAX_COLLECTIONS, MAX_DOMAINS, MAX_FIELDS_PER_STEP, MAX_OPTIONS, MAX_STEPS,
 };
 use local_apps::{AppError, DesignValue};
 use protocol::{ConversationMessage, MessageId};
@@ -316,8 +316,20 @@ impl LocalAppsLlm {
             .model
             .structured(PLAN_PROMPT, user, TOOL_PLAN, plan_schema())
             .await?;
-        let plan: AppPlan = serde_json::from_value(value)
+        let mut plan: AppPlan = serde_json::from_value(value)
             .map_err(|error| AppError::LlmOutputRejected(format!("plan is malformed: {error}")))?;
+        // Normalize BEFORE validating (same order `AppState::plan_ready`
+        // uses, and for the same reason — see `normalize_plan`'s doc
+        // comment): `validate_plan` now rejects a duplicate domain outright
+        // (review NEW-2 tightened it to match `AppManifest::validate`), and
+        // a model producing `API.Example.com` alongside `api.example.com`
+        // is a cosmetic duplicate, not a bad plan. Normalizing here first
+        // means this early gate does not manufacture an avoidable
+        // `LlmOutputRejected` retry for something `plan_ready` would have
+        // silently repaired anyway — and it means the plan `plan_ready`
+        // later normalizes again is already in its final, validated shape
+        // (normalization is idempotent).
+        normalize_plan(&mut plan);
         validate_plan(&plan).map_err(as_llm_output_rejected)?;
         Ok(plan)
     }
@@ -783,6 +795,26 @@ mod tests {
         llm.plan("一个记事本", &[], &BTreeMap::new())
             .await
             .expect_err("9 collections must be rejected by validate_plan, not passed through");
+    }
+
+    /// review NEW-2, second-order check: tightening `validate_plan` to
+    /// reject a duplicate domain (to match `AppManifest::validate`) must
+    /// NOT turn a merely-differently-cased domain into a manufactured
+    /// `LlmOutputRejected` retry here — `normalize_plan` runs first and
+    /// silently merges it, exactly like it does before `AppState::plan_ready`
+    /// stores the plan. Without the `normalize_plan` call added alongside
+    /// the tightened `validate_plan`, this plan would have failed here even
+    /// though it is perfectly legal after normalization.
+    #[tokio::test]
+    async fn plan_normalizes_a_case_duplicate_domain_instead_of_rejecting_it() {
+        let mut value = good_plan();
+        value["domains"] = serde_json::json!(["API.Example.com", "api.example.com"]);
+        let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(value)]));
+        let plan = llm
+            .plan("一个记事本", &[], &BTreeMap::new())
+            .await
+            .expect("a case-duplicate domain is normalized, not rejected");
+        assert_eq!(plan.domains, vec!["api.example.com".to_string()]);
     }
 
     #[tokio::test]

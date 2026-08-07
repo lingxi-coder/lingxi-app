@@ -430,7 +430,7 @@ impl AppState {
     /// round returns `Ok(None)` — a no-op, not an error.
     pub fn plan_ready(
         &mut self,
-        plan: crate::questionnaire::AppPlan,
+        mut plan: crate::questionnaire::AppPlan,
         interaction_id: String,
         epoch: u64,
         now_ms: u64,
@@ -439,6 +439,12 @@ impl AppState {
             return Ok(None);
         }
         self.ensure_workflow("plan_ready", &[AppWorkflowState::Planning])?;
+        // Normalize BEFORE validating so the value that gets checked is the
+        // one that gets stored (and later copied verbatim into
+        // `AppManifest` by `reconcile_manifest`) — review NEW-2. Order
+        // matters: `normalize_plan` only repairs domain casing/duplication;
+        // `validate_plan` is the actual gate for everything else.
+        crate::questionnaire::normalize_plan(&mut plan);
         crate::questionnaire::validate_plan(&plan)?;
         self.draft.plan = Some(plan);
         self.draft.plan_for_revision = Some(self.draft.revision);
@@ -1984,6 +1990,33 @@ mod tests {
         );
         assert_eq!(interaction.kind, AppInteractionKind::Designer);
         assert_eq!(app.draft.plan_for_revision, Some(app.draft.revision));
+    }
+
+    /// review NEW-2: `plan_ready` must normalize domains BEFORE validating
+    /// and storing, not just validate — otherwise the mixed-case/duplicate
+    /// value that `validate_plan`'s lenient domain check let through would
+    /// be the value `reconcile_manifest` later copies verbatim into
+    /// `AppManifest`, which rejects it (`domain ==
+    /// domain.to_ascii_lowercase()` and no duplicates).
+    #[test]
+    fn plan_ready_normalizes_domains_before_storing_them() {
+        let mut app = authoring_app();
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
+            .expect("authoring succeeds");
+        let epoch = app.begin_planning(3).expect("planning starts");
+        let mut plan = a_plan();
+        plan.domains = vec!["API.Example.com".into(), "api.example.com".into()];
+
+        app.plan_ready(plan, "i-1".into(), epoch, 4)
+            .expect("normalized plan passes validate_plan")
+            .expect("fresh epoch must not be rejected as stale");
+
+        assert_eq!(
+            app.draft.plan.as_ref().expect("plan stored").domains,
+            vec!["api.example.com".to_string()],
+            "stored domains are lowercased and deduplicated, not the raw LLM output"
+        );
     }
 
     /// The same stale-round protection as

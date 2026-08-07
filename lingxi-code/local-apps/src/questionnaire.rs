@@ -20,6 +20,22 @@ pub const MAX_COLLECTIONS: usize = 8;
 pub const MAX_COLLECTION_FIELDS: usize = 24;
 pub const MAX_DOMAINS: usize = 8;
 pub const MAX_SUMMARY_CHARS: usize = 1200;
+/// Byte cap mirroring `AppManifest::validate`'s collection name / field
+/// label limit (manifest.rs:158/182: `> 200` bytes). A char cap alone
+/// (`MAX_LABEL_CHARS`) is not enough here — up to 80 CJK characters can
+/// exceed 200 bytes in UTF-8, so a plan that satisfies `MAX_LABEL_CHARS`
+/// could still be rejected by the manifest downstream of the human gate
+/// (review NEW-2). Only applies to the two plan-carried labels that
+/// actually flow into the manifest (`DataCollectionSchema::name`,
+/// `DataFieldSchema::label`) — questionnaire step/field labels never reach
+/// the manifest and keep the char-only cap.
+pub const MAX_LABEL_BYTES: usize = 200;
+/// Mirrors `AppManifest::validate`'s enum option count limit
+/// (manifest.rs:191: `1..=100`).
+pub const MAX_ENUM_OPTIONS: usize = 100;
+/// Mirrors `AppManifest::validate`'s per-option byte limit
+/// (manifest.rs:202: `> 500`).
+pub const MAX_ENUM_OPTION_BYTES: usize = 500;
 
 /// 动态问卷字段的输入类型。与 `DesignValue` 的变体一一对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +157,22 @@ fn valid_id(id: &str) -> bool {
 fn ensure_chars(label: &str, text: &str, max: usize) -> Result<(), AppError> {
     if text.chars().count() > max {
         return Err(reject(format!("{label} exceeds {max} characters")));
+    }
+    Ok(())
+}
+
+/// Like `ensure_chars`, but for the two plan labels that flow straight into
+/// `AppManifest` (`DataCollectionSchema::name`, `DataFieldSchema::label`):
+/// also rejects an empty (post-trim) label and enforces a BYTE cap
+/// alongside the char cap — a CJK label can clear `max_chars` while still
+/// exceeding the manifest's byte limit. See `MAX_LABEL_BYTES`.
+fn ensure_label(context: &str, text: &str, max_chars: usize, max_bytes: usize) -> Result<(), AppError> {
+    if text.trim().is_empty() {
+        return Err(reject(format!("{context} must not be empty")));
+    }
+    ensure_chars(context, text, max_chars)?;
+    if text.len() > max_bytes {
+        return Err(reject(format!("{context} exceeds {max_bytes} bytes")));
     }
     Ok(())
 }
@@ -297,7 +329,7 @@ pub fn validate_plan(plan: &AppPlan) -> Result<(), AppError> {
         if !collection_ids.insert(collection.id.as_str()) {
             return Err(reject(format!("duplicate collection id `{}`", collection.id)));
         }
-        ensure_chars("collection name", &collection.name, MAX_LABEL_CHARS)?;
+        ensure_label("collection name", &collection.name, MAX_LABEL_CHARS, MAX_LABEL_BYTES)?;
         if collection.fields.len() > MAX_COLLECTION_FIELDS {
             return Err(reject(format!(
                 "collection `{}` declares {} fields, the limit is {MAX_COLLECTION_FIELDS}",
@@ -319,12 +351,43 @@ pub fn validate_plan(plan: &AppPlan) -> Result<(), AppError> {
                     collection.id, field.id
                 )));
             }
-            ensure_chars("collection field label", &field.label, MAX_LABEL_CHARS)?;
-            if field.kind == DataFieldKind::Enum && field.enum_options.is_empty() {
-                return Err(reject(format!(
-                    "enum field `{}` declares no options",
-                    field.id
-                )));
+            ensure_label("collection field label", &field.label, MAX_LABEL_CHARS, MAX_LABEL_BYTES)?;
+            // Mirrors `AppManifest::validate`'s `match field.kind` exactly
+            // (manifest.rs:189-217): an enum field needs 1..=MAX_ENUM_OPTIONS
+            // unique, non-empty, <=MAX_ENUM_OPTION_BYTES options; a non-enum
+            // field must not carry any. Previously this only checked
+            // "an enum field has at least one option" — every other manifest
+            // rule on this field was a plan-step no-op that failed only once
+            // it reached `manifest.validate()` past the human gate (review
+            // NEW-2).
+            match field.kind {
+                DataFieldKind::Enum => {
+                    if field.enum_options.is_empty() || field.enum_options.len() > MAX_ENUM_OPTIONS {
+                        return Err(reject(format!(
+                            "enum field `{}` must declare 1..={MAX_ENUM_OPTIONS} options",
+                            field.id
+                        )));
+                    }
+                    let unique: BTreeSet<&str> =
+                        field.enum_options.iter().map(String::as_str).collect();
+                    if unique.len() != field.enum_options.len()
+                        || field.enum_options.iter().any(|option| {
+                            option.is_empty() || option.len() > MAX_ENUM_OPTION_BYTES
+                        })
+                    {
+                        return Err(reject(format!(
+                            "enum field `{}` has duplicate, empty, or oversized options",
+                            field.id
+                        )));
+                    }
+                }
+                _ if !field.enum_options.is_empty() => {
+                    return Err(reject(format!(
+                        "non-enum field `{}` cannot declare enum options",
+                        field.id
+                    )));
+                }
+                _ => {}
             }
         }
     }
@@ -334,10 +397,41 @@ pub fn validate_plan(plan: &AppPlan) -> Result<(), AppError> {
             plan.domains.len()
         )));
     }
+    // Case-insensitive dedup: `normalize_plan` is expected to have already
+    // folded case and dropped duplicates by the time a plan reaches here
+    // (`AppState::plan_ready`), but `validate_plan` is the actual gate — it
+    // must reject on its own, not merely trust an upstream normalization
+    // step, or a caller that skips normalization silently produces a plan
+    // `AppManifest::validate` then rejects as a "duplicate allowed domain"
+    // past the human gate (review NEW-2).
+    let mut seen_domains = BTreeSet::new();
     for domain in &plan.domains {
         validate_domain(domain)?;
+        if !seen_domains.insert(domain.to_ascii_lowercase()) {
+            return Err(reject(format!("duplicate domain `{domain}`")));
+        }
     }
     Ok(())
+}
+
+/// Normalize a plan's domains before `validate_plan`/storage: fold each to
+/// lowercase and drop case-insensitive duplicates, keeping first-seen order.
+///
+/// `validate_domain` already lowercases internally to decide validity, but
+/// historically the *raw* (possibly mixed-case) value was what got stored in
+/// `draft.plan` and later copied verbatim into `AppManifest::allowed_domains`
+/// — which requires `domain == domain.to_ascii_lowercase()` and rejects
+/// duplicates outright. An LLM-authored domain like `API.Example.com` is not
+/// wrong, just differently cased, so this repairs it rather than bouncing
+/// the plan back to the LLM for a cosmetic retry; genuinely invalid domains
+/// (IP literals, loopback, malformed labels) are still rejected by
+/// `validate_domain` inside `validate_plan`, which MUST run after this.
+pub fn normalize_plan(plan: &mut AppPlan) {
+    let mut seen = BTreeSet::new();
+    plan.domains.retain_mut(|domain| {
+        *domain = domain.to_ascii_lowercase();
+        seen.insert(domain.clone())
+    });
 }
 
 /// 域名必须是可公开解析的主机名。IP 字面量、loopback、私网一律拒绝——
@@ -527,5 +621,136 @@ mod tests {
         let mut plan = plan_with_domain("api.example.com");
         plan.collections[0].fields[0].kind = DataFieldKind::Enum;
         validate_plan(&plan).expect_err("enum fields need enum_options");
+    }
+
+    // review NEW-2: `validate_plan` disagreed with the stricter
+    // `AppManifest::validate` that now consumes a confirmed plan
+    // (`reconcile_manifest`, `local_apps_generation.rs:153`) in six ways, so
+    // every one of these plans used to pass `validate_plan` and only die at
+    // scaffold, past the human confirmation gate. Each case below asserts
+    // the plan now fails HERE instead.
+
+    #[test]
+    fn rejects_an_empty_collection_name() {
+        let mut plan = plan_with_domain("api.example.com");
+        plan.collections[0].name = "   ".into();
+        let error = validate_plan(&plan).expect_err("an empty display name must be rejected");
+        assert!(
+            format!("{error}").contains("empty"),
+            "message names the offending rule: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_80_char_cjk_collection_name_that_exceeds_the_manifest_byte_limit() {
+        // 80 CJK characters clears `MAX_LABEL_CHARS` (a char cap) but each
+        // character is 3 UTF-8 bytes, so 80 * 3 = 240 bytes blows past the
+        // manifest's 200-byte cap (`MAX_LABEL_BYTES`) — a char-only cap
+        // cannot catch this.
+        let mut plan = plan_with_domain("api.example.com");
+        let label: String = std::iter::repeat('测').take(80).collect();
+        assert_eq!(label.chars().count(), 80, "stays within MAX_LABEL_CHARS");
+        assert!(label.len() > MAX_LABEL_BYTES, "but exceeds MAX_LABEL_BYTES in UTF-8");
+        plan.collections[0].name = label;
+        validate_plan(&plan).expect_err("a byte cap must catch what the char cap misses");
+    }
+
+    #[test]
+    fn rejects_a_non_enum_field_that_carries_enum_options() {
+        let mut plan = plan_with_domain("api.example.com");
+        // `kind` defaults to `Text` from `plan_with_domain`.
+        plan.collections[0].fields[0].enum_options = vec!["a".into()];
+        let error = validate_plan(&plan).expect_err("only enum fields may declare options");
+        assert!(
+            format!("{error}").contains("enum options"),
+            "message names the offending rule: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_100_enum_options() {
+        let mut plan = plan_with_domain("api.example.com");
+        plan.collections[0].fields[0].kind = DataFieldKind::Enum;
+        plan.collections[0].fields[0].enum_options =
+            (0..101).map(|i| format!("opt{i}")).collect();
+        validate_plan(&plan).expect_err("more than 100 enum options must be rejected");
+    }
+
+    #[test]
+    fn rejects_duplicate_enum_options() {
+        let mut plan = plan_with_domain("api.example.com");
+        plan.collections[0].fields[0].kind = DataFieldKind::Enum;
+        plan.collections[0].fields[0].enum_options = vec!["a".into(), "a".into()];
+        validate_plan(&plan).expect_err("duplicate enum options must be rejected");
+    }
+
+    #[test]
+    fn rejects_an_empty_enum_option() {
+        let mut plan = plan_with_domain("api.example.com");
+        plan.collections[0].fields[0].kind = DataFieldKind::Enum;
+        plan.collections[0].fields[0].enum_options = vec!["a".into(), String::new()];
+        validate_plan(&plan).expect_err("an empty enum option must be rejected");
+    }
+
+    #[test]
+    fn rejects_an_enum_option_over_500_bytes() {
+        let mut plan = plan_with_domain("api.example.com");
+        plan.collections[0].fields[0].kind = DataFieldKind::Enum;
+        plan.collections[0].fields[0].enum_options = vec!["x".repeat(501)];
+        validate_plan(&plan).expect_err("an oversized enum option must be rejected");
+    }
+
+    #[test]
+    fn rejects_duplicate_domains_even_when_validate_plan_is_called_directly() {
+        // `normalize_plan` is expected to dedupe before this ever runs in
+        // production (`AppState::plan_ready`), but `validate_plan` is the
+        // actual gate and must not rely on that: a caller that skips
+        // normalization must still be refused here, not by the manifest.
+        let mut plan = plan_with_domain("api.example.com");
+        plan.domains.push("API.example.com".into());
+        let error = validate_plan(&plan).expect_err("duplicate domains must be rejected");
+        assert!(
+            format!("{error}").contains("duplicate"),
+            "message names the offending rule: {error}"
+        );
+    }
+
+    #[test]
+    fn normalize_plan_lowercases_domains() {
+        let mut plan = plan_with_domain("API.Example.com");
+        normalize_plan(&mut plan);
+        assert_eq!(plan.domains, vec!["api.example.com".to_string()]);
+    }
+
+    #[test]
+    fn normalize_plan_drops_case_insensitive_duplicates_keeping_first_seen_order() {
+        let mut plan = plan_with_domain("api.example.com");
+        plan.domains = vec!["Api.Example.com".into(), "OTHER.example.com".into(), "api.EXAMPLE.com".into()];
+        normalize_plan(&mut plan);
+        assert_eq!(
+            plan.domains,
+            vec!["api.example.com".to_string(), "other.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_plan_normalized_then_validated_no_longer_trips_the_manifests_rules() {
+        // End-to-end proof for the two divergences `normalize_plan` fixes
+        // rather than rejects: build the exact plan the table's first row
+        // describes (mixed-case, duplicated domain), run it through the real
+        // `plan_ready` order (normalize, then validate), and confirm the
+        // resulting `AppManifest` — the thing that actually gates
+        // generation — also accepts it.
+        let mut plan = plan_with_domain("API.Example.com");
+        plan.domains.push("api.example.com".into());
+        normalize_plan(&mut plan);
+        validate_plan(&plan).expect("normalized plan passes its own gate");
+
+        let mut manifest = crate::manifest::AppManifest::for_new_app("app-1", "App");
+        manifest.collections = plan.collections;
+        manifest.allowed_domains = plan.domains;
+        manifest
+            .validate()
+            .expect("the value validate_plan approved is also what the manifest approves");
     }
 }

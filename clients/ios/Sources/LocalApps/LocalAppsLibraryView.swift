@@ -29,7 +29,13 @@ struct LocalAppsRootView: View {
         .task {
             await store.refresh()
             if let initialAppID {
-                path = [store.hasPendingUIRequest(appID: initialAppID) ? .preview(initialAppID) : .details(initialAppID)]
+                // Either an inbound UI-automation request, or a preview gate
+                // this session's own generation just armed (review NEW-1) —
+                // both mean the user should land straight on the gate rather
+                // than one tap short at `.details`.
+                let shouldOpenPreview = store.hasPendingUIRequest(appID: initialAppID)
+                    || store.consumePendingPreviewRouteAppID(appID: initialAppID)
+                path = [shouldOpenPreview ? .preview(initialAppID) : .details(initialAppID)]
             }
         }
         .alert(

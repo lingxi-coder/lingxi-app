@@ -63,6 +63,13 @@ final class LocalAppsStore {
     private(set) var pendingPermission: LocalAppPermissionPrompt?
     private(set) var requestedPresentationAppID: String?
     private(set) var activeUIRequestAppID: String?
+    /// Set alongside `requestedPresentationAppID` only for a preview gate
+    /// armed by a live generation this session (see `appPreviewReady`'s
+    /// `generationProgress` gate). `requestedPresentationAppID` itself is
+    /// consumed synchronously by `RootView`'s `onChange` before a cold
+    /// `LocalAppsRootView`'s `.task` ever runs, so it cannot be read there;
+    /// this field survives until `consumePendingPreviewRouteAppID` reads it.
+    private(set) var pendingPreviewRouteAppID: String?
 
     var searchQuery = ""
 
@@ -286,7 +293,42 @@ final class LocalAppsStore {
                 // never navigates `path` on its own) had no way back to the
                 // gate that just opened except manually re-tapping the app row
                 // from the library (review F2).
-                requestedPresentationAppID = appId
+                //
+                // BUT `PreviewReady` is not a one-shot live event:
+                // `AppService::resync_pending_gates` (service.rs) re-announces
+                // the pending gate of every app at engine bootstrap, on the
+                // documented assumption that clients treat gate announcements
+                // idempotently. Unconditionally arming navigation here breaks
+                // that assumption — an app that has sat at
+                // `awaiting_preview_confirmation` for days gets its gate
+                // replayed on every relaunch, hijacking the screen into the
+                // local-apps cover for an app the user never touched this
+                // session (review NEW-1). Two parked apps in the same
+                // bootstrap batch each fire this, so the cover is presented,
+                // its `path` reset, and re-presented.
+                //
+                // Gate on `generationProgress[appId]`: a LIVE generation
+                // reports stage progress (`appGenerationProgress` /
+                // `appGenerationJobChanged`, both of which populate this map)
+                // continuously right up to `validation_passed`, which is what
+                // emits `PreviewReady` — so the map is still non-nil at the
+                // instant this case runs. A bootstrap re-announcement has no
+                // such job in this process: the map starts empty every launch
+                // and nothing populates it before the resync fires. This
+                // distinguishes "the gate that just opened because I generated
+                // it this session" from "the gate that has been sitting there
+                // since before I opened the app."
+                if generationProgress[appId] != nil {
+                    requestedPresentationAppID = appId
+                    // Lets a COLD local-apps cover (its `.task` runs after
+                    // `requestedPresentationAppID` has already been consumed
+                    // by `RootView`'s synchronous `onChange`) land straight on
+                    // `.preview(appId)` instead of one tap short at
+                    // `.details(appId)` — see
+                    // `LocalAppsLibraryView.swift`'s use of
+                    // `consumePendingPreviewRouteAppID`.
+                    pendingPreviewRouteAppID = appId
+                }
 
             case let .appCheckpointCreated(appId, checkpoint):
                 let item = LocalAppsProtocolAdapter.checkpoint(checkpoint)
@@ -361,6 +403,16 @@ final class LocalAppsStore {
 
     func hasPendingUIRequest(appID: String) -> Bool {
         activeUIRequestAppID == appID
+    }
+
+    /// One-shot read of a preview gate armed this session for `appID` (see
+    /// `pendingPreviewRouteAppID`'s doc comment). Consumes on match so a
+    /// later cold-open of the same app doesn't spuriously skip to
+    /// `.preview` again.
+    func consumePendingPreviewRouteAppID(appID: String) -> Bool {
+        guard pendingPreviewRouteAppID == appID else { return false }
+        pendingPreviewRouteAppID = nil
+        return true
     }
 
     func refresh() async {

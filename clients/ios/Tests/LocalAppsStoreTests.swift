@@ -371,6 +371,53 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.previews["tracker"]?.url?.absoluteString, "http://127.0.0.1:43123")
         }
 
+        // review NEW-1: `AppService::resync_pending_gates` re-announces the
+        // pending gate of EVERY app at engine bootstrap (service.rs), not
+        // just a gate that just opened this session. `PreviewReady` must not
+        // unconditionally arm cross-screen navigation, or a relaunch with a
+        // stale `awaiting_preview_confirmation` app hijacks the screen into
+        // the local-apps cover for an app the user never touched.
+        func testPreviewReadyDoesNotHijackNavigationOnALoadTimeReannouncement() {
+            let store = LocalAppsStore()
+            // No `appGenerationProgress`/`appGenerationJobChanged` preceded
+            // this — exactly what a bootstrap resync looks like: the gate
+            // announcement arrives cold, with no live job in this process.
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-2",
+                revision: 7,
+                url: nil
+            ))
+
+            XCTAssertNil(store.requestedPresentationAppID)
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
+        // The F2 fix this must not regress: a generation that actually ran
+        // this session still routes the user to the gate it just opened.
+        func testPreviewReadyStillArmsNavigationForALiveSessionGeneration() {
+            let store = LocalAppsStore()
+            store.handle(event: .appGenerationProgress(
+                appId: "tracker",
+                stage: "scaffold",
+                percent: 60,
+                detail: nil
+            ))
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-2",
+                revision: 7,
+                url: nil
+            ))
+
+            XCTAssertEqual(store.requestedPresentationAppID, "tracker")
+            // Consumed exactly once — a cold cover's `.task` reads this to
+            // land directly on `.preview` instead of `.details`; a second
+            // read (e.g. a re-render) must not resurrect it.
+            XCTAssertTrue(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
         func testFailedRuntimeLabelCarriesTheEngineReason() {
             let store = LocalAppsStore()
             store.handle(event: .appRuntimeChanged(

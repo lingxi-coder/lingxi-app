@@ -38,14 +38,19 @@ final class LocalAppsStore {
     }
 
     private struct PendingCreation {
-        let name: String
-        let template: LocalAppTemplateKind
         let knownAppIDs: Set<String>
     }
 
     private(set) var apps: [LocalAppSummary] = []
-    private(set) var templates: [LocalAppTemplate] = []
     private(set) var designers: [String: LocalAppDesignerSession] = [:]
+    /// The LLM-authored questionnaire per app (local-apps#questionnaire, Task
+    /// 13). Replaces the deleted static `templates` cache — the questionnaire
+    /// is authored per-app from its brief, not looked up from a catalog.
+    private(set) var questionnaires: [String: [LocalAppDesignStep]] = [:]
+    /// The LLM-derived plan awaiting confirmation, keyed by app id. Cleared by
+    /// the engine (and mirrored here) the moment an answer edit invalidates a
+    /// previously-derived plan.
+    private(set) var plans: [String: LocalAppPlan] = [:]
     private(set) var suggestions: [String: LocalAppSuggestionDiff] = [:]
     private(set) var previews: [String: LocalAppPreviewSession] = [:]
     private(set) var runtimes: [String: LocalAppRuntimeStatus] = [:]
@@ -60,7 +65,6 @@ final class LocalAppsStore {
     private(set) var activeUIRequestAppID: String?
 
     var searchQuery = ""
-    var templateFilter: LocalAppTemplateKind?
 
     @ObservationIgnored private var debounceTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingEdits: [String: [String: PendingEdit]] = [:]
@@ -72,10 +76,13 @@ final class LocalAppsStore {
     ///
     /// `open_designer` is only legal from `collecting_spec`/`generation_failed`;
     /// the first one to land moves the app to `awaiting_spec_confirmation` and
-    /// the engine rejects every later one outright. Creation has two callers by
-    /// construction — the `appsChanged` handler opens the designer, and setting
-    /// `createdAppIDForDesigner` in the same tick pushes the view whose
-    /// `prepare()` opens it too — so one of them was always the loser.
+    /// the engine rejects every later one outright. `openDesigner(appID:)` can
+    /// still be invoked more than once as a view re-renders or re-appears
+    /// (e.g. the designer's `prepare()` running again), so this marker still
+    /// spans send → gate-arrival even though creation itself no longer opens
+    /// the designer eagerly (local-apps#questionnaire, Task 13: a freshly
+    /// created app starts in `authoring_questionnaire`, not `collecting_spec`,
+    /// so an immediate open would just be rejected).
     ///
     /// A guard on `apps.first(where:)?.workflow` cannot catch this: the summary
     /// the view reads comes from the very `appsChanged` batch that triggered the
@@ -103,12 +110,10 @@ final class LocalAppsStore {
 
     var filteredApps: [LocalAppSummary] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return apps }
         return apps.filter { app in
-            let matchesTemplate = templateFilter == nil || app.templateKind == templateFilter
-            let matchesText = query.isEmpty
-                || app.name.localizedStandardContains(query)
+            app.name.localizedStandardContains(query)
                 || app.workflow.label.localizedStandardContains(query)
-            return matchesTemplate && matchesText
         }
     }
 
@@ -126,15 +131,22 @@ final class LocalAppsStore {
                     $0.updatedAt > $1.updatedAt
                 }
                 apps = updatedApps
+                // `createApp(brief:)` sends an empty `name`, letting the engine
+                // derive the display name from the brief (`AppService::create_app`,
+                // first 24 chars) — so the created row can no longer be matched by
+                // name. A single pending creation only ever produces one new id, so
+                // "not in the pre-create snapshot" is sufficient on its own.
                 if let pendingCreation,
-                   let created = updatedApps.first(where: {
-                       !pendingCreation.knownAppIDs.contains($0.id)
-                           && $0.name == pendingCreation.name
-                           && $0.templateKind == pendingCreation.template
-                   }) {
+                   let created = updatedApps.first(where: { !pendingCreation.knownAppIDs.contains($0.id) }) {
                     self.pendingCreation = nil
                     createdAppIDForDesigner = created.id
-                    Task { await openDesigner(appID: created.id) }
+                    // NOTE (local-apps#questionnaire, Task 13): a freshly created
+                    // app starts in `authoring_questionnaire`, not `collecting_spec`
+                    // — `open_designer` is only legal from the latter (and from
+                    // `generation_failed`), so eagerly opening it here would just be
+                    // rejected. Task 14's questionnaire screen is expected to call
+                    // `openDesigner(appID:)` itself once the app actually reaches
+                    // `collecting_spec`.
                 }
                 lastRefreshAt = .now
                 isRefreshing = false
@@ -297,16 +309,6 @@ final class LocalAppsStore {
         }
     #endif
 
-    func installTemplates(_ values: [LocalAppTemplate]) {
-        templates = values.sorted { lhs, rhs in
-            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
-    }
-
-    func template(for app: LocalAppSummary) -> LocalAppTemplate? {
-        templates.first { $0.kind == app.templateKind }
-    }
-
     func app(id: String) -> LocalAppSummary? {
         apps.first { $0.id == id }
     }
@@ -338,9 +340,6 @@ final class LocalAppsStore {
             isRefreshing = true
             do {
                 try await submitCommand(.listApps)
-                // NOTE (local-apps#questionnaire, Task 5): `.listAppTemplates`
-                // was deleted with `ClientCommand::ListAppTemplates` (human-partner
-                // ruling: total removal of the static template catalog).
             } catch {
                 isRefreshing = false
                 errorMessage = error.localizedDescription
@@ -357,36 +356,26 @@ final class LocalAppsStore {
         }
     }
 
-    func createApp(name: String, template: LocalAppTemplate) async -> Bool {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Creates an app from a real one-line brief — no display name is
+    /// collected here. `name` goes over the wire empty, and `AppService::
+    /// create_app` derives a display name from the brief itself (first 24
+    /// characters) when none is supplied. This replaces the old
+    /// `createApp(name:template:)`, which sent the app's display NAME as its
+    /// BRIEF — the exact fabrication the Rust side spent two tasks
+    /// eliminating (local-apps#questionnaire, Task 11). A dedicated name
+    /// input is Task 16's "创建入口" job; this method itself no longer
+    /// fabricates anything.
+    func createApp(brief: String) async -> Bool {
+        let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            errorMessage = String(localized: "local_apps_error_name_required")
+            errorMessage = String(localized: "local_apps_error_brief_required")
             return false
         }
         #if canImport(engine_mobileFFI)
-            pendingCreation = PendingCreation(
-                name: trimmed,
-                template: template.kind,
-                knownAppIDs: Set(apps.map(\.id))
-            )
-            // NOTE (local-apps#questionnaire, Task 5): `ClientCommand::CreateApp.template`
-            // was deleted alongside `AppTemplateKindDto` (human-partner ruling:
-            // total removal of the static template catalog) — the wire command
-            // no longer carries a template selection at all. This whole
-            // template-based create flow is superseded by the brief-based one;
-            // replacing it is Task 16's job, not this task's.
-            //
-            // NOTE (local-apps#questionnaire, Task 11): `brief` is now REQUIRED
-            // on the wire (it seeds the LLM questionnaire-authoring round trip
-            // the engine starts in the background right after `create_app`
-            // commits) and this legacy template picker collects no brief of its
-            // own — reusing `trimmed` (the display name) is the SAME stopgap
-            // the engine side used before Task 11 wired a real brief input.
-            // Task 16 replaces this whole flow with the conversational one,
-            // which collects an actual brief from the user.
+            pendingCreation = PendingCreation(knownAppIDs: Set(apps.map(\.id)))
             let succeeded = await send(
                 .createApp(
-                    name: trimmed,
+                    name: "",
                     origin: .library,
                     brief: trimmed,
                     conversationId: nil
@@ -397,6 +386,47 @@ final class LocalAppsStore {
         #else
             errorMessage = String(localized: "local_apps_error_engine_unavailable")
             return false
+        #endif
+    }
+
+    /// Replaces an app's brief and re-authors its questionnaire from scratch,
+    /// discarding any prior questionnaire/answers/plan. Valid from
+    /// `collecting_spec`, `questionnaire_failed`, or `plan_failed`.
+    func updateBrief(appID: String, brief: String) async -> Bool {
+        let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = String(localized: "local_apps_error_brief_required")
+            return false
+        }
+        #if canImport(engine_mobileFFI)
+            return await send(.updateAppBrief(appId: appID, brief: trimmed))
+        #else
+            return false
+        #endif
+    }
+
+    /// Retries questionnaire authoring after it failed, reusing the same brief.
+    func retryQuestionnaire(appID: String) async {
+        #if canImport(engine_mobileFFI)
+            _ = await send(.retryAppQuestionnaire(appId: appID))
+        #endif
+    }
+
+    /// Begins planning from the collected answers (`collecting_spec ->
+    /// planning`). The engine validates the answers are self-consistent
+    /// before starting the background plan round trip.
+    func beginPlanning(appID: String) async -> Bool {
+        #if canImport(engine_mobileFFI)
+            return await send(.beginAppPlanning(appId: appID))
+        #else
+            return false
+        #endif
+    }
+
+    /// Retries planning after it failed, reusing the same answers.
+    func retryPlan(appID: String) async {
+        #if canImport(engine_mobileFFI)
+            _ = await send(.retryAppPlan(appId: appID))
         #endif
     }
 
@@ -763,13 +793,6 @@ final class LocalAppsStore {
     #if canImport(engine_mobileFFI)
         private func handleAppEvent(_ event: AppEventDto) {
             switch event {
-            // NOTE (local-apps#questionnaire, Task 5): `AppEventDto::AppTemplatesChanged`
-            // was deleted (human-partner ruling: total removal of the static
-            // template catalog) — no case for it exists on the wire enum
-            // anymore, so there is nothing to match here. `installTemplates`
-            // and the `templates` store below are now unreachable dead code;
-            // removing them is Task 13's job alongside the rest of the
-            // template-picker UI.
             case let .appDetailsChanged(details):
                 let summary = LocalAppsProtocolAdapter.app(details.app)
                 upsertApp(summary)
@@ -792,6 +815,13 @@ final class LocalAppsStore {
                     fields: fields,
                     currentStep: existing?.currentStep ?? 0
                 )
+                // The full-details snapshot carries its own questionnaire/plan
+                // (Task 6's bridge lowering), independent of the incremental
+                // `appQuestionnaireChanged`/`appPlanChanged` events below — a
+                // caller that only ever calls `getDetails` (e.g. on relaunch,
+                // before any incremental event has arrived) must still see them.
+                questionnaires[summary.id] = LocalAppsProtocolAdapter.questionnaire(details.questionnaire)
+                plans[summary.id] = details.plan.map(LocalAppsProtocolAdapter.plan)
                 runtimes[summary.id] = LocalAppsProtocolAdapter.runtime(
                     details.runtime.state,
                     details: details.runtime,
@@ -805,19 +835,15 @@ final class LocalAppsStore {
                 }
                 replaceCheckpoints(details.checkpoints, appID: summary.id)
 
-            // TODO(local-apps#questionnaire, Task 13/14): no iOS designer
-            // surface renders the LLM-authored questionnaire yet. Task 14
-            // will consume `steps`/`revision` here to drive it. Explicit
-            // no-op arm (not a catch-all) so this switch still breaks the
-            // moment a real case is added, removed, or renamed.
-            case .appQuestionnaireChanged:
-                break
+            case let .appQuestionnaireChanged(appId, _, steps):
+                questionnaires[appId] = LocalAppsProtocolAdapter.questionnaire(steps)
 
-            // TODO(local-apps#questionnaire, Task 13/15): no iOS plan
-            // confirmation sheet exists yet. Task 15 will consume
-            // `plan`/`revision` here.
-            case .appPlanChanged:
-                break
+            // An answer edit voids a previously-derived plan on the engine
+            // side too (see `local-apps` `update_draft`), announced here with
+            // `plan: nil` — mirror that by clearing the client's copy rather
+            // than leaving a stale plan on screen.
+            case let .appPlanChanged(appId, _, plan):
+                plans[appId] = plan.map(LocalAppsProtocolAdapter.plan)
 
             case let .appGenerationJobChanged(job):
                 updateGenerationJob(job)
@@ -1052,6 +1078,18 @@ final class LocalAppsStore {
     }
 
     #if canImport(engine_mobileFFI)
+        /// Builds a single-op design patch without requiring the field's
+        /// declared `LocalAppFieldType` — only correct for `.deferred`
+        /// ("let the model decide"), whose wire encoding does not depend on
+        /// field type at all (see `LocalAppsProtocolAdapter.designValue(_:fieldType:)`,
+        /// which checks `.deferred` before ever consulting `fieldType`). A
+        /// real per-field edit still goes through `edit(field:value:appID:)`,
+        /// which knows the field's actual type.
+        func designPatch(fieldID: String, value: LocalAppDesignValue) -> AppDesignPatchDto {
+            let dtoValue = LocalAppsProtocolAdapter.designValue(value, fieldType: .shortText) ?? .shortText(value: "")
+            return AppDesignPatchDto(ops: [.set(fieldId: fieldID, value: dtoValue)], note: nil)
+        }
+
         private func send(_ command: ClientCommand) async -> Bool {
             guard let submitCommand else {
                 errorMessage = String(localized: "local_apps_error_engine_not_connected")

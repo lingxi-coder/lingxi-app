@@ -18,26 +18,21 @@ enum LocalAppsDistributionMode: String, Sendable {
     }
 }
 
-enum LocalAppTemplateKind: String, CaseIterable, Hashable, Sendable {
-    case dashboard
-    case crudTracker = "crud_tracker"
-    case contentShowcase = "content_showcase"
-    case formUtility = "form_utility"
-
-    var systemImage: String {
-        switch self {
-        case .dashboard: "chart.xyaxis.line"
-        case .crudTracker: "checklist"
-        case .contentShowcase: "rectangle.grid.2x2"
-        case .formUtility: "text.badge.checkmark"
-        }
-    }
-}
+/// Generic per-app glyph. The static per-template icon catalog
+/// (`LocalAppTemplateKind`) was deleted alongside the static template system
+/// (local-apps#questionnaire, Task 2/5/13) — every app now starts from a
+/// brief, not a template kind, so there is no longer a taxonomy to key an
+/// icon off of.
+let localAppIconSystemName = "app.badge"
 
 struct LocalAppSummary: Identifiable, Hashable, Sendable {
     let id: String
     var name: String
-    var templateKind: LocalAppTemplateKind
+    /// One-line description the user gave at creation time — the seed the
+    /// LLM authors the questionnaire from. Replaces `templateKind`
+    /// (local-apps#questionnaire, Task 13): there is no more static template
+    /// catalog to classify an app by.
+    var brief: String
     var updatedAt: Date
     var workflow: LocalAppWorkflow
     var workspaceRelativePath: String
@@ -103,8 +98,8 @@ enum LocalAppDataFieldType: String, CaseIterable, Hashable, Sendable {
 
 struct LocalAppDataField: Identifiable, Hashable, Sendable {
     var id: String
-    var name: String
-    var type: LocalAppDataFieldType
+    var label: String
+    var fieldType: LocalAppDataFieldType
     var required: Bool
     var options: [String]
 }
@@ -117,13 +112,21 @@ enum LocalAppDesignValue: Hashable, Sendable {
     case density(String)
     case dataFields([LocalAppDataField])
     case domains([String])
+    /// The user explicitly chose to let the LLM decide this field
+    /// ("由你决定"). This is an ANSWER, not an absence — the core treats it
+    /// as satisfying a required field (mirrors `DesignValueDto.deferred`,
+    /// local-apps#questionnaire, Task 1/2/13). Never collapse this to `nil`
+    /// or an empty string: that erases the distinction between "unanswered"
+    /// and "deferred to the model" the whole feature depends on.
+    case deferred
 
     var textValue: String {
         switch self {
         case let .text(value), let .color(value), let .density(value): value
         case let .strings(values), let .domains(values): values.joined(separator: "\n")
         case let .boolean(value): value ? String(localized: "common_yes") : String(localized: "common_no")
-        case let .dataFields(fields): fields.map(\.name).joined(separator: "、")
+        case let .dataFields(fields): fields.map(\.label).joined(separator: "、")
+        case .deferred: String(localized: "local_apps_value_deferred")
         }
     }
 }
@@ -134,6 +137,10 @@ struct LocalAppDesignField: Identifiable, Hashable, Sendable {
     let description: String
     let type: LocalAppFieldType
     let required: Bool
+    /// Renders an `Other…` free-text box (mirrors `AppDesignFieldDto.allowsCustom`).
+    let allowsCustom: Bool
+    /// Renders "let the model decide" (mirrors `AppDesignFieldDto.allowsDefer`).
+    let allowsDefer: Bool
     let defaultValue: LocalAppDesignValue?
     let options: [LocalAppDesignOption]
 }
@@ -152,27 +159,37 @@ struct LocalAppDesignStep: Identifiable, Hashable, Sendable {
     let fields: [LocalAppDesignField]
 }
 
-struct LocalAppCollectionSchema: Identifiable, Hashable, Sendable {
+struct LocalAppDataCollection: Identifiable, Hashable, Sendable {
     let id: String
-    let name: String
+    let label: String
     let fields: [LocalAppDataField]
     let enabledByDefault: Bool
 }
 
-struct LocalAppTemplate: Identifiable, Hashable, Sendable {
-    let id: String
-    let kind: LocalAppTemplateKind
-    let version: UInt64
-    let name: String
-    let description: String
-    let steps: [LocalAppDesignStep]
-    let collections: [LocalAppCollectionSchema]
+/// One capability kind the plan asks the user to grant, mirrors
+/// `AppCapabilityKindDto`. Distinct from `LocalAppCapabilityDecision`
+/// (once/session/always/deny), which is the user's ANSWER to a capability
+/// prompt, not the capability itself.
+enum LocalAppCapabilityKind: Hashable, Sendable {
+    case dataMutation
+    case uiControl
+    case networkDomain
+    case restoreCheckpoint
+}
 
-    var orderedSteps: [LocalAppDesignStep] {
-        steps.sorted { lhs, rhs in
-            lhs.order == rhs.order ? lhs.id < rhs.id : lhs.order < rhs.order
-        }
-    }
+/// The LLM-derived plan awaiting confirmation (local-apps#questionnaire, Task
+/// 1/13). Replaces the deleted `LocalAppTemplate`: a template was a
+/// human-authored, static catalog entry; a plan is authored per-app from the
+/// questionnaire answers, and voided the moment an answer changes underneath
+/// it (see `LocalAppsStore.handle`'s `.appPlanChanged` arm).
+struct LocalAppPlan: Hashable, Sendable {
+    var collections: [LocalAppDataCollection]
+    var capabilities: [LocalAppCapabilityKind]
+    /// External HTTPS host names the app may request.
+    var domains: [String]
+    /// Human-readable summary, including what every deferred field was
+    /// finally decided as.
+    var summary: String
 }
 
 struct LocalAppSuggestionDiff: Identifiable, Hashable, Sendable {

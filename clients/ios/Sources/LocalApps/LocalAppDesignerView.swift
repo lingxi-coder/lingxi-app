@@ -9,8 +9,9 @@ struct LocalAppDesignerView: View {
     @State private var confirming = false
 
     private var app: LocalAppSummary? { store.app(id: appID) }
-    private var template: LocalAppTemplate? { app.flatMap(store.template) }
-    private var steps: [LocalAppDesignStep] { template?.orderedSteps ?? [] }
+    /// The LLM-authored questionnaire (local-apps#questionnaire, Task 13),
+    /// replacing the deleted static `LocalAppTemplate.orderedSteps`.
+    private var steps: [LocalAppDesignStep] { store.questionnaires[appID] ?? [] }
     private var designer: LocalAppDesignerSession? { store.designers[appID] }
     private var stepIndex: Int {
         min(max(designer?.currentStep ?? 0, 0), max(steps.count - 1, 0))
@@ -22,11 +23,11 @@ struct LocalAppDesignerView: View {
 
     var body: some View {
         Group {
-            if let app, let template, let currentStep {
+            if let app, let currentStep {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
                         DesignerStepHeader(
-                            templateName: template.name,
+                            appName: app.name,
                             steps: steps,
                             selectedIndex: stepIndex,
                             onSelect: selectStep
@@ -65,7 +66,7 @@ struct LocalAppDesignerView: View {
                 ContentUnavailableView {
                     Label("local_apps_designer_not_ready", systemImage: "slider.horizontal.3")
                 } description: {
-                    Text(template == nil ? String(localized: "local_apps_designer_waiting") : String(localized: "local_apps_designer_opening"))
+                    Text(steps.isEmpty ? String(localized: "local_apps_designer_waiting") : String(localized: "local_apps_designer_opening"))
                 } actions: {
                     Button("common_retry") { Task { await prepare() } }
                 }
@@ -170,6 +171,12 @@ enum LocalAppDesignerGate {
                 return true
             case let .dataFields(fields):
                 return !fields.isEmpty
+            // The user explicitly chose to let the LLM decide — that IS a
+            // complete answer, not a missing one (local-apps#questionnaire,
+            // Task 1/13: the core gate treats `Deferred` as satisfying a
+            // required field the same way).
+            case .deferred:
+                return true
             }
         }
     }
@@ -177,14 +184,14 @@ enum LocalAppDesignerGate {
 
 private struct DesignerStepHeader: View {
     @Environment(\.theme) private var theme
-    let templateName: String
+    let appName: String
     let steps: [LocalAppDesignStep]
     let selectedIndex: Int
     let onSelect: (Int) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(templateName)
+            Text(appName)
                 .font(.caption)
                 .foregroundStyle(theme.text3)
             HStack(spacing: 7) {
@@ -506,8 +513,8 @@ private struct LocalAppDataFieldsEditor: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach($fields) { $field in
                 HStack {
-                    TextField("local_apps_field_name", text: $field.name)
-                    Picker("local_apps_field_type", selection: $field.type) {
+                    TextField("local_apps_field_name", text: $field.label)
+                    Picker("local_apps_field_type", selection: $field.fieldType) {
                         ForEach(LocalAppDataFieldType.allCases, id: \.rawValue) { type in
                             Text(type.rawValue).tag(type)
                         }
@@ -526,8 +533,8 @@ private struct LocalAppDataFieldsEditor: View {
                 fields.append(
                     LocalAppDataField(
                         id: LocalAppDataFieldIDPolicy.nextID(existing: fields),
-                        name: "",
-                        type: .text,
+                        label: "",
+                        fieldType: .text,
                         required: false,
                         options: []
                     )

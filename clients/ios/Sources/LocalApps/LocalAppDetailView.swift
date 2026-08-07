@@ -103,7 +103,7 @@ struct LocalAppDetailView: View {
         case .preview:
             LocalAppEmbeddedPreview(store: store, appID: appID)
         case .data:
-            LocalAppDataSection(template: store.template(for: app))
+            LocalAppDataSection(plan: store.plans[appID])
         case .code:
             LocalAppCodeSection(app: app)
         case .history:
@@ -146,7 +146,7 @@ private struct LocalAppOverviewSection: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 14) {
-                    Image(systemName: app.templateKind.systemImage)
+                    Image(systemName: localAppIconSystemName)
                         .font(.largeTitle)
                         .foregroundStyle(theme.accent)
                         .frame(width: 64, height: 64)
@@ -170,7 +170,7 @@ private struct LocalAppOverviewSection: View {
                 VStack(alignment: .leading, spacing: 10) {
                     LabeledContent("local_apps_runtime_mode", value: distribution.runtimeLabel)
                     LabeledContent("local_apps_workspace", value: app.workspaceRelativePath)
-                    LabeledContent("local_apps_template", value: app.templateKind.rawValue)
+                    LabeledContent("local_apps_brief", value: app.brief)
                     LabeledContent("local_apps_updated_at") {
                         Text(app.updatedAt, format: .relative(presentation: .named))
                     }
@@ -231,7 +231,7 @@ private struct LocalAppEmbeddedPreview: View {
 }
 
 private struct LocalAppDataSection: View {
-    let template: LocalAppTemplate?
+    let plan: LocalAppPlan?
 
     var body: some View {
         List {
@@ -241,10 +241,10 @@ private struct LocalAppDataSection: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            ForEach(template?.collections ?? []) { collection in
-                Section(collection.name) {
+            ForEach(plan?.collections ?? []) { collection in
+                Section(collection.label) {
                     ForEach(collection.fields) { field in
-                        LabeledContent(field.name, value: field.type.rawValue)
+                        LabeledContent(field.label, value: field.fieldType.rawValue)
                     }
                 }
             }

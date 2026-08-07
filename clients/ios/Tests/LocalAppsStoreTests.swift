@@ -4,31 +4,56 @@ import WebKit
 
 @MainActor
 final class LocalAppsStoreTests: XCTestCase {
-    func testInstallsRustOwnedTemplatesInStableNameOrder() {
-        let store = LocalAppsStore()
-        store.installTemplates([
-            template(id: "z", name: "Zulu", kind: .dashboard),
-            template(id: "a", name: "Alpha", kind: .crudTracker),
-        ])
-
-        XCTAssertEqual(store.templates.map(\.name), ["Alpha", "Zulu"])
-        XCTAssertTrue(store.templates.allSatisfy { $0.steps.count == 5 })
-    }
-
-    func testFilteringUsesTemplateAndLocalizedSearch() {
+    func testFilteringUsesLocalizedSearch() {
         let store = LocalAppsStore()
         #if canImport(engine_mobileFFI)
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "订单跟踪", template: .crudTracker),
-                app(id: "metrics", name: "Metrics", template: .dashboard),
+                app(id: "tracker", name: "订单跟踪", brief: "跟踪订单状态"),
+                app(id: "metrics", name: "Metrics", brief: "查看运营指标"),
             ]))
         #endif
 
-        store.templateFilter = .crudTracker
         store.searchQuery = "订单"
 
         XCTAssertEqual(store.filteredApps.map(\.id), ["tracker"])
     }
+
+    #if canImport(engine_mobileFFI)
+        func testQuestionnaireEventReplacesTheStoredSteps() {
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appQuestionnaireChanged(
+                appId: "a",
+                revision: 1,
+                steps: [oneStepDTO()]
+            )))
+
+            XCTAssertEqual(store.questionnaires["a"]?.count, 1)
+            XCTAssertEqual(store.questionnaires["a"]?.first?.fields.first?.allowsDefer, true)
+        }
+
+        func testPlanEventStoresAndClears() {
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appPlanChanged(appId: "a", revision: 2, plan: onePlanDTO())))
+            XCTAssertEqual(store.plans["a"]?.summary, "记事本")
+
+            store.handle(event: .appEvent(event: .appPlanChanged(appId: "a", revision: 3, plan: nil)))
+            XCTAssertNil(store.plans["a"], "an answer edit voids the plan on the client too")
+        }
+
+        /// `.deferred` ("let the model decide") must survive the trip through
+        /// `LocalAppsProtocolAdapter.designValue(_:fieldType:)` unchanged,
+        /// regardless of the field's declared type — see the client-side half
+        /// of the contract the brief `.deferred` model value exists for.
+        func testDeferredAnswersRoundTripThroughThePatchWire() {
+            let store = LocalAppsStore()
+            let sent = store.designPatch(fieldID: "tone", value: .deferred)
+            guard case let .set(fieldId, value) = sent.ops.first else {
+                return XCTFail("Expected a set op")
+            }
+            XCTAssertEqual(fieldId, "tone")
+            XCTAssertEqual(value, .deferred)
+        }
+    #endif
 
     #if canImport(engine_mobileFFI)
         func testDesignerEventsPreserveQueuedStateAndSuggestionDiff() {
@@ -55,7 +80,13 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.suggestions["tracker"]?.changes.first?.newValue, .text("Sales Orders"))
         }
 
-        func testAppEventInstallsDynamicTemplateContract() {
+        /// Replaces the deleted `testAppEventInstallsDynamicTemplateContract`
+        /// (local-apps#questionnaire, Task 13: the static template catalog it
+        /// exercised no longer exists) with equivalent coverage of the LLM-
+        /// authored questionnaire event: a `dataFieldList` default value and
+        /// the new `allowsCustom`/`allowsDefer` flags must all survive the
+        /// DTO → `LocalAppDesignStep` mapping.
+        func testQuestionnaireEventMapsFieldsIncludingDataFieldListDefaults() {
             let store = LocalAppsStore()
             let fields = [
                 AppDesignFieldDto(
@@ -64,6 +95,8 @@ final class LocalAppsStoreTests: XCTestCase {
                     description: "由 Rust 下发",
                     fieldType: .dataFieldList,
                     required: true,
+                    allowsCustom: false,
+                    allowsDefer: true,
                     defaultValue: .dataFieldList(value: [
                         AppDataFieldDto(
                             id: "title",
@@ -85,34 +118,23 @@ final class LocalAppsStoreTests: XCTestCase {
                     fields: index == 2 ? fields : []
                 )
             }
-            store.handle(event: .appEvent(event: .appTemplatesChanged(templates: [
-                AppTemplateDto(
-                    kind: .crudTracker,
-                    version: 3,
-                    name: "CRUD Tracker",
-                    description: "Tracker",
-                    steps: steps,
-                    collections: [
-                        AppDataCollectionDto(
-                            id: "items",
-                            label: "Items",
-                            fields: [],
-                            enabledByDefault: true
-                        ),
-                    ]
-                ),
-            ])))
+            store.handle(event: .appEvent(event: .appQuestionnaireChanged(
+                appId: "tracker",
+                revision: 3,
+                steps: steps
+            )))
 
-            XCTAssertEqual(store.templates.first?.version, 3)
-            XCTAssertEqual(store.templates.first?.orderedSteps.count, 5)
-            XCTAssertEqual(store.templates.first?.orderedSteps[2].fields.first?.type, .dataFieldList)
+            XCTAssertEqual(store.questionnaires["tracker"]?.count, 5)
+            XCTAssertEqual(store.questionnaires["tracker"]?[2].fields.first?.type, .dataFieldList)
+            XCTAssertEqual(store.questionnaires["tracker"]?[2].fields.first?.allowsDefer, true)
+            XCTAssertEqual(store.questionnaires["tracker"]?[2].fields.first?.allowsCustom, false)
             XCTAssertEqual(
-                store.templates.first?.orderedSteps[2].fields.first?.defaultValue,
+                store.questionnaires["tracker"]?[2].fields.first?.defaultValue,
                 .dataFields([
                     LocalAppDataField(
                         id: "title",
-                        name: "标题",
-                        type: .text,
+                        label: "标题",
+                        fieldType: .text,
                         required: true,
                         options: []
                     ),
@@ -185,7 +207,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "Tracker", template: .crudTracker),
+                app(id: "tracker", name: "Tracker", brief: "跟踪任务"),
             ]))
             store.handle(event: .appRuntimeChanged(
                 appId: "tracker",
@@ -198,7 +220,6 @@ final class LocalAppsStoreTests: XCTestCase {
             await store.sceneWillEnterForeground()
 
             XCTAssertTrue(submitted.contains { if case .listApps = $0 { true } else { false } })
-            XCTAssertTrue(submitted.contains { if case .listAppTemplates = $0 { true } else { false } })
             XCTAssertTrue(submitted.contains {
                 if case let .getAppDetails(appId) = $0 { return appId == "tracker" }
                 return false
@@ -733,7 +754,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "Tracker", template: .crudTracker),
+                app(id: "tracker", name: "Tracker", brief: "跟踪任务"),
             ]))
             store.handle(event: .appRuntimeChanged(
                 appId: "tracker",
@@ -898,22 +919,6 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertNil(LocalAppDomainPolicy.normalize("api_example.com"))
     }
 
-    private func dataField(id: String) -> LocalAppDataField {
-        LocalAppDataField(id: id, name: id, type: .text, required: false, options: [])
-    }
-
-    private func designField(id: String, type: LocalAppFieldType) -> LocalAppDesignField {
-        LocalAppDesignField(
-            id: id,
-            label: id,
-            description: "",
-            type: type,
-            required: true,
-            defaultValue: nil,
-            options: []
-        )
-    }
-
     #if canImport(engine_mobileFFI)
         /// Creation has two independent callers of `openDesigner` — the
         /// `appsChanged` handler and the designer view's `prepare()` — and the
@@ -1001,40 +1006,16 @@ final class LocalAppsStoreTests: XCTestCase {
         }
     #endif
 
-    private func template(
-        id: String,
-        name: String,
-        kind: LocalAppTemplateKind
-    ) -> LocalAppTemplate {
-        LocalAppTemplate(
-            id: id,
-            kind: kind,
-            version: 1,
-            name: name,
-            description: "Description",
-            steps: (0 ..< 5).map { index in
-                LocalAppDesignStep(
-                    id: "step-\(index)",
-                    order: index,
-                    title: "Step \(index)",
-                    description: "",
-                    fields: []
-                )
-            },
-            collections: []
-        )
-    }
-
     #if canImport(engine_mobileFFI)
         private func app(
             id: String,
             name: String,
-            template: AppTemplateKindDto
+            brief: String = "简介"
         ) -> AppRecordDto {
             AppRecordDto(
                 id: id,
                 name: name,
-                template: template,
+                brief: brief,
                 createdAtMs: 1,
                 updatedAtMs: 2,
                 workflowState: .collectingSpec,

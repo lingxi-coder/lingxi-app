@@ -140,7 +140,7 @@ impl AppState {
                 brief,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
-                workflow_state: AppWorkflowState::CollectingSpec,
+                workflow_state: AppWorkflowState::AuthoringQuestionnaire,
                 conversation_id,
                 workspace_rel,
             },
@@ -249,6 +249,122 @@ impl AppState {
         continuation
     }
 
+    /// `authoring_questionnaire -> collecting_spec`，落盘问卷；`name` 是
+    /// LLM 建议的正式名，用来替换创建时的占位名。
+    pub fn questionnaire_ready(
+        &mut self,
+        steps: Vec<crate::questionnaire::AppDesignStep>,
+        name: Option<String>,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        self.ensure_workflow(
+            "questionnaire_ready",
+            &[AppWorkflowState::AuthoringQuestionnaire],
+        )?;
+        crate::questionnaire::validate_questionnaire(&steps)?;
+        self.draft.questionnaire = steps;
+        if let Some(name) = name {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                self.record.name = trimmed.to_string();
+            }
+        }
+        self.set_workflow(AppWorkflowState::CollectingSpec, now_ms);
+        Ok(())
+    }
+
+    /// `authoring_questionnaire -> questionnaire_failed`.
+    pub fn questionnaire_failed(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow(
+            "questionnaire_failed",
+            &[AppWorkflowState::AuthoringQuestionnaire],
+        )?;
+        self.set_workflow(AppWorkflowState::QuestionnaireFailed, now_ms);
+        Ok(())
+    }
+
+    /// `questionnaire_failed -> authoring_questionnaire`. 重试回到执行态，
+    /// 不是跳过它。
+    pub fn retry_questionnaire(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow(
+            "retry_questionnaire",
+            &[AppWorkflowState::QuestionnaireFailed],
+        )?;
+        self.set_workflow(AppWorkflowState::AuthoringQuestionnaire, now_ms);
+        Ok(())
+    }
+
+    /// 改 brief 并重新出题。旧答案的 field id 在新问卷里已不存在，
+    /// 保留它们只会让后续校验对着幽灵字段报错——一并清掉。
+    pub fn update_brief(&mut self, brief: String, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow(
+            "update_brief",
+            &[
+                AppWorkflowState::CollectingSpec,
+                AppWorkflowState::QuestionnaireFailed,
+            ],
+        )?;
+        let trimmed = brief.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidRequest("brief is empty".into()));
+        }
+        self.record.brief = trimmed.to_string();
+        self.draft.questionnaire.clear();
+        self.draft.fields.clear();
+        self.draft.plan = None;
+        self.draft.plan_for_revision = None;
+        self.draft.pending_suggestion = None;
+        self.draft.revision += 1;
+        self.set_workflow(AppWorkflowState::AuthoringQuestionnaire, now_ms);
+        Ok(())
+    }
+
+    /// `collecting_spec -> planning`。先确认答案自洽，别拿一份残缺答案
+    /// 去换一次 LLM 往返。
+    pub fn begin_planning(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow("begin_planning", &[AppWorkflowState::CollectingSpec])?;
+        crate::questionnaire::validate_answers(&self.draft.questionnaire, &self.draft.fields)?;
+        self.set_workflow(AppWorkflowState::Planning, now_ms);
+        Ok(())
+    }
+
+    /// `planning -> awaiting_spec_confirmation`，落盘方案并开确认门。
+    pub fn plan_ready(
+        &mut self,
+        plan: crate::questionnaire::AppPlan,
+        interaction_id: String,
+        now_ms: u64,
+    ) -> Result<AppInteractionRequest, AppError> {
+        self.ensure_workflow("plan_ready", &[AppWorkflowState::Planning])?;
+        crate::questionnaire::validate_plan(&plan)?;
+        self.draft.plan = Some(plan);
+        self.draft.plan_for_revision = Some(self.draft.revision);
+        let interaction = AppInteractionRequest {
+            interaction_id,
+            app_id: self.record.id.clone(),
+            kind: AppInteractionKind::Designer,
+            revision: self.draft.revision,
+            created_at_ms: now_ms,
+        };
+        self.interactions.pending = Some(interaction.clone());
+        self.set_workflow(AppWorkflowState::AwaitingSpecConfirmation, now_ms);
+        Ok(interaction)
+    }
+
+    /// `planning -> plan_failed`.
+    pub fn plan_failed(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow("plan_failed", &[AppWorkflowState::Planning])?;
+        self.set_workflow(AppWorkflowState::PlanFailed, now_ms);
+        Ok(())
+    }
+
+    /// `plan_failed -> planning`.
+    pub fn retry_plan(&mut self, now_ms: u64) -> Result<(), AppError> {
+        self.ensure_workflow("retry_plan", &[AppWorkflowState::PlanFailed])?;
+        self.set_workflow(AppWorkflowState::Planning, now_ms);
+        Ok(())
+    }
+
     /// `collecting_spec | generation_failed -> awaiting_spec_confirmation`;
     /// opens the single pending designer interaction at the current revision.
     ///
@@ -295,6 +411,9 @@ impl AppState {
         self.ensure_current_revision(expected_revision)?;
         self.apply_patch(patch);
         self.draft.revision += 1;
+        // 答案变了，方案就不再是对这份答案的方案。
+        self.draft.plan = None;
+        self.draft.plan_for_revision = None;
         self.record.updated_at_ms = now_ms;
         Ok(self.draft.revision)
     }
@@ -418,6 +537,12 @@ impl AppState {
             interaction_id,
         )?;
         self.ensure_current_revision(revision)?;
+        if self.draft.plan_for_revision != Some(self.draft.revision) {
+            return Err(AppError::RevisionConflict {
+                expected: self.draft.plan_for_revision.unwrap_or_default(),
+                actual: self.draft.revision,
+            });
+        }
         self.interactions.pending = None;
         self.draft.confirmed_revision = Some(revision);
         self.set_workflow(AppWorkflowState::Generating, now_ms);
@@ -628,6 +753,9 @@ mod tests {
 
     use super::*;
     use crate::error::AppErrorCode;
+    use crate::questionnaire::{
+        AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignStep, AppPlan,
+    };
     use crate::types::DesignValue;
 
     const ALL_WORKFLOW_STATES: [AppWorkflowState; 9] = [
@@ -642,14 +770,60 @@ mod tests {
         AppWorkflowState::ValidationFailed,
     ];
 
+    /// A brand-new app, fast-forwarded past `authoring_questionnaire` into
+    /// `collecting_spec` — the state every pre-existing gating test in this
+    /// module was written against, before `authoring_questionnaire` became
+    /// the true initial state. Tests that specifically exercise the
+    /// authoring/planning states use [`authoring_app`] instead.
     fn app() -> AppState {
-        AppState::create(
+        let mut a = AppState::create(
             "abc123".into(),
             "Test".into(),
             "a test app".into(),
             None,
             10,
-        )
+        );
+        a.questionnaire_ready(one_step(), None, 10)
+            .expect("fixture questionnaire is valid");
+        a
+    }
+
+    /// A brand-new app still in `authoring_questionnaire` (the real initial
+    /// state) — for tests exercising authoring/planning themselves.
+    fn authoring_app() -> AppState {
+        AppState::create("notes".into(), "Notes".into(), "一个记事本".into(), None, 1)
+    }
+
+    fn one_step() -> Vec<AppDesignStep> {
+        vec![AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "基础".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "tone".into(),
+                label: "语气".into(),
+                description: None,
+                field_type: AppDesignFieldType::SingleChoice,
+                required: false,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: None,
+                options: vec![AppDesignFieldOption {
+                    value: "a".into(),
+                    label: "A".into(),
+                }],
+            }],
+        }]
+    }
+
+    fn a_plan() -> AppPlan {
+        AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: Vec::new(),
+            summary: "s".into(),
+        }
     }
 
     /// App forced into `state`, with a matching pending interaction (and a
@@ -666,6 +840,12 @@ mod tests {
                     revision: a.draft.revision,
                     created_at_ms: 10,
                 });
+                // Reaching this gate legitimately always goes through
+                // `plan_ready`, which stamps `plan_for_revision` — without
+                // it `confirm_design`'s freshness gate would refuse every
+                // fixture built this way.
+                a.draft.plan = Some(a_plan());
+                a.draft.plan_for_revision = Some(a.draft.revision);
             }
             AppWorkflowState::AwaitingPreviewConfirmation => {
                 a.interactions.pending = Some(AppInteractionRequest {
@@ -675,6 +855,8 @@ mod tests {
                     revision: a.draft.revision,
                     created_at_ms: 10,
                 });
+                a.draft.plan = Some(a_plan());
+                a.draft.plan_for_revision = Some(a.draft.revision);
             }
             AppWorkflowState::Generating
             | AppWorkflowState::Validating
@@ -682,8 +864,15 @@ mod tests {
             | AppWorkflowState::ValidationFailed
             | AppWorkflowState::Ready => {
                 a.draft.confirmed_revision = Some(a.draft.revision);
+                a.draft.plan = Some(a_plan());
+                a.draft.plan_for_revision = Some(a.draft.revision);
             }
-            AppWorkflowState::CollectingSpec | AppWorkflowState::Revising => {}
+            AppWorkflowState::CollectingSpec
+            | AppWorkflowState::Revising
+            | AppWorkflowState::AuthoringQuestionnaire
+            | AppWorkflowState::QuestionnaireFailed
+            | AppWorkflowState::Planning
+            | AppWorkflowState::PlanFailed => {}
         }
         a
     }
@@ -823,6 +1012,10 @@ mod tests {
             a.interactions.pending.is_some(),
             "failed confirm must not consume the gate"
         );
+        // This test is about revision matching, not plan freshness — stamp a
+        // plan for the edited revision directly (bypassing `plan_ready`,
+        // which isn't what's under test here).
+        a.draft.plan_for_revision = Some(a.draft.revision);
         // Confirming with the CURRENT revision succeeds.
         a.confirm_design(&interaction.interaction_id, 1, 14)
             .unwrap();
@@ -1021,11 +1214,26 @@ mod tests {
             a.record.workflow_state,
             AppWorkflowState::AwaitingSpecConfirmation
         );
+        // Editing invalidates the stamped plan (`update_draft` clears
+        // `plan_for_revision`), and there is no path from
+        // `awaiting_spec_confirmation` back to `planning` — so recovering
+        // now goes: cancel back to `collecting_spec`, fix the answer,
+        // re-plan, then confirm the FRESH plan. `confirm_design` refuses a
+        // stale one on purpose.
+        a.cancel_design(12).unwrap();
+        assert!(a.interactions.pending.is_none(), "the old gate is voided");
+        let _ = gate;
         let current = a.draft.revision;
         let revision = a
-            .update_draft(current, &set_patch("title", "fixed"), 12)
+            .update_draft(current, &set_patch("title", "fixed"), 13)
             .unwrap();
-        a.confirm_design(&gate.interaction_id, revision, 13).unwrap();
+        a.begin_planning(14).unwrap();
+        let fresh_gate = a
+            .plan_ready(a_plan(), "int-fix-2".into(), 15)
+            .expect("re-planning the fixed draft succeeds");
+        assert_eq!(a.draft.plan_for_revision, Some(revision));
+        a.confirm_design(&fresh_gate.interaction_id, revision, 16)
+            .unwrap();
         assert_eq!(a.record.workflow_state, AppWorkflowState::Generating);
         assert_eq!(a.draft.confirmed_revision, Some(revision));
     }
@@ -1095,6 +1303,10 @@ mod tests {
         a.open_designer("int-1".into(), 11).unwrap();
         let c1 = a.cancel_design(12).unwrap();
         a.open_designer("int-2".into(), 13).unwrap();
+        // Not testing planning here — stamp a plan for the current revision
+        // so the freshness gate `confirm_design` added doesn't get in the
+        // way of the seq-monotonicity assertion this test is actually for.
+        a.draft.plan_for_revision = Some(a.draft.revision);
         let c2 = a.confirm_design("int-2", 0, 14).unwrap();
         a.generation_complete(15).unwrap();
         let p = a.validation_passed("int-3".into(), 16).unwrap();
@@ -1299,5 +1511,154 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         assert_eq!(a.runtime.port, Some(3005));
         assert_eq!(a.runtime.state, AppRuntimeState::Running);
+    }
+
+    #[test]
+    fn a_new_app_starts_in_authoring_questionnaire() {
+        assert_eq!(
+            authoring_app().record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+    }
+
+    #[test]
+    fn questionnaire_ready_moves_to_collecting_spec_and_stores_the_steps() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), Some("记事本".into()), 2)
+            .expect("authoring succeeds");
+        assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
+        assert_eq!(app.draft.questionnaire.len(), 1);
+        assert_eq!(app.record.name, "记事本", "a suggested name replaces the placeholder");
+    }
+
+    #[test]
+    fn a_failed_authoring_retry_returns_to_authoring_not_to_collecting_spec() {
+        let mut app = authoring_app();
+        app.questionnaire_failed(2).expect("authoring can fail");
+        assert_eq!(app.record.workflow_state, AppWorkflowState::QuestionnaireFailed);
+        app.retry_questionnaire(3)
+            .expect("a failed authoring can be retried");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire,
+            "retry re-runs authoring; it does not skip ahead"
+        );
+    }
+
+    #[test]
+    fn updating_the_brief_clears_the_questionnaire_answers_and_plan() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.draft
+            .fields
+            .insert("tone".into(), DesignValue::SingleChoice("a".into()));
+        app.draft.plan = Some(a_plan());
+        app.draft.plan_for_revision = Some(app.draft.revision);
+
+        app.update_brief("换成一个待办清单".into(), 3)
+            .expect("brief is editable while collecting");
+
+        assert_eq!(app.record.brief, "换成一个待办清单");
+        assert!(
+            app.draft.questionnaire.is_empty(),
+            "the questionnaire must be re-authored"
+        );
+        assert!(
+            app.draft.fields.is_empty(),
+            "old answers reference field ids that no longer exist"
+        );
+        assert!(app.draft.plan.is_none());
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+    }
+
+    #[test]
+    fn the_brief_is_not_editable_once_generation_has_been_confirmed() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.begin_planning(3).expect("planning starts");
+        app.plan_ready(a_plan(), "i-1".into(), 4)
+            .expect("planning succeeds");
+        app.confirm_design("i-1", app.draft.revision, 5)
+            .expect("the user confirms");
+        app.update_brief("太晚了".into(), 6)
+            .expect_err("the brief is frozen after confirmation");
+    }
+
+    #[test]
+    fn plan_ready_opens_the_spec_confirmation_gate_and_stamps_the_revision() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.begin_planning(3).expect("planning starts");
+        let interaction = app
+            .plan_ready(a_plan(), "i-1".into(), 4)
+            .expect("planning succeeds");
+
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation
+        );
+        assert_eq!(interaction.kind, AppInteractionKind::Designer);
+        assert_eq!(app.draft.plan_for_revision, Some(app.draft.revision));
+    }
+
+    #[test]
+    fn confirming_a_plan_computed_for_an_older_revision_is_refused() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.begin_planning(3).expect("planning starts");
+        app.plan_ready(a_plan(), "i-1".into(), 4)
+            .expect("planning succeeds");
+
+        // 用户回头改了一个答案：revision 前进，方案作废。
+        app.draft.revision += 1;
+
+        let error = app
+            .confirm_design("i-1", app.draft.revision, 5)
+            .expect_err("a stale plan must never be confirmed");
+        assert!(
+            matches!(error, AppError::RevisionConflict { .. }),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn a_failed_plan_retry_returns_to_planning() {
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.begin_planning(3).expect("planning starts");
+        app.plan_failed(4).expect("planning can fail");
+        assert_eq!(app.record.workflow_state, AppWorkflowState::PlanFailed);
+        app.retry_plan(5).expect("a failed plan can be retried");
+        assert_eq!(app.record.workflow_state, AppWorkflowState::Planning);
+    }
+
+    #[test]
+    fn the_draft_is_read_only_while_the_llm_is_authoring_or_planning() {
+        let patch = AppDesignPatch {
+            ops: vec![AppDesignPatchOp::Set {
+                field_id: "tone".into(),
+                value: DesignValue::SingleChoice("a".into()),
+            }],
+            note: None,
+        };
+
+        let mut app = authoring_app();
+        app.update_draft(0, &patch, 2)
+            .expect_err("no edits while authoring — the answers would race the questions");
+
+        let mut app = authoring_app();
+        app.questionnaire_ready(one_step(), None, 2)
+            .expect("authoring succeeds");
+        app.begin_planning(3).expect("planning starts");
+        app.update_draft(app.draft.revision, &patch, 4)
+            .expect_err("no edits while planning — the plan would be computed against stale answers");
     }
 }

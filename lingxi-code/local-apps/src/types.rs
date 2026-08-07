@@ -17,8 +17,18 @@ pub const APPS_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppWorkflowState {
+    /// LLM is authoring the questionnaire for this brief. Designer is
+    /// read-only.
+    AuthoringQuestionnaire,
+    /// Authoring failed; retryable, or the brief can be changed and
+    /// re-authored.
+    QuestionnaireFailed,
     /// Draft is being filled in; no confirmation gate is open.
     CollectingSpec,
+    /// LLM is deriving the plan from the answers. Designer is read-only.
+    Planning,
+    /// Planning failed; retryable.
+    PlanFailed,
     /// The designer interaction is pending user confirmation.
     AwaitingSpecConfirmation,
     /// Code generation is running (phase 3 drives this).
@@ -43,7 +53,11 @@ impl AppWorkflowState {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::AuthoringQuestionnaire => "authoring_questionnaire",
+            Self::QuestionnaireFailed => "questionnaire_failed",
             Self::CollectingSpec => "collecting_spec",
+            Self::Planning => "planning",
+            Self::PlanFailed => "plan_failed",
             Self::AwaitingSpecConfirmation => "awaiting_spec_confirmation",
             Self::Generating => "generating",
             Self::Validating => "validating",

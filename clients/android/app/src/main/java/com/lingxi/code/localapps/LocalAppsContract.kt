@@ -375,6 +375,12 @@ sealed interface LocalAppsAction {
     data class RetryPlan(val appId: String) : LocalAppsAction
     /** Requests a revision pass with a free-text prompt (the persistent iteration input). */
     data class Revise(val appId: String, val prompt: String) : LocalAppsAction
+    /**
+     * Backs out of the plan-confirmation gate (`awaiting_spec_confirmation ->
+     * collecting_spec`, `cancel_design`) — the plan-confirmation screen's
+     * "返回修改" exit (local-apps#questionnaire, Task 20).
+     */
+    data class CancelDesign(val appId: String) : LocalAppsAction
     data class OpenApp(val appId: String) : LocalAppsAction
     data class OpenDesigner(val appId: String) : LocalAppsAction
     data class ChangeStep(val index: Int) : LocalAppsAction
@@ -390,7 +396,6 @@ sealed interface LocalAppsAction {
     data class ResetPermissions(val appId: String) : LocalAppsAction
     data class RestoreCheckpoint(val appId: String, val checkpointId: String) : LocalAppsAction
     data class ApprovePreview(val appId: String) : LocalAppsAction
-    data class SubmitRevision(val appId: String, val feedback: String) : LocalAppsAction
     data class BridgeRequest(val message: LocalAppBridgeMessage) : LocalAppsAction
     data class AcknowledgeBridgeResult(val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
@@ -421,4 +426,20 @@ internal fun LocalAppDesignValue.readable(strings: LocalAppsStrings = DefaultLoc
     is LocalAppDesignValue.StringList -> values.joinToString("、")
     is LocalAppDesignValue.DataFields -> values.joinToString("、") { it.label }
     is LocalAppDesignValue.Deferred -> strings.resolve(R.string.local_apps_value_deferred, "由你决定")
+}
+
+/**
+ * Human-readable label for a plan capability kind — the plan-confirmation
+ * screen's permissions section (local-apps#questionnaire, Task 20). Mirrors
+ * iOS's `LocalAppPlanConfirmView.capabilityLine(_:)`.
+ */
+internal fun LocalAppCapabilityKind.readable(strings: LocalAppsStrings = DefaultLocalAppsStrings): String = when (this) {
+    LocalAppCapabilityKind.DataMutation ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_data_mutation, "数据修改")
+    LocalAppCapabilityKind.UiControl ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_ui_control, "界面控制")
+    LocalAppCapabilityKind.NetworkDomain ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_network_domain, "网络访问")
+    LocalAppCapabilityKind.RestoreCheckpoint ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_restore_checkpoint, "恢复检查点")
 }

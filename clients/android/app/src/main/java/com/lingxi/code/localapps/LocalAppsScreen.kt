@@ -159,9 +159,9 @@ private fun LocalAppsLibraryScreen(
     // Pure Compose-local UI state, not part of `LocalAppsUiState` — the
     // template-picker route this replaces (local-apps#questionnaire, Task
     // 18) is gone, and there is no dedicated create destination to hold
-    // "is the create dialog open" instead. This is the minimal working
-    // replacement, same spirit as iOS's Task 13 `.create` route note; Task 20
-    // owns the real create-entry UI.
+    // "is the create dialog open" instead. Mirrors iOS's dedicated
+    // `LocalAppCreateView` route, minus a real navigation destination: the
+    // dialog itself (below) collects only a one-line brief, same as iOS.
     var showCreateDialog by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
@@ -222,52 +222,70 @@ private fun LocalAppsLibraryScreen(
     }
     if (showCreateDialog) {
         CreateAppDialog(
-            name = state.createName,
-            onNameChange = { onAction(LocalAppsAction.ChangeCreateName(it)) },
             onDismiss = { showCreateDialog = false },
-            onCreate = {
-                // NOTE (local-apps#questionnaire, Task 18/20): this dialog only
-                // collects a display name, so it sends that name as the brief
-                // too — the SAME stopgap `createSelectedTemplate()` used to
-                // make (see `LocalAppsViewModel.createFromBrief`'s doc and the
-                // `LocalAppsViewModelTest` tripwire pinning this exact
-                // fabrication). Task 20 replaces this dialog with the real
-                // brief-collecting create entry.
-                onAction(LocalAppsAction.CreateFromBrief(state.createName))
+            onCreate = { brief ->
+                onAction(LocalAppsAction.CreateFromBrief(brief))
                 showCreateDialog = false
             },
         )
     }
 }
 
+/**
+ * Collects the one-line brief `CreateFromBrief` needs and nothing else — no
+ * display name, no template grid (local-apps#questionnaire, Task 20). Mirrors
+ * iOS's `LocalAppCreateView`: a single multi-line description field, whose
+ * submit dispatches `CreateFromBrief` directly. There is no longer a display
+ * name for this dialog to collect at all — `LocalAppsViewModel.createFromBrief`
+ * sends `name` empty on the wire and `AppService::create_app` derives one
+ * from the brief itself, so nothing on the client ever relabels the brief as
+ * a name or vice versa (the exact fabrication the former stopgap dialog made,
+ * pinned by `LocalAppsViewModelTest`'s tripwire until this task).
+ */
 @Composable
 private fun CreateAppDialog(
-    name: String,
-    onNameChange: (String) -> Unit,
     onDismiss: () -> Unit,
-    onCreate: () -> Unit,
+    onCreate: (String) -> Unit,
 ) {
+    var brief by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.local_apps_create)) },
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = onNameChange,
-                label = { Text(stringResource(R.string.local_apps_name)) },
-                supportingText = { Text(stringResource(R.string.local_apps_create_name_hint)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Column {
+                OutlinedTextField(
+                    value = brief,
+                    onValueChange = { brief = it },
+                    label = { Text(stringResource(R.string.local_apps_create_brief_label)) },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    stringResource(R.string.local_apps_create_brief_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
         },
         confirmButton = {
-            Button(enabled = name.isNotBlank(), onClick = onCreate) {
+            Button(enabled = canSubmitBrief(brief), onClick = { onCreate(brief) }) {
                 Text(stringResource(R.string.local_apps_create_and_design))
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
+
+/**
+ * The create screen's one and only input — a documented count, not a UI
+ * probe: [CreateAppDialog] above declares exactly one [OutlinedTextField]
+ * (the brief), with no separate name field alongside it.
+ */
+internal fun createScreenInputCount(): Int = 1
+
+/** Whether [brief] is non-blank enough to submit — mirrors `AppService::create_app`'s own empty check server-side (belt-and-suspenders, not the only gate). */
+internal fun canSubmitBrief(brief: String): Boolean = brief.isNotBlank()
 
 @Composable
 private fun RuntimeModeBanner(mode: LocalAppRuntimeMode) {
@@ -421,6 +439,22 @@ internal fun isDesignerEditable(workflow: LocalAppWorkflow): Boolean =
     workflow == LocalAppWorkflow.CollectingSpec
 
 /**
+ * Whether the persistent revision input (local-apps#questionnaire, Task 20)
+ * should be offered for [workflow] — the exact allowed-states list
+ * `AppState::request_revision` (state.rs) enforces server-side:
+ * [LocalAppWorkflow.AwaitingPreviewConfirmation] and [LocalAppWorkflow.Ready],
+ * nothing else. In particular `false` for [LocalAppWorkflow.Revising] itself
+ * — offering it while a revision is already in flight would let a second
+ * submit race the first, and the engine would reject it outright with
+ * `workflow_state_invalid` anyway. Offering the input in a state the engine
+ * rejects is the exact defect class that has already bitten Tasks 13, 14,
+ * 15, 18 and 19 — gate on this function everywhere the input could render,
+ * never on "a preview/details screen is showing" alone.
+ */
+internal fun showsRevisionInput(workflow: LocalAppWorkflow): Boolean =
+    workflow == LocalAppWorkflow.Ready || workflow == LocalAppWorkflow.AwaitingPreviewConfirmation
+
+/**
  * A chip in a field's chip row: one of the field's declared options, or the
  * 「由你决定」 chip when [LocalAppDesignField.allowsDefer]. Mirrors iOS's
  * `DesignerFieldChips.Chip`.
@@ -497,6 +531,18 @@ private fun LocalAppDesignerScreen(appId: String, state: LocalAppsUiState, onAct
         }
         return
     }
+    // Its own destination, not another questionnaire step
+    // (local-apps#questionnaire, Task 20): `LocalAppPlanConfirmationScreen`
+    // renders a wholly separate Scaffold, with none of the step wizard's
+    // progress bar or "上一步/下一步" semantics below. Checked before
+    // `isDesignerEditable` (which is false here anyway — only
+    // `CollectingSpec` is editable) and before the `designer == null` guard
+    // below, since this screen needs only `app` and `state.plans[appId]`,
+    // never `state.designer`.
+    if (app.workflow == LocalAppWorkflow.AwaitingSpecConfirmation) {
+        LocalAppPlanConfirmationScreen(app = app, plan = state.plans[appId], onAction = onAction)
+        return
+    }
     if (!isDesignerEditable(app.workflow)) {
         DesignerUnavailableScreen(app = app, onAction = onAction)
         return
@@ -542,11 +588,12 @@ private fun LocalAppDesignerScreen(appId: String, state: LocalAppsUiState, onAct
                                 // `ConfirmDesign`/`confirm_design`, which is the
                                 // LATER "confirm the derived plan" gate
                                 // (`awaiting_spec_confirmation -> generating`,
-                                // Task 20's plan-confirm screen) that arms
-                                // automatically once planning finishes. Stays
-                                // on this screen either way: `isDesignerEditable`
-                                // above flips to the busy 出计划中 state as soon
-                                // as `AppWorkflowChanged` reports `planning`.
+                                // `LocalAppPlanConfirmationScreen` below) that
+                                // arms automatically once planning finishes.
+                                // Stays on this screen either way:
+                                // `isDesignerEditable` above flips to the busy
+                                // 出计划中 state as soon as `AppWorkflowChanged`
+                                // reports `planning`.
                                 onAction(LocalAppsAction.BeginPlanning(appId))
                             }
                         },
@@ -611,13 +658,16 @@ private fun LocalAppDesignerScreen(appId: String, state: LocalAppsUiState, onAct
 }
 
 /**
- * The four intermediate/failure states plus a generic fallback that
- * [LocalAppDesignerScreen] renders instead of the editable form
- * ([isDesignerEditable] false) — mirrors iOS's
+ * The four intermediate/failure states that [LocalAppDesignerScreen] renders
+ * instead of the editable form ([isDesignerEditable] false) — mirrors iOS's
  * `LocalAppDesignerView.unavailableView(for:)`. `AwaitingSpecConfirmation`
- * and `GenerationFailed` land in the generic fallback: their real screens
- * (the plan-confirm sheet, and re-arming the confirm gate) are Task 20's job;
- * this screen only needs to not dead-end while waiting for them.
+ * never reaches the generic `else` fallback below: [LocalAppDesignerScreen]
+ * intercepts it before calling this function at all, routing to
+ * `LocalAppPlanConfirmationScreen` instead (local-apps#questionnaire, Task
+ * 20). `GenerationFailed` likewise never reaches here in practice — `openApp`
+ * routes it to the Preview destination, not Designer — so the `else` branch
+ * is a defensive fallback for a workflow this screen was not expecting to be
+ * asked to render, not a state either of those two still lands in.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -682,6 +732,199 @@ private fun DesignerFailedState(
         Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.common_retry)) }
         extraActions()
     }
+}
+
+/**
+ * The plan-confirmation screen (local-apps#questionnaire, Task 20) — the
+ * human gate between the LLM-derived plan (`awaiting_spec_confirmation`) and
+ * code generation (`generating`). Read-only: nothing here mutates the draft.
+ * Its own destination, not another questionnaire step — [LocalAppDesignerScreen]
+ * routes here directly, never through the step wizard's Scaffold or progress
+ * bar. Exactly two exits, [planActionTitles]'s own contract: "返回修改"
+ * ([LocalAppsAction.CancelDesign], `cancel_design`:
+ * `awaiting_spec_confirmation -> collecting_spec`) and "确认并生成"
+ * ([LocalAppsAction.ConfirmDesign], `confirm_design`). No `LocalAppsTopBar`
+ * here on purpose — that composable always adds a back-arrow exit, which
+ * would make three. Mirrors iOS's `LocalAppPlanConfirmView`.
+ *
+ * Never wire [LocalAppsAction.ConfirmDesign] to anything but a user tap on
+ * this screen's "确认并生成" button. This is one of the two human
+ * confirmations the whole conversational-design feature exists to preserve —
+ * nothing may auto-advance it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LocalAppPlanConfirmationScreen(
+    app: LocalAppItem,
+    plan: LocalAppPlan?,
+    onAction: (LocalAppsAction) -> Unit,
+) {
+    val strings = localAppsStrings(LocalContext.current)
+    val actionTitles = planActionTitles(strings)
+    Scaffold(
+        bottomBar = {
+            Surface(tonalElevation = 3.dp) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { onAction(LocalAppsAction.CancelDesign(app.id)) },
+                        modifier = Modifier.weight(1f),
+                    ) { Text(actionTitles[0]) }
+                    Button(
+                        enabled = plan != null,
+                        onClick = { onAction(LocalAppsAction.ConfirmDesign) },
+                        modifier = Modifier.weight(1f),
+                    ) { Text(actionTitles[1]) }
+                }
+            }
+        },
+    ) { padding ->
+        if (plan == null) {
+            // `plan_ready` (state.rs) sets the workflow AND the plan in the
+            // same commit, but the two arrive as separate events
+            // (`AppWorkflowChanged`, `AppPlanChanged`) — a transient window
+            // where this screen is showing before the plan lands is real,
+            // not a bug to route around.
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+            return@Scaffold
+        }
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp),
+        ) {
+            item {
+                Text(
+                    stringResource(R.string.local_apps_plan_confirm_title),
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.semantics { heading() },
+                )
+            }
+            item {
+                PlanSection(stringResource(R.string.local_apps_plan_confirm_summary_header)) {
+                    Text(plan.summary)
+                }
+            }
+            item {
+                PlanSection(stringResource(R.string.local_apps_plan_confirm_data_header)) {
+                    if (plan.collections.isEmpty()) {
+                        Text(stringResource(R.string.local_apps_no_collections), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        plan.collections.forEach { collection ->
+                            Column {
+                                Text(planCollectionSummaryLine(collection), fontWeight = FontWeight.SemiBold)
+                                collection.fields.forEach { field ->
+                                    Text(
+                                        planFieldDetailLine(field, strings),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                PlanSection(stringResource(R.string.local_apps_plan_confirm_capabilities_header)) {
+                    if (plan.capabilities.isEmpty()) {
+                        Text(
+                            stringResource(R.string.local_apps_plan_confirm_no_capabilities),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        plan.capabilities.forEach { Text("• ${it.readable(strings)}") }
+                    }
+                }
+            }
+            // Silence about network access reads as an omission, not a
+            // guarantee — this is a permissions disclosure the user is about
+            // to approve, so an empty `domains` always renders an explicit
+            // "不访问网络" line rather than nothing a reader could mistake
+            // for "not yet loaded."
+            item {
+                PlanSection(stringResource(R.string.local_apps_plan_confirm_domains_header)) {
+                    if (plan.domains.isEmpty()) {
+                        Text(
+                            stringResource(R.string.local_apps_plan_confirm_no_domains),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        plan.domains.forEach { Text("• $it") }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun PlanSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+        ) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            content()
+        }
+    }
+}
+
+/**
+ * "返回修改" then "确认并生成", in that exact order — [LocalAppPlanConfirmationScreen]'s
+ * whole exit contract. Mirrors iOS's `LocalAppPlanConfirmView.actionTitles`.
+ */
+internal fun planActionTitles(strings: LocalAppsStrings = DefaultLocalAppsStrings): List<String> = listOf(
+    strings.resolve(R.string.local_apps_plan_confirm_back, "返回修改"),
+    strings.resolve(R.string.local_apps_confirm_generate, "确认并生成"),
+)
+
+/**
+ * Flattened line-per-row text projection of [plan] — built from the exact
+ * same per-row formatters [LocalAppPlanConfirmationScreen] renders, so a test
+ * against this is a test against what the user actually sees, not a parallel
+ * description of it. Mirrors iOS's `LocalAppPlanConfirmView.summaryLines`.
+ */
+internal fun planSummaryLines(plan: LocalAppPlan, strings: LocalAppsStrings = DefaultLocalAppsStrings): List<String> {
+    val lines = mutableListOf(plan.summary)
+    plan.collections.forEach { collection ->
+        lines += planCollectionSummaryLine(collection)
+        collection.fields.forEach { field -> lines += planFieldDetailLine(field, strings) }
+    }
+    lines += if (plan.capabilities.isEmpty()) {
+        strings.resolve(R.string.local_apps_plan_confirm_no_capabilities, "无需额外权限")
+    } else {
+        plan.capabilities.joinToString("、") { it.readable(strings) }
+    }
+    lines += if (plan.domains.isEmpty()) {
+        strings.resolve(R.string.local_apps_plan_confirm_no_domains, "不访问网络")
+    } else {
+        plan.domains.joinToString("、")
+    }
+    return lines
+}
+
+/**
+ * One line naming a collection AND every field id it holds — carries both
+ * the collection's and its fields' identifiers (not just display labels),
+ * since those are what literally exist in the generated app's manifest.
+ * Mirrors iOS's `LocalAppPlanConfirmView.collectionSummaryLine(_:)`.
+ */
+internal fun planCollectionSummaryLine(collection: LocalAppCollectionSchema): String =
+    "${collection.label}（${collection.id}）：${collection.fields.joinToString("、") { it.id }}"
+
+/** Mirrors iOS's `LocalAppPlanConfirmView.fieldDetailLine(_:)`. */
+internal fun planFieldDetailLine(field: LocalAppDataField, strings: LocalAppsStrings = DefaultLocalAppsStrings): String {
+    val base = "${field.label}（${field.id}） — ${field.type.name}"
+    return if (field.required) base + strings.resolve(R.string.local_apps_required_suffix, " · 必填") else base
 }
 
 @Composable
@@ -1126,13 +1369,25 @@ private fun LocalAppPreviewScreen(
     val app = state.apps.firstOrNull { it.id == appId }
     val preview = state.previews[appId]
     val generation = state.generation[appId]
-    var feedback by remember(appId) { mutableStateOf("") }
     Scaffold(
         topBar = {
             LocalAppsTopBar(
                 app?.name ?: stringResource(R.string.local_apps_preview_title),
                 onBack = { onAction(LocalAppsAction.Back) },
             )
+        },
+        // Gated on `showsRevisionInput`, not "a preview exists" — this
+        // screen also renders for `Generating`/`Validating`/`Revising`/
+        // `GenerationFailed`/`ValidationFailed`, none of which
+        // `request_revision` (state.rs) accepts (local-apps#questionnaire,
+        // Task 20). Offering the input there would let a submit race the
+        // engine's own transition and get rejected with
+        // `workflow_state_invalid` — the defect class Tasks 13/14/15/18/19
+        // already hit once each.
+        bottomBar = {
+            if (app != null && showsRevisionInput(app.workflow)) {
+                PersistentRevisionInput(appId = appId, onAction = onAction)
+            }
         },
     ) { padding ->
         Column(
@@ -1153,9 +1408,9 @@ private fun LocalAppPreviewScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.local_apps_continue_design)) }
             }
-            // Only the WebView needs a url; approval and revision need just the
-            // gate's interaction id, so they must stay reachable while the
-            // runtime is still coming up.
+            // Only the WebView needs a url; approval needs just the gate's
+            // interaction id, so it must stay reachable while the runtime is
+            // still coming up.
             val previewUrl = state.previewUrl(appId)
             if (preview != null) {
                 if (previewUrl != null) {
@@ -1176,22 +1431,51 @@ private fun LocalAppPreviewScreen(
                     Button(onClick = { onAction(LocalAppsAction.ApprovePreview(appId)) }) { Text(stringResource(R.string.local_apps_approve_preview)) }
                     OutlinedButton(onClick = { onAction(LocalAppsAction.StartRuntime(appId)) }) { Text(stringResource(R.string.local_apps_ui_action_reload)) }
                 }
-                OutlinedTextField(
-                    value = feedback,
-                    onValueChange = { feedback = it },
-                    label = { Text(stringResource(R.string.local_apps_feedback)) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Button(
-                    enabled = feedback.isNotBlank(),
-                    onClick = { onAction(LocalAppsAction.SubmitRevision(appId, feedback)); feedback = "" },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.local_apps_submit_to_agent)) }
             } else if (generation == null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(stringResource(R.string.local_apps_awaiting_generation_job))
                 }
             }
+        }
+    }
+}
+
+/**
+ * The persistent revision input (local-apps#questionnaire, Task 20) — a
+ * free-text prompt that dispatches [LocalAppsAction.Revise], anchored to the
+ * bottom of whichever screen renders it (`bottomBar`, not scrolled content),
+ * so it stays reachable the whole time [showsRevisionInput] holds for the
+ * app it is bound to. Shared between [LocalAppPreviewScreen]
+ * (`awaitingPreviewConfirmation`) and [LocalAppDetailsScreen] (`ready`) —
+ * both destinations [showsRevisionInput] names — rather than two independent
+ * copies of the same gate-and-submit logic.
+ *
+ * Submitting clears the field, which doubles as the double-submit guard: the
+ * button is disabled while blank, so the same tap cannot fire twice before
+ * either new text is typed or the workflow leaves the allowed set entirely
+ * (at which point the caller's [showsRevisionInput] check removes this
+ * composable from the tree altogether).
+ */
+@Composable
+private fun PersistentRevisionInput(appId: String, onAction: (LocalAppsAction) -> Unit) {
+    var feedback by remember(appId) { mutableStateOf("") }
+    Surface(tonalElevation = 3.dp) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+        ) {
+            OutlinedTextField(
+                value = feedback,
+                onValueChange = { feedback = it },
+                label = { Text(stringResource(R.string.local_apps_feedback)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                enabled = feedback.isNotBlank(),
+                onClick = { onAction(LocalAppsAction.Revise(appId, feedback)); feedback = "" },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.local_apps_submit_to_agent)) }
         }
     }
 }
@@ -1211,6 +1495,17 @@ private fun LocalAppDetailsScreen(
                 app?.name ?: stringResource(R.string.local_apps_detail_title),
                 onBack = { onAction(LocalAppsAction.Back) },
             )
+        },
+        // `ready` is the one workflow that lands on this destination
+        // (`openApp`), and it is one of the two `showsRevisionInput` allows —
+        // this screen had no revision affordance at all before Task 20
+        // (local-apps#questionnaire): the ONLY iteration path was the
+        // Preview destination's box, unreachable once an app finished
+        // generating and settled here.
+        bottomBar = {
+            if (app != null && showsRevisionInput(app.workflow)) {
+                PersistentRevisionInput(appId = appId, onAction = onAction)
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {

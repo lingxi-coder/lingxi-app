@@ -267,6 +267,80 @@ class LocalAppsScreenTest {
         assertFalse(isValidDomain("api..example.com"))
     }
 
+    // local-apps#questionnaire, Task 20 — the plan-confirmation screen, the
+    // real create entry, and the persistent revision input, all pure-function
+    // covered here the same way Task 19's designer was.
+
+    @Test
+    fun `the plan sheet lists every collection and field`() {
+        val lines = planSummaryLines(notesPlan())
+        assertTrue(lines.any { it.contains("notes") && it.contains("title") })
+    }
+
+    @Test
+    fun `the plan sheet says so when no network access is requested`() {
+        assertTrue(
+            "silence about network access reads as an omission, not as a guarantee",
+            planSummaryLines(notesPlan()).any { it.contains("不访问网络") },
+        )
+    }
+
+    @Test
+    fun `the plan sheet says so when no capabilities are requested`() {
+        // Same rule as network access: an empty `capabilities` list must say
+        // so explicitly — this is a permissions disclosure the user is about
+        // to approve, and silence reads as an omission, not a guarantee.
+        val plan = notesPlan().copy(capabilities = emptyList())
+        assertTrue(planSummaryLines(plan).any { it.contains("无需额外权限") })
+    }
+
+    @Test
+    fun `the plan sheet has exactly two exits`() {
+        assertEquals(listOf("返回修改", "确认并生成"), planActionTitles())
+    }
+
+    @Test
+    fun `the create screen asks only for a description`() {
+        assertEquals(1, createScreenInputCount())
+    }
+
+    @Test
+    fun `an empty description cannot be submitted`() {
+        assertFalse(canSubmitBrief("   "))
+    }
+
+    @Test
+    fun `a ready app shows a persistent revision input`() {
+        assertTrue(showsRevisionInput(LocalAppWorkflow.Ready))
+        assertTrue(showsRevisionInput(LocalAppWorkflow.AwaitingPreviewConfirmation))
+        assertFalse(showsRevisionInput(LocalAppWorkflow.Generating))
+        assertFalse(showsRevisionInput(LocalAppWorkflow.AuthoringQuestionnaire))
+    }
+
+    @Test
+    fun `a revision in flight offers no revision input`() {
+        // The exact defect class Tasks 13/14/15/18/19 already hit once each:
+        // offering the input in a state `request_revision` (state.rs)
+        // rejects. `Revising` is deliberately absent from the allowed set —
+        // a second submit while the first is still in flight would race the
+        // engine's own transition.
+        assertFalse(showsRevisionInput(LocalAppWorkflow.Revising))
+    }
+
+    private fun notesPlan() = LocalAppPlan(
+        collections = listOf(
+            LocalAppCollectionSchema(
+                id = "notes",
+                label = "笔记",
+                fields = listOf(LocalAppDataField(id = "title", label = "标题", type = LocalAppDataFieldType.Text, required = true)),
+                enabledByDefault = true,
+            ),
+        ),
+        capabilities = listOf(LocalAppCapabilityKind.DataMutation),
+        domains = emptyList(),
+        summary = "一个简单的笔记应用，可以记标题和正文。",
+    )
+
     private fun field(id: String) = LocalAppDataField(id, "新字段", LocalAppDataFieldType.Text, false)
 
     private fun oneStep(id: String = "basics", order: UInt = 1u) = LocalAppDesignStep(

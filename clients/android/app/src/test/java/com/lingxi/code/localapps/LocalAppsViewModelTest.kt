@@ -65,32 +65,37 @@ class LocalAppsViewModelTest {
         }
     }
 
-    /// local-apps#questionnaire Task 11 review, Fix 2. The Rust side pinned
-    /// this exact fabrication with a NAMED, red-until-fixed test
+    /// PERMANENT GUARD (local-apps#questionnaire, Task 11 review Fix 2;
+    /// converted from a red-until-fixed tripwire by Task 20). The Rust side
+    /// pinned the display-name-as-brief fabrication with a NAMED,
+    /// red-until-fixed test
     /// (`create_app_persists_name_as_brief_until_task_11_adds_a_real_one`,
     /// since renamed once Task 11 landed the real brief). Android's
     /// `createSelectedTemplate()` was given the SAME stopgap
     /// (`brief = name`) with only a `NOTE`, no mechanism forcing anyone to
-    /// notice when it should stop being true — this test is that mechanism.
-    /// It MUST FAIL until Task 20 replaces the template-picker create flow
-    /// with one that collects a real brief from the user; do not "fix" it
-    /// by relaxing the assertion — fix it by making Android send a REAL
-    /// brief, then update this test the way the Rust tripwire was updated.
+    /// notice when it should stop being true — this test was that mechanism,
+    /// red for nine tasks (`ChangeCreateName("My Habit App")` then
+    /// `CreateFromBrief("My Habit App")`, asserting `sent.brief != sent.name`
+    /// on two IDENTICAL strings — an assertion that could only ever fail).
     ///
-    /// MOVED (local-apps#questionnaire, Task 18): `createSelectedTemplate()`
-    /// and `state.templates`/`selectedTemplateKind` are deleted —
-    /// `LocalAppsAction.CreateFromBrief(brief)` takes the brief as an
-    /// explicit parameter, so the ViewModel itself no longer fabricates
-    /// anything. The fabrication moved to the CALLER: `LocalAppsScreen.kt`'s
-    /// `CreateAppDialog` (the template picker's minimal replacement) still
-    /// collects only a display name and passes that name as the brief too
-    /// (see its `onCreate` NOTE). This test now dispatches the exact same
-    /// action sequence that dialog's confirm button does — `ChangeCreateName`
-    /// then `CreateFromBrief` with the SAME string — so it still fails for
-    /// the same reason, just no longer needs the `internal _uiState` seam to
-    /// get there.
+    /// Task 20 deletes the fabrication rather than papering over the
+    /// assertion: `LocalAppsViewModel.createFromBrief` now sends `name`
+    /// EMPTY on every create (never the display text of anything), and
+    /// `AppService::create_app` (service.rs) derives the display name from
+    /// the brief itself when the caller's name is empty — mirrors iOS's
+    /// `LocalAppsStore.createApp(brief:)` exactly. There is no longer a
+    /// display-name input on the real create screen at all (`CreateAppDialog`
+    /// in `LocalAppsScreen.kt` collects only the brief) — `ChangeCreateName`
+    /// is dispatched here only because a handful of OTHER tests below still
+    /// exercise it to probe `pendingCreates` matching; it has no effect on
+    /// what goes out on the wire.
+    ///
+    /// Inverted into a permanent guard: proves BOTH directions of the
+    /// fabrication stay dead — the brief reaches the wire completely
+    /// unchanged (not paraphrased, not truncated to a name-like string), and
+    /// `name` is never anything the client invented from it.
     @Test
-    fun `create app fabricates the brief from the display name until Task 20 fixes it`() = runTest {
+    fun `create app sends the real brief unmodified and fabricates no display name`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -100,19 +105,22 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            viewModel.onAction(LocalAppsAction.ChangeCreateName("My Habit App"))
-            // Mirrors `CreateAppDialog`'s confirm button in `LocalAppsScreen.kt`.
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("My Habit App"))
+            val brief = "一个能记录每天喝水量的小工具，支持提醒和每周汇总"
+            // Mirrors the real create screen (`CreateAppDialog`): a single
+            // description field, submit dispatches `CreateFromBrief` alone.
+            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief))
             runCurrent()
 
             val sent = source.commands.filterIsInstance<ClientCommand.CreateApp>().singleOrNull()
                 ?: throw AssertionError("CreateFromBrief must submit ClientCommand.CreateApp")
-            assertEquals("My Habit App", sent.name)
+            assertEquals("the brief must reach the wire verbatim, not paraphrased or truncated", brief, sent.brief)
             assertTrue(
-                "the brief must be a real spec, not the display name relabeled — " +
+                "the client must not fabricate a display name — AppService::create_app " +
+                    "derives one from the brief itself when name is empty (service.rs); " +
                     "this is the exact fabrication local-apps#questionnaire Tasks 10/11 " +
-                    "spent two review rounds eliminating on the Rust side",
-                sent.brief != sent.name,
+                    "spent two review rounds eliminating on the Rust side, now eliminated " +
+                    "on the client instead of merely hidden behind a passing assertion",
+                sent.name.isEmpty(),
             )
         } finally {
             Dispatchers.resetMain()
@@ -332,6 +340,119 @@ class LocalAppsViewModelTest {
             assertEquals(1uL, confirm.revision)
             assertEquals("designer-1", confirm.interactionId)
             assertEquals(1, source.updateCommands().size)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The plan-confirmation screen's "返回修改" exit (local-apps#questionnaire,
+     * Task 20) — `cancel_design` (state.rs) needs only the app id, no
+     * interaction id, so unlike `ConfirmDesign` there is nothing to drain or
+     * cache first. Also refreshes the details snapshot: `reduceDesignerRequested`
+     * seeded `designer.values` from bare field defaults when this gate armed
+     * (its only source of answers — see its own doc), discarding whatever the
+     * user had actually last saved; without this refresh, landing back on the
+     * step form would show every answer visually reset, even though the
+     * engine's own `draft.fields` was never touched by `cancel_design`.
+     */
+    @Test
+    fun `cancel design sends CancelAppDesign and refreshes the draft`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.CancelDesign(APP_ID))
+            runCurrent()
+
+            val cancel = source.commands.filterIsInstance<ClientCommand.CancelAppDesign>().single()
+            assertEquals(APP_ID, cancel.appId)
+            val refresh = source.commands.filterIsInstance<ClientCommand.GetAppDetails>().single()
+            assertEquals(APP_ID, refresh.appId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The regression this refresh exists to prevent: reaching
+     * `collecting_spec` a SECOND time (via `cancel_design`, after the plan
+     * gate already reset `designer.values` to bare defaults) must show the
+     * user's real last-saved answer, not the default it was wiped to.
+     */
+    @Test
+    fun `cancelling the design restores the real saved answer, not the field default`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            // Mirrors the plan gate arming (`AppDesignerRequested`):
+            // `reduceDesignerRequested` seeds `designer.values` from each
+            // field's bare default (`""` for `purpose`'s `ShortText`), which
+            // is NOT the user's real saved answer ("external", per
+            // `appDetails` below).
+            seedDesigner(source)
+            runCurrent()
+            assertEquals(
+                "sanity: the plan gate seeds only the field's bare default",
+                LocalAppDesignValue.Text(""),
+                viewModel.uiState.value.designer?.values?.get("purpose"),
+            )
+
+            viewModel.onAction(LocalAppsAction.CancelDesign(APP_ID))
+            runCurrent()
+
+            // The details refresh `cancelDesign` requested lands, carrying the
+            // engine's real stored answer.
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppDetailsChanged(appDetails(designRevision = 0u)),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(
+                LocalAppDesignValue.Text("external"),
+                viewModel.uiState.value.designer?.values?.get("purpose"),
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * The persistent revision input's submit action (local-apps#questionnaire,
+     * Task 20) — used by both the `ready` (Details) and
+     * `awaitingPreviewConfirmation` (Preview) destinations. Replaces the
+     * former `SubmitRevision` action, which dispatched the identical
+     * `RequestAppRevision` command under a second name; consolidated to one.
+     */
+    @Test
+    fun `revise sends the free-text prompt as a revision request`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.Revise(APP_ID, "把标题字体调大一点"))
+            runCurrent()
+
+            val revise = source.commands.filterIsInstance<ClientCommand.RequestAppRevision>().single()
+            assertEquals(APP_ID, revise.appId)
+            assertEquals("把标题字体调大一点", revise.prompt)
         } finally {
             Dispatchers.resetMain()
         }

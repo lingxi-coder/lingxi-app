@@ -79,22 +79,26 @@ class LocalAppsViewModel(
      * to match it) — see `reduceApps` for how each entry is matched and
      * consumed.
      *
+     * Keyed on `brief` alone, not `name`+`brief` (Task 20): `createFromBrief`
+     * now sends `name = ""` on every create and lets
+     * `AppService::create_app` derive the display name from the brief itself
+     * (mirrors iOS's `LocalAppsStore.createApp(brief:)`), so the persisted
+     * record's `name` is never the literal string this ViewModel sent —
+     * matching on it would never succeed.
+     *
      * RESIDUAL AMBIGUITY: `AppRecordDto`/`ClientCommand.CreateApp` carry no
-     * correlation id, so `name`+`brief` is the best discriminator available.
-     * Two concurrent creates with the IDENTICAL name+brief — plausible today,
-     * since `CreateAppDialog` still fabricates `brief = name` (Task 20's
-     * job to fix) — cannot be told apart by content alone: `reduceApps`
-     * matches FIFO by list position against `apps`' sort order, which is
-     * `updatedAtMs`-descending, not request order. If two such creates race
-     * closely enough that their records tie or invert on `updatedAtMs`, the
-     * wrong pending entry can be claimed for a given new id. Nothing is
-     * corrupted by this — both apps still exist, independently editable —
-     * only WHICH one's designer opens first can be swapped. A real
-     * correlation id on the wire is the only way to close this gap
-     * completely; Task 20's real brief-collecting create entry only makes
-     * the collision less likely (distinct briefs), not impossible.
+     * correlation id, so `brief` is the best discriminator available. Two
+     * concurrent creates with the IDENTICAL brief cannot be told apart by
+     * content alone: `reduceApps` matches FIFO by list position against
+     * `apps`' sort order, which is `updatedAtMs`-descending, not request
+     * order. If two such creates race closely enough that their records tie
+     * or invert on `updatedAtMs`, the wrong pending entry can be claimed for
+     * a given new id. Nothing is corrupted by this — both apps still exist,
+     * independently editable — only WHICH one's designer opens first can be
+     * swapped. A real correlation id on the wire is the only way to close
+     * this gap completely.
      */
-    private val pendingCreates = mutableListOf<Pair<String, String>>()
+    private val pendingCreates = mutableListOf<String>()
     private val draftEditQueue = mutableListOf<QueuedDraftEdit>()
     private val textEditJobs = mutableMapOf<String, Job>()
     private var draftEditInFlight: InFlightDraftEdit? = null
@@ -203,9 +207,15 @@ class LocalAppsViewModel(
     fun onAction(action: LocalAppsAction) {
         when (action) {
             LocalAppsAction.Refresh -> submit { requestSnapshots(it) }
-            // The template-picker create screen is gone (Task 18); a fresh
-            // `Create` just clears any stale draft name left over from a
-            // previous attempt. Task 20 owns the real create-entry UI.
+            // `createName`/`ChangeCreateName` are unused by the real
+            // create screen (Task 20): it collects only a brief and dispatches
+            // `CreateFromBrief` directly, with no display-name field to hold
+            // — `createFromBrief` below sends `name` empty and lets the
+            // engine derive one. This action and `state.createName` are kept
+            // only because several ViewModel tests still exercise the exact
+            // `ChangeCreateName` + `CreateFromBrief` sequence to probe
+            // `pendingCreates` matching; deleting either would force
+            // rewriting those, for no behavioral gain.
             LocalAppsAction.Create -> _uiState.update { it.copy(createName = "") }
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
             is LocalAppsAction.ChangeCreateName -> _uiState.update { it.copy(createName = action.name) }
@@ -215,6 +225,7 @@ class LocalAppsViewModel(
             is LocalAppsAction.BeginPlanning -> submit(ClientCommand.BeginAppPlanning(action.appId))
             is LocalAppsAction.RetryPlan -> submit(ClientCommand.RetryAppPlan(action.appId))
             is LocalAppsAction.Revise -> submit(ClientCommand.RequestAppRevision(action.appId, action.prompt))
+            is LocalAppsAction.CancelDesign -> cancelDesign(action.appId)
             is LocalAppsAction.OpenApp -> openApp(action.appId)
             is LocalAppsAction.OpenDesigner -> openDesigner(action.appId)
             is LocalAppsAction.ChangeStep -> _uiState.update { state ->
@@ -240,7 +251,6 @@ class LocalAppsViewModel(
                 ClientCommand.RestoreAppCheckpoint(action.appId, action.checkpointId),
             )
             is LocalAppsAction.ApprovePreview -> approvePreview(action.appId)
-            is LocalAppsAction.SubmitRevision -> submit(ClientCommand.RequestAppRevision(action.appId, action.feedback))
             is LocalAppsAction.BridgeRequest -> executeBridgeRequest(action.message)
             is LocalAppsAction.AcknowledgeBridgeResult -> _uiState.update {
                 it.copy(bridgeResults = it.bridgeResults - action.requestId)
@@ -275,26 +285,25 @@ class LocalAppsViewModel(
         // total removal of the static template catalog).
     }
 
-    // NOTE (local-apps#questionnaire, Task 18): this replaces the deleted
+    // NOTE (local-apps#questionnaire, Task 18/20): this replaces the deleted
     // `createSelectedTemplate()`. `brief` is REQUIRED on the wire (it seeds
     // the LLM questionnaire-authoring round trip `create_app` starts in the
-    // background) and is now a genuine parameter of `CreateFromBrief` rather
-    // than something this function fabricates — the fabrication itself
-    // (a caller passing the display name as the brief because there is no
-    // dedicated brief input yet) moved OUT of the ViewModel to the
-    // template-picker's minimal replacement dialog in `LocalAppsScreen.kt`
-    // (`CreateAppDialog`), which still collects only a single name field.
-    // Task 20 replaces that dialog with the real brief-collecting UI; see
-    // `LocalAppsViewModelTest`'s "create app fabricates the brief..." tripwire,
-    // migrated to dispatch through this action instead of the deleted one.
+    // background) and is a genuine parameter of `CreateFromBrief` — never
+    // fabricated from a display name. `name` is sent EMPTY, every time:
+    // `AppService::create_app` (service.rs) derives a display name from the
+    // brief itself (first 24 chars) whenever the caller's name is empty or
+    // blank, so there is no client-side name to collect, guess, or relabel
+    // from the brief at all — mirrors iOS's `LocalAppsStore.createApp(brief:)`
+    // exactly. `LocalAppsViewModelTest`'s "create app fabricates the brief
+    // from the display name" tripwire (Task 11's stopgap, carried through
+    // Task 18) is now a permanent guard that this stays true.
     private fun createFromBrief(brief: String) {
-        val name = _uiState.value.createName.trim()
         val trimmedBrief = brief.trim()
-        if (name.isEmpty() || trimmedBrief.isEmpty()) return
-        pendingCreates += name to trimmedBrief
+        if (trimmedBrief.isEmpty()) return
+        pendingCreates += trimmedBrief
         submit(
             ClientCommand.CreateApp(
-                name = name,
+                name = "",
                 origin = AppCreateOriginDto.LIBRARY,
                 brief = trimmedBrief,
                 conversationId = null,
@@ -651,6 +660,35 @@ class LocalAppsViewModel(
             }
             submit(ClientCommand.ConfirmAppDesign(designer.appId, designer.revision, interaction))
         }
+    }
+
+    /**
+     * The plan-confirmation screen's "返回修改" exit (local-apps#questionnaire,
+     * Task 20): `cancel_design` (`awaiting_spec_confirmation -> collecting_spec`)
+     * needs only the app id — unlike [confirmDesign] there is no interaction
+     * id to read or drafts to drain first.
+     *
+     * Also requests a details refresh: `reduceDesignerRequested` set
+     * `state.designer.values` to each field's bare DEFAULT the moment
+     * `plan_ready` armed this gate (it has no other source of answers to
+     * seed from — see its own doc), discarding whatever the user had
+     * actually last saved from the DISPLAYED draft, even though the
+     * engine's own `draft.fields` (what `cancel_design` reverts to editing)
+     * was never touched. Landing back on the step form with every answer
+     * visually reset to its default — while the real answers are still
+     * intact server-side — is exactly the "check what the second call does
+     * with the first call's result fed back in" class of bug: without this
+     * refresh, the SECOND arrival at `collecting_spec` (via cancel, as
+     * opposed to the FIRST, fresh-questionnaire arrival `reduceDesignerRequested`
+     * was written for) would show wrong values despite the underlying state
+     * being correct. `reduceDetails` overwrites `designer.values` from the
+     * reply's authoritative `designFields` for the app currently pinned to
+     * `state.designer` — exactly this one, since `destination` never leaves
+     * `Designer(appId)` across the whole plan-confirm detour.
+     */
+    private fun cancelDesign(appId: String) {
+        submit(ClientCommand.CancelAppDesign(appId))
+        submit(ClientCommand.GetAppDetails(appId))
     }
 
     /**
@@ -1272,15 +1310,16 @@ class LocalAppsViewModel(
         if (queuePruned || flightPruned || gatePruned) pumpDraftEditQueue()
 
         // Claims every app just created by [createFromBrief], to open its
-        // designer. `templateKind` is gone (Task 18), so this matches on
-        // `name` + the `brief` recorded at create time — both of which
-        // `pendingCreates` holds, set from the exact strings `createFromBrief`
-        // sent on the wire. `it.id !in oldIds` is still checked first and is
-        // still doing the real work: it is what stops this from claiming a
-        // PRE-EXISTING app that merely happens to share a name+brief with the
-        // one just created (two apps from the same brief, e.g. a retry after
-        // a dropped reply) — name+brief alone cannot tell those apart, since
-        // neither is unique.
+        // designer. `templateKind` is gone (Task 18), so this matches on the
+        // `brief` recorded at create time — `createFromBrief` sends `name`
+        // empty on every create (Task 20), so the persisted record's `name`
+        // is engine-derived and never equals anything this ViewModel sent;
+        // `brief` is the only content still comparable. `it.id !in oldIds`
+        // is still checked first and is still doing the real work: it is
+        // what stops this from claiming a PRE-EXISTING app that merely
+        // happens to share a brief with the one just created (two apps from
+        // the same brief, e.g. a retry after a dropped reply) — brief alone
+        // cannot tell those apart, since it is not unique.
         //
         // `pendingCreates` is a queue, not a scalar (Task 19: see its own
         // doc) — every freshly-appeared app is checked against it, oldest
@@ -1295,7 +1334,7 @@ class LocalAppsViewModel(
         // correlation id on the wire.
         val newApps = apps.filter { it.id !in oldIds }
         newApps.forEach { candidate ->
-            val matchIndex = pendingCreates.indexOfFirst { it.first == candidate.name && it.second == candidate.brief }
+            val matchIndex = pendingCreates.indexOfFirst { it == candidate.brief }
             if (matchIndex >= 0) {
                 pendingCreates.removeAt(matchIndex)
                 openDesigner(candidate.id)

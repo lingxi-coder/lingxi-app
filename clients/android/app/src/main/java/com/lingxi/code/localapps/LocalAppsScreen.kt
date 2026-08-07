@@ -883,15 +883,32 @@ private fun isChipOptionSelected(field: LocalAppDesignField, optionValue: String
  * of [field]'s declared options. Used ONLY to seed the box's initial state
  * on a fresh composition (`remember(field.id)` in [DesignerFieldChips]) —
  * every keystroke after that is tracked by the Composable itself and threaded
- * explicitly into [commitCustomChipText] as `previousCustomText`, which is
- * what makes the write side robust (see that function's doc). For
- * `ScreenList`/`FeatureList`/`DomainList`, which declare no `options` at all
- * (only `SingleChoice`/`MultipleChoice` do, questionnaire.rs:61-63) and so
- * have no declared-vs-custom CONTENT split to filter by, this is a
- * best-effort guess (the list's last entry) for that one cold-start moment
- * only — getting it wrong just means the box starts empty or shows the wrong
- * pre-existing entry once; it can no longer corrupt the list, because writes
- * no longer depend on this guess being right.
+ * explicitly into [commitCustomChipText] as `previousCustomText`.
+ *
+ * For `ShortText`/`SingleChoice`/`MultipleChoice`-shaped values this is a
+ * real answer, not a guess: `field.options` is a KNOWN declared set, so
+ * "whatever is NOT one of them" reliably identifies the custom part.
+ *
+ * For `ScreenList`/`FeatureList`/`DomainList`, which declare no `options` at
+ * all (only `SingleChoice`/`MultipleChoice` do, questionnaire.rs:61-63),
+ * there is no such known set — this DELIBERATELY always returns `""` rather
+ * than guess. An earlier version of this fix guessed the list's last entry;
+ * a review's own probe showed that seed is not just occasionally wrong but
+ * **guaranteed** to equal a real pre-existing entry whenever the list is
+ * non-empty at mount (a saved draft, or an LLM-authored `default_value`,
+ * questionnaire.rs:92) — and because [commitCustomChipText] removes
+ * `previousCustomText` BY IDENTITY, that guess being fed back as the seed on
+ * keystroke #1 deleted the real entry it happened to equal, with certainty,
+ * not as an edge case. On `DomainList` that is a permissions-adjacent
+ * allowed-host silently disappearing the instant the user touches the box.
+ * The honest answer is `""`: we genuinely cannot tell, from the list alone,
+ * which entry (if any) was custom-typed versus added through
+ * `StringListEditor`'s own separate add flow, so the box starts blank on a
+ * fresh composition rather than guessing wrong with confidence. The cost is
+ * that revisiting a field does not pre-fill previously-typed custom text;
+ * [commitCustomChipText]'s `previousCustomText.isEmpty()` branch treats that
+ * blank start as "nothing to remove yet", so the first keystroke only
+ * appends and never deletes.
  */
 internal fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValue?): String {
     val optionValues = field.options.mapTo(hashSetOf()) { it.value }
@@ -899,7 +916,7 @@ internal fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValu
         is LocalAppDesignValue.Text -> value.value.takeUnless { it in optionValues }.orEmpty()
         is LocalAppDesignValue.Choice -> value.value.takeUnless { it in optionValues }.orEmpty()
         is LocalAppDesignValue.Choices -> value.values.firstOrNull { it !in optionValues }.orEmpty()
-        is LocalAppDesignValue.StringList -> value.values.lastOrNull().orEmpty()
+        is LocalAppDesignValue.StringList -> ""
         else -> ""
     }
 }
@@ -938,6 +955,12 @@ internal fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValu
  * with fragments like `["a","ap","api",…]` — no format check runs on this
  * path; `isValidDomain` only gates `StringListEditor`'s own add flow), and
  * it no longer depends on WHERE in the list the custom entry sits.
+ *
+ * [customTextFor] always seeds `previousCustomText` to `""` for these three
+ * kinds on a fresh composition (it cannot safely guess otherwise — see its
+ * own doc), so `previousCustomText.isEmpty()` below means "nothing to
+ * remove yet" on the very first keystroke — that keystroke only appends,
+ * never deletes, so a pre-existing real entry always survives it.
  */
 internal fun commitCustomChipText(
     field: LocalAppDesignField,

@@ -142,17 +142,48 @@ class LocalAppsScreenTest {
         assertEquals(LocalAppDesignValue.StringList(listOf("api.example.com")), value)
     }
 
-    /** The readback half of the same defect: revisiting the field must show the full typed text, not the first fragment. */
+    /**
+     * A THIRD review round caught what the first fix's readback still got
+     * wrong: seeding the box to a GUESS (the list's last entry) meant the
+     * guess was fed back as `previousCustomText` on keystroke #1 — and
+     * whenever the list is non-empty at mount, that guess is GUARANTEED to
+     * equal a real pre-existing entry (a saved draft, or an LLM-authored
+     * `default_value`, questionnaire.rs:92), so `commitCustomChipText`'s
+     * identity-removal deleted it with certainty, not as an edge case. A
+     * review's own probe reproduced this on a `DomainList` seeded with
+     * `["a.com","b.com"]`: the seed became `"b.com"`, and committing a
+     * single keystroke silently dropped it. `customTextFor` now always
+     * returns `""` for these three kinds instead of guessing — this is that
+     * honest readback, asserted directly.
+     */
     @Test
-    fun `reading back the other box after progressive typing returns the full text not a fragment`() {
+    fun `the other box on a string list field always starts empty because the custom entry cannot be identified`() {
         val field = designField(allowsCustom = true).copy(kind = LocalAppFieldKind.DomainList)
-        var value: LocalAppDesignValue? = null
-        var previous = ""
-        for (keystroke in listOf("a", "ap", "api", "api.example.com")) {
-            value = commitCustomChipText(field, keystroke, value, previous)
-            previous = keystroke
-        }
-        assertEquals("api.example.com", customTextFor(field, value))
+        assertEquals("", customTextFor(field, LocalAppDesignValue.StringList(listOf("a.com", "b.com"))))
+    }
+
+    /**
+     * The permanent regression test for the review's own probe: seeding the
+     * box from a NON-EMPTY pre-existing list (exactly what `customTextFor`
+     * now returns `""` for, and what `DesignerFieldChips` threads as the
+     * FIRST `previousCustomText`) must not delete anything already there —
+     * the first keystroke may only APPEND. Every pre-existing entry
+     * (`a.com`, `b.com` — a `DomainList`'s allowed-hosts, permissions-
+     * adjacent) must survive the user's very first keystroke into the box.
+     */
+    @Test
+    fun `the first keystroke into the other box never deletes a pre-existing list entry`() {
+        val field = designField(allowsCustom = true).copy(kind = LocalAppFieldKind.DomainList)
+        val preExisting = LocalAppDesignValue.StringList(listOf("a.com", "b.com"))
+        // Mirrors `DesignerFieldChips`'s own `remember(field.id) {
+        // mutableStateOf(customTextFor(field, value)) }` cold-start seed.
+        val coldStartSeed = customTextFor(field, preExisting)
+        val afterFirstKeystroke = commitCustomChipText(field, "c.com", preExisting, previousCustomText = coldStartSeed)
+        assertEquals(
+            "a.com and b.com must both survive the very first keystroke",
+            LocalAppDesignValue.StringList(listOf("a.com", "b.com", "c.com")),
+            afterFirstKeystroke,
+        )
     }
 
     /**

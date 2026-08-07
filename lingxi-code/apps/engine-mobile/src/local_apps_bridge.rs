@@ -190,6 +190,23 @@ pub(crate) fn lower_app_event(event: AppEvent) -> ClientEvent {
         AppEvent::AppsChanged { apps } => ClientEvent::AppsChanged {
             apps: lower_records(&apps),
         },
+        // TODO(local-apps#questionnaire, Task 5/6): `QuestionnaireChanged`
+        // and `PlanChanged` are Task 4's new domain events for the
+        // conversational designer's authoring/planning round trips. Neither
+        // has a wire `ClientEvent`/`AppEventDto` twin yet — that's Task 5
+        // (client-protocol DTO) and Task 6 (this bridge's mapping). Nothing
+        // in engine-mobile calls the `AppService` methods that emit these
+        // (`questionnaire_ready`, `plan_ready`) until Task 8 wires the LLM
+        // round trip, so these arms cannot fire today — `todo!()` rather
+        // than `unreachable!()` for the same reason as `lower_design_value`'s
+        // `Deferred` arm below: a real mapping is expected to land here, not
+        // a permanent invariant.
+        AppEvent::QuestionnaireChanged { .. } => {
+            todo!("no wire representation for QuestionnaireChanged yet (T5/T6)")
+        }
+        AppEvent::PlanChanged { .. } => {
+            todo!("no wire representation for PlanChanged yet (T5/T6)")
+        }
         AppEvent::DesignerRequested {
             app_id,
             interaction_id,

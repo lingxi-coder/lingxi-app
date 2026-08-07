@@ -2836,7 +2836,7 @@ impl MobileEngineHandle {
         // discover at runtime.
         // Success needs no extra emit: `create_app` announces the new record
         // set via its own `AppsChanged` domain event.
-        if let Err(error) = service.create_app(name, name, conversation_id).await {
+        if let Err(error) = service.create_app(Some(name), name, conversation_id).await {
             self.emit_app_failure(None, &error).await;
         }
     }
@@ -8931,7 +8931,7 @@ mod tests {
                 .await
                 .expect("seed service");
                 let record = service
-                    .create_app("Queued", "a test app", None)
+                    .create_app(Some("Queued"), "a test app", None)
                     .await
                     .expect("create app");
                 local_apps::test_support::advance_to_collecting_spec(&service, &record.id).await;

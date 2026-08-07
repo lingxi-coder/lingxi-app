@@ -377,7 +377,7 @@ impl LocalAppsMcpTransport {
                     .get("conversation_id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
-                let record = match service.create_app(name, name, conversation_id).await {
+                let record = match service.create_app(Some(name), name, conversation_id).await {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
@@ -659,7 +659,7 @@ mod tests {
     /// present") so ANY future change to what `create` persists as `brief` —
     /// whether Task 10 wires a real one or someone quietly "improves" this
     /// call — fails this test and forces a conscious look at the comment
-    /// above `service.create_app(name, name, conversation_id)`, instead of
+    /// above `service.create_app(Some(name), name, conversation_id)`, instead of
     /// silently shipping a still-wrong value.
     #[tokio::test]
     async fn create_persists_name_as_brief_until_task_10_adds_a_real_one() {

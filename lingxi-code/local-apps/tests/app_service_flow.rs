@@ -138,8 +138,7 @@ async fn phase1_acceptance_designer_flow_survives_disk_rebuild() {
 
     let record = h
         .service
-        .create_app(
-            "Habit Tracker",
+        .create_app(Some("Habit Tracker"),
             "a test app",
             Some("conv-42".into()),
         )

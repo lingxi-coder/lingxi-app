@@ -1083,7 +1083,7 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", "a test app", None)
+            .create_app(Some("Tasks"), "a test app", None)
             .await
             .unwrap();
         let app = advance_to_collecting_spec(&service, &app.id).await;
@@ -1146,7 +1146,7 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", "a test app", None)
+            .create_app(Some("Tasks"), "a test app", None)
             .await
             .unwrap();
         let app = advance_to_collecting_spec(&service, &app.id).await;
@@ -1216,7 +1216,7 @@ mod tests {
         );
         coordinator.attach_service(service.clone()).await.unwrap();
         let app = service
-            .create_app("Tasks", "a test app", None)
+            .create_app(Some("Tasks"), "a test app", None)
             .await
             .unwrap();
         let app = advance_to_collecting_spec(&service, &app.id).await;
@@ -1276,7 +1276,7 @@ mod tests {
             .unwrap(),
         );
         let app = service
-            .create_app("Interrupted", "a test app", None)
+            .create_app(Some("Interrupted"), "a test app", None)
             .await
             .unwrap();
         let app = advance_to_collecting_spec(&service, &app.id).await;

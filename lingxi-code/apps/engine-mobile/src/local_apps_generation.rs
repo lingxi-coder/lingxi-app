@@ -841,7 +841,7 @@ mod tests {
             .expect("load service"),
         );
         let record = service
-            .create_app("Habits", "a habit tracker", None)
+            .create_app(Some("Habits"), "a habit tracker", None)
             .await
             .expect("create app");
         let record = local_apps::test_support::advance_to_collecting_spec(&service, &record.id)

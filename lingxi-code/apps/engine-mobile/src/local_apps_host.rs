@@ -2855,7 +2855,7 @@ mod tests {
 
     async fn create_app_fixture(root: &TempDir, service: &Arc<AppService>, name: &str) -> String {
         let record = service
-            .create_app(name, "a test app", None)
+            .create_app(Some(name), "a test app", None)
             .await
             .expect("create app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");

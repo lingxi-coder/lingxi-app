@@ -32,6 +32,7 @@ use crate::manifest::{
     save_manifest, validate_domain, validate_identifier, AppLayout, AppManifest,
 };
 use crate::permissions::{save_permissions, AppPermissions};
+use crate::questionnaire::{AppDesignStep, AppPlan};
 use crate::state::{self, AppState};
 use crate::storage;
 use crate::types::{
@@ -876,21 +877,23 @@ impl AppService {
         Ok(safety)
     }
 
-    /// Create a new app record (workflow starts in `collecting_spec`) and its
-    /// on-disk layout, then announce the new list via `AppsChanged`.
+    /// Create a new app record (workflow starts in `authoring_questionnaire`)
+    /// and its on-disk layout, then announce the new list via `AppsChanged`.
+    ///
+    /// `name` is optional: the conversational designer creates an app from a
+    /// one-line `brief` alone, and lets the LLM propose the real name once it
+    /// authors the questionnaire (`Self::questionnaire_ready`'s `name`
+    /// param). A blank or absent `name` gets a PLACEHOLDER — the brief's
+    /// first 24 **chars**, not bytes: truncating a CJK brief on a byte
+    /// boundary would slice a multi-byte codepoint in half and produce
+    /// invalid UTF-8 — so the app always has a non-empty, presentable name
+    /// even before that round trip lands.
     pub async fn create_app(
         &self,
-        name: &str,
+        name: Option<&str>,
         brief: &str,
         conversation_id: Option<String>,
     ) -> Result<AppRecord, AppError> {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            return Err(AppError::InvalidRequest(
-                "app name must not be empty".into(),
-            ));
-        }
-        ensure_within("app name", trimmed.len(), MAX_NAME_BYTES)?;
         let trimmed_brief = brief.trim();
         if trimmed_brief.is_empty() {
             return Err(AppError::InvalidRequest(
@@ -898,6 +901,13 @@ impl AppService {
             ));
         }
         ensure_within("app brief", trimmed_brief.len(), MAX_BRIEF_BYTES)?;
+        let name = match name.map(str::trim).filter(|candidate| !candidate.is_empty()) {
+            Some(candidate) => {
+                ensure_within("app name", candidate.len(), MAX_NAME_BYTES)?;
+                candidate.to_string()
+            }
+            None => trimmed_brief.chars().take(24).collect(),
+        };
         if let Some(conversation_id) = &conversation_id {
             ensure_within(
                 "conversation id",
@@ -905,7 +915,6 @@ impl AppService {
                 MAX_CONVERSATION_ID_BYTES,
             )?;
         }
-        let name = trimmed.to_string();
         let brief = trimmed_brief.to_string();
         let order = self.acquire_emit_order().await;
         // After the queue join, for commit-order-monotonic timestamps (see
@@ -1043,6 +1052,142 @@ impl AppService {
         completion
             .await
             .map_err(|error| AppError::Io(format!("delete completion task failed: {error}")))?
+    }
+
+    /// Store the LLM-authored questionnaire (`authoring_questionnaire ->
+    /// collecting_spec`). `name` is the LLM's suggested real name, replacing
+    /// the placeholder [`Self::create_app`] minted at create time; a blank or
+    /// absent `name` leaves the placeholder in place. Unlike every sibling
+    /// transition below (which reuse [`Self::workflow_step`] and so only ever
+    /// emit `WorkflowChanged`), this builds its event list by hand so it can
+    /// ALSO emit `QuestionnaireChanged` with the steps the client needs to
+    /// render — the same reason [`Self::plan_ready`] does not use
+    /// `workflow_step` either.
+    pub async fn questionnaire_ready(
+        &self,
+        app_id: &str,
+        steps: Vec<AppDesignStep>,
+        name: Option<String>,
+    ) -> Result<(), AppError> {
+        self.with_app(app_id, move |app, now| {
+            match app.questionnaire_ready(steps.clone(), name.clone(), now) {
+                Ok(()) => {
+                    let events = vec![
+                        AppEvent::WorkflowChanged {
+                            app_id: app.record.id.clone(),
+                            state: app.record.workflow_state,
+                            detail: None,
+                        },
+                        AppEvent::QuestionnaireChanged {
+                            app_id: app.record.id.clone(),
+                            revision: app.draft.revision,
+                            steps: app.draft.questionnaire.clone(),
+                        },
+                    ];
+                    (Ok(()), events)
+                }
+                Err(error) => (Err(error), Vec::new()),
+            }
+        })
+        .await
+    }
+
+    /// Questionnaire authoring failed (`authoring_questionnaire ->
+    /// questionnaire_failed`). `reason` rides the `WorkflowChanged` detail for
+    /// display.
+    pub async fn questionnaire_failed(&self, app_id: &str, reason: &str) -> Result<(), AppError> {
+        let reason = reason.to_string();
+        self.workflow_step(app_id, Some(reason), AppState::questionnaire_failed)
+            .await
+    }
+
+    /// Retry questionnaire authoring (`questionnaire_failed ->
+    /// authoring_questionnaire`).
+    pub async fn retry_questionnaire(&self, app_id: &str) -> Result<(), AppError> {
+        self.workflow_step(app_id, None, AppState::retry_questionnaire)
+            .await
+    }
+
+    /// Change the brief and re-author from scratch (`collecting_spec |
+    /// questionnaire_failed | plan_failed -> authoring_questionnaire`).
+    /// Discards the questionnaire, every answer, and any plan — a new brief
+    /// can invalidate all three.
+    pub async fn update_brief(&self, app_id: &str, brief: &str) -> Result<(), AppError> {
+        ensure_within("brief", brief.len(), MAX_BRIEF_BYTES)?;
+        let brief = brief.to_string();
+        self.workflow_step(app_id, None, move |app, now| {
+            app.update_brief(brief.clone(), now)
+        })
+        .await
+    }
+
+    /// `collecting_spec -> planning`.
+    pub async fn begin_planning(&self, app_id: &str) -> Result<(), AppError> {
+        self.workflow_step(app_id, None, AppState::begin_planning)
+            .await
+    }
+
+    /// Store the LLM-authored plan and open the designer confirmation gate
+    /// (`planning -> awaiting_spec_confirmation`). Mirrors
+    /// [`Self::open_designer`]'s event shape exactly (state-change-first,
+    /// then the gate announcement via [`Self::gate_announcement`] — NOT a
+    /// separately invented event) with `PlanChanged` inserted between the
+    /// two so the client also learns the plan content that gated the
+    /// confirmation.
+    pub async fn plan_ready(
+        &self,
+        app_id: &str,
+        plan: AppPlan,
+    ) -> Result<AppInteractionRequest, AppError> {
+        let interaction_id = ids::generate_interaction_id();
+        self.with_app(app_id, move |app, now| {
+            match app.plan_ready(plan.clone(), interaction_id.clone(), now) {
+                Ok(interaction) => {
+                    let events = vec![
+                        AppEvent::WorkflowChanged {
+                            app_id: app.record.id.clone(),
+                            state: app.record.workflow_state,
+                            detail: None,
+                        },
+                        AppEvent::PlanChanged {
+                            app_id: app.record.id.clone(),
+                            revision: app.draft.revision,
+                            plan: app.draft.plan.clone(),
+                        },
+                        Self::gate_announcement(&interaction),
+                    ];
+                    (Ok(interaction), events)
+                }
+                Err(error) => (Err(error), Vec::new()),
+            }
+        })
+        .await
+    }
+
+    /// Planning failed (`planning -> plan_failed`). `reason` rides the
+    /// `WorkflowChanged` detail for display.
+    pub async fn plan_failed(&self, app_id: &str, reason: &str) -> Result<(), AppError> {
+        let reason = reason.to_string();
+        self.workflow_step(app_id, Some(reason), AppState::plan_failed)
+            .await
+    }
+
+    /// Retry planning with the SAME answers (`plan_failed -> planning`) —
+    /// useful when the failure was transient (e.g. an LLM hiccup).
+    pub async fn retry_plan(&self, app_id: &str) -> Result<(), AppError> {
+        self.workflow_step(app_id, None, AppState::retry_plan).await
+    }
+
+    /// Reopen the answers instead of retrying blindly (`plan_failed ->
+    /// collecting_spec`) — the other escape from `plan_failed`, for when the
+    /// answers themselves are unsatisfiable rather than the LLM call being
+    /// transient. Preserves the questionnaire and every answer (unlike
+    /// [`Self::update_brief`], which clears both); see
+    /// [`AppState::reopen_answers`] for why `plan_failed` would otherwise be
+    /// a dead end.
+    pub async fn reopen_answers(&self, app_id: &str) -> Result<(), AppError> {
+        self.workflow_step(app_id, None, AppState::reopen_answers)
+            .await
     }
 
     /// Open the designer gate (`collecting_spec | generation_failed ->
@@ -1687,8 +1832,9 @@ mod tests {
     use crate::test_support::{advance_to_collecting_spec, stamp_fresh_plan};
     use crate::continuation::{NoopContinuationSink, RecordingContinuationSink};
     use crate::error::AppErrorCode;
-    use crate::events::RecordingAppEventObserver;
+    use crate::events::{NoopAppEventObserver, RecordingAppEventObserver};
     use crate::manifest::{DataFieldKind, DataFieldSchema};
+    use crate::questionnaire::{AppDesignField, AppDesignFieldOption, AppDesignFieldType};
     use crate::test_support::FixedClock;
     use crate::types::{
         AppContinuation, AppContinuationKind, AppDesignPatchOp, AppWorkflowState, DesignValue,
@@ -1729,6 +1875,60 @@ mod tests {
         }
     }
 
+    /// A ready [`AppService`] over its own throwaway directory, for tests
+    /// that only need `service.*` calls and don't care about sink/observer
+    /// (see [`harness`] for those). The directory is leaked (never cleaned
+    /// up — `TempDir::into_path` disarms its drop-time removal) so it stays
+    /// alive for the rest of the test process; harmless in a test binary.
+    async fn test_service() -> AppService {
+        let root = tempfile::tempdir().unwrap().into_path();
+        harness(&root).await.service
+    }
+
+    /// Rebuild a fresh [`AppService`] over the SAME on-disk root as
+    /// `service`, standing in for a process restart. `root` is
+    /// `pub(crate)`-visible for exactly this reason (module doc).
+    async fn reload_service(service: &AppService) -> AppService {
+        AppService::load(
+            service.root.clone(),
+            Arc::new(FixedClock::new(1_700_000_000_000)),
+            Arc::new(NoopContinuationSink) as Arc<dyn ContinuationSink>,
+            Arc::new(NoopAppEventObserver) as Arc<dyn AppEventObserver>,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A single design step named `id` at position `order`, with one
+    /// non-empty-options `SingleChoice` field whose id is `{id}_f`.
+    fn step_named(id: &str, order: u32) -> AppDesignStep {
+        AppDesignStep {
+            id: id.to_string(),
+            order,
+            title: id.to_string(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: format!("{id}_f"),
+                label: "field".into(),
+                description: None,
+                field_type: AppDesignFieldType::SingleChoice,
+                required: false,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: None,
+                options: vec![AppDesignFieldOption {
+                    value: "a".into(),
+                    label: "A".into(),
+                }],
+            }],
+        }
+    }
+
+    /// A minimal one-step questionnaire.
+    fn one_step() -> Vec<AppDesignStep> {
+        vec![step_named("basics", 0)]
+    }
+
     fn patch(field: &str, text: &str) -> AppDesignPatch {
         AppDesignPatch {
             ops: vec![AppDesignPatchOp::Set {
@@ -1746,8 +1946,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app(
-                "  Habit Tracker  ",
+            .create_app(Some("  Habit Tracker  "),
                 "a test app",
                 Some("conv-1".into()),
             )
@@ -1779,16 +1978,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rejects_blank_name() {
+    async fn create_treats_a_blank_name_as_absent_and_uses_a_placeholder() {
+        // A blank `name` is no longer an error (Task 4): the conversational
+        // designer can create an app from a brief alone, so a whitespace-only
+        // `name` is filtered exactly like `None` and falls back to the
+        // brief-derived placeholder, same as `create_app_without_a_name_...`
+        // below but exercised through the `Some("   ")` shape instead of
+        // `None`.
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
-        let err = h
+        let record = h
             .service
-            .create_app("   ", "a test app", None)
+            .create_app(Some("   "), "a test app", None)
             .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        assert!(h.service.list_apps().await.is_empty());
+            .expect("a blank name is treated as absent, not rejected");
+        assert!(!record.name.trim().is_empty());
+        assert_eq!(h.service.list_apps().await, vec![record]);
     }
 
     #[tokio::test]
@@ -1840,7 +2045,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("A", "a test app", None)
+            .create_app(Some("A"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -1882,7 +2087,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("A", "a test app", None)
+            .create_app(Some("A"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -1941,13 +2146,13 @@ mod tests {
         let h = harness(dir.path()).await;
         let keep = h
             .service
-            .create_app("Keep", "a test app", None)
+            .create_app(Some("Keep"), "a test app", None)
             .await
             .unwrap();
         let keep = advance_to_collecting_spec(&h.service, &keep.id).await;
         let gone = h
             .service
-            .create_app("Gone", "a test app", None)
+            .create_app(Some("Gone"), "a test app", None)
             .await
             .unwrap();
         let gone = advance_to_collecting_spec(&h.service, &gone.id).await;
@@ -1973,7 +2178,7 @@ mod tests {
 
         let record = h
             .service
-            .create_app("Busy", "a test app", None)
+            .create_app(Some("Busy"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2018,7 +2223,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Stuck", "a test app", None)
+            .create_app(Some("Stuck"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2052,7 +2257,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Race", "a test app", None)
+            .create_app(Some("Race"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2103,7 +2308,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("R", "a test app", None)
+            .create_app(Some("R"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2161,7 +2366,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("Q", "a test app", None)
+            .create_app(Some("Q"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2209,7 +2414,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("D", "a test app", None)
+            .create_app(Some("D"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2260,7 +2465,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("M", "a test app", None)
+            .create_app(Some("M"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2321,7 +2526,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("C", "a test app", None)
+            .create_app(Some("C"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2345,7 +2550,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Restorable", "a test app", None)
+            .create_app(Some("Restorable"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2397,7 +2602,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Legacy", "a test app", None)
+            .create_app(Some("Legacy"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2435,7 +2640,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("P", "a test app", None)
+            .create_app(Some("P"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2475,13 +2680,13 @@ mod tests {
         h.sink.set_fail(true);
         let a = h
             .service
-            .create_app("A", "a test app", None)
+            .create_app(Some("A"), "a test app", None)
             .await
             .unwrap();
         let a = advance_to_collecting_spec(&h.service, &a.id).await;
         let b = h
             .service
-            .create_app("B", "a test app", None)
+            .create_app(Some("B"), "a test app", None)
             .await
             .unwrap();
         let b = advance_to_collecting_spec(&h.service, &b.id).await;
@@ -2533,7 +2738,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("F", "a test app", None)
+            .create_app(Some("F"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2583,8 +2788,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let err = h
             .service
-            .create_app(
-                &"x".repeat(MAX_NAME_BYTES + 1),
+            .create_app(Some(&"x".repeat(MAX_NAME_BYTES + 1)),
                 "a test app",
                 None,
             )
@@ -2593,8 +2797,7 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         let err = h
             .service
-            .create_app(
-                "A",
+            .create_app(Some("A"),
                 "a test app",
                 Some("c".repeat(MAX_CONVERSATION_ID_BYTES + 1)),
             )
@@ -2607,8 +2810,7 @@ mod tests {
         );
         // Exactly at the cap is fine.
         h.service
-            .create_app(
-                &"x".repeat(MAX_NAME_BYTES),
+            .create_app(Some(&"x".repeat(MAX_NAME_BYTES)),
                 "a test app",
                 Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
             )
@@ -2632,14 +2834,14 @@ mod tests {
         // Empty after trim is rejected, independent of `name`.
         let err = h
             .service
-            .create_app("A", "   ", None)
+            .create_app(Some("A"), "   ", None)
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         // Over the cap is rejected.
         let err = h
             .service
-            .create_app("A", &"x".repeat(MAX_BRIEF_BYTES + 1), None)
+            .create_app(Some("A"), &"x".repeat(MAX_BRIEF_BYTES + 1), None)
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
@@ -2651,11 +2853,218 @@ mod tests {
         // trimmed the same way `name` is before persisting.
         let record = h
             .service
-            .create_app("A", &format!("  {}  ", "x".repeat(MAX_BRIEF_BYTES)), None)
+            .create_app(Some("A"), &format!("  {}  ", "x".repeat(MAX_BRIEF_BYTES)), None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
         assert_eq!(record.brief, "x".repeat(MAX_BRIEF_BYTES));
+    }
+
+    #[tokio::test]
+    async fn create_app_without_a_name_uses_a_placeholder_until_the_llm_suggests_one() {
+        let service = test_service().await;
+        let record = service
+            .create_app(None, "一个记事本 app", None)
+            .await
+            .expect("brief alone is enough to create");
+        assert_eq!(record.brief, "一个记事本 app");
+        assert!(
+            !record.name.trim().is_empty(),
+            "a placeholder name is always present"
+        );
+        assert_eq!(
+            record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+    }
+
+    #[tokio::test]
+    async fn create_app_rejects_an_empty_brief() {
+        let service = test_service().await;
+        service
+            .create_app(Some("Notes"), "   ", None)
+            .await
+            .expect_err("an empty brief cannot drive authoring");
+    }
+
+    #[tokio::test]
+    async fn a_stored_questionnaire_survives_a_reload() {
+        let service = test_service().await;
+        let record = service
+            .create_app(None, "一个记事本", None)
+            .await
+            .expect("create");
+        service
+            .questionnaire_ready(&record.id, one_step(), Some("记事本".into()))
+            .await
+            .expect("authoring succeeds");
+
+        let reloaded = reload_service(&service).await;
+        let draft = reloaded.draft(&record.id).await.expect("draft is readable");
+        assert_eq!(draft.questionnaire.len(), 1);
+        assert_eq!(
+            reloaded.record(&record.id).await.expect("record").name,
+            "记事本"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_questionnaire_leaves_the_app_in_authoring() {
+        let service = test_service().await;
+        let record = service
+            .create_app(None, "一个记事本", None)
+            .await
+            .expect("create");
+
+        // 6 steps is over MAX_STEPS; the validator must reject it and the
+        // workflow must not advance.
+        let too_many: Vec<_> = (0..6).map(|i| step_named(&format!("s{i}"), i)).collect();
+        service
+            .questionnaire_ready(&record.id, too_many, None)
+            .await
+            .expect_err("an over-limit questionnaire is rejected");
+
+        assert_eq!(
+            service.record(&record.id).await.expect("record").workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire,
+            "a rejected questionnaire must not advance the workflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_brief_after_a_failure_reauthors_from_scratch() {
+        let service = test_service().await;
+        let record = service
+            .create_app(None, "一个记事本", None)
+            .await
+            .expect("create");
+        service
+            .questionnaire_failed(&record.id, "model offline")
+            .await
+            .expect("fail");
+        service
+            .update_brief(&record.id, "改成一个待办清单")
+            .await
+            .expect("brief is editable");
+
+        let refreshed = service.record(&record.id).await.expect("record");
+        assert_eq!(refreshed.brief, "改成一个待办清单");
+        assert_eq!(
+            refreshed.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+    }
+
+    fn plan_stub() -> AppPlan {
+        AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: Vec::new(),
+            summary: "s".into(),
+        }
+    }
+
+    /// `begin_planning` then `plan_ready` end to end: unlike every OTHER
+    /// `stamp_fresh_plan` call site in this file (which reach
+    /// `awaiting_spec_confirmation` via `open_designer`, skipping `planning`
+    /// entirely — see `test_support::stamp_fresh_plan`'s doc), this is the
+    /// ONE path that drives the real `planning -> awaiting_spec_confirmation`
+    /// transition, so it's the only place `plan_ready`'s own event shape
+    /// (`WorkflowChanged`, `PlanChanged`, then the gate announcement) is
+    /// exercised directly.
+    #[tokio::test]
+    async fn begin_planning_then_plan_ready_opens_the_designer_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Plan"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        h.service.begin_planning(&record.id).await.unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Planning
+        );
+        let _ = h.take_events().await;
+
+        let interaction = h
+            .service
+            .plan_ready(&record.id, plan_stub())
+            .await
+            .unwrap();
+        assert_eq!(interaction.kind, AppInteractionKind::Designer);
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation
+        );
+        assert_eq!(
+            h.service.draft(&record.id).await.unwrap().plan,
+            Some(plan_stub())
+        );
+        assert_eq!(
+            h.take_events().await,
+            vec![
+                AppEvent::WorkflowChanged {
+                    app_id: record.id.clone(),
+                    state: AppWorkflowState::AwaitingSpecConfirmation,
+                    detail: None,
+                },
+                AppEvent::PlanChanged {
+                    app_id: record.id.clone(),
+                    revision: 0,
+                    plan: Some(plan_stub()),
+                },
+                AppEvent::DesignerRequested {
+                    app_id: record.id.clone(),
+                    interaction_id: interaction.interaction_id,
+                    revision: 0,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_failed_can_retry_or_reopen_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Retry"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        h.service.begin_planning(&record.id).await.unwrap();
+        h.service
+            .plan_failed(&record.id, "model offline")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::PlanFailed
+        );
+
+        // `retry_plan` returns to `planning` with the same answers.
+        h.service.retry_plan(&record.id).await.unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Planning
+        );
+        h.service.plan_failed(&record.id, "again").await.unwrap();
+
+        // `reopen_answers` is the other escape: back to `collecting_spec`,
+        // preserving the questionnaire and every answer (unlike
+        // `update_brief`, which clears both).
+        let draft_before = h.service.draft(&record.id).await.unwrap();
+        h.service.reopen_answers(&record.id).await.unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::CollectingSpec
+        );
+        let draft_after = h.service.draft(&record.id).await.unwrap();
+        assert_eq!(draft_after.questionnaire, draft_before.questionnaire);
+        assert_eq!(draft_after.fields, draft_before.fields);
     }
 
     #[tokio::test]
@@ -2664,7 +3073,7 @@ mod tests {
         let h = harness(dir.path()).await;
         for i in 0..101 {
             h.service
-                .create_app(&format!("App {i}"), "a test app", None)
+                .create_app(Some(&format!("App {i}")), "a test app", None)
                 .await
                 .unwrap();
         }
@@ -2677,7 +3086,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Suggestion", "a test app", None)
+            .create_app(Some("Suggestion"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2722,7 +3131,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Caps", "a test app", None)
+            .create_app(Some("Caps"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2806,7 +3215,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Contract", "a test app", None)
+            .create_app(Some("Contract"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2881,7 +3290,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Fields", "a test app", None)
+            .create_app(Some("Fields"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2944,7 +3353,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Prompt", "a test app", None)
+            .create_app(Some("Prompt"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -2978,7 +3387,7 @@ mod tests {
         .await
         .unwrap();
         let record = service
-            .create_app("N", "a test app", None)
+            .create_app(Some("N"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&service, &record.id).await;
@@ -3000,7 +3409,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Big", "a test app", None)
+            .create_app(Some("Big"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3052,7 +3461,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Roll", "a test app", None)
+            .create_app(Some("Roll"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3176,7 +3585,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("MidBatch", "a test app", None)
+            .create_app(Some("MidBatch"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3285,7 +3694,7 @@ mod tests {
         h.sink.set_fail(true);
         let record = h
             .service
-            .create_app("Merge", "a test app", None)
+            .create_app(Some("Merge"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3397,7 +3806,7 @@ mod tests {
         .unwrap();
         recording.set_fail(true);
         let record = service
-            .create_app("Race", "a test app", None)
+            .create_app(Some("Race"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&service, &record.id).await;
@@ -3440,7 +3849,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Proof", "a test app", None)
+            .create_app(Some("Proof"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3529,7 +3938,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Err", "a test app", None)
+            .create_app(Some("Err"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3606,7 +4015,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Sugg", "a test app", None)
+            .create_app(Some("Sugg"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3679,7 +4088,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("P", "a test app", None)
+            .create_app(Some("P"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3732,14 +4141,14 @@ mod tests {
         let h = harness(dir.path()).await;
         let a = h
             .service
-            .create_app("GateA", "a test app", None)
+            .create_app(Some("GateA"), "a test app", None)
             .await
             .unwrap();
         let a = advance_to_collecting_spec(&h.service, &a.id).await;
         let designer_gate = h.service.open_designer(&a.id).await.unwrap();
         let b = h
             .service
-            .create_app("GateB", "a test app", None)
+            .create_app(Some("GateB"), "a test app", None)
             .await
             .unwrap();
         let b = advance_to_collecting_spec(&h.service, &b.id).await;
@@ -3785,7 +4194,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let a = h
             .service
-            .create_app("LateSub", "a test app", None)
+            .create_app(Some("LateSub"), "a test app", None)
             .await
             .unwrap();
         let a = advance_to_collecting_spec(&h.service, &a.id).await;
@@ -3819,7 +4228,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Order", "a test app", None)
+            .create_app(Some("Order"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3878,7 +4287,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Busy2", "a test app", None)
+            .create_app(Some("Busy2"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3915,7 +4324,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Lean", "a test app", None)
+            .create_app(Some("Lean"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -3992,7 +4401,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Hybrid", "a test app", None)
+            .create_app(Some("Hybrid"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -4053,7 +4462,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Hybrid2", "a test app", None)
+            .create_app(Some("Hybrid2"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -4157,7 +4566,7 @@ mod tests {
         .await
         .unwrap();
         let record = service
-            .create_app("Plant", "a test app", None)
+            .create_app(Some("Plant"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&service, &record.id).await;
@@ -4196,7 +4605,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("HornB", "a test app", None)
+            .create_app(Some("HornB"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -4280,7 +4689,7 @@ mod tests {
         h.sink.set_fail(true); // continuations stay queued
         let record = h
             .service
-            .create_app("Big", "a test app", None)
+            .create_app(Some("Big"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -4342,7 +4751,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Stale", "a test app", None)
+            .create_app(Some("Stale"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
@@ -4435,14 +4844,14 @@ mod tests {
         let b = harness(dir.path()).await; // loaded before app1 exists
         let app1 = a
             .service
-            .create_app("From A", "a test app", None)
+            .create_app(Some("From A"), "a test app", None)
             .await
             .unwrap();
         let app1 = advance_to_collecting_spec(&a.service, &app1.id).await;
         // B has never seen app1; its index write must preserve it.
         let app2 = b
             .service
-            .create_app("From B", "a test app", None)
+            .create_app(Some("From B"), "a test app", None)
             .await
             .unwrap();
         let app2 = advance_to_collecting_spec(&b.service, &app2.id).await;
@@ -4462,7 +4871,7 @@ mod tests {
         // …and stays deleted across A's next index write.
         let app3 = a
             .service
-            .create_app("A again", "a test app", None)
+            .create_app(Some("A again"), "a test app", None)
             .await
             .unwrap();
         let app3 = advance_to_collecting_spec(&a.service, &app3.id).await;
@@ -4553,7 +4962,7 @@ mod tests {
 
         // The create's emission triggers the observer's reentrant call.
         service
-            .create_app("Reenter", "a test app", None)
+            .create_app(Some("Reenter"), "a test app", None)
             .await
             .unwrap();
         service.flush_events().await; // completes — the queue is NOT deadlocked
@@ -4578,7 +4987,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app("Drop", "a test app", None)
+            .create_app(Some("Drop"), "a test app", None)
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;

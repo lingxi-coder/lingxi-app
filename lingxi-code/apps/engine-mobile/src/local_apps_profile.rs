@@ -221,7 +221,7 @@ mod tests {
                 .expect("profile");
             let record = profile
                 .service
-                .create_app("Survivor", "a test app", None)
+                .create_app(Some("Survivor"), "a test app", None)
                 .await
                 .expect("create app");
             local_apps::test_support::advance_to_collecting_spec(&profile.service, &record.id)

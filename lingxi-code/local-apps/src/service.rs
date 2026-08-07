@@ -2583,6 +2583,47 @@ mod tests {
             .unwrap();
     }
 
+    /// Direct coverage for `brief`'s validation (empty-after-trim rejected,
+    /// `MAX_BRIEF_BYTES` enforced, exactly-at-cap accepted, and the trimmed
+    /// value is what's persisted) — finding from Task 2 review: every WIRE
+    /// path (`host.rs::handle_create_app`, `local_apps_mcp.rs`'s `create`
+    /// tool) currently passes an already-trimmed, non-empty, ≤200-byte
+    /// `name` as `brief` (Tasks 10/11 have not wired a real `brief` input
+    /// yet), so this validation was otherwise unreachable from any live
+    /// caller and shipped with no test. Mirrors
+    /// `create_app_enforces_name_and_conversation_caps` immediately above.
+    #[tokio::test]
+    async fn create_app_enforces_brief_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        // Empty after trim is rejected, independent of `name`.
+        let err = h
+            .service
+            .create_app("A", "   ", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
+        // Over the cap is rejected.
+        let err = h
+            .service
+            .create_app("A", &"x".repeat(MAX_BRIEF_BYTES + 1), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
+        assert!(
+            h.service.list_apps().await.is_empty(),
+            "nothing was created"
+        );
+        // Exactly at the cap is fine, and leading/trailing whitespace is
+        // trimmed the same way `name` is before persisting.
+        let record = h
+            .service
+            .create_app("A", &format!("  {}  ", "x".repeat(MAX_BRIEF_BYTES)), None)
+            .await
+            .unwrap();
+        assert_eq!(record.brief, "x".repeat(MAX_BRIEF_BYTES));
+    }
+
     #[tokio::test]
     async fn create_app_library_is_not_artificially_capped() {
         let dir = tempfile::tempdir().unwrap();

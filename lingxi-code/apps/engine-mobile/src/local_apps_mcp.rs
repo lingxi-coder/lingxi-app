@@ -353,10 +353,15 @@ impl LocalAppsMcpTransport {
                 // template concept — `AppRecord`/`AppService::create_app` now
                 // take a free-text `brief` instead. Task 10 rewrites this
                 // schema (and the request shape) around the conversational
-                // design flow. Until then `template` (if sent) is accepted
-                // and ignored, and `name` doubles as the brief — a real,
-                // user-supplied string, not a fabricated one — so `create`
-                // keeps working for existing callers/tests.
+                // design flow to accept a real brief. Until then `template`
+                // (if sent) is accepted and ignored, and `name` doubles as
+                // the brief. This is DELIBERATELY pinned, not silent:
+                // `create_persists_name_as_brief_until_task_10_adds_a_real_one`
+                // below asserts `AppRecord.brief == name` and will fail the
+                // moment this changes — Task 10 cannot land a real brief
+                // field without that test forcing it to touch this comment
+                // and this call.
+
                 let conversation_id = input
                     .get("conversation_id")
                     .and_then(Value::as_str)
@@ -635,6 +640,35 @@ mod tests {
         .expect("load app service");
         assert!(transport.attach_service(Arc::new(service)).is_ok());
         transport
+    }
+
+    /// PINS the gap the `create` handler's TODO names: until Task 10 gives
+    /// the `create` tool a real `brief` input, `AppRecord.brief` is exactly
+    /// `name` — not a template tag, not empty, not anything else. This is
+    /// deliberately a strong equality assertion (not "is non-empty" or "is
+    /// present") so ANY future change to what `create` persists as `brief` —
+    /// whether Task 10 wires a real one or someone quietly "improves" this
+    /// call — fails this test and forces a conscious look at the comment
+    /// above `service.create_app(name, name, conversation_id)`, instead of
+    /// silently shipping a still-wrong value.
+    #[tokio::test]
+    async fn create_persists_name_as_brief_until_task_10_adds_a_real_one() {
+        let root = tempfile::tempdir().unwrap();
+        let transport = attached_transport(root.path()).await;
+        let created = transport
+            .call(
+                "create",
+                json!({"name": "Habit Tracker", "template": "dashboard"}),
+            )
+            .await
+            .expect("create");
+        let app = &created.structured_content.expect("structured")["app"];
+        assert_eq!(app["name"], "Habit Tracker");
+        assert_eq!(
+            app["brief"], "Habit Tracker",
+            "until Task 10 adds a real brief input, `create` must persist `name` as `brief` \
+             verbatim — not a template tag, not empty, not silently something else"
+        );
     }
 
     #[tokio::test]

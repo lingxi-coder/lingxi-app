@@ -1682,12 +1682,40 @@ mod tests {
 
     /// A draft with no `Deferred` value anywhere (the common case, including
     /// an empty `fields` map and no pending suggestion) is unaffected.
+    ///
+    /// The questionnaire carries a REAL step with a POPULATED, legal
+    /// non-`Deferred` `default_value` — not an empty `questionnaire: Vec::new()`
+    /// — so this is honest coverage of the new third arm
+    /// (`ensure_no_deferred_design_values`'s questionnaire check), not a
+    /// vacuous pass: a guard that rejected every populated `default_value`
+    /// regardless of its variant (e.g. `is_some()` instead of
+    /// `is_some_and(is_deferred)`) would still pass a test whose
+    /// `questionnaire` is empty, and review flagged exactly that. Verified by
+    /// hand: mutating the real `is_some_and(is_deferred)` to `is_some()` in
+    /// `ensure_no_deferred_design_values` turns this test red (see
+    /// `task-2-report.md`'s mutation-check writeup for the exact output).
     #[test]
     fn a_draft_without_any_deferred_value_passes_the_guard() {
         let draft = AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
             revision: 1,
-            questionnaire: Vec::new(),
+            questionnaire: vec![crate::questionnaire::AppDesignStep {
+                id: "basics".into(),
+                order: 0,
+                title: "Basics".into(),
+                description: None,
+                fields: vec![crate::questionnaire::AppDesignField {
+                    id: "tone".into(),
+                    label: "Tone".into(),
+                    description: None,
+                    field_type: crate::questionnaire::AppDesignFieldType::ShortText,
+                    required: false,
+                    allows_custom: false,
+                    allows_defer: true,
+                    default_value: Some(DesignValue::ShortText("playful".into())),
+                    options: Vec::new(),
+                }],
+            }],
             fields: std::collections::BTreeMap::from([(
                 "tone".to_string(),
                 DesignValue::ShortText("playful".into()),

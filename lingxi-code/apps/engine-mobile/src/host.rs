@@ -2828,6 +2828,12 @@ impl MobileEngineHandle {
         // doubles as the brief: a real, user-supplied string (not a
         // fabricated placeholder), so `create` keeps working for the ~14
         // existing tests that exercise `ClientCommand::CreateApp` end to end.
+        // This is DELIBERATELY pinned, not silent:
+        // `create_app_persists_name_as_brief_until_task_11_adds_a_real_one`
+        // asserts `AppRecord.brief == name` and fails the moment this
+        // changes, forcing Task 11 to touch this comment and this call
+        // instead of leaving the gap for Task 8's questionnaire authoring to
+        // discover at runtime.
         // Success needs no extra emit: `create_app` announces the new record
         // set via its own `AppsChanged` domain event.
         if let Err(error) = service.create_app(name, name, conversation_id).await {
@@ -7412,6 +7418,46 @@ mod tests {
                     && details.design_revision == 0
                     && matches!(details.runtime.state, AppRuntimeStateDto::Stopped)
             )));
+        });
+    }
+
+    /// PINS the gap `handle_create_app`'s TODO names: until Task 11 gives
+    /// `ClientCommand::CreateApp` a real `brief` field, the core
+    /// `AppRecord.brief` persisted for a chat/library create is exactly
+    /// `name` — verbatim, not the (ignored) `template`, not empty. Checked
+    /// against the CORE record (`AppRecordDto` carries no `brief` yet — see
+    /// the client-protocol Task-5 note), so this reaches past the wire and
+    /// pins what actually lands on disk, which is what Task 8's
+    /// questionnaire-authoring stage will read.
+    #[test]
+    fn create_app_persists_name_as_brief_until_task_11_adds_a_real_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Habit Tracker".into(),
+                    template: AppTemplateKindDto::Dashboard,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            let service = handle.local_apps().expect("local-apps service");
+            let record = service.record(&app_id).await.expect("record");
+            assert_eq!(record.name, "Habit Tracker");
+            assert_eq!(
+                record.brief, "Habit Tracker",
+                "until Task 11 adds a real brief input, CreateApp must persist `name` as \
+                 `brief` verbatim — not empty, not silently something else"
+            );
         });
     }
 

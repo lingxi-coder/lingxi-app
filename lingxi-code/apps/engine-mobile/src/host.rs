@@ -1846,8 +1846,8 @@ async fn build_mobile_inner_with_ask(
     // must read the HOST directory backing the guest session cwd while the
     // env block displays the guest path itself. Live table: external mounts
     // added later still resolve.
-    let orchestrator = if let Some(runtime) = mobile_linux.clone() {
-        orchestrator.with_prompt_probe_cwd_resolver(std::sync::Arc::new(move |path| {
+    orch_inner = if let Some(runtime) = mobile_linux.clone() {
+        orch_inner.with_prompt_probe_cwd_resolver(std::sync::Arc::new(move |path| {
             traits::mobile_linux::map_guest_path_to_host(
                 &path.to_string_lossy(),
                 &runtime.current_mounts(),
@@ -1855,7 +1855,7 @@ async fn build_mobile_inner_with_ask(
             .unwrap_or_else(|| path.to_path_buf())
         }))
     } else {
-        orchestrator
+        orch_inner
     };
     orch_inner = orch_inner.with_mcp_registry(mcp_registry.clone());
     // P0.1 (gated): attach the memdir prefetch when enabled above.

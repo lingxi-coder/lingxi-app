@@ -2844,19 +2844,22 @@ impl MobileEngineHandle {
         }
     }
 
-    /// As [`Self::join_app_mutation`], but the task also reports whether ITS
-    /// OWN mutation committed — used by the four handlers below that gate a
+    /// As [`Self::join_app_mutation`], but the task also reports ITS OWN
+    /// mutation's outcome — used by the four handlers below that gate a
     /// SEPARATE, un-joined background LLM round trip (authoring/planning) on
-    /// that outcome. A cancelled join (runtime shutting down) reports `false`:
-    /// there is nothing left to trigger.
-    async fn join_app_mutation_outcome(task: tokio::task::JoinHandle<bool>) -> bool {
+    /// it. `T` is `Option<u64>` at every call site: `Some(epoch)` on success
+    /// (the `llm_round` the mutation just bumped to, handed straight to the
+    /// freshly spawned task), `None` on failure. A cancelled join (runtime
+    /// shutting down) reports `T::default()` (`None`): there is nothing left
+    /// to trigger.
+    async fn join_app_mutation_outcome<T: Default>(task: tokio::task::JoinHandle<T>) -> T {
         match task.await {
-            Ok(succeeded) => succeeded,
+            Ok(outcome) => outcome,
             Err(error) => {
                 if error.is_panic() {
                     std::panic::resume_unwind(error.into_panic());
                 }
-                false
+                T::default()
             }
         }
     }
@@ -2932,7 +2935,10 @@ impl MobileEngineHandle {
         // spec the questionnaire gets authored from; see
         // `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
         match service.create_app(Some(name), brief, conversation_id).await {
-            Ok(record) => self.trigger_authoring(&service, record.id),
+            Ok(record) => {
+                let epoch = record.llm_round;
+                self.trigger_authoring(&service, record.id, epoch);
+            }
             Err(error) => self.emit_app_failure(None, &error).await,
         }
     }
@@ -2944,23 +2950,24 @@ impl MobileEngineHandle {
         let emissions = self.app_emissions.clone();
         let task_service = service.clone();
         let task_app_id = app_id.clone();
-        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-            match task_service.update_brief(&task_app_id, &brief).await {
-                Ok(()) => {
-                    Self::emit_apps_snapshot(&task_service).await;
-                    true
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.update_brief(&task_app_id, &brief).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
                 }
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                        .await;
-                    false
-                }
-            }
-        }))
-        .await;
-        if succeeded {
-            self.trigger_authoring(&service, app_id);
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_authoring(&service, app_id, epoch);
         }
     }
 
@@ -2971,23 +2978,24 @@ impl MobileEngineHandle {
         let emissions = self.app_emissions.clone();
         let task_service = service.clone();
         let task_app_id = app_id.clone();
-        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-            match task_service.retry_questionnaire(&task_app_id).await {
-                Ok(()) => {
-                    Self::emit_apps_snapshot(&task_service).await;
-                    true
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.retry_questionnaire(&task_app_id).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
                 }
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                        .await;
-                    false
-                }
-            }
-        }))
-        .await;
-        if succeeded {
-            self.trigger_authoring(&service, app_id);
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_authoring(&service, app_id, epoch);
         }
     }
 
@@ -3001,23 +3009,24 @@ impl MobileEngineHandle {
         // `begin_planning` validates the collected answers are self-consistent
         // BEFORE flipping to `planning` — a failure here never starts the
         // background plan round trip.
-        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-            match task_service.begin_planning(&task_app_id).await {
-                Ok(()) => {
-                    Self::emit_apps_snapshot(&task_service).await;
-                    true
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.begin_planning(&task_app_id).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
                 }
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                        .await;
-                    false
-                }
-            }
-        }))
-        .await;
-        if succeeded {
-            self.trigger_planning(&service, app_id);
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_planning(&service, app_id, epoch);
         }
     }
 
@@ -3028,23 +3037,24 @@ impl MobileEngineHandle {
         let emissions = self.app_emissions.clone();
         let task_service = service.clone();
         let task_app_id = app_id.clone();
-        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-            match task_service.retry_plan(&task_app_id).await {
-                Ok(()) => {
-                    Self::emit_apps_snapshot(&task_service).await;
-                    true
+        let epoch: Option<u64> =
+            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+                match task_service.retry_plan(&task_app_id).await {
+                    Ok(epoch) => {
+                        Self::emit_apps_snapshot(&task_service).await;
+                        Some(epoch)
+                    }
+                    Err(error) => {
+                        emissions
+                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                            .await;
+                        None
+                    }
                 }
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                        .await;
-                    false
-                }
-            }
-        }))
-        .await;
-        if succeeded {
-            self.trigger_planning(&service, app_id);
+            }))
+            .await;
+        if let Some(epoch) = epoch {
+            self.trigger_planning(&service, app_id, epoch);
         }
     }
 
@@ -3058,7 +3068,7 @@ impl MobileEngineHandle {
     /// this is a free function and why it runs on
     /// [`crate::local_apps_profile::worker_runtime`] rather than
     /// `self.runtime`.
-    fn trigger_authoring(&self, service: &Arc<AppService>, app_id: String) {
+    fn trigger_authoring(&self, service: &Arc<AppService>, app_id: String, epoch: u64) {
         // `self.local_apps` was `Ok` (checked by every caller via
         // `local_apps_or_report`) iff `self.profile_apps` is `Some` — both are
         // set together from the same `loaded_profile` match at build time.
@@ -3081,13 +3091,18 @@ impl MobileEngineHandle {
         };
         let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
             Arc::new(self.app_emissions.clone());
-        let handle =
-            crate::local_apps_profile::spawn_authoring(service.clone(), profile.llm.current(), notifier, app_id);
+        let handle = crate::local_apps_profile::spawn_authoring(
+            service.clone(),
+            profile.llm.current(),
+            notifier,
+            app_id,
+            epoch,
+        );
         self.local_apps_background.track(handle);
     }
 
     /// As [`Self::trigger_authoring`], for background plan derivation.
-    fn trigger_planning(&self, service: &Arc<AppService>, app_id: String) {
+    fn trigger_planning(&self, service: &Arc<AppService>, app_id: String, epoch: u64) {
         let Some(profile) = &self.profile_apps else {
             debug_assert!(
                 false,
@@ -3102,8 +3117,13 @@ impl MobileEngineHandle {
         };
         let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
             Arc::new(self.app_emissions.clone());
-        let handle =
-            crate::local_apps_profile::spawn_planning(service.clone(), profile.llm.current(), notifier, app_id);
+        let handle = crate::local_apps_profile::spawn_planning(
+            service.clone(),
+            profile.llm.current(),
+            notifier,
+            app_id,
+            epoch,
+        );
         self.local_apps_background.track(handle);
     }
 

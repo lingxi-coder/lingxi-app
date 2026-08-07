@@ -143,6 +143,7 @@ impl AppState {
                 workflow_state: AppWorkflowState::AuthoringQuestionnaire,
                 conversation_id,
                 workspace_rel,
+                llm_round: 1,
             },
             draft: AppDesignDraft {
                 schema_version: APPS_SCHEMA_VERSION,
@@ -251,16 +252,34 @@ impl AppState {
 
     /// `authoring_questionnaire -> collecting_spec`，落盘问卷；`name` 是
     /// LLM 建议的正式名，用来替换创建时的占位名。
+    ///
+    /// `epoch` MUST match [`crate::types::AppRecord::llm_round`] at the
+    /// moment this commits, or this is a NO-OP that returns `Ok(false)` —
+    /// not an error. A mismatch means a LATER `retry_questionnaire`/
+    /// `update_brief` already superseded whichever round `epoch` names (the
+    /// escape hatch that admits `authoring_questionnaire` as its own source,
+    /// specifically so a user is never trapped behind a slow or dead round
+    /// trip, ALSO makes it possible for the ORIGINAL round trip to still be
+    /// alive when a second one starts). Without this check the stale round
+    /// could commit ITS questionnaire — authored from whatever brief was
+    /// current when IT started — as the answer for the NEW round, silently,
+    /// with the fresh round's own eventual failure (its `questionnaire_ready`
+    /// call now rejected by this very guard) surfacing as a confusing error
+    /// on an app that already looks like it succeeded.
     pub fn questionnaire_ready(
         &mut self,
         steps: Vec<crate::questionnaire::AppDesignStep>,
         name: Option<String>,
+        epoch: u64,
         now_ms: u64,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
         self.ensure_workflow(
             "questionnaire_ready",
             &[AppWorkflowState::AuthoringQuestionnaire],
         )?;
+        if epoch != self.record.llm_round {
+            return Ok(false);
+        }
         crate::questionnaire::validate_questionnaire(&steps)?;
         self.draft.questionnaire = steps;
         if let Some(name) = name {
@@ -270,17 +289,25 @@ impl AppState {
             }
         }
         self.set_workflow(AppWorkflowState::CollectingSpec, now_ms);
-        Ok(())
+        Ok(true)
     }
 
-    /// `authoring_questionnaire -> questionnaire_failed`.
-    pub fn questionnaire_failed(&mut self, now_ms: u64) -> Result<(), AppError> {
+    /// `authoring_questionnaire -> questionnaire_failed`. `epoch`-gated the
+    /// same way as [`Self::questionnaire_ready`] and for the identical
+    /// reason, just for the failure half of the SAME race: without this, a
+    /// STALE round's failure could fail-close a FRESH round that is still
+    /// legitimately in flight (both sit in the same `authoring_questionnaire`
+    /// state, so the workflow guard alone cannot tell them apart).
+    pub fn questionnaire_failed(&mut self, epoch: u64, now_ms: u64) -> Result<bool, AppError> {
         self.ensure_workflow(
             "questionnaire_failed",
             &[AppWorkflowState::AuthoringQuestionnaire],
         )?;
+        if epoch != self.record.llm_round {
+            return Ok(false);
+        }
         self.set_workflow(AppWorkflowState::QuestionnaireFailed, now_ms);
-        Ok(())
+        Ok(true)
     }
 
     /// `questionnaire_failed -> authoring_questionnaire`. 重试回到执行态，
@@ -290,10 +317,11 @@ impl AppState {
     /// crash mid round trip that predates `AppService::load`'s own
     /// fail-closed sweep, or a sweep that itself missed a case). The engine
     /// re-fires `spawn_authoring` on every successful call here, live task
-    /// or not, so this MUST NOT be exposed to a client while a genuinely
-    /// live task could still be running — see the host-side caller's own
-    /// note on that residual race.
-    pub fn retry_questionnaire(&mut self, now_ms: u64) -> Result<(), AppError> {
+    /// or not — that is exactly what bumps `AppRecord::llm_round` and
+    /// returns the NEW value, so the engine can hand it to the freshly
+    /// spawned task and any STILL-RUNNING older one is provably unable to
+    /// commit over it (see [`Self::questionnaire_ready`]).
+    pub fn retry_questionnaire(&mut self, now_ms: u64) -> Result<u64, AppError> {
         self.ensure_workflow(
             "retry_questionnaire",
             &[
@@ -301,8 +329,9 @@ impl AppState {
                 AppWorkflowState::AuthoringQuestionnaire,
             ],
         )?;
+        self.record.llm_round += 1;
         self.set_workflow(AppWorkflowState::AuthoringQuestionnaire, now_ms);
-        Ok(())
+        Ok(self.record.llm_round)
     }
 
     /// 改 brief 并重新出题。旧答案的 field id 在新问卷里已不存在，
@@ -311,8 +340,10 @@ impl AppState {
     /// escape hatch `retry_questionnaire`/`retry_plan` have for those two
     /// states (an engine-owned background task died with nothing left to
     /// resolve them): a user who would rather change the brief entirely than
-    /// retry the same one is never trapped either.
-    pub fn update_brief(&mut self, brief: String, now_ms: u64) -> Result<(), AppError> {
+    /// retry the same one is never trapped either. Bumps `AppRecord::
+    /// llm_round` and returns it, same as `retry_questionnaire` — see
+    /// [`Self::questionnaire_ready`] for why.
+    pub fn update_brief(&mut self, brief: String, now_ms: u64) -> Result<u64, AppError> {
         self.ensure_workflow(
             "update_brief",
             &[
@@ -346,27 +377,39 @@ impl AppState {
         self.draft.plan_for_revision = None;
         self.draft.pending_suggestion = None;
         self.draft.revision += 1;
+        self.record.llm_round += 1;
         self.set_workflow(AppWorkflowState::AuthoringQuestionnaire, now_ms);
-        Ok(())
+        Ok(self.record.llm_round)
     }
 
     /// `collecting_spec -> planning`。先确认答案自洽，别拿一份残缺答案
-    /// 去换一次 LLM 往返。
-    pub fn begin_planning(&mut self, now_ms: u64) -> Result<(), AppError> {
+    /// 去换一次 LLM 往返。Bumps `AppRecord::llm_round` and returns it — see
+    /// [`Self::questionnaire_ready`] for why.
+    pub fn begin_planning(&mut self, now_ms: u64) -> Result<u64, AppError> {
         self.ensure_workflow("begin_planning", &[AppWorkflowState::CollectingSpec])?;
         crate::questionnaire::validate_answers(&self.draft.questionnaire, &self.draft.fields)?;
+        self.record.llm_round += 1;
         self.set_workflow(AppWorkflowState::Planning, now_ms);
-        Ok(())
+        Ok(self.record.llm_round)
     }
 
     /// `planning -> awaiting_spec_confirmation`，落盘方案并开确认门。
+    ///
+    /// `epoch`-gated exactly like [`Self::questionnaire_ready`], for the
+    /// identical reason (planning's own retry-from-`planning` escape hatch
+    /// creates the same possible-second-live-task shape). A stale round
+    /// returns `Ok(None)` — a no-op, not an error.
     pub fn plan_ready(
         &mut self,
         plan: crate::questionnaire::AppPlan,
         interaction_id: String,
+        epoch: u64,
         now_ms: u64,
-    ) -> Result<AppInteractionRequest, AppError> {
+    ) -> Result<Option<AppInteractionRequest>, AppError> {
         self.ensure_workflow("plan_ready", &[AppWorkflowState::Planning])?;
+        if epoch != self.record.llm_round {
+            return Ok(None);
+        }
         crate::questionnaire::validate_plan(&plan)?;
         self.draft.plan = Some(plan);
         self.draft.plan_for_revision = Some(self.draft.revision);
@@ -379,14 +422,18 @@ impl AppState {
         };
         self.interactions.pending = Some(interaction.clone());
         self.set_workflow(AppWorkflowState::AwaitingSpecConfirmation, now_ms);
-        Ok(interaction)
+        Ok(Some(interaction))
     }
 
-    /// `planning -> plan_failed`.
-    pub fn plan_failed(&mut self, now_ms: u64) -> Result<(), AppError> {
+    /// `planning -> plan_failed`. `epoch`-gated like
+    /// [`Self::questionnaire_failed`], for the identical reason.
+    pub fn plan_failed(&mut self, epoch: u64, now_ms: u64) -> Result<bool, AppError> {
         self.ensure_workflow("plan_failed", &[AppWorkflowState::Planning])?;
+        if epoch != self.record.llm_round {
+            return Ok(false);
+        }
         self.set_workflow(AppWorkflowState::PlanFailed, now_ms);
-        Ok(())
+        Ok(true)
     }
 
     /// `plan_failed -> planning`. ALSO admits `planning` itself as a source
@@ -394,14 +441,16 @@ impl AppState {
     /// has for `authoring_questionnaire`, and for the same reason: `planning`
     /// is driven entirely by an engine-owned background task, so a crash mid
     /// round trip (or a load-time sweep that missed it) can leave it stuck
-    /// with nothing left to resolve it.
-    pub fn retry_plan(&mut self, now_ms: u64) -> Result<(), AppError> {
+    /// with nothing left to resolve it. Bumps `AppRecord::llm_round` and
+    /// returns it — see [`Self::questionnaire_ready`] for why.
+    pub fn retry_plan(&mut self, now_ms: u64) -> Result<u64, AppError> {
         self.ensure_workflow(
             "retry_plan",
             &[AppWorkflowState::PlanFailed, AppWorkflowState::Planning],
         )?;
+        self.record.llm_round += 1;
         self.set_workflow(AppWorkflowState::Planning, now_ms);
-        Ok(())
+        Ok(self.record.llm_round)
     }
 
     /// `plan_failed -> collecting_spec`. `retry_plan` is only useful when
@@ -849,7 +898,7 @@ mod tests {
             None,
             10,
         );
-        a.questionnaire_ready(one_step(), None, 10)
+        a.questionnaire_ready(one_step(), None, 1, 10)
             .expect("fixture questionnaire is valid");
         a
     }
@@ -1293,10 +1342,11 @@ mod tests {
         let revision = a
             .update_draft(current, &set_patch("title", "fixed"), 13)
             .unwrap();
-        a.begin_planning(14).unwrap();
+        let epoch = a.begin_planning(14).unwrap();
         let fresh_gate = a
-            .plan_ready(a_plan(), "int-fix-2".into(), 15)
-            .expect("re-planning the fixed draft succeeds");
+            .plan_ready(a_plan(), "int-fix-2".into(), epoch, 15)
+            .expect("re-planning the fixed draft succeeds")
+            .expect("fresh epoch must not be rejected as stale");
         assert_eq!(a.draft.plan_for_revision, Some(revision));
         a.confirm_design(&fresh_gate.interaction_id, revision, 16)
             .unwrap();
@@ -1590,7 +1640,8 @@ mod tests {
     #[test]
     fn questionnaire_ready_moves_to_collecting_spec_and_stores_the_steps() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), Some("记事本".into()), 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), Some("记事本".into()), epoch, 2)
             .expect("authoring succeeds");
         assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
         assert_eq!(app.draft.questionnaire.len(), 1);
@@ -1598,9 +1649,37 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_epoch_is_a_silent_no_op_not_an_error_or_a_fail_close() {
+        let mut app = authoring_app();
+        let real_epoch = app.record.llm_round;
+        let stale_epoch = real_epoch.wrapping_sub(1);
+        let applied = app
+            .questionnaire_ready(one_step(), None, stale_epoch, 2)
+            .expect("a stale epoch is Ok, not an error");
+        assert!(!applied, "a stale epoch must not apply");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire,
+            "a stale epoch must not move the workflow state at all"
+        );
+        assert!(app.draft.questionnaire.is_empty(), "nothing was written");
+
+        let failed = app
+            .questionnaire_failed(stale_epoch, 3)
+            .expect("a stale epoch is Ok, not an error");
+        assert!(!failed, "a stale epoch must not fail-close either");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire,
+            "still untouched — a stale FAILURE must not fail-close a fresh, still-live round"
+        );
+    }
+
+    #[test]
     fn a_failed_authoring_retry_returns_to_authoring_not_to_collecting_spec() {
         let mut app = authoring_app();
-        app.questionnaire_failed(2).expect("authoring can fail");
+        let epoch = app.record.llm_round;
+        app.questionnaire_failed(epoch, 2).expect("authoring can fail");
         assert_eq!(app.record.workflow_state, AppWorkflowState::QuestionnaireFailed);
         app.retry_questionnaire(3)
             .expect("a failed authoring can be retried");
@@ -1611,10 +1690,50 @@ mod tests {
         );
     }
 
+    /// The manual retry escape (`retry_questionnaire` from
+    /// `authoring_questionnaire` itself) bumps `llm_round`, so the ORIGINAL
+    /// round's eventual completion — success OR failure — is a no-op against
+    /// the app's now-current (higher) epoch.
+    #[test]
+    fn a_stale_task_cannot_overwrite_a_fresher_round_after_a_manual_retry() {
+        let mut app = authoring_app();
+        let original_epoch = app.record.llm_round;
+        let fresh_epoch = app
+            .retry_questionnaire(2)
+            .expect("retry from authoring_questionnaire itself is a valid self-transition");
+        assert_ne!(original_epoch, fresh_epoch, "retry must bump the epoch");
+
+        // The ORIGINAL (now stale) round's LLM call finally resolves and
+        // tries to commit its (outdated) questionnaire.
+        let applied = app
+            .questionnaire_ready(one_step(), Some("Wrong Name".into()), original_epoch, 3)
+            .expect("a stale epoch is Ok, not an error");
+        assert!(!applied);
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire,
+            "still waiting on the FRESH round"
+        );
+        assert_ne!(
+            app.record.name, "Wrong Name",
+            "the stale round's suggested name must never land"
+        );
+
+        // The FRESH round then resolves for real, using the epoch the retry
+        // returned — and DOES apply.
+        let applied = app
+            .questionnaire_ready(one_step(), Some("Right Name".into()), fresh_epoch, 4)
+            .expect("the fresh epoch is not stale");
+        assert!(applied);
+        assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
+        assert_eq!(app.record.name, "Right Name");
+    }
+
     #[test]
     fn updating_the_brief_clears_the_questionnaire_answers_and_plan() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
         app.draft
             .fields
@@ -1644,11 +1763,13 @@ mod tests {
     #[test]
     fn the_brief_is_not_editable_once_generation_has_been_confirmed() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
-        app.begin_planning(3).expect("planning starts");
-        app.plan_ready(a_plan(), "i-1".into(), 4)
-            .expect("planning succeeds");
+        let epoch = app.begin_planning(3).expect("planning starts");
+        app.plan_ready(a_plan(), "i-1".into(), epoch, 4)
+            .expect("planning succeeds")
+            .expect("fresh epoch must not be rejected as stale");
         app.confirm_design("i-1", app.draft.revision, 5)
             .expect("the user confirms");
         app.update_brief("太晚了".into(), 6)
@@ -1658,12 +1779,14 @@ mod tests {
     #[test]
     fn plan_ready_opens_the_spec_confirmation_gate_and_stamps_the_revision() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
-        app.begin_planning(3).expect("planning starts");
+        let epoch = app.begin_planning(3).expect("planning starts");
         let interaction = app
-            .plan_ready(a_plan(), "i-1".into(), 4)
-            .expect("planning succeeds");
+            .plan_ready(a_plan(), "i-1".into(), epoch, 4)
+            .expect("planning succeeds")
+            .expect("fresh epoch must not be rejected as stale");
 
         assert_eq!(
             app.record.workflow_state,
@@ -1673,14 +1796,52 @@ mod tests {
         assert_eq!(app.draft.plan_for_revision, Some(app.draft.revision));
     }
 
+    /// The same stale-round protection as
+    /// `a_stale_task_cannot_overwrite_a_fresher_round_after_a_manual_retry`,
+    /// for the planning side (`retry_plan` from `planning` itself).
+    #[test]
+    fn a_stale_planning_task_cannot_overwrite_a_fresher_round() {
+        let mut app = authoring_app();
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
+            .expect("authoring succeeds");
+        let original_epoch = app.begin_planning(3).expect("planning starts");
+        let fresh_epoch = app
+            .retry_plan(4)
+            .expect("retry from planning itself is a valid self-transition");
+        assert_ne!(original_epoch, fresh_epoch, "retry must bump the epoch");
+
+        let stale_result = app
+            .plan_ready(a_plan(), "stale-int".into(), original_epoch, 5)
+            .expect("a stale epoch is Ok, not an error");
+        assert!(stale_result.is_none(), "the stale round must not open the gate");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::Planning,
+            "still waiting on the FRESH round"
+        );
+
+        let fresh_result = app
+            .plan_ready(a_plan(), "fresh-int".into(), fresh_epoch, 6)
+            .expect("the fresh epoch is not stale")
+            .expect("fresh epoch must not be rejected as stale");
+        assert_eq!(fresh_result.interaction_id, "fresh-int");
+        assert_eq!(
+            app.record.workflow_state,
+            AppWorkflowState::AwaitingSpecConfirmation
+        );
+    }
+
     #[test]
     fn confirming_a_plan_computed_for_an_older_revision_is_refused() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
-        app.begin_planning(3).expect("planning starts");
-        app.plan_ready(a_plan(), "i-1".into(), 4)
-            .expect("planning succeeds");
+        let epoch = app.begin_planning(3).expect("planning starts");
+        app.plan_ready(a_plan(), "i-1".into(), epoch, 4)
+            .expect("planning succeeds")
+            .expect("fresh epoch must not be rejected as stale");
 
         // 用户回头改了一个答案：revision 前进，方案作废。
         app.draft.revision += 1;
@@ -1697,10 +1858,11 @@ mod tests {
     #[test]
     fn a_failed_plan_retry_returns_to_planning() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
-        app.begin_planning(3).expect("planning starts");
-        app.plan_failed(4).expect("planning can fail");
+        let epoch = app.begin_planning(3).expect("planning starts");
+        app.plan_failed(epoch, 4).expect("planning can fail");
         assert_eq!(app.record.workflow_state, AppWorkflowState::PlanFailed);
         app.retry_plan(5).expect("a failed plan can be retried");
         assert_eq!(app.record.workflow_state, AppWorkflowState::Planning);
@@ -1714,13 +1876,14 @@ mod tests {
     #[test]
     fn reopen_answers_returns_to_collecting_spec_keeping_the_answers() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
         app.draft
             .fields
             .insert("tone".into(), DesignValue::SingleChoice("a".into()));
-        app.begin_planning(3).expect("planning starts");
-        app.plan_failed(4).expect("planning can fail");
+        let epoch = app.begin_planning(3).expect("planning starts");
+        app.plan_failed(epoch, 4).expect("planning can fail");
         app.reopen_answers(5)
             .expect("plan_failed can reopen the answers");
         assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
@@ -1743,10 +1906,11 @@ mod tests {
     #[test]
     fn update_brief_escapes_a_failed_plan_too() {
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
-        app.begin_planning(3).expect("planning starts");
-        app.plan_failed(4).expect("planning can fail");
+        let epoch = app.begin_planning(3).expect("planning starts");
+        app.plan_failed(epoch, 4).expect("planning can fail");
         app.update_brief("换个方向重来".into(), 5)
             .expect("plan_failed can also change the brief");
         assert_eq!(
@@ -1771,7 +1935,8 @@ mod tests {
             .expect_err("no edits while authoring — the answers would race the questions");
 
         let mut app = authoring_app();
-        app.questionnaire_ready(one_step(), None, 2)
+        let epoch = app.record.llm_round;
+        app.questionnaire_ready(one_step(), None, epoch, 2)
             .expect("authoring succeeds");
         app.begin_planning(3).expect("planning starts");
         app.update_draft(app.draft.revision, &patch, 4)

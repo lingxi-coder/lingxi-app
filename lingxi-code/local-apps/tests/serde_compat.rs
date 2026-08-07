@@ -344,6 +344,8 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
             workflow_state: AppWorkflowState::AwaitingPreviewConfirmation,
             conversation_id: Some("conv-fixture-1".to_string()),
             workspace_rel: "apps/aaaa1111/workspace".to_string(),
+            // `#[serde(skip)]` — never on disk, always `0` after a load.
+            llm_round: 0,
         },
         draft: AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,
@@ -427,6 +429,8 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
             workflow_state: AppWorkflowState::CollectingSpec,
             conversation_id: None,
             workspace_rel: "apps/bbbb2222/workspace".to_string(),
+            // `#[serde(skip)]` — never on disk, always `0` after a load.
+            llm_round: 0,
         },
         draft: AppDesignDraft {
             schema_version: APPS_SCHEMA_VERSION,

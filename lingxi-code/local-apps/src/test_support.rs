@@ -87,8 +87,11 @@ pub async fn advance_to_collecting_spec(service: &AppService, app_id: &str) -> A
         .iter_mut()
         .find(|a| a.record.id == app_id)
         .expect("app exists");
-    app.questionnaire_ready(fixture_questionnaire(), None, app.record.updated_at_ms)
+    let epoch = app.record.llm_round;
+    let applied = app
+        .questionnaire_ready(fixture_questionnaire(), None, epoch, app.record.updated_at_ms)
         .expect("fixture questionnaire is valid");
+    assert!(applied, "the app's own current llm_round must never be stale");
     // Match the in-memory advance on disk too — otherwise a later
     // `AppService::load` reload sees the ORIGINAL `authoring_questionnaire`
     // record and the two diverge.

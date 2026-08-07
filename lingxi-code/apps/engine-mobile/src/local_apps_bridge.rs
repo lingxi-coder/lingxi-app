@@ -1161,6 +1161,7 @@ mod tests {
             workflow_state: AppWorkflowState::AwaitingSpecConfirmation,
             conversation_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
+            llm_round: 0,
         };
         let step = AppDesignStep {
             id: "basics".into(),
@@ -1260,6 +1261,7 @@ mod tests {
             workflow_state: AppWorkflowState::Ready,
             conversation_id: Some("conv-9".into()),
             workspace_rel: "apps/app00001/workspace".into(),
+            llm_round: 0,
         };
         let record_dto = AppRecordDto {
             id: "app00001".into(),

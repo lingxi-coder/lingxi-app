@@ -207,11 +207,25 @@ fn log_failed_fail_close(
 /// so a task anchored to the connection's runtime would be silently aborted
 /// mid round trip by an ordinary reconnect, not just a crash. Anchoring here
 /// is what the generation worker already does for the identical reason.
+///
+/// `epoch` MUST be the `llm_round` value the caller captured synchronously
+/// when it started THIS round (`create_app`'s returned record, or the `u64`
+/// `retry_questionnaire`/`update_brief` return) — never re-read later, or a
+/// third round starting between the capture and the re-read could be
+/// mis-attributed to this task. Passed straight through to
+/// `questionnaire_ready`/`questionnaire_failed`, which reject a stale epoch
+/// as a no-op: see [`local_apps::AppRecord::llm_round`]'s doc for why this
+/// exists — admitting `authoring_questionnaire` as its own
+/// `retry_questionnaire` source (the manual escape for a STUCK app) also
+/// means a manual retry can race a round that was only SLOW, not dead,
+/// spawning two tasks for the same app. Without the epoch check the loser
+/// could silently commit its (stale-brief) questionnaire as the winner's.
 pub(crate) fn spawn_authoring(
     service: Arc<AppService>,
     llm: Arc<LocalAppsLlm>,
     notifier: Arc<dyn AppFailureNotifier>,
     app_id: String,
+    epoch: u64,
 ) -> tokio::task::JoinHandle<()> {
     worker_runtime().spawn(async move {
         let brief = match service.record(&app_id).await {
@@ -225,26 +239,37 @@ pub(crate) fn spawn_authoring(
         };
         match llm.author_questionnaire(&brief).await {
             Ok((name, steps)) => {
-                if let Err(error) = service.questionnaire_ready(&app_id, steps, name).await {
-                    if let Err(fail_error) =
-                        service.questionnaire_failed(&app_id, &format!("{error}")).await
-                    {
-                        log_failed_fail_close(&app_id, "questionnaire_ready", &error, fail_error);
-                    }
-                    notifier
-                        .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                if let Err(error) = service
+                    .questionnaire_ready(&app_id, steps, name, epoch)
+                    .await
+                {
+                    let fail_close = service
+                        .questionnaire_failed(&app_id, &format!("{error}"), epoch)
                         .await;
+                    report_llm_failure(
+                        &service,
+                        notifier.as_ref(),
+                        &app_id,
+                        "questionnaire_ready",
+                        error,
+                        fail_close,
+                    )
+                    .await;
                 }
             }
             Err(error) => {
-                if let Err(fail_error) =
-                    service.questionnaire_failed(&app_id, &format!("{error}")).await
-                {
-                    log_failed_fail_close(&app_id, "author_questionnaire", &error, fail_error);
-                }
-                notifier
-                    .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                let fail_close = service
+                    .questionnaire_failed(&app_id, &format!("{error}"), epoch)
                     .await;
+                report_llm_failure(
+                    &service,
+                    notifier.as_ref(),
+                    &app_id,
+                    "author_questionnaire",
+                    error,
+                    fail_close,
+                )
+                .await;
             }
         }
         service.announce_apps().await;
@@ -254,12 +279,14 @@ pub(crate) fn spawn_authoring(
 /// 出方案跑在后台，形状同 [`spawn_authoring`]：读 brief + 问卷 + 答案，
 /// 调模型出方案；成功落 `plan_ready`（打开确认门），失败落
 /// `plan_failed`，绝不静默降级。See [`spawn_authoring`]'s doc for why this
-/// is a shared free function and why it runs on [`worker_runtime`].
+/// is a shared free function, why it runs on [`worker_runtime`], and what
+/// `epoch` must be.
 pub(crate) fn spawn_planning(
     service: Arc<AppService>,
     llm: Arc<LocalAppsLlm>,
     notifier: Arc<dyn AppFailureNotifier>,
     app_id: String,
+    epoch: u64,
 ) -> tokio::task::JoinHandle<()> {
     worker_runtime().spawn(async move {
         let loaded = async {
@@ -282,27 +309,75 @@ pub(crate) fn spawn_planning(
             .await
         {
             Ok(plan) => {
-                if let Err(error) = service.plan_ready(&app_id, plan).await {
-                    if let Err(fail_error) = service.plan_failed(&app_id, &format!("{error}")).await
-                    {
-                        log_failed_fail_close(&app_id, "plan_ready", &error, fail_error);
-                    }
-                    notifier
-                        .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                if let Err(error) = service.plan_ready(&app_id, plan, epoch).await {
+                    let fail_close = service
+                        .plan_failed(&app_id, &format!("{error}"), epoch)
                         .await;
+                    report_llm_failure(
+                        &service,
+                        notifier.as_ref(),
+                        &app_id,
+                        "plan_ready",
+                        error,
+                        fail_close,
+                    )
+                    .await;
                 }
             }
             Err(error) => {
-                if let Err(fail_error) = service.plan_failed(&app_id, &format!("{error}")).await {
-                    log_failed_fail_close(&app_id, "plan", &error, fail_error);
-                }
-                notifier
-                    .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                let fail_close = service
+                    .plan_failed(&app_id, &format!("{error}"), epoch)
                     .await;
+                report_llm_failure(
+                    &service,
+                    notifier.as_ref(),
+                    &app_id,
+                    "plan",
+                    error,
+                    fail_close,
+                )
+                .await;
             }
         }
         service.announce_apps().await;
     })
+}
+
+/// Report an LLM-round failure to the client — UNLESS the matching
+/// fail-close (`questionnaire_failed`/`plan_failed`) turned out to be a
+/// stale no-op (`Ok(false)`), meaning a FRESHER round already superseded
+/// this one and owns whatever the app's current state says. Reporting THIS
+/// round's failure anyway would show the user a confusing error on an app
+/// that may already look successful (the review's exact scenario). A
+/// genuine fail-close ERROR (a state-guard violation for some other
+/// reason — not staleness) still logs via [`log_failed_fail_close`] AND
+/// notifies with the ORIGINAL llm/service error, since that remains the
+/// most useful thing to show even when the bookkeeping itself hit a snag.
+async fn report_llm_failure(
+    service: &AppService,
+    notifier: &dyn AppFailureNotifier,
+    app_id: &str,
+    stage: &'static str,
+    original: AppError,
+    fail_close: Result<bool, AppError>,
+) {
+    match fail_close {
+        Ok(true) => {
+            notifier
+                .notify_failure(Some(service), Some(app_id.to_string()), &original)
+                .await;
+        }
+        Ok(false) => {
+            // A fresher round already owns this app; this round's opinion
+            // about its own failure is no longer relevant to show anyone.
+        }
+        Err(fail_error) => {
+            log_failed_fail_close(app_id, stage, &original, fail_error);
+            notifier
+                .notify_failure(Some(service), Some(app_id.to_string()), &original)
+                .await;
+        }
+    }
 }
 
 pub(crate) struct ProfileApps {

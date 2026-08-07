@@ -142,6 +142,37 @@ pub struct AppRecord {
     /// Workspace directory relative to the data root, always
     /// `apps/<id>/workspace` with forward slashes.
     pub workspace_rel: String,
+    /// Monotonic counter bumped every time the app ENTERS
+    /// `authoring_questionnaire` or `planning` (`AppState::create`,
+    /// `retry_questionnaire`, `update_brief`, `begin_planning`,
+    /// `retry_plan`). The engine captures this value when it spawns the
+    /// background LLM round trip for that entry and passes it back to
+    /// `questionnaire_ready`/`questionnaire_failed`/`plan_ready`/
+    /// `plan_failed`, which reject a round whose epoch no longer matches
+    /// the CURRENT one as a silent no-op (not a fail-close).
+    ///
+    /// Exists because `retry_questionnaire`/`retry_plan`/`update_brief` all
+    /// admit their OWN in-progress state as a valid source (the manual
+    /// escape hatch for a stuck app) — without an epoch, a user retrying
+    /// while the original round trip is still genuinely alive (just slow,
+    /// not dead) spawns a SECOND task racing the first for the SAME
+    /// workflow-state guard, and whichever finishes last wins even if it is
+    /// the STALE one — silently overwriting a fresh questionnaire/plan with
+    /// a stale one, with no error surfaced anywhere. The epoch makes that
+    /// race decidable: only the round the CURRENT epoch names may commit.
+    ///
+    /// Deliberately `#[serde(skip)]` — NOT persisted. Correctness only
+    /// requires comparing two epochs captured within the SAME live
+    /// process: a background task's `Arc<AppService>` and this counter both
+    /// live only as long as the process does, and `AppService::load`'s
+    /// `fail_interrupted_llm_rounds` sweep already guarantees no task from a
+    /// PRIOR process ever survives to race a new one after a restart.
+    /// Skipping it keeps the on-disk schema — and the `serde_compat.rs`
+    /// byte-for-byte goldens — untouched by a purely in-process bookkeeping
+    /// field; every reload starts back at `0`, which is always < any epoch
+    /// a live task could ever present.
+    #[serde(skip)]
+    pub llm_round: u64,
 }
 
 /// Density choice for [`DesignValue::Density`].
@@ -591,6 +622,10 @@ mod tests {
             workflow_state: AppWorkflowState::CollectingSpec,
             conversation_id: None,
             workspace_rel: "apps/abc123/workspace".into(),
+            // `#[serde(skip)]` (process-lifetime only, see its doc) — `0`
+            // so the round-trip equality below holds; a real round trip
+            // always comes back `0` regardless of what's written here.
+            llm_round: 0,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"createdAtMs\":1700000000000"));

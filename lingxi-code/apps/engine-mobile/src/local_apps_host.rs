@@ -1649,7 +1649,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.restore_checkpoint_value(input).await
     }
 
-    async fn trigger_authoring(&self, app_id: String) {
+    async fn trigger_authoring(&self, app_id: String, epoch: u64) {
         let (Ok(service), Some(llm)) = (self.service(), self.llm.get()) else {
             // `service`/`llm` are attached together with `generation` at
             // profile load, right after `create_app` itself becomes
@@ -1666,7 +1666,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         };
         let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
             Arc::new(BrokerFailureNotifier(self.event_sink.clone()));
-        crate::local_apps_profile::spawn_authoring(service, llm.current(), notifier, app_id);
+        crate::local_apps_profile::spawn_authoring(service, llm.current(), notifier, app_id, epoch);
     }
 }
 

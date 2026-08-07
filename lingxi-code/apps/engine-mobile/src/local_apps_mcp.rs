@@ -43,8 +43,11 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// false the whole time. Never fails the caller: the `create` tool call
     /// already committed the record before this runs, and the app stays
     /// recoverable (load-time sweep, `retry_questionnaire`) even if THIS
-    /// call is dropped entirely (host capability not yet attached).
-    async fn trigger_authoring(&self, app_id: String);
+    /// call is dropped entirely (host capability not yet attached). `epoch`
+    /// MUST be the `llm_round` the `create_app` call that produced `app_id`
+    /// returned — captured synchronously, never re-read later (see
+    /// [`local_apps::AppRecord::llm_round`]'s doc).
+    async fn trigger_authoring(&self, app_id: String, epoch: u64);
 }
 
 /// Mobile-local implementation of the MCP transport boundary.
@@ -393,7 +396,7 @@ impl LocalAppsMcpTransport {
                 // load-time sweep both still recover the app if this is
                 // dropped.
                 if let Ok(host) = self.host() {
-                    host.trigger_authoring(record.id.clone()).await;
+                    host.trigger_authoring(record.id.clone(), record.llm_round).await;
                 } else {
                     tracing::warn!(
                         app_id = %record.id,
@@ -775,7 +778,7 @@ mod tests {
     /// `trigger_authoring` calls — every other method is unreachable from
     /// the `create` tool and panics if ever called.
     struct RecordingAuthoringHost {
-        calls: StdMutex<Vec<String>>,
+        calls: StdMutex<Vec<(String, u64)>>,
     }
 
     #[async_trait]
@@ -798,8 +801,8 @@ mod tests {
         async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
-        async fn trigger_authoring(&self, app_id: String) {
-            self.calls.lock().expect("lock").push(app_id);
+        async fn trigger_authoring(&self, app_id: String, epoch: u64) {
+            self.calls.lock().expect("lock").push((app_id, epoch));
         }
     }
 
@@ -829,8 +832,9 @@ mod tests {
 
         assert_eq!(
             host.calls.lock().expect("lock").as_slice(),
-            &[app_id],
-            "create must trigger background authoring for the app it just persisted"
+            &[(app_id, 1)],
+            "create must trigger background authoring for the app it just persisted, \
+             with the fresh app's first llm_round epoch"
         );
     }
 
@@ -880,7 +884,7 @@ mod tests {
     /// -> `generation_complete` -> `validation_passed` -> `confirm_preview`).
     async fn drive_to_ready(service: &AppService, app_id: &str) {
         local_apps::test_support::advance_to_collecting_spec(service, app_id).await;
-        service
+        let epoch = service
             .begin_planning(app_id)
             .await
             .expect("begin_planning");
@@ -891,9 +895,10 @@ mod tests {
             summary: "a test plan".into(),
         };
         let designer = service
-            .plan_ready(app_id, plan)
+            .plan_ready(app_id, plan, epoch)
             .await
-            .expect("plan_ready");
+            .expect("plan_ready")
+            .expect("fresh epoch must not be rejected as stale");
         service
             .confirm_design(app_id, &designer.interaction_id, designer.revision)
             .await

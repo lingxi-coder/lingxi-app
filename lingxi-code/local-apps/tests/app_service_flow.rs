@@ -91,7 +91,8 @@ fn splice_questionnaire_and_plan(root: &Path, app_id: &str, now_ms: u64) {
         .iter_mut()
         .find(|a| a.record.id == app_id)
         .expect("app on disk");
-    app.questionnaire_ready(one_step(), None, now_ms)
+    let epoch = app.record.llm_round;
+    app.questionnaire_ready(one_step(), None, epoch, now_ms)
         .expect("fixture questionnaire is valid");
     app.draft.plan = Some(AppPlan {
         collections: Vec::new(),

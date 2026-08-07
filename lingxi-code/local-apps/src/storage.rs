@@ -1142,8 +1142,13 @@ mod tests {
             Some("conv-9".into()),
             1_700_000_000_000,
         );
-        app.questionnaire_ready(one_step(), None, 1_700_000_000_000)
+        app.questionnaire_ready(one_step(), None, 1, 1_700_000_000_000)
             .expect("fixture questionnaire is valid");
+        // `llm_round` is `#[serde(skip)]` (process-lifetime only, see its
+        // doc) — a disk round trip always comes back `0`. Zero it here too
+        // so an in-memory fixture compares equal to its own reload; these
+        // storage goldens pin document persistence, not this field.
+        app.record.llm_round = 0;
         app
     }
 

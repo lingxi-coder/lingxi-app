@@ -64,6 +64,70 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /// local-apps#questionnaire Task 11 review, Fix 2. The Rust side pinned
+    /// this exact fabrication with a NAMED, red-until-fixed test
+    /// (`create_app_persists_name_as_brief_until_task_11_adds_a_real_one`,
+    /// since renamed once Task 11 landed the real brief). Android's
+    /// `createSelectedTemplate()` was given the SAME stopgap
+    /// (`brief = name`) with only a `NOTE`, no mechanism forcing anyone to
+    /// notice when it should stop being true — this test is that mechanism.
+    /// It MUST FAIL until Task 20 replaces the template-picker create flow
+    /// with one that collects a real brief from the user; do not "fix" it
+    /// by relaxing the assertion — fix it by making Android send a REAL
+    /// brief, then update this test the way the Rust tripwire was updated.
+    ///
+    /// `state.templates` can only be populated by `AppEventDto.
+    /// AppTemplatesChanged`, which no longer exists on the wire (Task 5) —
+    /// so there is no public path to seed it; this reaches into the
+    /// `internal` `_uiState` directly (see its doc for why that seam
+    /// exists) rather than skip the test.
+    @Test
+    fun `create app fabricates the brief from the display name until Task 20 fixes it`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            // No public path sets `templates`/`selectedTemplateKind` (see
+            // the doc above) — seed the ONE state `createSelectedTemplate()`
+            // needs directly.
+            viewModel._uiState.update {
+                it.copy(
+                    templates = listOf(
+                        LocalAppTemplate(
+                            kind = "habit_tracker",
+                            version = 1u,
+                            name = "Habit Tracker",
+                            description = "Track daily habits",
+                            steps = emptyList(),
+                        ),
+                    ),
+                    selectedTemplateKind = "habit_tracker",
+                )
+            }
+
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("My Habit App"))
+            viewModel.onAction(LocalAppsAction.CreateSelectedTemplate)
+            runCurrent()
+
+            val sent = source.commands.filterIsInstance<ClientCommand.CreateApp>().singleOrNull()
+                ?: throw AssertionError("CreateSelectedTemplate must submit ClientCommand.CreateApp")
+            assertEquals("My Habit App", sent.name)
+            assertTrue(
+                "the brief must be a real spec, not the display name relabeled — " +
+                    "this is the exact fabrication local-apps#questionnaire Tasks 10/11 " +
+                    "spent two review rounds eliminating on the Rust side",
+                sent.brief != sent.name,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun `draft edits debounce serialize and recover revision conflicts`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))

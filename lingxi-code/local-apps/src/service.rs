@@ -385,24 +385,26 @@ impl AppService {
     /// longer than one restart — the client sees the same retryable-failure
     /// UI a live LLM error would produce, not a spinner that never resolves.
     async fn fail_interrupted_llm_rounds(&self) {
-        let stuck: Vec<(String, AppWorkflowState)> = {
+        let stuck: Vec<(String, AppWorkflowState, u64)> = {
             let apps = self.state.lock().await;
             apps.iter()
                 .filter_map(|app| match app.record.workflow_state {
                     state @ (AppWorkflowState::AuthoringQuestionnaire
-                    | AppWorkflowState::Planning) => Some((app.record.id.clone(), state)),
+                    | AppWorkflowState::Planning) => {
+                        Some((app.record.id.clone(), state, app.record.llm_round))
+                    }
                     _ => None,
                 })
                 .collect()
         };
-        for (app_id, state) in stuck {
+        for (app_id, state, epoch) in stuck {
             let result = match state {
                 AppWorkflowState::AuthoringQuestionnaire => {
-                    self.questionnaire_failed(&app_id, "interrupted by an engine restart")
+                    self.questionnaire_failed(&app_id, "interrupted by an engine restart", epoch)
                         .await
                 }
                 AppWorkflowState::Planning => {
-                    self.plan_failed(&app_id, "interrupted by an engine restart")
+                    self.plan_failed(&app_id, "interrupted by an engine restart", epoch)
                         .await
                 }
                 _ => unreachable!("filtered to only these two states above"),
@@ -1106,15 +1108,19 @@ impl AppService {
     /// ALSO emit `QuestionnaireChanged` with the steps the client needs to
     /// render — the same reason [`Self::plan_ready`] does not use
     /// `workflow_step` either.
+    /// `epoch` MUST be the value the engine captured when it spawned the
+    /// task making this call — see [`AppState::questionnaire_ready`]. A
+    /// stale epoch is a silent no-op: `Ok(())` with no events, not an error.
     pub async fn questionnaire_ready(
         &self,
         app_id: &str,
         steps: Vec<AppDesignStep>,
         name: Option<String>,
+        epoch: u64,
     ) -> Result<(), AppError> {
         self.with_app(app_id, move |app, now| {
-            match app.questionnaire_ready(steps.clone(), name.clone(), now) {
-                Ok(()) => {
+            match app.questionnaire_ready(steps.clone(), name.clone(), epoch, now) {
+                Ok(true) => {
                     let events = vec![
                         AppEvent::WorkflowChanged {
                             app_id: app.record.id.clone(),
@@ -1129,6 +1135,7 @@ impl AppService {
                     ];
                     (Ok(()), events)
                 }
+                Ok(false) => (Ok(()), Vec::new()),
                 Err(error) => (Err(error), Vec::new()),
             }
         })
@@ -1137,18 +1144,42 @@ impl AppService {
 
     /// Questionnaire authoring failed (`authoring_questionnaire ->
     /// questionnaire_failed`). `reason` rides the `WorkflowChanged` detail for
-    /// display.
-    pub async fn questionnaire_failed(&self, app_id: &str, reason: &str) -> Result<(), AppError> {
+    /// display. `epoch` is gated the same way as [`Self::questionnaire_ready`]
+    /// — returns `Ok(false)` for a stale epoch (a silent no-op) so the
+    /// caller can tell "this round's failure was actually recorded" from
+    /// "a fresher round already superseded it" and skip notifying the
+    /// client of a failure that no longer describes the app's real state.
+    pub async fn questionnaire_failed(
+        &self,
+        app_id: &str,
+        reason: &str,
+        epoch: u64,
+    ) -> Result<bool, AppError> {
         let reason = reason.to_string();
-        self.workflow_step(app_id, Some(reason), AppState::questionnaire_failed)
-            .await
+        self.with_app(app_id, move |app, now| {
+            match app.questionnaire_failed(epoch, now) {
+                Ok(true) => (
+                    Ok(true),
+                    vec![AppEvent::WorkflowChanged {
+                        app_id: app.record.id.clone(),
+                        state: app.record.workflow_state,
+                        detail: Some(reason.clone()),
+                    }],
+                ),
+                Ok(false) => (Ok(false), Vec::new()),
+                Err(error) => (Err(error), Vec::new()),
+            }
+        })
+        .await
     }
 
     /// Retry questionnaire authoring (`questionnaire_failed ->
     /// authoring_questionnaire`), or re-fire it from `authoring_questionnaire`
     /// itself — the manual escape for an app stuck there with no live task
-    /// behind it (see [`AppState::retry_questionnaire`]).
-    pub async fn retry_questionnaire(&self, app_id: &str) -> Result<(), AppError> {
+    /// behind it (see [`AppState::retry_questionnaire`]). Returns the NEW
+    /// `llm_round` epoch — the caller (the engine's trigger) passes this to
+    /// the freshly spawned task.
+    pub async fn retry_questionnaire(&self, app_id: &str) -> Result<u64, AppError> {
         self.workflow_step(app_id, None, AppState::retry_questionnaire)
             .await
     }
@@ -1168,14 +1199,16 @@ impl AppService {
     /// there was anything to invalidate: a brief change with no prior
     /// questionnaire/plan (e.g. straight from `questionnaire_failed`, which
     /// never got that far) announces neither.
-    pub async fn update_brief(&self, app_id: &str, brief: &str) -> Result<(), AppError> {
+    /// Returns the NEW `llm_round` epoch — the caller (the engine's trigger)
+    /// passes this to the freshly spawned authoring task.
+    pub async fn update_brief(&self, app_id: &str, brief: &str) -> Result<u64, AppError> {
         ensure_within("brief", brief.len(), MAX_BRIEF_BYTES)?;
         let brief = brief.to_string();
         self.with_app(app_id, move |app, now| {
             let had_questionnaire = !app.draft.questionnaire.is_empty();
             let had_plan = app.draft.plan.is_some();
             match app.update_brief(brief.clone(), now) {
-                Ok(()) => {
+                Ok(epoch) => {
                     let mut events = vec![AppEvent::WorkflowChanged {
                         app_id: app.record.id.clone(),
                         state: app.record.workflow_state,
@@ -1195,7 +1228,7 @@ impl AppService {
                             plan: None,
                         });
                     }
-                    (Ok(()), events)
+                    (Ok(epoch), events)
                 }
                 Err(error) => (Err(error), Vec::new()),
             }
@@ -1203,8 +1236,10 @@ impl AppService {
         .await
     }
 
-    /// `collecting_spec -> planning`.
-    pub async fn begin_planning(&self, app_id: &str) -> Result<(), AppError> {
+    /// `collecting_spec -> planning`. Returns the NEW `llm_round` epoch —
+    /// the caller (the engine's trigger) passes this to the freshly spawned
+    /// planning task.
+    pub async fn begin_planning(&self, app_id: &str) -> Result<u64, AppError> {
         self.workflow_step(app_id, None, AppState::begin_planning)
             .await
     }
@@ -1216,15 +1251,18 @@ impl AppService {
     /// separately invented event) with `PlanChanged` inserted between the
     /// two so the client also learns the plan content that gated the
     /// confirmation.
+    /// `epoch` is gated the same way as [`Self::questionnaire_ready`]. A
+    /// stale round returns `Ok(None)` — a no-op, not an error.
     pub async fn plan_ready(
         &self,
         app_id: &str,
         plan: AppPlan,
-    ) -> Result<AppInteractionRequest, AppError> {
+        epoch: u64,
+    ) -> Result<Option<AppInteractionRequest>, AppError> {
         let interaction_id = ids::generate_interaction_id();
         self.with_app(app_id, move |app, now| {
-            match app.plan_ready(plan.clone(), interaction_id.clone(), now) {
-                Ok(interaction) => {
+            match app.plan_ready(plan.clone(), interaction_id.clone(), epoch, now) {
+                Ok(Some(interaction)) => {
                     let events = vec![
                         AppEvent::WorkflowChanged {
                             app_id: app.record.id.clone(),
@@ -1238,8 +1276,9 @@ impl AppService {
                         },
                         Self::gate_announcement(&interaction),
                     ];
-                    (Ok(interaction), events)
+                    (Ok(Some(interaction)), events)
                 }
+                Ok(None) => (Ok(None), Vec::new()),
                 Err(error) => (Err(error), Vec::new()),
             }
         })
@@ -1247,18 +1286,35 @@ impl AppService {
     }
 
     /// Planning failed (`planning -> plan_failed`). `reason` rides the
-    /// `WorkflowChanged` detail for display.
-    pub async fn plan_failed(&self, app_id: &str, reason: &str) -> Result<(), AppError> {
+    /// `WorkflowChanged` detail for display. `epoch` is gated the same way
+    /// as [`Self::questionnaire_failed`] — returns `Ok(false)` for a stale
+    /// epoch (a silent no-op), for the identical reason.
+    pub async fn plan_failed(&self, app_id: &str, reason: &str, epoch: u64) -> Result<bool, AppError> {
         let reason = reason.to_string();
-        self.workflow_step(app_id, Some(reason), AppState::plan_failed)
-            .await
+        self.with_app(app_id, move |app, now| {
+            match app.plan_failed(epoch, now) {
+                Ok(true) => (
+                    Ok(true),
+                    vec![AppEvent::WorkflowChanged {
+                        app_id: app.record.id.clone(),
+                        state: app.record.workflow_state,
+                        detail: Some(reason.clone()),
+                    }],
+                ),
+                Ok(false) => (Ok(false), Vec::new()),
+                Err(error) => (Err(error), Vec::new()),
+            }
+        })
+        .await
     }
 
     /// Retry planning with the SAME answers (`plan_failed -> planning`) —
     /// useful when the failure was transient (e.g. an LLM hiccup) — or
     /// re-fire it from `planning` itself, the manual escape for an app stuck
     /// there with no live task behind it (see [`AppState::retry_plan`]).
-    pub async fn retry_plan(&self, app_id: &str) -> Result<(), AppError> {
+    /// Returns the NEW `llm_round` epoch — the caller (the engine's trigger)
+    /// passes this to the freshly spawned task.
+    pub async fn retry_plan(&self, app_id: &str) -> Result<u64, AppError> {
         self.workflow_step(app_id, None, AppState::retry_plan).await
     }
 
@@ -1627,15 +1683,26 @@ impl AppService {
     /// through here (gate methods discard their continuation and follow up
     /// with `drain_after_gate`), so the event shape can never drift between
     /// them.
-    async fn workflow_step(
+    /// Generic over the step's return value `T` (almost always `()`; the
+    /// four LLM-round starters — `retry_questionnaire`/`update_brief`/
+    /// `begin_planning`/`retry_plan` — return the new `llm_round` epoch
+    /// instead, so their caller can hand it straight to the freshly spawned
+    /// task without a second read). Every call here is a plain, unambiguous
+    /// transition (never epoch-gated itself — only the background-task
+    /// completions `questionnaire_ready`/`questionnaire_failed`/
+    /// `plan_ready`/`plan_failed` are, and those write their OWN `with_app`
+    /// bodies instead of using this, since they need to skip emitting
+    /// `WorkflowChanged` entirely on a stale/no-op epoch), so `Ok(_)` always
+    /// emits the event.
+    async fn workflow_step<T: Send + 'static>(
         &self,
         app_id: &str,
         detail: Option<String>,
-        step: impl FnOnce(&mut AppState, u64) -> Result<(), AppError>,
-    ) -> Result<(), AppError> {
+        step: impl FnOnce(&mut AppState, u64) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         self.with_app(app_id, move |app, now| match step(app, now) {
-            Ok(()) => (
-                Ok(()),
+            Ok(value) => (
+                Ok(value),
                 vec![AppEvent::WorkflowChanged {
                     app_id: app.record.id.clone(),
                     state: app.record.workflow_state,
@@ -2092,9 +2159,25 @@ mod tests {
         let h2 = harness(dir.path()).await;
         let reloaded = h2.service.list_apps().await;
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].id, record.id);
+        let reloaded = &reloaded[0];
+        // Field-wise, not a whole-struct equality against `record`:
+        // `workflow_state` is the ONE field this load-time sweep legitimately
+        // changes (that's the fix under test), and `llm_round` is
+        // `#[serde(skip)]` (process-lifetime only — see its doc), so neither
+        // belongs in an "everything else survived the reload untouched"
+        // check. Every OTHER field is asserted individually so a future
+        // regression in trimming/brief/conversation/workspace/timestamps
+        // survival is still caught here, same as before this fix narrowed
+        // the original whole-struct comparison.
+        assert_eq!(reloaded.id, record.id);
+        assert_eq!(reloaded.name, record.name);
+        assert_eq!(reloaded.brief, record.brief);
+        assert_eq!(reloaded.created_at_ms, record.created_at_ms);
+        assert_eq!(reloaded.updated_at_ms, record.updated_at_ms);
+        assert_eq!(reloaded.conversation_id, record.conversation_id);
+        assert_eq!(reloaded.workspace_rel, record.workspace_rel);
         assert_eq!(
-            reloaded[0].workflow_state,
+            reloaded.workflow_state,
             AppWorkflowState::QuestionnaireFailed,
             "authoring_questionnaire with no live task behind it fails closed at load"
         );
@@ -2524,6 +2607,13 @@ mod tests {
         // Survives reload.
         drop(h);
         let h2 = harness(dir.path()).await;
+        // `llm_round` is `#[serde(skip)]` (process-lifetime only) — `keep`
+        // was captured before this reload with whatever value was live
+        // then; a real reload always comes back `0`. Zero it here so this
+        // assertion pins what it means to (every OTHER field survives
+        // reload), not this deliberately-non-persisted one.
+        let mut keep = keep;
+        keep.llm_round = 0;
         assert_eq!(h2.service.list_apps().await, vec![keep]);
     }
 
@@ -3293,7 +3383,7 @@ mod tests {
             .expect("create");
         let _ = h.take_events().await;
         h.service
-            .questionnaire_ready(&record.id, one_step(), Some("记事本".into()))
+            .questionnaire_ready(&record.id, one_step(), Some("记事本".into()), record.llm_round)
             .await
             .expect("authoring succeeds");
         assert_eq!(
@@ -3333,7 +3423,7 @@ mod tests {
         // workflow must not advance.
         let too_many: Vec<_> = (0..6).map(|i| step_named(&format!("s{i}"), i)).collect();
         service
-            .questionnaire_ready(&record.id, too_many, None)
+            .questionnaire_ready(&record.id, too_many, None, record.llm_round)
             .await
             .expect_err("an over-limit questionnaire is rejected");
 
@@ -3352,7 +3442,7 @@ mod tests {
             .await
             .expect("create");
         service
-            .questionnaire_failed(&record.id, "model offline")
+            .questionnaire_failed(&record.id, "model offline", record.llm_round)
             .await
             .expect("fail");
         service
@@ -3432,7 +3522,7 @@ mod tests {
             .await
             .unwrap();
         h.service
-            .questionnaire_failed(&record.id, "model offline")
+            .questionnaire_failed(&record.id, "model offline", record.llm_round)
             .await
             .unwrap();
         let _ = h.take_events().await;
@@ -3480,7 +3570,7 @@ mod tests {
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service.begin_planning(&record.id).await.unwrap();
+        let epoch = h.service.begin_planning(&record.id).await.unwrap();
         assert_eq!(
             h.service.record(&record.id).await.unwrap().workflow_state,
             AppWorkflowState::Planning
@@ -3489,9 +3579,10 @@ mod tests {
 
         let interaction = h
             .service
-            .plan_ready(&record.id, plan_stub())
+            .plan_ready(&record.id, plan_stub(), epoch)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("fresh epoch must not be rejected as stale");
         assert_eq!(interaction.kind, AppInteractionKind::Designer);
         assert_eq!(
             h.service.record(&record.id).await.unwrap().workflow_state,
@@ -3533,9 +3624,9 @@ mod tests {
             .await
             .unwrap();
         let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service.begin_planning(&record.id).await.unwrap();
+        let epoch = h.service.begin_planning(&record.id).await.unwrap();
         h.service
-            .plan_failed(&record.id, "model offline")
+            .plan_failed(&record.id, "model offline", epoch)
             .await
             .unwrap();
         assert_eq!(
@@ -3544,12 +3635,15 @@ mod tests {
         );
 
         // `retry_plan` returns to `planning` with the same answers.
-        h.service.retry_plan(&record.id).await.unwrap();
+        let epoch = h.service.retry_plan(&record.id).await.unwrap();
         assert_eq!(
             h.service.record(&record.id).await.unwrap().workflow_state,
             AppWorkflowState::Planning
         );
-        h.service.plan_failed(&record.id, "again").await.unwrap();
+        h.service
+            .plan_failed(&record.id, "again", epoch)
+            .await
+            .unwrap();
 
         // `reopen_answers` is the other escape: back to `collecting_spec`,
         // preserving the questionnaire and every answer (unlike

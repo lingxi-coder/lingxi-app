@@ -62,10 +62,15 @@ fn fresh_app(id: &str) -> AppState {
         None,
         T0,
     );
-    app.questionnaire_ready(one_step(), None, T0)
+    app.questionnaire_ready(one_step(), None, 1, T0)
         .expect("fixture questionnaire is valid");
     app.draft.plan = Some(a_plan());
     app.draft.plan_for_revision = Some(app.draft.revision);
+    // `llm_round` is `#[serde(skip)]` (process-lifetime only) — a disk
+    // round trip always comes back `0`. Zero it here too so an in-memory
+    // fixture compares equal to its own reload; these crash-repair goldens
+    // pin document persistence, not this field.
+    app.record.llm_round = 0;
     app
 }
 
@@ -207,9 +212,12 @@ fn torn_open_designer_repairs_to_awaiting_spec_confirmation() {
 fn torn_plan_ready_repairs_to_awaiting_spec_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let mut before = fresh_app("aaaa1111");
-    before.begin_planning(T0 + 1).unwrap();
+    let epoch = before.begin_planning(T0 + 1).unwrap();
     let mut after = before.clone();
-    after.plan_ready(a_plan(), "int-1".into(), T0 + 2).unwrap();
+    after
+        .plan_ready(a_plan(), "int-1".into(), epoch, T0 + 2)
+        .unwrap()
+        .expect("fresh epoch must not be rejected as stale");
     tear(dir.path(), &before, &after, &Tear::AfterInteractions);
 
     let mut app = load_repaired(dir.path());

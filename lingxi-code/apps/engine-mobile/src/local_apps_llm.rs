@@ -78,14 +78,18 @@ pub trait LocalAppsModel: Send + Sync {
 /// caller's budget policy.
 pub struct ApiServiceModel {
     service: Arc<ApiService>,
-    /// `RwLock`-backed, NOT a plain `String`: `ClientCommand::SetModel`
-    /// updates this in place (via [`LocalAppsModel::set_model`]) so the
-    /// three local-app LLM stages follow a live `/model` switch instead of
-    /// staying pinned to whatever `default_model_id`/`default_model_profile`
-    /// were at engine build time — the same class of "silently stale after
-    /// the user changed something" bug `SharedLlm` closes for a reconnect.
-    model: RwLock<String>,
-    profile: RwLock<Option<String>>,
+    /// `(model, profile)` behind ONE `RwLock`, NOT two independent locks:
+    /// `ClientCommand::SetModel` updates this in place (via
+    /// [`LocalAppsModel::set_model`]) so the three local-app LLM stages
+    /// follow a live `/model` switch instead of staying pinned to whatever
+    /// `default_model_id`/`default_model_profile` were at engine build time
+    /// — the same class of "silently stale after the user changed
+    /// something" bug `SharedLlm` closes for a reconnect. Two separate locks
+    /// (an earlier version of this code) let a read land BETWEEN `set_model`'s
+    /// two writes and see a new model id paired with the OLD provider
+    /// profile, routing the new model through the wrong provider — a single
+    /// lock over the pair makes that torn read structurally impossible.
+    selection: RwLock<(String, Option<String>)>,
 }
 
 impl ApiServiceModel {
@@ -93,8 +97,7 @@ impl ApiServiceModel {
     pub fn new(service: Arc<ApiService>, model: impl Into<String>, profile: Option<String>) -> Self {
         Self {
             service,
-            model: RwLock::new(model.into()),
-            profile: RwLock::new(profile),
+            selection: RwLock::new((model.into(), profile)),
         }
     }
 
@@ -123,12 +126,12 @@ impl LocalAppsModel for ApiServiceModel {
             "input_schema": schema,
         });
         let message = ConversationMessage::user(MessageId::new(), user);
-        // Snapshot both under their own locks (never held across the `.await`
-        // below) rather than holding a guard across the network call — a
-        // concurrent `set_model` must never block, or be blocked by, an
-        // in-flight structured call.
-        let model = self.model.read().expect("model lock poisoned").clone();
-        let profile = self.profile.read().expect("profile lock poisoned").clone();
+        // Snapshot the PAIR together under one lock acquisition (never held
+        // across the `.await` below) — a concurrent `set_model` must never
+        // block, or be blocked by, an in-flight structured call, but a
+        // reader must also never see a model id paired with a profile from
+        // a DIFFERENT `set_model` call.
+        let (model, profile) = self.selection.read().expect("selection lock poisoned").clone();
         let response = self
             .service
             .messages_create_side_query(
@@ -148,8 +151,7 @@ impl LocalAppsModel for ApiServiceModel {
     }
 
     fn set_model(&self, model: String, profile: Option<String>) {
-        *self.model.write().expect("model lock poisoned") = model;
-        *self.profile.write().expect("profile lock poisoned") = profile;
+        *self.selection.write().expect("selection lock poisoned") = (model, profile);
     }
 }
 

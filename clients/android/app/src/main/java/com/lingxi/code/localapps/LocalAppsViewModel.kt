@@ -48,7 +48,14 @@ class LocalAppsViewModel(
     distributionChannel: String = BuildConfig.DISTRIBUTION_CHANNEL,
     private val strings: LocalAppsStrings = DefaultLocalAppsStrings,
 ) : ViewModel() {
-    private val _uiState = MutableStateFlow(
+    // `internal`, not `private`: local-apps#questionnaire Task 11 review —
+    // `createSelectedTemplate()`'s `state.templates` can ONLY be populated
+    // through `AppEventDto.AppTemplatesChanged`, which no longer exists on
+    // the wire (Task 5 deleted it with the static template catalog; see
+    // `reduceAppEvent`'s note). With no other public path to a non-empty
+    // `templates`, a same-module test needs direct access to seed it —
+    // this is that seam, kept as narrow as a single field's visibility.
+    internal val _uiState = MutableStateFlow(
         LocalAppsUiState(
             distributionMode = if (distributionChannel == "full") {
                 LocalAppRuntimeMode.NextProduction

@@ -1051,6 +1051,48 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertNil(LocalAppDomainPolicy.normalize("api_example.com"))
     }
 
+    // MARK: - LocalAppPlanConfirmView
+    //
+    // Adapted from the brief's Swift-Testing (`@Test`/`#expect`) pseudocode to
+    // this file's established XCTest conventions, same as the
+    // `DesignerFieldChips`/`isEditable` tests above. `LocalAppPlanConfirmView`
+    // never touches `LocalAppsStore`/FFI directly — it takes plain closures —
+    // so it lives here outside the `#if canImport(engine_mobileFFI)` block too.
+
+    func testThePlanSheetListsEveryCollectionAndField() {
+        let view = LocalAppPlanConfirmView(plan: notesPlan(), onConfirm: {}, onBack: {})
+        XCTAssertTrue(view.summaryLines.contains { $0.contains("notes") && $0.contains("title") })
+    }
+
+    func testThePlanSheetNamesTheDomainsItWillAllow() {
+        let view = LocalAppPlanConfirmView(plan: planWithDomain("api.example.com"), onConfirm: {}, onBack: {})
+        XCTAssertTrue(view.summaryLines.contains { $0.contains("api.example.com") })
+    }
+
+    func testThePlanSheetSaysSoWhenNoNetworkAccessIsRequested() {
+        let view = LocalAppPlanConfirmView(plan: notesPlan(), onConfirm: {}, onBack: {})
+        XCTAssertTrue(
+            view.summaryLines.contains { $0.contains("不访问网络") },
+            "silence about network access reads as an omission, not as a guarantee"
+        )
+    }
+
+    func testTheSheetHasExactlyTwoExits() {
+        let view = LocalAppPlanConfirmView(plan: notesPlan(), onConfirm: {}, onBack: {})
+        XCTAssertEqual(view.actionTitles, ["返回修改", "确认并生成"])
+    }
+
+    /// The sheet's capability section must also say something when the plan
+    /// requests none, mirroring the domain section's "silence reads as an
+    /// omission" reasoning — not asserted by the brief, but the same logic
+    /// applies and the copy exists (`local_apps_plan_confirm_no_capabilities`).
+    func testThePlanSheetSaysSoWhenNoCapabilitiesAreRequested() {
+        let plan = notesPlan()
+        XCTAssertTrue(plan.capabilities.isEmpty, "fixture sanity check")
+        let view = LocalAppPlanConfirmView(plan: plan, onConfirm: {}, onBack: {})
+        XCTAssertTrue(view.summaryLines.contains { $0.contains("无需额外权限") })
+    }
+
     #if canImport(engine_mobileFFI)
         /// Creation has two independent callers of `openDesigner` — the
         /// `appsChanged` handler and the designer view's `prepare()` — and the

@@ -15,6 +15,14 @@ struct LocalAppDesignerView: View {
     /// trip, so the wasted one is worth guarding against client-side too.
     @State private var retryingQuestionnaire = false
     @State private var retryingPlan = false
+    /// Guards Task 15's plan-confirmation sheet's two buttons against a
+    /// double-tap firing two `confirm_design`/`cancel_design` commands
+    /// before the workflow transition lands and `planConfirmBinding`'s
+    /// getter (driven by `app.workflow`/`store.plans[appID]`) flips the
+    /// sheet closed. Same reasoning as `retryingQuestionnaire`/`retryingPlan`
+    /// above: the engine rejects a redundant second command harmlessly, but
+    /// each one is a real round trip worth not wasting.
+    @State private var planSheetBusy = false
 
     private var app: LocalAppSummary? { store.app(id: appID) }
     /// The LLM-authored questionnaire (local-apps#questionnaire, Task 13),
@@ -115,15 +123,73 @@ struct LocalAppDesignerView: View {
         // app to `.collectingSpec` — no user action required to pick the
         // retry back up.
         .task(id: app?.workflow) { await prepare() }
+        // Task 15's plan-confirmation gate — the human confirmation that
+        // makes `store.confirmDesign`/`cancelDesign` reachable for the first
+        // time anywhere in `Sources/LocalApps/`. An independent sheet, NOT a
+        // step of the questionnaire above: it renders its own
+        // `NavigationStack` and carries no step-bar "previous/next" editing
+        // semantics. `planConfirmBinding`'s getter is entirely
+        // store-state-derived (workflow + a non-nil plan); the
+        // `.interactiveDismissDisabled()` below is what makes that safe —
+        // otherwise a swipe-to-dismiss would hide the sheet while leaving
+        // the app parked in `awaiting_spec_confirmation` with no plan and no
+        // editable form behind it, the same "reachable but dead-ended" shape
+        // Task 14's review caught for `.generationFailed`. The two buttons
+        // inside the sheet (`onBack` -> `cancel_design`, `onConfirm` ->
+        // `confirm_design`) are therefore the ONLY way this sheet closes.
+        .sheet(isPresented: planConfirmBinding) {
+            if let plan = store.plans[appID] {
+                LocalAppPlanConfirmView(
+                    plan: plan,
+                    onConfirm: { Task { await confirmPlan() } },
+                    onBack: { Task { await cancelPlan() } },
+                    isConfirming: planSheetBusy
+                )
+                .interactiveDismissDisabled()
+            }
+        }
+    }
+
+    /// `true` exactly when there is a plan to confirm: `awaiting_spec_
+    /// confirmation` with a non-nil `store.plans[appID]`. Mirrors
+    /// `confirm_design`'s own server-side freshness check
+    /// (`plan_for_revision == revision`, state.rs) on the client — an
+    /// answer edit voids the plan server-side and announces `plan: nil` via
+    /// `appPlanChanged`, which clears `store.plans[appID]` and, through this
+    /// binding, closes the sheet before it could ever offer to confirm a
+    /// plan the server already discarded.
+    private var planConfirmBinding: Binding<Bool> {
+        Binding(
+            get: { app?.workflow == .awaitingSpecConfirmation && store.plans[appID] != nil },
+            set: { _ in }
+        )
+    }
+
+    private func confirmPlan() async {
+        guard !planSheetBusy else { return }
+        planSheetBusy = true
+        _ = await store.confirmDesign(appID: appID)
+        planSheetBusy = false
+    }
+
+    private func cancelPlan() async {
+        guard !planSheetBusy else { return }
+        planSheetBusy = true
+        await store.cancelDesign(appID: appID)
+        planSheetBusy = false
     }
 
     /// The four intermediate/failure states this screen renders instead of
     /// the editable form, plus a fallback for everything else the designer
-    /// can transiently be pushed onto (`awaitingSpecConfirmation` — Task
-    /// 15's plan-confirmation screen owns that state; `generationFailed` —
-    /// left alone by `prepare()` on purpose, see its comment there, so this
-    /// fallback's inert "重试" is harmless rather than a dead end). Every
-    /// state that lands here does so because `prepare()` never issues a
+    /// can transiently be pushed onto. `awaitingSpecConfirmation` is
+    /// normally owned by Task 15's `LocalAppPlanConfirmView` sheet
+    /// (presented from `body` whenever `store.plans[appID] != nil`) rather
+    /// than by this fallback — it only shows here for the moment before
+    /// that plan has loaded. `generationFailed` is likewise transient as of
+    /// Task 15: `prepare()`'s `.generationFailed` case calls `openDesigner`,
+    /// which moves the workflow to `awaitingSpecConfirmation` (and this
+    /// screen along with it) the instant the gate lands. Every state that
+    /// lands here past that point does so because `prepare()` never issues a
     /// doomed command, or none at all, for it — see `prepare()`.
     @ViewBuilder
     private func unavailableView(for workflow: LocalAppWorkflow) -> some View {
@@ -230,6 +296,26 @@ struct LocalAppDesignerView: View {
             // check workflow state, so `getDetails` alone is enough to load
             // the current draft answers for editing.
             await store.getDetails(appID: appID)
+        case .generationFailed:
+            // RESTORED by Task 15. Task 14's review had folded this into the
+            // no-op `default:` branch below, because back then
+            // `store.confirmDesign`/`cancelDesign` had zero call sites
+            // anywhere in `Sources/LocalApps/` — landing here in
+            // `awaiting_spec_confirmation` (legal per the FSM, state.rs:
+            // 491-501 explicitly admits `generation_failed`; its own test is
+            // named `open_designer_reopens_a_failed_generation`) was a dead
+            // end with no UI able to advance OR back out of it.
+            // `LocalAppPlanConfirmView` is now that destination: `onConfirm`
+            // re-confirms the SAME plan (`confirm_design` requires
+            // `plan_for_revision == revision`, satisfied here since nothing
+            // was edited since the original confirmation) and retries
+            // generation; `onBack` calls
+            // `cancel_design` back to `collecting_spec`, so a plan that
+            // failed generation because the ANSWERS were wrong can actually
+            // be fixed instead of retried verbatim forever (the only
+            // recourse `LocalAppDetailView`'s "重试生成" — `retryGeneration`
+            // → `retry_generation`, still present and unchanged — offers).
+            await store.openDesigner(appID: appID)
         default:
             // `.authoringQuestionnaire`/`.planning` (an LLM round trip still
             // in flight) and `.questionnaireFailed`/`.planFailed` (a
@@ -240,28 +326,6 @@ struct LocalAppDesignerView: View {
             // storm. `.task(id: app?.workflow)` already re-invokes
             // `prepare()` the moment the workflow actually changes, so a
             // busy state resolves itself without polling.
-            //
-            // `.generationFailed` is ALSO a deliberate no-op here — this was
-            // `openDesigner` until review caught it as a regression
-            // (local-apps#questionnaire, Task 14 review Critical). Legal per
-            // the FSM (state.rs:491-501 admits `generation_failed`) but
-            // wrong for the user: `isFormEditable` renders the answering
-            // form ONLY for `.collectingSpec`, so the instant `openDesigner`
-            // lands the app in `awaiting_spec_confirmation`, this screen
-            // falls to the generic `default:` fallback in
-            // `unavailableView(for:)` — whose "重试" just calls `prepare()`
-            // again, a no-op for that state, since `store.confirmDesign`/
-            // `cancelDesign` have zero call sites anywhere in
-            // `Sources/LocalApps/` (Task 15's plan-confirmation screen is
-            // what will make them reachable). Before this task, `body`
-            // wasn't gated on workflow at all, so this exact re-entry DID
-            // work (the questionnaire form rendered and its confirm button
-            // called `confirmDesign`) — `isFormEditable` closed that path
-            // while leaving the auto-trigger that walks the user into it.
-            // Staying put leaves `.generationFailed` visible on
-            // `LocalAppDetailView`'s existing "重试生成" button
-            // (`retryGeneration` → `retry_generation`, no designer/replan
-            // needed) as the one real way out, instead of a dead end.
             return
         }
     }

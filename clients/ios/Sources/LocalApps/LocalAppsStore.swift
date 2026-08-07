@@ -558,13 +558,27 @@ final class LocalAppsStore {
                 errorMessage = String(localized: "local_apps_error_design_unsaved")
                 return false
             }
-            return await send(
+            let confirmed = await send(
                 .confirmAppDesign(
                     appId: appID,
                     revision: designers[appID]?.revision ?? designer.revision,
                     interactionId: interactionID
                 )
             )
+            if confirmed {
+                // `confirm_design` (state.rs) consumes the pending interaction
+                // server-side (`self.interactions.pending = None`). Clear the
+                // client's copy to match — otherwise it lingers as a stale,
+                // non-nil value that `LocalAppDesignerView.prepare()`'s top-level
+                // `designers[appID]?.interactionID == nil` guard reads as "a
+                // designer interaction is still active," permanently no-oping
+                // `prepare()` (including its `.generationFailed` re-entry arm)
+                // for this app for the rest of the session if generation later
+                // fails — the same shape of bug `cancelDesign` below already
+                // avoids by clearing on its own success.
+                designers[appID]?.interactionID = nil
+            }
+            return confirmed
         #else
             return false
         #endif

@@ -7,6 +7,14 @@ struct LocalAppDesignerView: View {
     @Binding var path: [LocalAppsRoute]
 
     @State private var confirming = false
+    /// Guards the two retry buttons in `unavailableView(for:)` against a
+    /// double-tap firing two `retry_questionnaire`/`retry_plan` commands
+    /// before the workflow transition lands and the button disappears.
+    /// `ensure_workflow` (state.rs) rejects the second server-side, so a
+    /// double-tap cannot corrupt anything — but each one is a real LLM round
+    /// trip, so the wasted one is worth guarding against client-side too.
+    @State private var retryingQuestionnaire = false
+    @State private var retryingPlan = false
 
     private var app: LocalAppSummary? { store.app(id: appID) }
     /// The LLM-authored questionnaire (local-apps#questionnaire, Task 13),
@@ -112,9 +120,11 @@ struct LocalAppDesignerView: View {
     /// The four intermediate/failure states this screen renders instead of
     /// the editable form, plus a fallback for everything else the designer
     /// can transiently be pushed onto (`awaitingSpecConfirmation` — Task
-    /// 15's plan-confirmation screen owns that state; until it lands this is
-    /// an honest "not ready" holding pattern, not a broken one, because
-    /// `prepare()` never issues a doomed command for it) — see `prepare()`.
+    /// 15's plan-confirmation screen owns that state; `generationFailed` —
+    /// left alone by `prepare()` on purpose, see its comment there, so this
+    /// fallback's inert "重试" is harmless rather than a dead end). Every
+    /// state that lands here does so because `prepare()` never issues a
+    /// doomed command, or none at all, for it — see `prepare()`.
     @ViewBuilder
     private func unavailableView(for workflow: LocalAppWorkflow) -> some View {
         switch workflow {
@@ -132,9 +142,14 @@ struct LocalAppDesignerView: View {
             } actions: {
                 VStack(spacing: 12) {
                     Button("common_retry") {
-                        Task { await store.retryQuestionnaire(appID: appID) }
+                        Task {
+                            retryingQuestionnaire = true
+                            await store.retryQuestionnaire(appID: appID)
+                            retryingQuestionnaire = false
+                        }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(retryingQuestionnaire)
                     DesignerBriefEditor(store: store, appID: appID, brief: app?.brief ?? "")
                 }
             }
@@ -151,9 +166,14 @@ struct LocalAppDesignerView: View {
                 Text("local_apps_plan_failed_detail")
             } actions: {
                 Button("common_retry") {
-                    Task { await store.retryPlan(appID: appID) }
+                    Task {
+                        retryingPlan = true
+                        await store.retryPlan(appID: appID)
+                        retryingPlan = false
+                    }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(retryingPlan)
             }
         default:
             ContentUnavailableView {
@@ -210,17 +230,6 @@ struct LocalAppDesignerView: View {
             // check workflow state, so `getDetails` alone is enough to load
             // the current draft answers for editing.
             await store.getDetails(appID: appID)
-        case .generationFailed:
-            // `open_designer` is legal here too: after a code-generation
-            // failure the design was already planned and confirmed once, so
-            // re-arming the SAME confirm gate (rather than re-running
-            // planning) is how the user retries. The screen that actually
-            // renders `awaiting_spec_confirmation` is Task 15's plan
-            // confirmation UI; until it lands this falls into the
-            // `unavailableView(for:)` fallback below, same as the
-            // plan-ready path above — an honest "not ready" holding
-            // pattern, not a broken command.
-            await store.openDesigner(appID: appID)
         default:
             // `.authoringQuestionnaire`/`.planning` (an LLM round trip still
             // in flight) and `.questionnaireFailed`/`.planFailed` (a
@@ -231,6 +240,28 @@ struct LocalAppDesignerView: View {
             // storm. `.task(id: app?.workflow)` already re-invokes
             // `prepare()` the moment the workflow actually changes, so a
             // busy state resolves itself without polling.
+            //
+            // `.generationFailed` is ALSO a deliberate no-op here — this was
+            // `openDesigner` until review caught it as a regression
+            // (local-apps#questionnaire, Task 14 review Critical). Legal per
+            // the FSM (state.rs:491-501 admits `generation_failed`) but
+            // wrong for the user: `isFormEditable` renders the answering
+            // form ONLY for `.collectingSpec`, so the instant `openDesigner`
+            // lands the app in `awaiting_spec_confirmation`, this screen
+            // falls to the generic `default:` fallback in
+            // `unavailableView(for:)` — whose "重试" just calls `prepare()`
+            // again, a no-op for that state, since `store.confirmDesign`/
+            // `cancelDesign` have zero call sites anywhere in
+            // `Sources/LocalApps/` (Task 15's plan-confirmation screen is
+            // what will make them reachable). Before this task, `body`
+            // wasn't gated on workflow at all, so this exact re-entry DID
+            // work (the questionnaire form rendered and its confirm button
+            // called `confirmDesign`) — `isFormEditable` closed that path
+            // while leaving the auto-trigger that walks the user into it.
+            // Staying put leaves `.generationFailed` visible on
+            // `LocalAppDetailView`'s existing "重试生成" button
+            // (`retryGeneration` → `retry_generation`, no designer/replan
+            // needed) as the one real way out, instead of a dead end.
             return
         }
     }

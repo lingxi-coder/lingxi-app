@@ -245,8 +245,8 @@ struct LXISHGuestEnvironment {
         stableWorkspaceId: String
     ) -> [String: String] {
         var environment = requestEnvironment
-        let workspaceGuestPath = "/workspace/\(stableWorkspaceId)"
-        let defaultHome = "/root"
+        let workspaceGuestPath = LXISHGuestPaths.workspace(stableWorkspaceId)
+        let defaultHome = LXISHGuestPaths.home
         let defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         let resolvedCwd = cwd?.isEmpty == false ? cwd! : workspaceGuestPath
         let defaults: [String: String] = [
@@ -301,11 +301,11 @@ struct LXISHRuntimeMountPlanner {
         requestedMounts: [LXISHMountSpec],
         config: LXISHNativeConfig
     ) -> [LXISHMountSpec] {
-        let workspaceGuestPath = "/workspace/\(config.stableWorkspaceId)"
+        let workspaceGuestPath = LXISHGuestPaths.workspace(config.stableWorkspaceId)
         var mounts: [LXISHMountSpec] = [
             LXISHMountSpec(
                 hostPath: config.persistentHomeURL.path,
-                guestPath: "/root",
+                guestPath: LXISHGuestPaths.home,
                 readOnly: false,
                 purpose: "home"
             )
@@ -322,7 +322,7 @@ struct LXISHRuntimeMountPlanner {
                 )
             )
         }
-        for mount in requestedMounts where mount.guestPath != "/root" && mount.guestPath != workspaceGuestPath {
+        for mount in requestedMounts where mount.guestPath != LXISHGuestPaths.home && mount.guestPath != workspaceGuestPath {
             mounts.append(
                 LXISHMountSpec(
                     hostPath: URL(fileURLWithPath: mount.hostPath, isDirectory: true)

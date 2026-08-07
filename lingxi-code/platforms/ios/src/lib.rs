@@ -163,7 +163,7 @@ fn build_mobile_linux_mounts(
         .map(|host_path| {
             vec![MountSpec {
                 host_path,
-                guest_path: format!("/workspace/{guest_workspace_id}"),
+                guest_path: traits::mobile_linux::guest_paths::workspace(&guest_workspace_id),
                 read_only: false,
                 purpose: MountPurpose::Workspace,
             }]

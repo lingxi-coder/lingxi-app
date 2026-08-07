@@ -18,8 +18,16 @@ use traits::{
     SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 
-const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &["/root", "/tmp", "/var/tmp", "/workspace"];
-const RESETTABLE_GUEST_PATHS: &[&str] = &["/tmp", "/var/tmp"];
+// Derived from the single guest-path atlas — see
+// `traits::mobile_linux::guest_paths` for why this is no longer a local
+// literal (four Rust + seven Swift sites used to restate it independently).
+const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &[
+    traits::mobile_linux::guest_paths::HOME,
+    traits::mobile_linux::guest_paths::SCRATCH[0],
+    traits::mobile_linux::guest_paths::SCRATCH[1],
+    traits::mobile_linux::guest_paths::WORKSPACE_ROOT,
+];
+const RESETTABLE_GUEST_PATHS: &[&str] = traits::mobile_linux::guest_paths::SCRATCH;
 const REQUIRED_ROOTFS_PACKAGES: &[&str] = &[
     "busybox",
     "git",

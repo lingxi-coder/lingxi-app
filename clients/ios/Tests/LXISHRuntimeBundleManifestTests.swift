@@ -472,6 +472,18 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         )
     }
 
+    /// The Swift half of the cross-language pin on the guest-path atlas.
+    /// `LXISHGuestPaths` twins Rust's `traits::mobile_linux::guest_paths`;
+    /// the Rust side pins the SAME literals in
+    /// `guest_paths::tests::atlas_atoms_are_pinned`. If either twin drifts,
+    /// exactly one of the two pins goes red and names the divergence.
+    func testGuestPathAtlasMatchesRustTwin() {
+        XCTAssertEqual(LXISHGuestPaths.home, "/root")
+        XCTAssertEqual(LXISHGuestPaths.scratch, ["/tmp", "/var/tmp"])
+        XCTAssertEqual(LXISHGuestPaths.workspaceRoot, "/workspace")
+        XCTAssertEqual(LXISHGuestPaths.workspace("abc-123"), "/workspace/abc-123")
+    }
+
     func testGuestMountPointRefusesPathsThatWouldEscapeTheDataTree() throws {
         let dataRoot = URL(fileURLWithPath: "/managed/alpine-rootfs/data", isDirectory: true)
         // Creating these would mkdir outside the rootfs on the HOST, so they are

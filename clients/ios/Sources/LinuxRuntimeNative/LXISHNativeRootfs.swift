@@ -56,12 +56,35 @@ struct LXISHRootfsStatus: Codable {
 /// workspace id under Application Support — while the terminal insisted on a
 /// project and refused to start without one. Both now resolve the same
 /// workspace, so they are the same machine rather than two.
+/// The Swift twin of Rust's guest-path atlas
+/// (`traits::mobile_linux::guest_paths`) — the ONE definition on this side of
+/// the FFI of the well-known guest paths and the `/workspace/<id>` format.
+/// Seven Swift sites used to restate these as independent string literals.
+/// The two twins are byte-pinned against each other:
+/// `guest_paths::tests::atlas_atoms_are_pinned` (Rust) and
+/// `testGuestPathAtlasMatchesRustTwin` (Swift) assert the SAME literals, so
+/// drift on either side fails one of the pins.
+enum LXISHGuestPaths {
+    /// The guest home (`~` of the interactive shell), host-backed by the
+    /// rootfs manager's `persistent/root` bind mount.
+    static let home = "/root"
+    /// Scratch areas writable inside the guest.
+    static let scratch = ["/tmp", "/var/tmp"]
+    /// Parent of every per-workspace mount.
+    static let workspaceRoot = "/workspace"
+
+    /// THE `/workspace/<id>` format.
+    static func workspace(_ stableWorkspaceId: String) -> String {
+        "\(workspaceRoot)/\(stableWorkspaceId)"
+    }
+}
+
 enum LXISHDefaultWorkspace {
     static let defaultsKey = "lingxi.mobile-linux.workspace.default.id"
 
     /// `/root` is mounted by the runtime unconditionally (the persistent home
     /// layer) and is always writable, so it is a valid cwd even with no project.
-    static let guestHome = "/root"
+    static let guestHome = LXISHGuestPaths.home
 
     static func stableID(defaults: UserDefaults = .standard) -> String {
         if let persisted = defaults.string(forKey: defaultsKey),
@@ -230,7 +253,7 @@ final class LXISHNativeRootfsManager {
             stagedRoot: nil,
             archiveSha256: installedMetadata?.archiveSha256 ?? config.archiveSha256,
             installedSizeBytes: state == "ready" ? directorySize(at: rootfsURL) : nil,
-            writableGuestPaths: ["/workspace/\(config.stableWorkspaceId)", "/tmp", "/var/tmp", "/root"],
+            writableGuestPaths: [LXISHGuestPaths.workspace(config.stableWorkspaceId)] + LXISHGuestPaths.scratch + [LXISHGuestPaths.home],
             lastError: lastError
         )
     }

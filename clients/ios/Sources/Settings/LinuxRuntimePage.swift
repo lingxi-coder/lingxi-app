@@ -183,7 +183,7 @@ private enum LinuxRuntimeBridge {
                 request: MobileLinuxCommandRequestFfi(
                     command: "/bin/sh",
                     args: ["-lc", command],
-                    cwd: "/workspace/\(cfg.stableWorkspaceId)",
+                    cwd: LXISHGuestPaths.workspace(cfg.stableWorkspaceId),
                     env: [:],
                     stdin: nil,
                     timeoutMs: 30_000,

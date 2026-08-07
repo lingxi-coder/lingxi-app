@@ -89,7 +89,7 @@ struct TerminalRuntimeDescriptor: Equatable, Sendable {
     var taskRefreshInterval: Int = 4
 
     var workspaceRootGuestPath: String {
-        "/workspace/\(config?.stableWorkspaceId ?? "")"
+        LXISHGuestPaths.workspace(config?.stableWorkspaceId ?? "")
     }
 }
 
@@ -187,7 +187,7 @@ extension TerminalRuntimeDescriptor {
     }
 
     private static func inferPurpose(for guestPath: String) -> TerminalMountPurpose {
-        if guestPath.hasPrefix("/workspace/") { return .workspace }
+        if guestPath.hasPrefix(LXISHGuestPaths.workspaceRoot + "/") { return .workspace }
         if guestPath.contains("/memory") { return .memory }
         if guestPath.contains("/skills") { return .skills }
         if guestPath.contains("/tmp") { return .temp }

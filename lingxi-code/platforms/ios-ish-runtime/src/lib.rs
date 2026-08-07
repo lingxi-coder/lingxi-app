@@ -26,7 +26,9 @@ const PTY_IDLE_POLL: Duration = Duration::from_millis(25);
 const BACKGROUND_IDLE_POLL: Duration = Duration::from_millis(25);
 const BACKGROUND_REAP_BUDGET: Duration = Duration::from_secs(3);
 const LINGXI_DOT_DIR: &str = ".lingxi";
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = "/var/lingxi/local-app-build";
+// Canonical value lives in the guest-path atlas; the local name is kept so
+// the three mount-contract call sites read unchanged.
+const LOCAL_APP_BUILD_GUEST_ROOT: &str = traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
 
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
 /// framework bridge.
@@ -60,7 +62,7 @@ impl IosIshRuntimeConfig {
     }
 
     fn workspace_guest_path(&self) -> String {
-        format!("/workspace/{}", self.stable_workspace_id)
+        traits::mobile_linux::guest_paths::workspace(&self.stable_workspace_id)
     }
 
     fn persistent_home_host_path(&self) -> PathBuf {
@@ -328,9 +330,9 @@ impl IosIshRuntime {
             archive_sha256: self.state.config.archive_sha256.clone(),
             installed_size_bytes: directory_size(&active_root).ok(),
             writable_guest_paths: vec![
-                "/root".to_string(),
-                "/tmp".to_string(),
-                "/var/tmp".to_string(),
+                traits::mobile_linux::guest_paths::HOME.to_string(),
+                traits::mobile_linux::guest_paths::SCRATCH[0].to_string(),
+                traits::mobile_linux::guest_paths::SCRATCH[1].to_string(),
                 self.state.config.workspace_guest_path(),
                 LOCAL_APP_BUILD_GUEST_ROOT.to_string(),
             ],

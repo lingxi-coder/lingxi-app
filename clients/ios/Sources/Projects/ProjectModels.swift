@@ -76,7 +76,7 @@ struct ProjectWorkspace: Equatable, Sendable {
     init(projectId: String, hostURL: URL) {
         self.projectId = projectId
         self.hostURL = hostURL
-        self.guestPath = "/workspace/\(projectId)"
+        self.guestPath = LXISHGuestPaths.workspace(projectId)
     }
 }
 

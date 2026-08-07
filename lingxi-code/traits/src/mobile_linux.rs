@@ -19,6 +19,66 @@ use thiserror::Error;
 /// Maximum number of events a single `read_events` call should return.
 pub const MAX_MOBILE_LINUX_EVENT_BATCH: usize = 512;
 
+/// The guest-path atlas — the ONE definition of the well-known mobile-linux
+/// guest paths and the `/workspace/<id>` format.
+///
+/// Before this module, the same knowledge was constructed independently in
+/// four Rust sites (`platform-common`'s writable allow-list, `platform-ios`'s
+/// workspace mount, `platform-ios-ish-runtime`'s status report and its config
+/// helper) and seven Swift sites — drift between them produced real bugs
+/// (display-label mount rows shipped into `openPty`; a managed-root spelling
+/// split). Every Rust consumer now derives from here.
+///
+/// The Swift twin is `LXISHGuestPaths` (clients/ios
+/// `LXISHNativeRootfs.swift`); the two are pinned to identical literals by
+/// `guest_paths::tests` on this side and
+/// `LXISHRuntimeBundleManifestTests.testGuestPathAtlasMatchesRustTwin` on the
+/// Swift side — change one and the other's pin fails.
+pub mod guest_paths {
+    /// The guest home (`~` of the interactive shell). Host-backed by the
+    /// rootfs manager's `persistent/root` bind mount.
+    pub const HOME: &str = "/root";
+    /// Scratch areas writable inside the guest.
+    pub const SCRATCH: &[&str] = &["/tmp", "/var/tmp"];
+    /// Parent of every per-workspace mount.
+    pub const WORKSPACE_ROOT: &str = "/workspace";
+    /// Root of the local-app build channels
+    /// (`<root>/<app-id>/<channel>` per mount contract).
+    pub const LOCAL_APP_BUILD_ROOT: &str = "/var/lingxi/local-app-build";
+
+    /// THE `/workspace/<id>` format — previously duplicated as a format
+    /// string in six places across two languages.
+    #[must_use]
+    pub fn workspace(stable_workspace_id: &str) -> String {
+        format!("{WORKSPACE_ROOT}/{stable_workspace_id}")
+    }
+
+    /// Guest prefixes a sandbox policy may declare writable.
+    #[must_use]
+    pub fn writable_roots() -> [&'static str; 4] {
+        [HOME, SCRATCH[0], SCRATCH[1], WORKSPACE_ROOT]
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// Byte-pins the atlas atoms. The Swift twin (`LXISHGuestPaths`)
+        /// pins the SAME literals — drift on either side fails one of the
+        /// twins.
+        #[test]
+        fn atlas_atoms_are_pinned() {
+            assert_eq!(super::HOME, "/root");
+            assert_eq!(super::SCRATCH, &["/tmp", "/var/tmp"]);
+            assert_eq!(super::WORKSPACE_ROOT, "/workspace");
+            assert_eq!(super::LOCAL_APP_BUILD_ROOT, "/var/lingxi/local-app-build");
+            assert_eq!(super::workspace("abc-123"), "/workspace/abc-123");
+            assert_eq!(
+                super::writable_roots(),
+                ["/root", "/tmp", "/var/tmp", "/workspace"]
+            );
+        }
+    }
+}
+
 /// Shared mobile runtime mode switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MobileLinuxRuntimeMode {

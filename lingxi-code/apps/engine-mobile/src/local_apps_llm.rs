@@ -26,6 +26,15 @@ const AUTHOR_PROMPT: &str = include_str!("../assets/prompts/author_questionnaire
 const PLAN_PROMPT: &str = include_str!("../assets/prompts/plan.md");
 const SOURCES_PROMPT: &str = include_str!("../assets/prompts/generate_sources.md");
 
+// Forced-tool names. Hoisted to constants (rather than inline string
+// literals at each call site) so [`ApiServiceModel::max_tokens_for`] cannot
+// silently desync from the names [`LocalAppsLlm`] actually calls with — a
+// rename or a fourth call that only updated one of the two spots would
+// otherwise fall through to the 4096 default and truncate mid-tool-call.
+const TOOL_QUESTIONNAIRE: &str = "emit_questionnaire";
+const TOOL_PLAN: &str = "emit_plan";
+const TOOL_SOURCES: &str = "emit_sources";
+
 /// A single structured model call. The implementation owns auth, routing,
 /// retry and timeout — the three call sites below only see a proposal in,
 /// a validated JSON value or an error out.
@@ -73,7 +82,7 @@ impl ApiServiceModel {
 
     fn max_tokens_for(tool_name: &str) -> u32 {
         match tool_name {
-            "emit_sources" => 32768,
+            TOOL_SOURCES => 32768,
             _ => 4096,
         }
     }
@@ -112,16 +121,32 @@ impl LocalAppsModel for ApiServiceModel {
             .await
             .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
 
-        for block in response.content {
-            if let ContentBlock::ToolCall { name, input, .. } = block {
-                if name == tool_name {
-                    return Ok(input);
-                }
-            }
+        // `ToolChoice::Tool { name }` forces the model to call the named
+        // tool, but it carries only a name — it does NOT disable parallel
+        // tool use, so a response can legally contain more than one
+        // `ToolCall` block naming `tool_name`. Taking only the first match
+        // (the earlier version of this method) would silently discard every
+        // later one: under the overlay write semantics a `emit_sources`
+        // response with two tool calls would drop the second batch of files
+        // with no error anywhere — `screen_writes` only ever sees the
+        // truncated first batch. Collect every match and require exactly one.
+        let mut matches: Vec<serde_json::Value> = response
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolCall { name, input, .. } if name == tool_name => Some(input),
+                _ => None,
+            })
+            .collect();
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            0 => Err(AppError::LlmOutputRejected(
+                "the model did not call the required tool".into(),
+            )),
+            count => Err(AppError::LlmOutputRejected(format!(
+                "the model called `{tool_name}` {count} times; expected exactly one call"
+            ))),
         }
-        Err(AppError::LlmOutputRejected(
-            "the model did not call the required tool".into(),
-        ))
     }
 }
 
@@ -147,6 +172,25 @@ pub struct SourceRequest {
     pub validator_feedback: Option<String>,
 }
 
+/// `validate_questionnaire`/`validate_plan`/`screen_writes` all build
+/// `AppError::InvalidRequest` — the vocabulary they share with every OTHER
+/// caller in the codebase, most of which really are describing a malformed
+/// *user* request. At this seam the rejected "request" was authored by the
+/// model, not the user: a bare `?` on any of the three would let that kind
+/// leak through unchanged, and the client renders `InvalidRequest` as "the
+/// request itself is malformed (bad id, empty name…)" — wrong copy, wrong
+/// recovery action, for a failure the user neither caused nor can fix by
+/// retyping anything. Remap `InvalidRequest` to `LlmOutputRejected` at each
+/// of the three validator/gate call sites; every other `AppError` variant
+/// (there currently are none from these three functions, but the match stays
+/// total for whatever a future validator might add) passes through as-is.
+fn as_llm_output_rejected(error: AppError) -> AppError {
+    match error {
+        AppError::InvalidRequest(message) => AppError::LlmOutputRejected(message),
+        other => other,
+    }
+}
+
 /// The three-call seam: author a questionnaire, derive a plan, write source.
 pub struct LocalAppsLlm {
     model: Arc<dyn LocalAppsModel>,
@@ -170,7 +214,7 @@ impl LocalAppsLlm {
             .structured(
                 AUTHOR_PROMPT,
                 format!("用户的描述：\n{brief}"),
-                "emit_questionnaire",
+                TOOL_QUESTIONNAIRE,
                 questionnaire_schema(),
             )
             .await?;
@@ -184,7 +228,7 @@ impl LocalAppsLlm {
         .map_err(|error| {
             AppError::LlmOutputRejected(format!("questionnaire is malformed: {error}"))
         })?;
-        validate_questionnaire(&steps)?;
+        validate_questionnaire(&steps).map_err(as_llm_output_rejected)?;
         Ok((name, steps))
     }
 
@@ -206,11 +250,11 @@ impl LocalAppsLlm {
         );
         let value = self
             .model
-            .structured(PLAN_PROMPT, user, "emit_plan", plan_schema())
+            .structured(PLAN_PROMPT, user, TOOL_PLAN, plan_schema())
             .await?;
         let plan: AppPlan = serde_json::from_value(value)
             .map_err(|error| AppError::LlmOutputRejected(format!("plan is malformed: {error}")))?;
-        validate_plan(&plan)?;
+        validate_plan(&plan).map_err(as_llm_output_rejected)?;
         Ok(plan)
     }
 
@@ -243,7 +287,7 @@ impl LocalAppsLlm {
         }
         let value = self
             .model
-            .structured(SOURCES_PROMPT, user, "emit_sources", sources_schema())
+            .structured(SOURCES_PROMPT, user, TOOL_SOURCES, sources_schema())
             .await?;
         let files = value.get("files").and_then(serde_json::Value::as_array).ok_or_else(|| {
             AppError::LlmOutputRejected("generator returned no `files` array".into())
@@ -264,7 +308,7 @@ impl LocalAppsLlm {
                 Ok(FileWrite { path: path.to_string(), contents: contents.to_string() })
             })
             .collect::<Result<_, AppError>>()?;
-        screen_writes(&writes)?;
+        screen_writes(&writes).map_err(as_llm_output_rejected)?;
         Ok(writes)
     }
 }
@@ -301,7 +345,6 @@ fn design_field_schema() -> serde_json::Value {
             "required": { "type": "boolean" },
             "allowsCustom": { "type": "boolean" },
             "allowsDefer": { "type": "boolean" },
-            "defaultValue": {},
             "options": {
                 "type": "array",
                 "maxItems": MAX_OPTIONS,
@@ -497,6 +540,18 @@ mod tests {
         })
     }
 
+    fn good_plan() -> serde_json::Value {
+        serde_json::json!({
+            "summary": "一个记事本，帮你记录日常想法。",
+            "collections": [{
+                "id": "notes", "name": "笔记",
+                "fields": [{"id": "title", "label": "标题", "kind": "text", "required": true}]
+            }],
+            "capabilities": ["data_mutation"],
+            "domains": []
+        })
+    }
+
     #[tokio::test]
     async fn author_questionnaire_returns_the_validated_steps_and_name() {
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_questionnaire())]));
@@ -516,9 +571,63 @@ mod tests {
             })).collect::<Vec<_>>()
         });
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(over_limit)]));
-        llm.author_questionnaire("一个记事本")
+        let err = llm
+            .author_questionnaire("一个记事本")
             .await
             .expect_err("6 steps must be rejected by the validator, not passed through");
+        // `validate_questionnaire` itself builds `AppError::InvalidRequest` —
+        // this seam must remap it to `LlmOutputRejected` before returning,
+        // since the "request" that failed validation was the model's output,
+        // not the user's. Without the remap this assertion is what would
+        // catch a regression back to the bare `?` (an `expect_err`-only test
+        // stays green either way).
+        assert!(
+            matches!(err, AppError::LlmOutputRejected(_)),
+            "a validator rejection must surface as LlmOutputRejected, not InvalidRequest: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_returns_the_validated_plan() {
+        let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_plan())]));
+        let plan = llm
+            .plan("一个记事本", &[], &BTreeMap::new())
+            .await
+            .expect("planning");
+        assert_eq!(plan.collections.len(), 1);
+        assert_eq!(plan.collections[0].id, "notes");
+        assert_eq!(plan.capabilities, vec![local_apps::AppCapability::DataMutation]);
+        assert!(plan.summary.contains("记事本"));
+    }
+
+    #[tokio::test]
+    async fn plan_rejects_an_ip_literal_domain() {
+        let mut bad = good_plan();
+        bad["domains"] = serde_json::json!(["203.0.113.10"]);
+        let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(bad)]));
+        let err = llm
+            .plan("一个记事本", &[], &BTreeMap::new())
+            .await
+            .expect_err("an IP-literal domain must be rejected by validate_plan, not passed through");
+        assert!(
+            matches!(err, AppError::LlmOutputRejected(_)),
+            "a validator rejection must surface as LlmOutputRejected, not InvalidRequest: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_rejects_more_than_eight_collections() {
+        let mut bad = good_plan();
+        bad["collections"] = serde_json::json!((0..9)
+            .map(|i| serde_json::json!({
+                "id": format!("c{i}"), "name": "C",
+                "fields": [{"id": "f", "label": "F", "kind": "text"}]
+            }))
+            .collect::<Vec<_>>());
+        let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(bad)]));
+        llm.plan("一个记事本", &[], &BTreeMap::new())
+            .await
+            .expect_err("9 collections must be rejected by validate_plan, not passed through");
     }
 
     #[tokio::test]
@@ -554,9 +663,17 @@ mod tests {
             "files": [{"path": "../secret.js", "contents": "x"}]
         });
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(escaping)]));
-        llm.generate_sources(&initial_request())
+        let err = llm
+            .generate_sources(&initial_request())
             .await
             .expect_err("the gate must reject an escaping path before anything is written");
+        // `screen_writes` builds `AppError::InvalidRequest` — this seam must
+        // remap it to `LlmOutputRejected`, same reasoning as the
+        // questionnaire/plan validator sites.
+        assert!(
+            matches!(err, AppError::LlmOutputRejected(_)),
+            "a gate rejection must surface as LlmOutputRejected, not InvalidRequest: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -585,9 +702,18 @@ mod tests {
     async fn a_model_error_propagates_rather_than_falling_back() {
         let llm =
             LocalAppsLlm::new(ScriptedModel::new(vec![Err(AppError::LlmUnavailable("offline".into()))]));
-        llm.author_questionnaire("一个记事本")
+        let err = llm
+            .author_questionnaire("一个记事本")
             .await
             .expect_err("there is no template to silently fall back to — fail closed");
+        // The model itself was unreachable — this must stay `LlmUnavailable`,
+        // never get relabeled `LlmOutputRejected` (which means the model DID
+        // answer, just badly). Mixing the two would send the client down the
+        // wrong recovery-action path (retry/reconnect vs. edit-and-resubmit).
+        assert!(
+            matches!(err, AppError::LlmUnavailable(_)),
+            "an unreachable model must surface as LlmUnavailable: {err:?}"
+        );
     }
 
     fn initial_request() -> SourceRequest {

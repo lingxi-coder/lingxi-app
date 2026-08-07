@@ -178,8 +178,20 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record. The app starts in authoring_questionnaire while its design questionnaire is set up; wait for that to complete before opening the design wizard. This never confirms the design or starts generation.",
-                json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":200},"template":{"enum":["dashboard","crud_tracker","content_showcase","form_utility"]},"conversation_id":{"type":"string","maxLength":128}},"required":["name","template"],"additionalProperties":false}),
+                "Create a local app from a one-line description and start the LLM-authored design questionnaire. This never confirms the design or starts generation.",
+                json!({"type":"object","properties":{
+                    "brief":{"type":"string","minLength":1,"maxLength":2000},
+                    "name":{"type":"string","minLength":1,"maxLength":200},
+                    "conversation_id":{"type":"string","maxLength":128}
+                },"required":["brief"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "revise",
+                "Ask for a revision of a generated app in the user's own words. The app rebuilds and re-opens the preview gate; the user still approves it.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "prompt":{"type":"string","minLength":1,"maxLength":4000}
+                },"required":["app_id","prompt"],"additionalProperties":false}),
             ),
             Self::tool(
                 "propose_design",
@@ -347,38 +359,19 @@ impl LocalAppsMcpTransport {
                 }))
             }
             "create" => {
-                let name = Self::required_string(&input, "name")?;
-                // TODO(local-apps#questionnaire, Task 10): the tool schema
-                // below still advertises/requires a `template` enum for
-                // backward input compatibility, but the core no longer has a
-                // template concept — `AppRecord`/`AppService::create_app` now
-                // take a free-text `brief` instead. Task 10 rewrites this
-                // schema (and the request shape) around the conversational
-                // design flow to accept a real brief. Until then `template`
-                // (if sent) is accepted and ignored, and `name` doubles as
-                // the brief. This is DELIBERATELY pinned, not silent:
-                // `create_persists_name_as_brief_until_task_10_adds_a_real_one`
-                // below asserts `AppRecord.brief == name` and will fail the
-                // moment this changes — Task 10 cannot land a real brief
-                // field without that test forcing it to touch this comment
-                // and this call.
-
-                // TODO(local-apps#questionnaire, Task 10): a fresh app now
-                // starts in `authoring_questionnaire` (Task 3), not
-                // `collecting_spec` — `open_designer` requires
+                let brief = Self::required_string(&input, "brief")?;
+                // A fresh app starts in `authoring_questionnaire` (Task 3),
+                // not `collecting_spec` — `open_designer` requires
                 // `collecting_spec | generation_failed` and would refuse it.
-                // This tool used to open the designer gate immediately after
-                // create; that step is gone until Task 4/8 wire the
-                // questionnaire-authoring LLM round trip that carries the app
-                // to `collecting_spec`. The tool description above was
-                // updated to match (no more "open its human design wizard"
-                // promise); Task 10 still owns the real conversational
-                // rewrite of this tool's shape around that round trip.
+                // This tool does not open the designer gate itself; the
+                // questionnaire-authoring LLM round trip (Task 4/8) carries
+                // the app to `collecting_spec` on its own.
+                let name = input.get("name").and_then(Value::as_str);
                 let conversation_id = input
                     .get("conversation_id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
-                let record = match service.create_app(Some(name), name, conversation_id).await {
+                let record = match service.create_app(name, brief, conversation_id).await {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
@@ -386,6 +379,14 @@ impl LocalAppsMcpTransport {
                     "app": record,
                     "next_step": "The app is being set up; wait for its questionnaire before designing."
                 }))
+            }
+            "revise" => {
+                let app_id = Self::required_string(&input, "app_id")?;
+                let prompt = Self::required_string(&input, "prompt")?;
+                match service.request_revision(app_id, prompt).await {
+                    Ok(()) => Self::result(json!({ "app_id": app_id, "state": "revising" })),
+                    Err(error) => Self::app_error(error),
+                }
             }
             "propose_design" => {
                 let app_id = Self::required_string(&input, "app_id")?;
@@ -612,6 +613,7 @@ mod tests {
                 "list",
                 "get",
                 "create",
+                "revise",
                 "propose_design",
                 "manage_runtime",
                 "query_data",
@@ -633,6 +635,37 @@ mod tests {
         assert!(!schemas.contains("package_manager"));
         assert!(schemas.contains("click"));
         assert!(schemas.contains("reload"));
+        // The four static template kinds were deleted from the codebase
+        // entirely in Task 5; the schema must not still promise a deleted
+        // enum to the model as a mandatory `create` argument.
+        assert!(!schemas.contains("template"));
+        assert!(!schemas.contains("dashboard"));
+        assert!(!schemas.contains("crud_tracker"));
+        assert!(!schemas.contains("content_showcase"));
+        assert!(!schemas.contains("form_utility"));
+        let create = tools
+            .iter()
+            .find(|tool| tool.tool_name == "create")
+            .expect("create is declared");
+        let create_schema = create.input_schema.to_string();
+        assert!(
+            create_schema.contains("brief"),
+            "create takes a brief: {create_schema}"
+        );
+        let descriptions = tools
+            .iter()
+            .map(|tool| tool.description.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            !descriptions.contains("wizard"),
+            "no tool description should promise the removed human design wizard: {descriptions}"
+        );
+        assert!(
+            !descriptions.contains("five-step") && !descriptions.contains("five step"),
+            "no tool description should promise a removed five-step flow: {descriptions}"
+        );
     }
 
     async fn attached_transport(
@@ -653,43 +686,149 @@ mod tests {
         (transport, service)
     }
 
-    /// PINS the gap the `create` handler's TODO names: until Task 10 gives
-    /// the `create` tool a real `brief` input, `AppRecord.brief` is exactly
-    /// `name` — not a template tag, not empty, not anything else. This is
-    /// deliberately a strong equality assertion (not "is non-empty" or "is
-    /// present") so ANY future change to what `create` persists as `brief` —
-    /// whether Task 10 wires a real one or someone quietly "improves" this
-    /// call — fails this test and forces a conscious look at the comment
-    /// above `service.create_app(Some(name), name, conversation_id)`, instead of
-    /// silently shipping a still-wrong value.
+    /// PINS the truth Task 10 was required to confront: `create` now takes a
+    /// real, caller-supplied `brief`, and a caller-supplied `name` is
+    /// honored rather than silently overwritten with the brief (or vice
+    /// versa). This replaces the previous pin
+    /// (`create_persists_name_as_brief_until_task_10_adds_a_real_one`), which
+    /// asserted the deliberately-wrong placeholder behavior (`brief ==
+    /// name`) that stood in until this task landed. The two fixture strings
+    /// are asserted UNEQUAL so this test cannot pass if `name` and `brief`
+    /// get conflated again.
     ///
     /// The fixture name is deliberately LONGER than `AppService::create_app`'s
-    /// 24-char placeholder cut: a regression to `create_app(None, name, ..)`
-    /// (`name` silently dropped from the `create` tool call, only `brief`
-    /// passed through) would come back byte-for-byte identical for any name
-    /// at or under 24 chars via the placeholder path, leaving this test green
-    /// over the regression. Only a name that survives verbatim through the
-    /// EXPLICIT path makes the pin on "how `name` is supplied" meaningful,
-    /// not just the pin on `brief`'s value.
+    /// 24-char placeholder cut: a regression to `create_app(None, brief, ..)`
+    /// (`name` silently dropped from the `create` tool call) would come back
+    /// as the brief's own 24-char prefix instead of `NAME`, which differs
+    /// from `NAME` by construction — so this test only stays green when
+    /// `name` really does survive through the explicit path.
     #[tokio::test]
-    async fn create_persists_name_as_brief_until_task_10_adds_a_real_one() {
+    async fn create_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name() {
         const NAME: &str = "Habit Tracker Deluxe Edition";
+        const BRIEF: &str = "一个记事本 app，用来跟踪每天的习惯打卡";
         assert!(
             NAME.chars().count() > 24,
             "test fixture must exceed the placeholder cut to be meaningful"
         );
+        assert_ne!(
+            NAME, BRIEF,
+            "name and brief must be distinct fixtures so the test cannot pass by conflating them"
+        );
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
         let created = transport
-            .call("create", json!({"name": NAME, "template": "dashboard"}))
+            .call("create", json!({"name": NAME, "brief": BRIEF}))
             .await
             .expect("create");
         let app = &created.structured_content.expect("structured")["app"];
-        assert_eq!(app["name"], NAME);
         assert_eq!(
-            app["brief"], NAME,
-            "until Task 10 adds a real brief input, `create` must persist `name` as `brief` \
-             verbatim — not a template tag, not empty, not silently something else"
+            app["name"], NAME,
+            "a caller-supplied name must not be silently overwritten"
+        );
+        assert_eq!(
+            app["brief"], BRIEF,
+            "the brief the caller supplied is the brief that gets stored — not the name, \
+             not a template tag, not anything else"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_takes_a_brief_instead_of_a_template() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("a brief alone creates an app");
+        let app = &result.structured_content.expect("structured")["app"];
+        assert!(app["id"].as_str().is_some(), "got {app}");
+        assert_eq!(app["brief"], "一个记事本 app");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_legacy_template_only_argument() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        // `template` no longer exists as a concept; sending it (without the
+        // now-required `brief`) must fail rather than silently proceed.
+        let error = transport
+            .call("create", json!({ "name": "N", "template": "dashboard" }))
+            .await
+            .expect_err("brief is required; a template-only payload has none");
+        let message = error.to_string();
+        assert!(
+            message.contains("brief"),
+            "the rejection should name the missing brief: {message}"
+        );
+    }
+
+    /// Drives a freshly created app all the way to `ready`, matching
+    /// `AppState::request_revision`'s `awaiting_preview_confirmation | ready`
+    /// precondition (`local-apps/src/state.rs`), by calling the same
+    /// `AppService` steps the coordinator/generator drive in production
+    /// (`questionnaire_ready` via the shared `advance_to_collecting_spec`
+    /// test helper, then `begin_planning` -> `plan_ready` -> `confirm_design`
+    /// -> `generation_complete` -> `validation_passed` -> `confirm_preview`).
+    async fn drive_to_ready(service: &AppService, app_id: &str) {
+        local_apps::test_support::advance_to_collecting_spec(service, app_id).await;
+        service
+            .begin_planning(app_id)
+            .await
+            .expect("begin_planning");
+        let plan = local_apps::AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: Vec::new(),
+            summary: "a test plan".into(),
+        };
+        let designer = service
+            .plan_ready(app_id, plan)
+            .await
+            .expect("plan_ready");
+        service
+            .confirm_design(app_id, &designer.interaction_id, designer.revision)
+            .await
+            .expect("confirm_design");
+        service
+            .generation_complete(app_id)
+            .await
+            .expect("generation_complete");
+        let preview = service
+            .validation_passed(app_id)
+            .await
+            .expect("validation_passed");
+        service
+            .confirm_preview(app_id, &preview.interaction_id, preview.revision)
+            .await
+            .expect("confirm_preview");
+    }
+
+    #[tokio::test]
+    async fn revise_is_exposed_and_reaches_the_service() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = attached_transport(root.path()).await;
+        let created = transport
+            .call("create", json!({ "brief": "一个记事本" }))
+            .await
+            .expect("create");
+        let app_id = created.structured_content.expect("structured")["app"]["id"]
+            .as_str()
+            .expect("app id")
+            .to_string();
+        drive_to_ready(&service, &app_id).await;
+
+        let result = transport
+            .call(
+                "revise",
+                json!({ "app_id": app_id, "prompt": "把搜索框挪到顶部" }),
+            )
+            .await
+            .expect("revise is callable on a ready app");
+        assert!(!result.is_error, "got {result:?}");
+        assert_eq!(
+            service.record(&app_id).await.expect("record").workflow_state,
+            local_apps::AppWorkflowState::Revising,
+            "revise must actually reach AppService::request_revision, not just accept the call"
         );
     }
 
@@ -698,10 +837,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (transport, service) = attached_transport(root.path()).await;
         let created = transport
-            .call(
-                "create",
-                json!({"name": "Habits", "template": "dashboard"}),
-            )
+            .call("create", json!({"name": "Habits", "brief": "habit tracker"}))
             .await
             .expect("create");
         let app_id = created.structured_content.expect("structured")["app"]["id"]
@@ -739,7 +875,7 @@ mod tests {
             transport
                 .call(
                     "create",
-                    json!({"name": format!("App {index}"), "template": "dashboard"}),
+                    json!({"name": format!("App {index}"), "brief": "a test app"}),
                 )
                 .await
                 .expect("create");

@@ -64,8 +64,8 @@ final class LocalAppsStore {
     private(set) var requestedPresentationAppID: String?
     private(set) var activeUIRequestAppID: String?
     /// Set alongside `requestedPresentationAppID` only for a preview gate
-    /// armed by a live generation this session (see `appPreviewReady`'s
-    /// `generationProgress` gate). `requestedPresentationAppID` itself is
+    /// armed by a live generation this session (see `appPreviewReady`'s use
+    /// of `liveGenerationAppIDs`). `requestedPresentationAppID` itself is
     /// consumed synchronously by `RootView`'s `onChange` before a cold
     /// `LocalAppsRootView`'s `.task` ever runs, so it cannot be read there;
     /// this field survives until `consumePendingPreviewRouteAppID` reads it.
@@ -78,6 +78,30 @@ final class LocalAppsStore {
     @ObservationIgnored private var inFlightEdits: [String: PendingEdit] = [:]
     @ObservationIgnored private var runningBeforeSuspension = Set<String>()
     @ObservationIgnored private var pendingCreation: PendingCreation?
+    /// App ids with a generation actively reporting progress IN THIS
+    /// PROCESS this session — inserted ONLY by `appGenerationProgress` and
+    /// `appGenerationJobChanged`, never by `appDetailsChanged`'s mirroring
+    /// of a snapshot's `generationJob` (review NEW-1, round 2).
+    ///
+    /// `generationProgress` (the `@Observable` map the UI renders progress
+    /// from) has TWO producers: live stage reports, AND `appDetailsChanged`
+    /// attaching whatever durable job the engine still has on disk for an
+    /// app the user merely opened the detail screen for
+    /// (`AppService::load_jobs`/`handle_get_app_details`, `host.rs:2891`) —
+    /// an app parked at `awaiting_preview_confirmation` keeps a durable job
+    /// in `AwaitingApproval` forever, so simply viewing its detail screen
+    /// populated `generationProgress` for it even though nothing was
+    /// running. Gating `appPreviewReady`'s navigation on `generationProgress`
+    /// alone (the round-1 fix) was therefore still wrong: a bootstrap resync
+    /// AFTER the user had merely looked at that app's details this session
+    /// would incorrectly arm navigation. This set has exactly one producer
+    /// (a truly live job) and is consumed (removed) the moment a
+    /// `PreviewReady` for that app uses it — see `appPreviewReady`'s handler
+    /// — so a LATER re-announcement of the same still-pending gate (e.g. a
+    /// second `resync_pending_gates` from a project/provider switch that
+    /// re-wires the engine source without recreating this store) no longer
+    /// finds a stale "live" marker either.
+    @ObservationIgnored private var liveGenerationAppIDs = Set<String>()
     /// Apps for which an `open_app_designer` has been sent and whose gate has
     /// not come back yet.
     ///
@@ -254,6 +278,10 @@ final class LocalAppsStore {
                     percent: percent,
                     detail: detail
                 )
+                // A live stage report — see `liveGenerationAppIDs`'s doc
+                // comment for why this is a DIFFERENT signal from the map
+                // above.
+                liveGenerationAppIDs.insert(appId)
 
             case let .appRuntimeChanged(appId, state, details, lastError):
                 runtimes[appId] = LocalAppsProtocolAdapter.runtime(
@@ -307,18 +335,20 @@ final class LocalAppsStore {
                 // bootstrap batch each fire this, so the cover is presented,
                 // its `path` reset, and re-presented.
                 //
-                // Gate on `generationProgress[appId]`: a LIVE generation
-                // reports stage progress (`appGenerationProgress` /
-                // `appGenerationJobChanged`, both of which populate this map)
-                // continuously right up to `validation_passed`, which is what
-                // emits `PreviewReady` — so the map is still non-nil at the
-                // instant this case runs. A bootstrap re-announcement has no
-                // such job in this process: the map starts empty every launch
-                // and nothing populates it before the resync fires. This
-                // distinguishes "the gate that just opened because I generated
-                // it this session" from "the gate that has been sitting there
-                // since before I opened the app."
-                if generationProgress[appId] != nil {
+                // Gate on `liveGenerationAppIDs`, NOT `generationProgress`
+                // (round-1 fix used the latter and was still wrong — see
+                // `liveGenerationAppIDs`'s doc comment for the full story):
+                // `generationProgress` also gets populated just by
+                // `appDetailsChanged` mirroring a durable job the engine
+                // still has on disk, which happens merely from opening an
+                // app's detail screen — nothing live required. Removing
+                // (not just reading) on match also closes the within-session
+                // repeat: a SECOND `resync_pending_gates` later in the same
+                // process (e.g. a project/provider switch that re-wires the
+                // engine source without recreating this store) re-announces
+                // the same still-pending gate, and must not re-arm just
+                // because this app WAS live earlier this session.
+                if liveGenerationAppIDs.remove(appId) != nil {
                     requestedPresentationAppID = appId
                     // Lets a COLD local-apps cover (its `.task` runs after
                     // `requestedPresentationAppID` has already been consumed
@@ -338,7 +368,10 @@ final class LocalAppsStore {
                 checkpoints[appId] = values.sorted { $0.createdAt > $1.createdAt }
 
             case let .appOperationFailed(appId, code, message):
-                if let appId { generationProgress[appId] = nil }
+                if let appId {
+                    generationProgress[appId] = nil
+                    liveGenerationAppIDs.remove(appId)
+                }
                 isRefreshing = false
                 // A failed open never produces a gate, so nothing else would
                 // clear the marker and the app could never be opened again.
@@ -942,6 +975,15 @@ final class LocalAppsStore {
 
             case let .appGenerationJobChanged(job):
                 updateGenerationJob(job)
+                // Unlike `appDetailsChanged`'s call to the same helper just
+                // above (a passive snapshot mirror), this event is only ever
+                // emitted for a job actually progressing in this process —
+                // see `liveGenerationAppIDs`'s doc comment. Do NOT hoist this
+                // insert into `updateGenerationJob` itself: that would also
+                // fire for the `appDetailsChanged` call site, which is
+                // exactly the false-positive producer this set exists to
+                // exclude.
+                liveGenerationAppIDs.insert(job.appId)
 
             case let .appBridgeResponse(response):
                 LocalAppWebViewRegistry.shared.resolveBridge(

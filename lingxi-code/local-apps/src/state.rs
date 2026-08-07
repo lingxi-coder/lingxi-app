@@ -442,9 +442,10 @@ impl AppState {
         // Normalize BEFORE validating so the value that gets checked is the
         // one that gets stored (and later copied verbatim into
         // `AppManifest` by `reconcile_manifest`) — review NEW-2. Order
-        // matters: `normalize_plan` only repairs domain casing/duplication;
-        // `validate_plan` is the actual gate for everything else.
-        crate::questionnaire::normalize_plan(&mut plan);
+        // matters: `normalize_plan` only repairs domain casing/duplication
+        // (and enforces `MAX_DOMAINS` on the pre-dedup count); `validate_plan`
+        // is the actual gate for everything else.
+        crate::questionnaire::normalize_plan(&mut plan)?;
         crate::questionnaire::validate_plan(&plan)?;
         self.draft.plan = Some(plan);
         self.draft.plan_for_revision = Some(self.draft.revision);

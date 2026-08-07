@@ -418,6 +418,110 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
         }
 
+        // review NEW-1, round 2: gating on `generationProgress` (round 1's
+        // fix) was still wrong — `appDetailsChanged` also populates that map
+        // whenever it mirrors a snapshot's `generationJob`, which happens
+        // just from opening an app's DETAIL screen (`LocalAppDetailView.task`
+        // -> `getDetails`), no live run required. An app parked at
+        // `awaiting_preview_confirmation` keeps its durable job forever
+        // (`AppService::load_jobs`), so `handle_get_app_details` attaches it
+        // on every fetch. This pins that merely viewing the details of a
+        // long-parked app must not, on a LATER gate re-announcement, make it
+        // look like a live generation.
+        func testAPersistedJobSeenOnlyViaAppDetailsDoesNotArmNavigation() {
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appDetailsChanged(details: AppDetailsDto(
+                app: app(id: "tracker", name: "Tracker"),
+                designRevision: 1,
+                designFields: [],
+                questionnaire: [],
+                plan: nil,
+                manifest: nil,
+                runtime: AppRuntimeDetailsDto(
+                    state: .stopped,
+                    mode: .nextProduction,
+                    loopbackUrl: nil,
+                    suspensionReason: nil,
+                    recoveryState: .recovered,
+                    lastError: nil
+                ),
+                generationJob: AppGenerationJobDto(
+                    id: "job-1",
+                    appId: "tracker",
+                    revision: 1,
+                    continuationSeq: 1,
+                    state: .awaitingApproval,
+                    percent: nil,
+                    detail: nil,
+                    logRel: nil,
+                    updatedAtMs: 1
+                ),
+                checkpoints: []
+            ))))
+            // Sanity: the details snapshot really did mirror the job into
+            // the map the round-1 fix (wrongly) gated on — otherwise this
+            // test would pass for the wrong reason.
+            XCTAssertNotNil(
+                store.generationProgress["tracker"],
+                "sanity: appDetailsChanged mirrors a persisted job into generationProgress"
+            )
+
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1,
+                url: nil
+            ))
+
+            XCTAssertNil(store.requestedPresentationAppID)
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
+        // review NEW-1, round 2: the within-session variant. A generation
+        // that really did run this session correctly arms navigation once
+        // (regression guard above) — but if the SAME still-pending gate is
+        // re-announced a second time later in the same process (a project or
+        // provider switch re-wires the engine source and re-runs
+        // `resync_pending_gates` without recreating this store — `RootView`'s
+        // `@State private var localAppsStore` is not reset by either), the
+        // second announcement must not re-arm just because the app WAS live
+        // earlier this session.
+        func testASecondReannouncementInTheSameSessionDoesNotReArmAfterTheFirstConsumedIt() {
+            let store = LocalAppsStore()
+            store.handle(event: .appGenerationProgress(
+                appId: "tracker",
+                stage: "scaffold",
+                percent: 60,
+                detail: nil
+            ))
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1,
+                url: nil
+            ))
+            XCTAssertEqual(store.requestedPresentationAppID, "tracker", "the first, genuinely live announcement arms")
+            _ = store.consumePendingPreviewRouteAppID(appID: "tracker")
+            // Mirrors `RootView`'s `onChange` consuming this synchronously in
+            // production — without this, the field would trivially still
+            // read "tracker" from the first event regardless of whether the
+            // second event re-armed it, making the assertion below vacuous.
+            _ = store.consumeRequestedPresentationAppID()
+
+            // A second resync re-announces the SAME still-unconfirmed gate —
+            // no new `appGenerationProgress` precedes it, because nothing is
+            // running; it is a replay, exactly like the cold-bootstrap case.
+            store.handle(event: .appPreviewReady(
+                appId: "tracker",
+                interactionId: "gate-1",
+                revision: 1,
+                url: nil
+            ))
+
+            XCTAssertNil(store.requestedPresentationAppID, "a replay of an already-consumed gate must not re-arm")
+            XCTAssertFalse(store.consumePendingPreviewRouteAppID(appID: "tracker"))
+        }
+
         func testFailedRuntimeLabelCarriesTheEngineReason() {
             let store = LocalAppsStore()
             store.handle(event: .appRuntimeChanged(

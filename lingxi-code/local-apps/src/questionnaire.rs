@@ -397,16 +397,24 @@ pub fn validate_plan(plan: &AppPlan) -> Result<(), AppError> {
             plan.domains.len()
         )));
     }
-    // Case-insensitive dedup: `normalize_plan` is expected to have already
-    // folded case and dropped duplicates by the time a plan reaches here
-    // (`AppState::plan_ready`), but `validate_plan` is the actual gate — it
-    // must reject on its own, not merely trust an upstream normalization
-    // step, or a caller that skips normalization silently produces a plan
-    // `AppManifest::validate` then rejects as a "duplicate allowed domain"
-    // past the human gate (review NEW-2).
+    // Case-insensitive dedup, AND casing itself: `normalize_plan` is
+    // expected to have already folded case and dropped duplicates by the
+    // time a plan reaches here (`AppState::plan_ready`), but `validate_plan`
+    // is the actual gate — it must reject on its own, not merely trust an
+    // upstream normalization step, or a caller that skips normalization
+    // silently produces a plan `AppManifest::validate` then rejects (as a
+    // non-lowercase or duplicate `allowed_domain`) past the human gate
+    // (review NEW-2, round 2: this reasoning was already applied to
+    // duplicates; it applies identically to casing — `validate_plan` is
+    // re-exported at the crate root (`lib.rs`) while `normalize_plan` is
+    // only reachable via `questionnaire::`, so a caller using the root
+    // export alone would otherwise get the lax path).
     let mut seen_domains = BTreeSet::new();
     for domain in &plan.domains {
         validate_domain(domain)?;
+        if domain.as_str() != domain.to_ascii_lowercase() {
+            return Err(reject(format!("domain `{domain}` must be lowercase")));
+        }
         if !seen_domains.insert(domain.to_ascii_lowercase()) {
             return Err(reject(format!("duplicate domain `{domain}`")));
         }
@@ -426,12 +434,30 @@ pub fn validate_plan(plan: &AppPlan) -> Result<(), AppError> {
 /// the plan back to the LLM for a cosmetic retry; genuinely invalid domains
 /// (IP literals, loopback, malformed labels) are still rejected by
 /// `validate_domain` inside `validate_plan`, which MUST run after this.
-pub fn normalize_plan(plan: &mut AppPlan) {
+///
+/// Enforces `MAX_DOMAINS` BEFORE deduping, not after (review NEW-2, round 2):
+/// deduping first would let a plan with e.g. 9 domains, 2 of which are only
+/// case-duplicates, pass a `> MAX_DOMAINS` check that a plan with the same
+/// raw shape used to fail. The count is a guard on how much raw output an
+/// LLM produced, not on how many distinct domains survive cleanup, so it has
+/// to see the pre-dedup length. `validate_plan` still re-checks the
+/// (necessarily smaller-or-equal) post-normalize count on its own — same
+/// "the gate must not rely on an upstream step" reasoning as the casing/dup
+/// checks above — but that second check existing does not excuse getting
+/// the first one's ordering wrong.
+pub fn normalize_plan(plan: &mut AppPlan) -> Result<(), AppError> {
+    if plan.domains.len() > MAX_DOMAINS {
+        return Err(reject(format!(
+            "plan declares {} domains, the limit is {MAX_DOMAINS}",
+            plan.domains.len()
+        )));
+    }
     let mut seen = BTreeSet::new();
     plan.domains.retain_mut(|domain| {
         *domain = domain.to_ascii_lowercase();
         seen.insert(domain.clone())
     });
+    Ok(())
 }
 
 /// 域名必须是可公开解析的主机名。IP 字面量、loopback、私网一律拒绝——
@@ -706,8 +732,14 @@ mod tests {
         // production (`AppState::plan_ready`), but `validate_plan` is the
         // actual gate and must not rely on that: a caller that skips
         // normalization must still be refused here, not by the manifest.
+        // Uses an EXACT (not case-differing) repeat so this isolates the
+        // duplicate check from the casing check added below — a
+        // differently-cased duplicate is covered by
+        // `rejects_a_mixed_case_domain_when_validate_plan_is_called_directly`
+        // and legitimately trips the casing check first (it runs first in
+        // the loop, so it names the more specific problem).
         let mut plan = plan_with_domain("api.example.com");
-        plan.domains.push("API.example.com".into());
+        plan.domains.push("api.example.com".into());
         let error = validate_plan(&plan).expect_err("duplicate domains must be rejected");
         assert!(
             format!("{error}").contains("duplicate"),
@@ -718,7 +750,7 @@ mod tests {
     #[test]
     fn normalize_plan_lowercases_domains() {
         let mut plan = plan_with_domain("API.Example.com");
-        normalize_plan(&mut plan);
+        normalize_plan(&mut plan).expect("well-formed count");
         assert_eq!(plan.domains, vec!["api.example.com".to_string()]);
     }
 
@@ -726,10 +758,53 @@ mod tests {
     fn normalize_plan_drops_case_insensitive_duplicates_keeping_first_seen_order() {
         let mut plan = plan_with_domain("api.example.com");
         plan.domains = vec!["Api.Example.com".into(), "OTHER.example.com".into(), "api.EXAMPLE.com".into()];
-        normalize_plan(&mut plan);
+        normalize_plan(&mut plan).expect("well-formed count");
         assert_eq!(
             plan.domains,
             vec!["api.example.com".to_string(), "other.example.com".to_string()]
+        );
+    }
+
+    // review NEW-2, round 2: `validate_plan` applied "the gate must reject
+    // on its own, not trust an upstream normalization step" to duplicates;
+    // the identical reasoning applies to casing, since `validate_plan` (not
+    // `normalize_plan`) is what's re-exported at the crate root.
+    #[test]
+    fn rejects_a_mixed_case_domain_when_validate_plan_is_called_directly() {
+        let plan = plan_with_domain("API.Example.com");
+        let error = validate_plan(&plan).expect_err("a mixed-case domain must be rejected on its own");
+        assert!(
+            format!("{error}").contains("lowercase"),
+            "message names the offending rule: {error}"
+        );
+    }
+
+    // review NEW-2, round 2: `normalize_plan` must count domains BEFORE
+    // deduping, or a plan with more raw domains than `MAX_DOMAINS` (a guard
+    // on how much the LLM produced) could pass just because some of them
+    // happened to be case-duplicates of each other.
+    #[test]
+    fn normalize_plan_rejects_more_than_max_domains_before_deduping() {
+        let mut plan = plan_with_domain("api.example.com");
+        // 9 raw domains (over MAX_DOMAINS = 8), only 7 of them distinct
+        // after case-folding — the pre-dedup count is what must be rejected.
+        plan.domains = vec![
+            "a.example.com".into(),
+            "A.example.com".into(), // case-duplicate of the previous entry
+            "b.example.com".into(),
+            "c.example.com".into(),
+            "d.example.com".into(),
+            "e.example.com".into(),
+            "f.example.com".into(),
+            "g.example.com".into(),
+            "h.example.com".into(),
+        ];
+        assert_eq!(plan.domains.len(), 9);
+        let error = normalize_plan(&mut plan)
+            .expect_err("9 raw domains must be rejected even though only 7 are distinct");
+        assert!(
+            format!("{error}").contains("9 domains"),
+            "message counts the RAW input, not the deduped result: {error}"
         );
     }
 
@@ -743,7 +818,7 @@ mod tests {
         // generation — also accepts it.
         let mut plan = plan_with_domain("API.Example.com");
         plan.domains.push("api.example.com".into());
-        normalize_plan(&mut plan);
+        normalize_plan(&mut plan).expect("well-formed count");
         validate_plan(&plan).expect("normalized plan passes its own gate");
 
         let mut manifest = crate::manifest::AppManifest::for_new_app("app-1", "App");

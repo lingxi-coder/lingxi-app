@@ -328,8 +328,12 @@ impl LocalAppsLlm {
         // `LlmOutputRejected` retry for something `plan_ready` would have
         // silently repaired anyway — and it means the plan `plan_ready`
         // later normalizes again is already in its final, validated shape
-        // (normalization is idempotent).
-        normalize_plan(&mut plan);
+        // (normalization is idempotent). `normalize_plan` can itself reject
+        // (an over-`MAX_DOMAINS` raw count, checked before dedup — review
+        // NEW-2 round 2), which is a genuine "the model over-produced"
+        // failure and belongs behind the same `LlmOutputRejected` remap as
+        // `validate_plan`'s own rejections.
+        normalize_plan(&mut plan).map_err(as_llm_output_rejected)?;
         validate_plan(&plan).map_err(as_llm_output_rejected)?;
         Ok(plan)
     }

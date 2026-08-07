@@ -3357,6 +3357,319 @@ EOF
 
 ---
 
+### Task 17: TS 协议镜像去模版化
+
+原计划遗漏了非 Rust 的线协议镜像。`clients/shared/test/snapshots.test.ts` 读的正是 `lingxi-code/client-protocol/snapshots/`——T2 重新 bless 过的那个目录——并且仍在 `:418` 与 `:492` 调 `validateAppTemplateKind(o['template'])`，对 `undefined` 会抛。
+
+**Files:**
+- Modify: `clients/shared/src/protocol.ts`
+- Modify: `clients/shared/test/snapshots.test.ts:418, 492, 523-525, 693-697`
+
+**Interfaces:**
+- Consumes: T5 的 DTO 形状（`AppPlanDto`、`brief`、`allowsCustom`/`allowsDefer`、`Deferred`）
+- Produces: 与 Rust 侧一致的 TS 类型与校验器
+
+- [ ] **Step 1: 先让它能跑**
+
+Run: `cd clients/shared && npm install && node --import tsx --test test/snapshots.test.ts 2>&1 | tail -20`
+Expected: 装完依赖后**失败**，且失败原因是 `template` 缺失（而不是 `ERR_MODULE_NOT_FOUND`）。如果报的仍是模块找不到，先解决环境再往下——一个没跑起来的测试不能作为任何结论的依据。
+
+- [ ] **Step 2: 更新 protocol.ts**
+
+删除 `AppTemplateKind`、`AppTemplate` 类型与 `app_templates_changed` / `list_app_templates` 消息；`AppRecord` 的 `template` 换成 `brief: string`；新增 `AppPlan`；`AppDesignField` 加 `allows_custom` / `allows_defer`；`DesignValue` 联合加 `{ kind: 'deferred' }`。字段名以 `lingxi-code/client-protocol/snapshots/` 里重新 bless 后的 golden JSON 为准，**不要照 Rust struct 的 Rust 侧命名猜**。
+
+- [ ] **Step 3: 更新 snapshots.test.ts**
+
+删除 `validateAppTemplateKind` 及其两个调用点、`validateAppTemplate`、`app_templates_changed` 与 `list_app_templates` 分支；给 `AppRecord` 加 `isString(o['brief'])` 断言；补 `AppPlan` 校验器。`:1136` 与 `:1144` 那两个 `assert.equal(files.length, N)` 的期望数字必须按实际 golden 数量更新——它们是"有没有人偷偷加/删 snapshot"的哨兵，改错了哨兵就哑了。
+
+- [ ] **Step 4: 跑通**
+
+Run: `cd clients/shared && node --import tsx --test test/*.test.ts 2>&1 | tail -20`
+Expected: 全通过。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add clients/shared
+git commit -m "$(cat <<'EOF'
+fix(shared): TS 线协议镜像跟进模版删除
+
+snapshots.test.ts 读的就是 client-protocol/snapshots，T2 重新 bless
+后它仍在断言 template，必然失败。同步 protocol.ts 的类型。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 18: Android 数据层去模版化，接入问卷与方案
+
+Android 的 UI 模型是手写的（`LocalAppsContract.kt`），但 `LocalAppsViewModel.kt:1298` 直接消费**生成的** `AppRecordDto.template` 与 `AppTemplateDto`——所以 uniffi 绑定一重新生成，Android 就编译不过。这是 T13 的 Android 对应物。
+
+**Files:**
+- Modify: `clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsContract.kt:35-36, 68, 176, 260, 269-311`
+- Modify: `clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsViewModel.kt:842, 969, 1137, 1145, 1293-1320`
+- Modify: `clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppsContractTest.kt`
+- Modify: `clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppsViewModelTest.kt`（1549 行，改动面最大）
+
+**Interfaces:**
+- Consumes: T5 的生成 DTO
+- Produces:
+  - `LocalAppItem`：删 `templateKind` / `templateName`，加 `brief: String`
+  - `LocalAppQuestionnaire = List<LocalAppDesignStep>`（`LocalAppTemplate` 删除）
+  - `LocalAppPlan(collections, capabilities, domains, summary)`
+  - `LocalAppsUiState`：删 `templates` / `templatesLoading` / `templateFilter` / `selectedTemplateKind`，加 `questionnaires: Map<String, List<LocalAppDesignStep>>`、`plans: Map<String, LocalAppPlan>`
+  - `LocalAppsAction`：删 `FilterTemplate` / `SelectTemplate` / `CreateSelectedTemplate`，加 `CreateFromBrief(brief)`、`UpdateBrief(appId, brief)`、`RetryQuestionnaire(appId)`、`BeginPlanning(appId)`、`RetryPlan(appId)`、`Revise(appId, prompt)`
+  - `LocalAppsDestination`：删 `Templates`
+
+- [ ] **Step 1: 写失败测试**
+
+在 `LocalAppsContractTest.kt` 加：
+
+```kotlin
+@Test
+fun `an app item carries the brief instead of a template kind`() {
+    val item = LocalAppItem(id = "a", name = "记事本", brief = "一个记事本 app")
+    assertEquals("一个记事本 app", item.brief)
+}
+
+@Test
+fun `filtering no longer depends on a template kind`() {
+    val state = LocalAppsUiState(apps = listOf(LocalAppItem(id = "a", name = "N", brief = "b")))
+    assertEquals(1, state.visibleApps.size)
+}
+```
+
+在 `LocalAppsViewModelTest.kt` 加：
+
+```kotlin
+@Test
+fun `a questionnaire event replaces the stored steps`() = runTest {
+    val vm = viewModel()
+    vm.onEvent(appQuestionnaireChanged(appId = "a", revision = 1, steps = listOf(oneStepDto())))
+    assertEquals(1, vm.state.value.questionnaires["a"]?.size)
+    assertTrue(vm.state.value.questionnaires["a"]!!.first().fields.first().allowsDefer)
+}
+
+@Test
+fun `a null plan event clears the stored plan`() = runTest {
+    val vm = viewModel()
+    vm.onEvent(appPlanChanged(appId = "a", revision = 2, plan = onePlanDto()))
+    assertNotNull(vm.state.value.plans["a"])
+    vm.onEvent(appPlanChanged(appId = "a", revision = 3, plan = null))
+    assertNull(vm.state.value.plans["a"], "an answer edit voids the plan on the client too")
+}
+
+@Test
+fun `creating an app sends only the brief`() = runTest {
+    val vm = viewModel()
+    vm.dispatch(LocalAppsAction.CreateFromBrief("一个记事本 app"))
+    val sent = bridge.lastCommand()
+    assertEquals("一个记事本 app", sent.getString("brief"))
+    assertFalse(sent.has("template"), "no template argument exists any more")
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*localapps*' 2>&1 | tail -30`
+Expected: 编译失败，`brief` / `questionnaires` / `CreateFromBrief` 都不存在。
+
+- [ ] **Step 3: 写实现**
+
+按 Interfaces 段改 `LocalAppsContract.kt` 的数据类与 action/destination，再改 `LocalAppsViewModel.kt` 的 DTO 映射（`toUiApp` 去掉 `template.toUiTemplateKind()`、删 `AppTemplateDto.toUiTemplate()`、删 `templateNames` 参数与 `:842` 的名字回填、删 `:969`/`:1137`/`:1145` 的模版查找）。`:1137` 那段是「按 name + templateKind 认领刚创建的 app」，改成按 `name` + 创建时记下的 `brief` 认领。
+
+**1549 行的 `LocalAppsViewModelTest.kt` 逐个改，不要整片删。** 每删一个测试都要在报告里点名并说明它测的行为是否已经不存在——一个因为主体搬家而被删掉的测试是一个穿着正当理由外衣的覆盖缺口。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*localapps*' 2>&1 | tail -20`
+Expected: 全通过，且测试总数不低于改动前（点名说明每一处减少）。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add clients/android
+git commit -m "$(cat <<'EOF'
+feat(android): 本地应用数据层去模版化，接入问卷与方案
+
+LocalAppItem.templateKind/templateName -> brief；UiState 的 templates
+换成 questionnaires/plans；action 换成 CreateFromBrief/UpdateBrief/
+RetryQuestionnaire/BeginPlanning/RetryPlan/Revise。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 19: Android 设计器问卷渲染
+
+T14 的 Android 对应物。
+
+**Files:**
+- Modify: `clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt`（1352 行，24 处模版引用）
+- Modify: `clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppsScreenTest.kt`
+
+**Interfaces:**
+- Consumes: T18 的 `LocalAppsUiState.questionnaires`
+- Produces: 问卷驱动的设计器 Composable + `Other…` / 「由你决定」两种 chip + 四个中间态
+
+- [ ] **Step 1: 写失败测试**
+
+```kotlin
+@Test
+fun `steps come from the questionnaire not a template`() {
+    val state = LocalAppsUiState(questionnaires = mapOf("a" to listOf(oneStep())))
+    assertEquals(1, designerSteps(state, appId = "a").size)
+}
+
+@Test
+fun `a field that allows defer offers the defer chip`() {
+    assertTrue(chipsFor(designField(allowsDefer = true)).contains(DesignerChip.Defer))
+}
+
+@Test
+fun `a field that allows custom offers the other input`() {
+    assertTrue(showsCustomInput(designField(allowsCustom = true)))
+}
+
+@Test
+fun `choosing defer stores the deferred value rather than clearing the field`() {
+    var recorded: LocalAppDesignValue? = null
+    selectChip(designField(allowsDefer = true), DesignerChip.Defer) { recorded = it }
+    assertEquals(LocalAppDesignValue.Deferred, recorded, "defer is an answer, not an absence")
+}
+
+@Test
+fun `the designer is read only while the model is working`() {
+    assertFalse(isDesignerEditable(LocalAppWorkflow.AuthoringQuestionnaire))
+    assertFalse(isDesignerEditable(LocalAppWorkflow.Planning))
+    assertTrue(isDesignerEditable(LocalAppWorkflow.CollectingSpec))
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*LocalAppsScreen*' 2>&1 | tail -30`
+Expected: 上述符号都不存在。
+
+- [ ] **Step 3: 写实现**
+
+删掉模版选择页（`LocalAppsDestination.Templates` 对应的 Composable）与模版筛选条。设计器的 steps 改从 `state.questionnaires[appId]` 按 `order` 排序取。新增 chip 渲染：普通选项、`allowsCustom` 时的 `Other…` 输入、`allowsDefer` 时的「由你决定」（选中发 `LocalAppDesignValue.Deferred`）。新增四个中间态：出题中、出题失败（重试 / 改描述）、出计划中、出计划失败。末步主按钮文案改为「生成方案」并派发 `BeginPlanning`。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*LocalAppsScreen*' 2>&1 | tail -20`
+Expected: 全通过。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add clients/android
+git commit -m "$(cat <<'EOF'
+feat(android): 设计器改由问卷驱动，新增两种 chip 与四个中间态
+
+删模版选择页与筛选条。allowsCustom 渲染 Other…，allowsDefer 渲染
+「由你决定」并发 Deferred（是答案，不是留空）。出题/出方案期间只读。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 20: Android 方案确认页、创建入口与常驻迭代输入
+
+T15 + T16 的 Android 对应物，合成一个任务——三者都在 `LocalAppsScreen.kt` 同一片导航代码里，拆开会让两个实现者反复改同一个文件。
+
+**Files:**
+- Modify: `clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt`
+- Modify: `clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppsScreenTest.kt`
+
+**Interfaces:**
+- Consumes: T18 的 `LocalAppPlan`、`LocalAppsAction.{CreateFromBrief, Revise}`
+- Produces: 方案确认页 Composable、一句话创建页、`ready` 态常驻迭代输入
+
+- [ ] **Step 1: 写失败测试**
+
+```kotlin
+@Test
+fun `the plan sheet lists every collection and field`() {
+    val lines = planSummaryLines(notesPlan())
+    assertTrue(lines.any { it.contains("notes") && it.contains("title") })
+}
+
+@Test
+fun `the plan sheet says so when no network access is requested`() {
+    assertTrue(
+        planSummaryLines(notesPlan()).any { it.contains("不访问网络") },
+        "silence about network access reads as an omission, not as a guarantee",
+    )
+}
+
+@Test
+fun `the plan sheet has exactly two exits`() {
+    assertEquals(listOf("返回修改", "确认并生成"), planActionTitles())
+}
+
+@Test
+fun `the create screen asks only for a description`() {
+    assertEquals(1, createScreenInputCount())
+}
+
+@Test
+fun `an empty description cannot be submitted`() {
+    assertFalse(canSubmitBrief("   "))
+}
+
+@Test
+fun `a ready app shows a persistent revision input`() {
+    assertTrue(showsRevisionInput(LocalAppWorkflow.Ready))
+    assertTrue(showsRevisionInput(LocalAppWorkflow.AwaitingPreviewConfirmation))
+    assertFalse(showsRevisionInput(LocalAppWorkflow.Generating))
+    assertFalse(showsRevisionInput(LocalAppWorkflow.AuthoringQuestionnaire))
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*LocalAppsScreen*' 2>&1 | tail -30`
+Expected: 上述符号都不存在。
+
+- [ ] **Step 3: 写实现**
+
+方案确认页：只读展示 `summary`、数据表、权限、外部域名（空时明写「不访问网络」——沉默会被读成遗漏而非保证），两个出口「返回修改」「确认并生成」。做成独立目的地，不复用问卷的步骤条。
+
+创建页：删掉模版网格，只留一个多行描述框，提交派发 `CreateFromBrief`。
+
+详情页：`ready` 与 `awaitingPreviewConfirmation` 两态在底部常驻一条输入，提交派发 `Revise`。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*localapps*' 2>&1 | tail -20`
+Expected: 全通过。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add clients/android
+git commit -m "$(cat <<'EOF'
+feat(android): 方案确认页 + 一句话创建 + ready 态常驻迭代输入
+
+无网络需求时明写「不访问网络」—— 沉默会被读成遗漏而非保证。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ## 收尾检查
 
 全部 task 完成后逐条确认：
@@ -3364,5 +3677,8 @@ EOF
 - [ ] `cargo test --workspace --all-features --no-fail-fast` 全绿。**必须带 `--all-features`**——local-apps 的 engine-mobile 侧模块全在 `uniffi` 门控内。
 - [ ] `grep -rn "AppTemplateKind\|AppTemplateDto\|render_app_shell_source\|APP_SHELL_TEMPLATE" lingxi-code/ --include=*.rs` 零命中（排除 `target/`）。
 - [ ] `grep -rn "LocalAppTemplate" clients/ios/Sources` 零命中。
+- [ ] `grep -rln "AppTemplateKind\|app_templates_changed\|list_app_templates\|LocalAppTemplate\|appTemplatesChanged" clients/ | grep -v node_modules | grep -v /build/` 零命中——这条覆盖 TS 与 Android 两个**原计划遗漏**的线协议镜像。
+- [ ] `cd clients/shared && npm install && node --import tsx --test test/*.test.ts` 全绿。注意：不装依赖时它会以 `ERR_MODULE_NOT_FOUND` 失败在任何断言之前，那种失败不能当作"测过了"。
+- [ ] `cd clients/android && ./gradlew :app:testDebugUnitTest --tests '*localapps*'` 全绿。
 - [ ] CHANGELOG 记一条 breaking：模版时代的 `apps/index.json` 不再可读。
 - [ ] 真机手测一遍完整链路：一句话创建 → 出题 → 答题（含 `Other…` 与「由你决定」各一次）→ 生成方案 → 确认 → 预览 → 用自然语言改两轮 → 回滚一次 checkpoint。这条链路里没有一步是被自动化测试端到端覆盖的。

@@ -220,9 +220,24 @@ final class LocalAppsStore {
                 flushNextEdit(appID: appId)
 
             case let .appWorkflowChanged(appId, state, detail):
+                let workflow = LocalAppsProtocolAdapter.workflow(state)
                 updateApp(appID: appId) { app in
-                    app.workflow = LocalAppsProtocolAdapter.workflow(state)
+                    app.workflow = workflow
                     app.updatedAt = .now
+                }
+                if workflow == .generating {
+                    // The engine's own ACCEPTANCE of `confirm_design` — not
+                    // `confirmDesign()`'s `send()` returning `true`, which only
+                    // means the command didn't throw on dispatch (review
+                    // Important 1). `confirm_design` consumes the pending
+                    // interaction server-side (`self.interactions.pending =
+                    // None`, state.rs) whenever it lands here; `retry_generation`
+                    // reaches `.generating` too and never needed one. Either
+                    // way a cached `interactionID` is stale once the workflow
+                    // is actually `.generating` — clear it here so
+                    // `prepare()`'s top-level reentry guard is not wedged by an
+                    // id that no longer corresponds to any live interaction.
+                    designers[appId]?.interactionID = nil
                 }
                 if let detail, !detail.isEmpty { errorMessage = detail }
 
@@ -558,27 +573,24 @@ final class LocalAppsStore {
                 errorMessage = String(localized: "local_apps_error_design_unsaved")
                 return false
             }
-            let confirmed = await send(
+            // NOTE: `send()` returning `true` means the FFI call didn't throw —
+            // i.e. the command was *submitted*, not that the engine accepted
+            // it. `confirm_design` can still be refused (`validate_pending`,
+            // `ensure_current_revision`, the plan-freshness check), surfacing
+            // only as a later `appOperationFailed`. The cached `interactionID`
+            // must therefore NOT be cleared here on dispatch — see the
+            // `appWorkflowChanged` handler below, which clears it only once
+            // the workflow actually reaches `.generating` (review Important 1
+            // on an earlier revision of this method, which cleared here and
+            // could wedge `prepare()`'s reentry guard for the rest of the
+            // session on a rejected confirm).
+            return await send(
                 .confirmAppDesign(
                     appId: appID,
                     revision: designers[appID]?.revision ?? designer.revision,
                     interactionId: interactionID
                 )
             )
-            if confirmed {
-                // `confirm_design` (state.rs) consumes the pending interaction
-                // server-side (`self.interactions.pending = None`). Clear the
-                // client's copy to match — otherwise it lingers as a stale,
-                // non-nil value that `LocalAppDesignerView.prepare()`'s top-level
-                // `designers[appID]?.interactionID == nil` guard reads as "a
-                // designer interaction is still active," permanently no-oping
-                // `prepare()` (including its `.generationFailed` re-entry arm)
-                // for this app for the rest of the session if generation later
-                // fails — the same shape of bug `cancelDesign` below already
-                // avoids by clearing on its own success.
-                designers[appID]?.interactionID = nil
-            }
-            return confirmed
         #else
             return false
         #endif

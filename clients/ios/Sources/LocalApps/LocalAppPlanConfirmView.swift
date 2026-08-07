@@ -53,8 +53,13 @@ struct LocalAppPlanConfirmView: View {
                         .padding(.vertical, 2)
                     }
                 }
+                // `id: \.self` would silently collapse a duplicated LLM-
+                // authored capability/domain into one row — `validate_plan`
+                // dedups collection/field ids but not these — dropping a row
+                // the user is being asked to approve is the wrong failure on
+                // a permissions disclosure, so index instead.
                 Section("local_apps_plan_confirm_capabilities_header") {
-                    ForEach(capabilityLines, id: \.self) { line in
+                    ForEach(Array(capabilityLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
                     }
                 }
@@ -67,7 +72,7 @@ struct LocalAppPlanConfirmView: View {
                         Label("local_apps_plan_confirm_no_domains", systemImage: "lock.shield")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(plan.domains, id: \.self) { domain in
+                        ForEach(Array(plan.domains.enumerated()), id: \.offset) { _, domain in
                             Label(domain, systemImage: "network")
                         }
                     }

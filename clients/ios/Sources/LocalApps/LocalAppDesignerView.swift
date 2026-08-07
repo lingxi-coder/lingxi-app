@@ -179,18 +179,21 @@ struct LocalAppDesignerView: View {
         planSheetBusy = false
     }
 
-    /// The four intermediate/failure states this screen renders instead of
+    /// The five intermediate/failure states this screen renders instead of
     /// the editable form, plus a fallback for everything else the designer
     /// can transiently be pushed onto. `awaitingSpecConfirmation` is
     /// normally owned by Task 15's `LocalAppPlanConfirmView` sheet
     /// (presented from `body` whenever `store.plans[appID] != nil`) rather
-    /// than by this fallback — it only shows here for the moment before
-    /// that plan has loaded. `generationFailed` is likewise transient as of
-    /// Task 15: `prepare()`'s `.generationFailed` case calls `openDesigner`,
-    /// which moves the workflow to `awaitingSpecConfirmation` (and this
-    /// screen along with it) the instant the gate lands. Every state that
-    /// lands here past that point does so because `prepare()` never issues a
-    /// doomed command, or none at all, for it — see `prepare()`.
+    /// than by this case — this case's own copy only shows once the plan is
+    /// actually gone (or briefly, before it has first loaded), and gives a
+    /// real way out via `cancelDesign` rather than the generic `default:`
+    /// fallback's inert "重试". `generationFailed` is likewise transient as
+    /// of Task 15: `prepare()`'s `.generationFailed` case calls
+    /// `openDesigner`, which moves the workflow to `awaitingSpecConfirmation`
+    /// (and this screen along with it) the instant the gate lands. Every
+    /// state that lands in the `default:` fallback below does so because
+    /// `prepare()` never issues a doomed command, or none at all, for it —
+    /// see `prepare()`.
     @ViewBuilder
     private func unavailableView(for workflow: LocalAppWorkflow) -> some View {
         switch workflow {
@@ -240,6 +243,29 @@ struct LocalAppDesignerView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(retryingPlan)
+            }
+        case .awaitingSpecConfirmation:
+            // Reached only while `store.plans[appID] == nil` — with a plan,
+            // `planConfirmBinding` already presents the real sheet over this.
+            // `AwaitingSpecConfirmation` IS in `DRAFT_EDITABLE_STATES`
+            // (state.rs), so `update_draft`/`apply_suggestion` (an
+            // agent-proposed revision, or a queued edit whose rejection during
+            // `planning` races the transition) can null `draft.plan` without
+            // moving the workflow off this state — and once that happens,
+            // nothing else on screen offers a way out: `prepare()`'s own
+            // `.awaitingSpecConfirmation` arm is unreachable once
+            // `interactionID` is already cached, and `LocalAppDetailView`'s
+            // "重试生成" is gated on `.generationFailed`, not this state
+            // (review Important 2). Real copy + `cancelDesign` instead of the
+            // generic fallback's inert "重试".
+            ContentUnavailableView {
+                Label("local_apps_plan_invalidated_title", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text("local_apps_plan_invalidated_detail")
+            } actions: {
+                Button("local_apps_plan_confirm_back") { Task { await cancelPlan() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(planSheetBusy)
             }
         default:
             ContentUnavailableView {

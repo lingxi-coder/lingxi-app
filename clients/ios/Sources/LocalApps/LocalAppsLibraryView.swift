@@ -323,14 +323,25 @@ struct LocalAppCreateView: View {
     @State var brief = ""
     @State private var creating = false
 
-    /// Test-facing mirror of the toolbar button's guard below (minus the
+    /// The submit predicate, as a pure function of the text.
+    ///
+    /// It lives here rather than inline in `canSubmit` because `brief` is
+    /// `@State`: assigning to it on a bare struct outside a view hierarchy
+    /// does NOT take effect, so a test that pokes `view.brief` and reads
+    /// `view.canSubmit` is really only ever reading the initial `""`. That
+    /// made the whitespace test pass vacuously (it asserts `false` on a value
+    /// that was already empty) while the non-empty test failed — the first
+    /// run of the iOS suite is what surfaced it. Tests call this directly.
+    static func canSubmit(brief: String) -> Bool {
+        !brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Instance mirror of the toolbar button's guard below (minus the
     /// transient `creating` flag) — same source of truth `body` disables on,
     /// not a parallel description of it. `createApp(brief:)` itself repeats
     /// this same empty check server-side, so this is belt-and-suspenders,
     /// not the only gate.
-    var canSubmit: Bool {
-        !brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    var canSubmit: Bool { Self.canSubmit(brief: brief) }
 
     var body: some View {
         Form {

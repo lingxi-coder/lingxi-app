@@ -1251,16 +1251,20 @@ final class LocalAppsStoreTests: XCTestCase {
     /// empty-input-refused acceptance criterion the brief's now-stale
     /// `theCreateSheetRefusesAnEmptyDescription` targeted, adapted to the
     /// view that actually exists.
+    /// Drives the predicate directly rather than poking `view.brief`: that
+    /// property is `@State`, so assigning to it on a bare struct outside a
+    /// view hierarchy silently does nothing. The previous form left this
+    /// test passing vacuously (asserting `false` on a `brief` that was still
+    /// `""`) while its non-empty sibling failed — caught by the first actual
+    /// run of the iOS suite, which had never been executed before.
     func testTheCreateViewRefusesAWhitespaceOnlyBrief() {
-        var view = LocalAppCreateView(store: makeStore(), path: .constant([]))
-        view.brief = "   \n  "
-        XCTAssertFalse(view.canSubmit)
+        XCTAssertFalse(LocalAppCreateView.canSubmit(brief: "   \n  "))
+        XCTAssertFalse(LocalAppCreateView.canSubmit(brief: ""))
     }
 
     func testTheCreateViewAcceptsANonEmptyBrief() {
-        var view = LocalAppCreateView(store: makeStore(), path: .constant([]))
-        view.brief = "a shared grocery list for my household"
-        XCTAssertTrue(view.canSubmit)
+        XCTAssertTrue(LocalAppCreateView.canSubmit(brief: "a shared grocery list for my household"))
+        XCTAssertTrue(LocalAppCreateView.canSubmit(brief: "  记事本  "))
     }
 
     /// `showsRevisionInput` must mirror `AppState::request_revision`'s

@@ -12,6 +12,17 @@
     <string name="local_apps_templates_title">템플릿 선택</string>
     <string name="local_apps_designer_title">앱 디자인</string>
     <string name="local_apps_confirm_generate">확인하고 생성</string>
+    <string name="local_apps_generate_plan">플랜 생성</string>
+    <string name="local_apps_generating_plan">생성하는 중…</string>
+    <string name="local_apps_brief">개요</string>
+    <string name="local_apps_update_brief">개요 업데이트</string>
+    <string name="local_apps_updating_brief">업데이트하는 중…</string>
+    <string name="local_apps_value_deferred">모델이 결정하도록</string>
+    <string name="local_apps_custom_other">기타…</string>
+    <string name="local_apps_authoring_questionnaire">질문을 준비하는 중입니다…</string>
+    <string name="local_apps_questionnaire_failed_detail">질문을 준비하는 중 문제가 발생했습니다. 다시 시도하거나 앱 설명을 바꿔보세요.</string>
+    <string name="local_apps_planning">플랜을 정리하는 중입니다…</string>
+    <string name="local_apps_plan_failed_detail">플랜을 만드는 중 문제가 발생했습니다. 같은 답변으로 다시 시도할 수 있습니다.</string>
     <string name="local_apps_allow_once">한 번 허용</string>
     <string name="local_apps_allow_session">이번 세션에서 허용</string>
     <string name="local_apps_allow_always">항상 허용</string>
@@ -522,7 +533,7 @@
     <string name="local_apps_delete_detail">코드, 빌드 결과물, 이 앱의 로컬 데이터가 삭제됩니다.</string>
     <string name="local_apps_designer_not_ready">디자이너가 아직 준비되지 않았습니다</string>
     <string name="local_apps_designer_opening">디자인 세션을 여는 중입니다.</string>
-    <string name="local_apps_designer_waiting">Rust 템플릿과 앱 세부 정보를 기다리는 중입니다.</string>
+    <string name="local_apps_designer_waiting">앱 세부 정보를 기다리는 중입니다.</string>
     <string name="local_apps_detail_title">앱 세부 정보</string>
     <string name="local_apps_domain">도메인</string>
     <string name="local_apps_empty_hint">템플릿으로 디자인을 시작하면 확인 후 에이전트가 앱을 생성합니다.</string>
@@ -637,6 +648,10 @@
     <string name="local_apps_ui_reason">에이전트가 구조화된 화면 조작 실행을 요청했습니다.</string>
     <string name="local_apps_updated_at">업데이트 시간</string>
     <string name="local_apps_view_all">모든 앱 보기</string>
+    <string name="local_apps_workflow_authoring_questionnaire">질문 준비 중</string>
+    <string name="local_apps_workflow_questionnaire_failed">질문 준비 실패</string>
+    <string name="local_apps_workflow_planning">플랜 작성 중</string>
+    <string name="local_apps_workflow_plan_failed">플랜 생성 실패</string>
     <string name="local_apps_workflow_awaiting_preview">미리보기 승인 대기 중</string>
     <string name="local_apps_workflow_awaiting_spec">디자인 확인 대기 중</string>
     <string name="local_apps_workflow_collecting_spec">디자인 중</string>

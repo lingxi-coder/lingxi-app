@@ -68,7 +68,33 @@ class LocalAppsViewModel(
     val uiState: StateFlow<LocalAppsUiState> = _uiState.asStateFlow()
 
     private var source: ConversationSource? = null
-    private var pendingCreate: Pair<String, String>? = null
+
+    /**
+     * Every `CreateFromBrief` still awaiting its `AppsChanged` claim, FIFO —
+     * one entry per in-flight create, not a single overwritable slot
+     * (local-apps#questionnaire, Task 19). A scalar here meant a second
+     * create before the first's ack arrived silently replaced the first's
+     * claim, so the first app could be claimed by the WRONG pending create
+     * (or none at all, if the id-freshness check in `reduceApps` then failed
+     * to match it) — see `reduceApps` for how each entry is matched and
+     * consumed.
+     *
+     * RESIDUAL AMBIGUITY: `AppRecordDto`/`ClientCommand.CreateApp` carry no
+     * correlation id, so `name`+`brief` is the best discriminator available.
+     * Two concurrent creates with the IDENTICAL name+brief — plausible today,
+     * since `CreateAppDialog` still fabricates `brief = name` (Task 20's
+     * job to fix) — cannot be told apart by content alone: `reduceApps`
+     * matches FIFO by list position against `apps`' sort order, which is
+     * `updatedAtMs`-descending, not request order. If two such creates race
+     * closely enough that their records tie or invert on `updatedAtMs`, the
+     * wrong pending entry can be claimed for a given new id. Nothing is
+     * corrupted by this — both apps still exist, independently editable —
+     * only WHICH one's designer opens first can be swapped. A real
+     * correlation id on the wire is the only way to close this gap
+     * completely; Task 20's real brief-collecting create entry only makes
+     * the collision less likely (distinct briefs), not impossible.
+     */
+    private val pendingCreates = mutableListOf<Pair<String, String>>()
     private val draftEditQueue = mutableListOf<QueuedDraftEdit>()
     private val textEditJobs = mutableMapOf<String, Job>()
     private var draftEditInFlight: InFlightDraftEdit? = null
@@ -265,7 +291,7 @@ class LocalAppsViewModel(
         val name = _uiState.value.createName.trim()
         val trimmedBrief = brief.trim()
         if (name.isEmpty() || trimmedBrief.isEmpty()) return
-        pendingCreate = name to trimmedBrief
+        pendingCreates += name to trimmedBrief
         submit(
             ClientCommand.CreateApp(
                 name = name,
@@ -281,7 +307,16 @@ class LocalAppsViewModel(
         _uiState.update { it.copy(selectedAppId = appId) }
         submit(ClientCommand.GetAppDetails(appId))
         when (app.workflow) {
+            // `LocalAppDesignerScreen` owns all six of these
+            // (local-apps#questionnaire, Task 19) — the busy/failure states
+            // get their own rendering there instead of the generic preview
+            // view, with retry actions wired to the store. Mirrors iOS's
+            // `LocalAppsLibraryView.open(_:)`.
+            LocalAppWorkflow.AuthoringQuestionnaire,
+            LocalAppWorkflow.QuestionnaireFailed,
             LocalAppWorkflow.CollectingSpec,
+            LocalAppWorkflow.Planning,
+            LocalAppWorkflow.PlanFailed,
             LocalAppWorkflow.AwaitingSpecConfirmation -> openDesigner(appId)
             LocalAppWorkflow.Generating,
             LocalAppWorkflow.Validating,
@@ -297,10 +332,53 @@ class LocalAppsViewModel(
         }
     }
 
+    /**
+     * Navigates to the designer and refreshes its draft, WITHOUT
+     * unconditionally arming the `open_designer` gate (local-apps#questionnaire,
+     * Task 19 — mirrors iOS's `LocalAppDesignerView.prepare()`).
+     *
+     * `open_designer` (state.rs) is legal only from `collecting_spec` /
+     * `generation_failed` — but even for `collecting_spec` it is deliberately
+     * NOT sent here: `open_designer` unconditionally advances
+     * `collecting_spec -> awaiting_spec_confirmation`, arming the LATER
+     * plan-confirm gate before the user has even answered a question.
+     * `begin_planning` (the questionnaire's own terminal action, dispatched
+     * by `BeginPlanning` at the last step) requires exactly `collecting_spec`,
+     * so that eager transition would make every 生成方案 tap fail with
+     * `workflow_state_invalid` the moment the designer was ever opened.
+     *
+     * A freshly created app starts in `authoring_questionnaire`, where
+     * `open_designer` is illegal outright — sending it unconditionally (the
+     * bug this fixes) rejected with `WORKFLOW_STATE_INVALID` on EVERY create
+     * tap, surfaced as the raw Rust string in the generic error dialog, with
+     * the designer stuck on an infinite spinner underneath because
+     * `AppDesignerRequested` — the only event that populates `state.designer`
+     * for that path — was never coming.
+     *
+     * `GetAppDetails` alone is enough for every other case: `update_draft`
+     * does not check workflow state, so it seeds the draft for editing once
+     * `collecting_spec` is reached, and `reduceDetails` below creates
+     * `state.designer` the first time its reply lands for the app on this
+     * destination — the questionnaire form (`state.questionnaires[appId]`,
+     * delivered independently by `AppQuestionnaireChanged`) and the four
+     * intermediate/failure states `LocalAppDesignerScreen` renders while
+     * `isDesignerEditable(app.workflow)` is false both come from the SAME
+     * `state.apps`/`state.questionnaires` the screen already reads, so the
+     * designer simply waits rather than erroring.
+     *
+     * `generation_failed` is the one state where `open_app_designer` is both
+     * legal and needed: generation usually fails on the DESIGN itself, and
+     * re-arming the confirm gate is what returns the draft to an editable
+     * state for a plan re-confirm (mirrors iOS's `.generationFailed` case,
+     * reached from `LocalAppPreviewScreen`'s "继续设计" button).
+     */
     private fun openDesigner(appId: String) {
         _uiState.update { it.copy(destination = LocalAppsDestination.Designer(appId), selectedAppId = appId) }
         submit(ClientCommand.GetAppDetails(appId))
-        submit(ClientCommand.OpenAppDesigner(appId))
+        val workflow = _uiState.value.apps.firstOrNull { it.id == appId }?.workflow
+        if (workflow == LocalAppWorkflow.GenerationFailed) {
+            submit(ClientCommand.OpenAppDesigner(appId))
+        }
     }
 
     private fun editField(action: LocalAppsAction.EditField) {
@@ -1014,14 +1092,36 @@ class LocalAppsViewModel(
                 // lookup gating this (Task 18: the questionnaire is looked up
                 // separately, by app id, not carried on the designer), so this
                 // snapshot always has enough to replace `values`.
-                designer = if (currentDesigner?.appId != app.id) {
-                    currentDesigner
-                } else {
-                    currentDesigner.copy(
+                //
+                // The second branch is new in Task 19: `openDesigner` no
+                // longer waits for `open_app_designer`/`AppDesignerRequested`
+                // to create `state.designer` for the common `collecting_spec`
+                // path (see `openDesigner`'s doc — issuing that command there
+                // would prematurely arm the plan-confirm gate). This details
+                // reply, which `openDesigner` always requests, is therefore
+                // the thing that creates the designer for that path — mirrors
+                // iOS's `LocalAppsStore.handle`'s `.appDetailsChanged` arm,
+                // which unconditionally creates/replaces
+                // `designers[summary.id]`. Scoped to "the app this snapshot
+                // is FOR is the one currently on the Designer destination" —
+                // Android holds one designer slot, not iOS's per-app
+                // dictionary — so a details reply for some other app (e.g. a
+                // background refresh) cannot spuriously create a designer for
+                // it.
+                designer = when {
+                    currentDesigner?.appId == app.id -> currentDesigner.copy(
                         revision = details.designRevision,
                         values = details.designFields.associate { it.fieldId to it.value.toUiValue() } + pendingValues,
                         conflictRevision = null,
                     )
+                    currentDesigner == null && (current.destination as? LocalAppsDestination.Designer)?.appId == app.id ->
+                        LocalAppDesigner(
+                            appId = app.id,
+                            appName = app.name,
+                            revision = details.designRevision,
+                            values = details.designFields.associate { it.fieldId to it.value.toUiValue() } + pendingValues,
+                        )
+                    else -> currentDesigner
                 },
                 generation = details.generationJob?.let { job ->
                     current.generation + (app.id to job.toUiGeneration(strings))
@@ -1164,22 +1264,36 @@ class LocalAppsViewModel(
         }
         if (queuePruned || flightPruned || gatePruned) pumpDraftEditQueue()
 
-        // Claims the app just created by [createFromBrief], to open its
-        // designer. `templateKind` is gone (Task 18), so this now matches on
+        // Claims every app just created by [createFromBrief], to open its
+        // designer. `templateKind` is gone (Task 18), so this matches on
         // `name` + the `brief` recorded at create time — both of which
-        // `pendingCreate` holds, set from the exact strings `createFromBrief`
+        // `pendingCreates` holds, set from the exact strings `createFromBrief`
         // sent on the wire. `it.id !in oldIds` is still checked first and is
         // still doing the real work: it is what stops this from claiming a
         // PRE-EXISTING app that merely happens to share a name+brief with the
         // one just created (two apps from the same brief, e.g. a retry after
         // a dropped reply) — name+brief alone cannot tell those apart, since
-        // neither is unique. Only a freshly-appeared id is eligible at all;
-        // name+brief then picks which of possibly several new ids (a second
-        // creation raced in) is THIS create's.
-        val pending = pendingCreate ?: return
-        val created = apps.firstOrNull { it.id !in oldIds && it.name == pending.first && it.brief == pending.second } ?: return
-        pendingCreate = null
-        openDesigner(created.id)
+        // neither is unique.
+        //
+        // `pendingCreates` is a queue, not a scalar (Task 19: see its own
+        // doc) — every freshly-appeared app is checked against it, oldest
+        // pending entry first, and each match is consumed (removed) so a
+        // later app cannot re-claim it. `openDesigner` is called once per
+        // claimed app; the LAST one claimed in this batch is the one left
+        // showing (single designer route), but every claim's `pendingCreates`
+        // entry is still consumed and its `GetAppDetails`/gate-check still
+        // runs, so a batch that claims two new apps at once does not leave
+        // either one silently unclaimed. See `pendingCreates`' doc for the
+        // residual ambiguity this cannot fully resolve without a real
+        // correlation id on the wire.
+        val newApps = apps.filter { it.id !in oldIds }
+        newApps.forEach { candidate ->
+            val matchIndex = pendingCreates.indexOfFirst { it.first == candidate.name && it.second == candidate.brief }
+            if (matchIndex >= 0) {
+                pendingCreates.removeAt(matchIndex)
+                openDesigner(candidate.id)
+            }
+        }
     }
 
     private fun reduceDesignerRequested(event: ClientEvent.AppDesignerRequested) {
@@ -1300,20 +1414,18 @@ private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
 // ruling: total removal of the static template catalog). `LocalAppTemplate`
 // (the native UI model) was deleted in Task 18 alongside them.
 
-// TODO(local-apps#questionnaire, Task 13/18): AUTHORING_QUESTIONNAIRE /
-// QUESTIONNAIRE_FAILED / PLANNING / PLAN_FAILED are new conversational-design
-// states (core Task 3) with no dedicated Android UI yet. Until Task 13/18 add
-// real screens for them, they map onto the closest existing bucket by KIND
-// (an LLM round trip in progress -> Generating's busy/spinner treatment; a
-// failed round trip -> GenerationFailed's retry treatment) -- explicit
-// branches, not an `else`, so this `when` still breaks the moment a real
-// state is removed or renamed.
+// (local-apps#questionnaire, Task 19): AUTHORING_QUESTIONNAIRE /
+// QUESTIONNAIRE_FAILED / PLANNING / PLAN_FAILED (core Task 3) now map 1:1 —
+// `LocalAppDesignerScreen` renders each as its own intermediate/failure
+// state (mirrors iOS's `LocalAppDesignerView.unavailableView(for:)`).
+// Explicit branches, not an `else`, so this `when` still breaks the moment a
+// real state is removed or renamed.
 private fun AppWorkflowStateDto.toUiWorkflow(): LocalAppWorkflow = when (this) {
-    AppWorkflowStateDto.AUTHORING_QUESTIONNAIRE -> LocalAppWorkflow.Generating
-    AppWorkflowStateDto.QUESTIONNAIRE_FAILED -> LocalAppWorkflow.GenerationFailed
+    AppWorkflowStateDto.AUTHORING_QUESTIONNAIRE -> LocalAppWorkflow.AuthoringQuestionnaire
+    AppWorkflowStateDto.QUESTIONNAIRE_FAILED -> LocalAppWorkflow.QuestionnaireFailed
     AppWorkflowStateDto.COLLECTING_SPEC -> LocalAppWorkflow.CollectingSpec
-    AppWorkflowStateDto.PLANNING -> LocalAppWorkflow.Generating
-    AppWorkflowStateDto.PLAN_FAILED -> LocalAppWorkflow.GenerationFailed
+    AppWorkflowStateDto.PLANNING -> LocalAppWorkflow.Planning
+    AppWorkflowStateDto.PLAN_FAILED -> LocalAppWorkflow.PlanFailed
     AppWorkflowStateDto.AWAITING_SPEC_CONFIRMATION -> LocalAppWorkflow.AwaitingSpecConfirmation
     AppWorkflowStateDto.GENERATING -> LocalAppWorkflow.Generating
     AppWorkflowStateDto.VALIDATING -> LocalAppWorkflow.Validating
@@ -1510,6 +1622,7 @@ private fun LocalAppDesignValue.toBindingValue(kind: LocalAppFieldKind): DesignV
         else -> DesignValueDto.FeatureList(values)
     }
     is LocalAppDesignValue.DataFields -> DesignValueDto.DataFieldList(values.map { it.toBindingDataField() })
+    LocalAppDesignValue.Deferred -> DesignValueDto.Deferred
 }
 
 private fun DesignValueDto.toUiValue(): LocalAppDesignValue = when (this) {
@@ -1524,13 +1637,10 @@ private fun DesignValueDto.toUiValue(): LocalAppDesignValue = when (this) {
     is DesignValueDto.FeatureList -> LocalAppDesignValue.StringList(value)
     is DesignValueDto.DataFieldList -> LocalAppDesignValue.DataFields(value.map { it.toUiDataField() })
     is DesignValueDto.DomainList -> LocalAppDesignValue.StringList(value)
-    // TODO(local-apps#questionnaire, Task 18/19): "let the model decide" has
-    // no dedicated LocalAppDesignValue case yet — no Android designer surface
-    // renders it. Map onto an empty text value as a safe, non-crashing
-    // placeholder (an explicit arm, not a catch-all, so this `when` still
-    // breaks the moment a real case is added, removed, or renamed) until
-    // Task 19 gives it a real "let the model decide" UI.
-    is DesignValueDto.Deferred -> LocalAppDesignValue.Text("")
+    // (local-apps#questionnaire, Task 19): "let the model decide" — a real
+    // answer, not an absence. `LocalAppDesignerScreen`'s 「由你决定」 chip
+    // sends this back verbatim; see `LocalAppDesignValue.Deferred`'s doc.
+    is DesignValueDto.Deferred -> LocalAppDesignValue.Deferred
 }
 
 private fun LocalAppDataField.toBindingDataField(): AppDataFieldDto = AppDataFieldDto(

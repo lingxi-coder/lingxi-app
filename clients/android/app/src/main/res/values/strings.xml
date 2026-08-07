@@ -12,6 +12,17 @@
     <string name="local_apps_templates_title">选择模板</string>
     <string name="local_apps_designer_title">应用设计</string>
     <string name="local_apps_confirm_generate">确认并生成</string>
+    <string name="local_apps_generate_plan">生成方案</string>
+    <string name="local_apps_generating_plan">生成中…</string>
+    <string name="local_apps_brief">简介</string>
+    <string name="local_apps_update_brief">更新简介</string>
+    <string name="local_apps_updating_brief">更新中…</string>
+    <string name="local_apps_value_deferred">由你决定</string>
+    <string name="local_apps_custom_other">其他…</string>
+    <string name="local_apps_authoring_questionnaire">正在准备问题…</string>
+    <string name="local_apps_questionnaire_failed_detail">准备问题时出了点问题。可以重试，或换一种方式描述这个应用。</string>
+    <string name="local_apps_planning">正在整理方案…</string>
+    <string name="local_apps_plan_failed_detail">生成方案时出了点问题。可以重试，用的还是同一份回答。</string>
     <string name="local_apps_allow_once">允许一次</string>
     <string name="local_apps_allow_session">本次会话允许</string>
     <string name="local_apps_allow_always">始终允许</string>
@@ -522,7 +533,7 @@
     <string name="local_apps_delete_detail">代码、构建产物和该应用的本地数据将被删除。</string>
     <string name="local_apps_designer_not_ready">设计器尚未准备好</string>
     <string name="local_apps_designer_opening">正在打开设计会话。</string>
-    <string name="local_apps_designer_waiting">正在等待 Rust 模板和应用详情。</string>
+    <string name="local_apps_designer_waiting">正在等待应用详情。</string>
     <string name="local_apps_detail_title">应用详情</string>
     <string name="local_apps_domain">域名</string>
     <string name="local_apps_empty_hint">从模板开始设计，Agent 会在确认后生成应用。</string>
@@ -637,6 +648,10 @@
     <string name="local_apps_ui_reason">Agent 请求执行结构化界面操作。</string>
     <string name="local_apps_updated_at">更新时间</string>
     <string name="local_apps_view_all">查看全部应用</string>
+    <string name="local_apps_workflow_authoring_questionnaire">正在出题</string>
+    <string name="local_apps_workflow_questionnaire_failed">出题失败</string>
+    <string name="local_apps_workflow_planning">正在规划</string>
+    <string name="local_apps_workflow_plan_failed">方案生成失败</string>
     <string name="local_apps_workflow_awaiting_preview">等待批准预览</string>
     <string name="local_apps_workflow_awaiting_spec">等待确认设计</string>
     <string name="local_apps_workflow_collecting_spec">设计中</string>

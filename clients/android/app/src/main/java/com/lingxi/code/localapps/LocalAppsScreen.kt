@@ -3,6 +3,7 @@ package com.lingxi.code.localapps
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -110,6 +111,7 @@ fun LocalAppsScreen(
             )
 
             is LocalAppsDestination.Designer -> LocalAppDesignerScreen(
+                appId = destination.appId,
                 state = state,
                 onAction = onAction,
             )
@@ -397,21 +399,108 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
     }
 }
 
+/**
+ * The questionnaire's steps for [appId], ordered the way the engine declares
+ * them. Pure so a test can assert the sort without a Composable host —
+ * [LocalAppDesignerScreen] calls this instead of inlining the sort (mirrors
+ * iOS's `LocalAppDesignerView.steps`).
+ */
+internal fun designerSteps(state: LocalAppsUiState, appId: String): List<LocalAppDesignStep> =
+    state.questionnaires[appId].orEmpty().sortedBy { it.order }
+
+/**
+ * Whether the questionnaire's answering form is interactive for [workflow] —
+ * `false` for every state but [LocalAppWorkflow.CollectingSpec], in
+ * particular for [LocalAppWorkflow.AuthoringQuestionnaire] and
+ * [LocalAppWorkflow.Planning], where an LLM round trip owns the draft and a
+ * concurrent user edit would race it. Mirrors iOS's
+ * `LocalAppDesignerView.isEditable`; a pure function of workflow so it is
+ * directly testable without a live view.
+ */
+internal fun isDesignerEditable(workflow: LocalAppWorkflow): Boolean =
+    workflow == LocalAppWorkflow.CollectingSpec
+
+/**
+ * A chip in a field's chip row: one of the field's declared options, or the
+ * 「由你决定」 chip when [LocalAppDesignField.allowsDefer]. Mirrors iOS's
+ * `DesignerFieldChips.Chip`.
+ */
+sealed interface DesignerChip {
+    data class Option(val value: String) : DesignerChip
+    data object Defer : DesignerChip
+}
+
+/**
+ * The chip row for [field]: every declared option, then the defer chip last
+ * when [LocalAppDesignField.allowsDefer]. `allowsCustom` does NOT add a chip
+ * here — [showsCustomInput] renders it as an always-visible text box instead
+ * (mirrors iOS's `DesignerFieldChips.chipValues`).
+ */
+internal fun chipsFor(field: LocalAppDesignField): List<DesignerChip> =
+    field.options.map { DesignerChip.Option(it.value) } +
+        if (field.allowsDefer) listOf(DesignerChip.Defer) else emptyList()
+
+/** Whether [field] renders the always-visible `Other…` free-text box. */
+internal fun showsCustomInput(field: LocalAppDesignField): Boolean = field.allowsCustom
+
+/**
+ * Applies tapping [chip] against [field]'s [currentValue]. `Defer` always
+ * sends [LocalAppDesignValue.Deferred] — an ANSWER, not an absence
+ * (local-apps#questionnaire, Task 1/13/19: the core gate treats `Deferred` as
+ * satisfying a required field the same way `isPresent` below does). An
+ * `Option` toggles into/out of a `MultipleChoice` selection, or replaces any
+ * other field kind's value outright. Mirrors iOS's `DesignerFieldChips.select(_:)`.
+ */
+internal fun selectChip(
+    field: LocalAppDesignField,
+    chip: DesignerChip,
+    currentValue: LocalAppDesignValue? = null,
+    onChange: (LocalAppDesignValue) -> Unit,
+) {
+    when (chip) {
+        DesignerChip.Defer -> onChange(LocalAppDesignValue.Deferred)
+        is DesignerChip.Option -> onChange(toggledChipOption(field, chip.value, currentValue))
+    }
+}
+
+private fun toggledChipOption(
+    field: LocalAppDesignField,
+    optionValue: String,
+    currentValue: LocalAppDesignValue?,
+): LocalAppDesignValue {
+    if (field.kind != LocalAppFieldKind.MultipleChoice) return LocalAppDesignValue.Choice(optionValue)
+    val selected = (currentValue as? LocalAppDesignValue.Choices)?.values.orEmpty()
+    return LocalAppDesignValue.Choices(
+        if (optionValue in selected) selected - optionValue else selected + optionValue,
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalAppsAction) -> Unit) {
-    val designer = state.designer
-    if (designer == null) {
+private fun LocalAppDesignerScreen(appId: String, state: LocalAppsUiState, onAction: (LocalAppsAction) -> Unit) {
+    val app = state.apps.firstOrNull { it.id == appId }
+    if (app == null) {
         Scaffold(topBar = { LocalAppsTopBar(stringResource(R.string.local_apps_designer_title), onBack = { onAction(LocalAppsAction.Back) }) }) { padding ->
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         }
         return
     }
-    // The questionnaire is looked up by app id rather than carried on the
-    // designer session (local-apps#questionnaire, Task 18 — mirrors iOS's
-    // `LocalAppsStore.questionnaires`); a still-empty list here just means the
-    // `AppQuestionnaireChanged` snapshot has not landed yet.
-    val steps = state.questionnaires[designer.appId].orEmpty().sortedBy { it.order }
+    if (!isDesignerEditable(app.workflow)) {
+        DesignerUnavailableScreen(app = app, onAction = onAction)
+        return
+    }
+    // The designer session itself (`state.designer`) is created by
+    // `reduceDetails` the first time a `GetAppDetails` reply for this app
+    // lands (Task 19 — `openDesigner` always requests one); a still-null
+    // designer here just means that reply has not arrived yet.
+    val designer = state.designer?.takeIf { it.appId == appId }
+    if (designer == null) {
+        Scaffold(topBar = { LocalAppsTopBar(app.name, onBack = { onAction(LocalAppsAction.Back) }) }) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        }
+        return
+    }
+    val steps = designerSteps(state, appId)
     val stepIndex = designer.stepIndex.coerceIn(0, (steps.size - 1).coerceAtLeast(0))
     val step = steps.getOrNull(stepIndex)
     val currentStepComplete = step?.fields?.all { field ->
@@ -433,8 +522,21 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
                     Button(
                         enabled = currentStepComplete,
                         onClick = {
-                            if (stepIndex < steps.lastIndex) onAction(LocalAppsAction.ChangeStep(stepIndex + 1))
-                            else onAction(LocalAppsAction.ConfirmDesign)
+                            if (stepIndex < steps.lastIndex) {
+                                onAction(LocalAppsAction.ChangeStep(stepIndex + 1))
+                            } else {
+                                // The final step starts an LLM round trip
+                                // (`collecting_spec -> planning`), NOT
+                                // `ConfirmDesign`/`confirm_design`, which is the
+                                // LATER "confirm the derived plan" gate
+                                // (`awaiting_spec_confirmation -> generating`,
+                                // Task 20's plan-confirm screen) that arms
+                                // automatically once planning finishes. Stays
+                                // on this screen either way: `isDesignerEditable`
+                                // above flips to the busy 出计划中 state as soon
+                                // as `AppWorkflowChanged` reports `planning`.
+                                onAction(LocalAppsAction.BeginPlanning(appId))
+                            }
                         },
                         modifier = Modifier.weight(1f),
                     ) {
@@ -442,7 +544,7 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
                             if (stepIndex < steps.lastIndex) {
                                 stringResource(R.string.local_apps_next)
                             } else {
-                                stringResource(R.string.local_apps_confirm_generate)
+                                stringResource(R.string.local_apps_generate_plan)
                             },
                         )
                     }
@@ -493,6 +595,80 @@ private fun LocalAppDesignerScreen(state: LocalAppsUiState, onAction: (LocalApps
             }
             Spacer(Modifier.height(84.dp))
         }
+    }
+}
+
+/**
+ * The four intermediate/failure states plus a generic fallback that
+ * [LocalAppDesignerScreen] renders instead of the editable form
+ * ([isDesignerEditable] false) — mirrors iOS's
+ * `LocalAppDesignerView.unavailableView(for:)`. `AwaitingSpecConfirmation`
+ * and `GenerationFailed` land in the generic fallback: their real screens
+ * (the plan-confirm sheet, and re-arming the confirm gate) are Task 20's job;
+ * this screen only needs to not dead-end while waiting for them.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DesignerUnavailableScreen(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit) {
+    var brief by remember(app.id) { mutableStateOf(app.brief) }
+    Scaffold(topBar = { LocalAppsTopBar(app.name, onBack = { onAction(LocalAppsAction.Back) }) }) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            when (app.workflow) {
+                LocalAppWorkflow.AuthoringQuestionnaire ->
+                    DesignerBusyState(stringResource(R.string.local_apps_authoring_questionnaire))
+                LocalAppWorkflow.Planning ->
+                    DesignerBusyState(stringResource(R.string.local_apps_planning))
+                LocalAppWorkflow.QuestionnaireFailed ->
+                    DesignerFailedState(
+                        detail = stringResource(R.string.local_apps_questionnaire_failed_detail),
+                        onRetry = { onAction(LocalAppsAction.RetryQuestionnaire(app.id)) },
+                    ) {
+                        OutlinedTextField(
+                            value = brief,
+                            onValueChange = { brief = it },
+                            label = { Text(stringResource(R.string.local_apps_brief)) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Button(
+                            enabled = brief.isNotBlank(),
+                            onClick = { onAction(LocalAppsAction.UpdateBrief(app.id, brief)) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(stringResource(R.string.local_apps_update_brief)) }
+                    }
+                LocalAppWorkflow.PlanFailed ->
+                    DesignerFailedState(
+                        detail = stringResource(R.string.local_apps_plan_failed_detail),
+                        onRetry = { onAction(LocalAppsAction.RetryPlan(app.id)) },
+                    )
+                else -> DesignerBusyState(stringResource(R.string.local_apps_designer_waiting))
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesignerBusyState(detail: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        CircularProgressIndicator()
+        Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DesignerFailedState(
+    detail: String,
+    onRetry: () -> Unit,
+    extraActions: @Composable ColumnScope.() -> Unit = {},
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.padding(24.dp),
+    ) {
+        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.error)
+        Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.common_retry)) }
+        extraActions()
     }
 }
 
@@ -608,8 +784,96 @@ private fun LocalAppDynamicField(
                     DataFieldListEditor(fields = fields, onChange = { onValueChange(LocalAppDesignValue.DataFields(it), false) })
                 }
             }
+            // Appended under EVERY field kind's own editor above, not a
+            // replacement for it: `allowsCustom`/`allowsDefer` are legal on
+            // any field (`AppDesignFieldDto`, local-apps#questionnaire), so a
+            // shortText/color/etc. field can still offer 「由你决定」 even
+            // though it has no options to chip. Task 19 — these two
+            // affordances had no UI treatment before this (Task 18 only
+            // wired the DTO/model fields through).
+            if (field.allowsDefer || field.allowsCustom) {
+                DesignerFieldChips(field = field, value = value, onValueChange = onValueChange)
+            }
         }
     }
+}
+
+/**
+ * Renders a field's 「由你决定」 chip (when [LocalAppDesignField.allowsDefer])
+ * and `Other…` free-text box (when [LocalAppDesignField.allowsCustom]) —
+ * mirrors iOS's `DesignerFieldChips`. Appended under [LocalAppDynamicField]'s
+ * own editor for the field's kind; not a replacement for it.
+ */
+@Composable
+private fun DesignerFieldChips(
+    field: LocalAppDesignField,
+    value: LocalAppDesignValue?,
+    onValueChange: (LocalAppDesignValue, Boolean) -> Unit,
+) {
+    val deferredLabel = stringResource(R.string.local_apps_value_deferred)
+    val chips = chipsFor(field)
+    if (chips.isNotEmpty()) {
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(chips, key = { it.toString() }) { chip ->
+                val selected = when (chip) {
+                    is DesignerChip.Option -> isChipOptionSelected(field, chip.value, value)
+                    DesignerChip.Defer -> value is LocalAppDesignValue.Deferred
+                }
+                FilterChip(
+                    selected = selected,
+                    onClick = {
+                        selectChip(field, chip, value) { onValueChange(it, false) }
+                    },
+                    label = {
+                        Text(
+                            when (chip) {
+                                is DesignerChip.Option -> field.options.firstOrNull { it.value == chip.value }?.label ?: chip.value
+                                DesignerChip.Defer -> deferredLabel
+                            },
+                        )
+                    },
+                )
+            }
+        }
+    }
+    if (showsCustomInput(field)) {
+        var customText by remember(field.id) { mutableStateOf(customTextFor(field, value)) }
+        OutlinedTextField(
+            value = customText,
+            onValueChange = { text ->
+                customText = text
+                onValueChange(commitCustomChipText(field, text, value), true)
+            },
+            placeholder = { Text(stringResource(R.string.local_apps_custom_other)) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+private fun isChipOptionSelected(field: LocalAppDesignField, optionValue: String, value: LocalAppDesignValue?): Boolean =
+    when (value) {
+        is LocalAppDesignValue.Choice -> value.value == optionValue
+        is LocalAppDesignValue.Choices -> optionValue in value.values
+        is LocalAppDesignValue.Text -> value.value == optionValue
+        else -> false
+    }
+
+/** The free-text box's current content: whatever part of [value] is NOT one of [field]'s declared options. */
+private fun customTextFor(field: LocalAppDesignField, value: LocalAppDesignValue?): String {
+    val optionValues = field.options.mapTo(hashSetOf()) { it.value }
+    return when (value) {
+        is LocalAppDesignValue.Text -> value.value.takeUnless { it in optionValues }.orEmpty()
+        is LocalAppDesignValue.Choices -> value.values.firstOrNull { it !in optionValues }.orEmpty()
+        else -> ""
+    }
+}
+
+private fun commitCustomChipText(field: LocalAppDesignField, text: String, value: LocalAppDesignValue?): LocalAppDesignValue {
+    if (field.kind != LocalAppFieldKind.MultipleChoice) return LocalAppDesignValue.Text(text)
+    val optionValues = field.options.mapTo(hashSetOf()) { it.value }
+    val selectedOptions = (value as? LocalAppDesignValue.Choices)?.values.orEmpty().filter { it in optionValues }
+    return LocalAppDesignValue.Choices(if (text.isNotEmpty()) selectedOptions + text else selectedOptions)
 }
 
 @Composable
@@ -1252,7 +1516,11 @@ private fun LocalAppsTopBar(title: String, onBack: () -> Unit) {
 
 @Composable
 private fun LocalAppWorkflow.label(): String = when (this) {
+    LocalAppWorkflow.AuthoringQuestionnaire -> stringResource(R.string.local_apps_workflow_authoring_questionnaire)
+    LocalAppWorkflow.QuestionnaireFailed -> stringResource(R.string.local_apps_workflow_questionnaire_failed)
     LocalAppWorkflow.CollectingSpec -> stringResource(R.string.local_apps_workflow_collecting_spec)
+    LocalAppWorkflow.Planning -> stringResource(R.string.local_apps_workflow_planning)
+    LocalAppWorkflow.PlanFailed -> stringResource(R.string.local_apps_workflow_plan_failed)
     LocalAppWorkflow.AwaitingSpecConfirmation -> stringResource(R.string.local_apps_workflow_awaiting_spec_confirm)
     LocalAppWorkflow.Generating -> stringResource(R.string.chat_run_generating)
     LocalAppWorkflow.Validating -> stringResource(R.string.local_apps_workflow_validating_label)
@@ -1311,6 +1579,10 @@ private fun LocalAppDesignValue.isPresent(): Boolean = when (this) {
     is LocalAppDesignValue.Density -> true
     is LocalAppDesignValue.StringList -> values.isNotEmpty()
     is LocalAppDesignValue.DataFields -> values.isNotEmpty() && values.all { it.id.isNotBlank() && it.label.isNotBlank() }
+    // The user explicitly chose to let the LLM decide — that IS a complete
+    // answer, not a missing one (local-apps#questionnaire, Task 1/13/19: the
+    // core gate treats `Deferred` as satisfying a required field the same way).
+    LocalAppDesignValue.Deferred -> true
 }
 
 private fun List<LocalAppDataField>.updated(index: Int, value: LocalAppDataField): List<LocalAppDataField> =

@@ -45,7 +45,15 @@ data class LocalAppItem(
 )
 
 enum class LocalAppWorkflow {
+    /** The LLM is authoring the questionnaire from the brief. A fresh app always starts here. */
+    AuthoringQuestionnaire,
+    /** Authoring the questionnaire failed; a user-initiated retry (or a changed brief) is required. */
+    QuestionnaireFailed,
     CollectingSpec,
+    /** The LLM is deriving a plan from the collected answers. */
+    Planning,
+    /** Deriving the plan failed; a user-initiated retry is required. */
+    PlanFailed,
     AwaitingSpecConfirmation,
     Generating,
     Validating,
@@ -159,6 +167,16 @@ sealed interface LocalAppDesignValue {
 
     @Immutable
     data class DataFields(val values: List<LocalAppDataField>) : LocalAppDesignValue
+
+    /**
+     * The user explicitly chose to let the model decide, via the 「由你决定」
+     * chip (mirrors `DesignValueDto.Deferred`). This is a real ANSWER, not a
+     * cleared field — the core gate (`local-apps` questionnaire.rs) and the
+     * client gate below both treat it as satisfying a required field, exactly
+     * like iOS's `LocalAppDesignValue.deferred` /
+     * `LocalAppDesignerGate.isSatisfied`.
+     */
+    data object Deferred : LocalAppDesignValue
 }
 
 @Immutable
@@ -402,4 +420,5 @@ internal fun LocalAppDesignValue.readable(strings: LocalAppsStrings = DefaultLoc
     }
     is LocalAppDesignValue.StringList -> values.joinToString("、")
     is LocalAppDesignValue.DataFields -> values.joinToString("、") { it.label }
+    is LocalAppDesignValue.Deferred -> strings.resolve(R.string.local_apps_value_deferred, "由你决定")
 }

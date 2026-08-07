@@ -1610,6 +1610,179 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /**
+     * The core bug local-apps#questionnaire Task 19 fixes: `state.rs` makes
+     * `authoring_questionnaire` the initial workflow for every new app, and
+     * `open_designer` is illegal from there — so claiming a just-created app
+     * and unconditionally issuing `OpenAppDesigner` (the old `openDesigner`)
+     * rejected with `WORKFLOW_STATE_INVALID` on EVERY single create, every
+     * time, with the raw Rust string surfacing in the generic error dialog
+     * and the designer stuck on an infinite spinner underneath. This is not a
+     * race to reproduce — it is the app's very first workflow state.
+     */
+    @Test
+    fun `claiming a just-created app never issues a doomed open_app_designer`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("记事本"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本 app"))
+            runCurrent()
+
+            // The engine's own creation ack: a fresh app always starts in
+            // authoring_questionnaire (state.rs), never collecting_spec.
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(
+                            name = "记事本",
+                            brief = "一个记事本 app",
+                            workflow = AppWorkflowStateDto.AUTHORING_QUESTIONNAIRE,
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(
+                "the claim must still navigate to the designer, which now waits instead of erroring",
+                LocalAppsDestination.Designer(APP_ID),
+                viewModel.uiState.value.destination,
+            )
+            assertTrue(
+                "open_app_designer is illegal from authoring_questionnaire and must never be sent",
+                source.commands.none { it is ClientCommand.OpenAppDesigner },
+            )
+            assertNull("no WORKFLOW_STATE_INVALID from the engine, so no raw-string error dialog", viewModel.uiState.value.error)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `open_designer` (state.rs) unconditionally advances
+     * `collecting_spec -> awaiting_spec_confirmation`; sending it eagerly the
+     * moment the designer opens would arm the LATER plan-confirm gate before
+     * `begin_planning` (the questionnaire's own terminal action) ever runs,
+     * breaking every 生成方案 tap with `workflow_state_invalid`. `GetAppDetails`
+     * alone is enough to seed the draft — `update_draft` does not check
+     * workflow state.
+     */
+    @Test
+    fun `opening the designer while collecting spec never arms the confirm gate early`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.COLLECTING_SPEC))))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenDesigner(APP_ID))
+            runCurrent()
+
+            assertTrue(source.commands.any { it is ClientCommand.GetAppDetails })
+            assertTrue(
+                "open_app_designer would prematurely arm awaiting_spec_confirmation",
+                source.commands.none { it is ClientCommand.OpenAppDesigner },
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `open_designer` IS legal (and needed) from `generation_failed`: it
+     * re-arms the confirm gate so a plan that failed generation can be
+     * re-confirmed. Mirrors iOS's `LocalAppDesignerView.prepare()`'s
+     * `.generationFailed` case.
+     */
+    @Test
+    fun `opening the designer after a failed generation re-arms the confirm gate`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.GENERATION_FAILED))))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenDesigner(APP_ID))
+            runCurrent()
+
+            assertTrue(source.commands.any { it is ClientCommand.OpenAppDesigner })
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * `pendingCreate` used to be a single overwritable slot (local-apps#questionnaire,
+     * Task 19). A second create in flight before the first's `AppsChanged` ack
+     * arrived silently replaced it, so the first app's own ack no longer
+     * matched anything and its claim — and its `openDesigner` navigation —
+     * was silently dropped. `pendingCreates` is a queue now; each create gets
+     * its own entry, consumed independently.
+     */
+    @Test
+    fun `a second create in flight does not clobber the first pending claim`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("笔记 A"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("笔记 A 的简介"))
+            viewModel.onAction(LocalAppsAction.ChangeCreateName("笔记 B"))
+            viewModel.onAction(LocalAppsAction.CreateFromBrief("笔记 B 的简介"))
+            runCurrent()
+
+            // A's own creation ack arrives alone, before B's — the scalar bug
+            // used to drop this claim because the single slot had already
+            // been overwritten by B's pending entry.
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "a-id", name = "笔记 A", brief = "笔记 A 的简介")),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(LocalAppsDestination.Designer("a-id"), viewModel.uiState.value.destination)
+
+            // B's own ack then arrives on its own and must still be claimed —
+            // its pending entry was not consumed by A's claim.
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(id = "a-id", name = "笔记 A", brief = "笔记 A 的简介"),
+                        appRecord(id = "b-id", name = "笔记 B", brief = "笔记 B 的简介"),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(LocalAppsDestination.Designer("b-id"), viewModel.uiState.value.destination)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun seedDesigner(source: RecordingSource) {
         // NOTE (local-apps#questionnaire, Task 18): the static template
         // catalogue (`AppEventDto.AppTemplatesChanged`) is gone — a

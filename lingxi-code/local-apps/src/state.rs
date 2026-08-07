@@ -284,18 +284,34 @@ impl AppState {
     }
 
     /// `questionnaire_failed -> authoring_questionnaire`. 重试回到执行态，
-    /// 不是跳过它。
+    /// 不是跳过它。ALSO admits `authoring_questionnaire` itself as a source
+    /// (a self-transition, refreshing `updated_at_ms`) — the manual escape
+    /// hatch for an app stuck there with no live task behind it (an engine
+    /// crash mid round trip that predates `AppService::load`'s own
+    /// fail-closed sweep, or a sweep that itself missed a case). The engine
+    /// re-fires `spawn_authoring` on every successful call here, live task
+    /// or not, so this MUST NOT be exposed to a client while a genuinely
+    /// live task could still be running — see the host-side caller's own
+    /// note on that residual race.
     pub fn retry_questionnaire(&mut self, now_ms: u64) -> Result<(), AppError> {
         self.ensure_workflow(
             "retry_questionnaire",
-            &[AppWorkflowState::QuestionnaireFailed],
+            &[
+                AppWorkflowState::QuestionnaireFailed,
+                AppWorkflowState::AuthoringQuestionnaire,
+            ],
         )?;
         self.set_workflow(AppWorkflowState::AuthoringQuestionnaire, now_ms);
         Ok(())
     }
 
     /// 改 brief 并重新出题。旧答案的 field id 在新问卷里已不存在，
-    /// 保留它们只会让后续校验对着幽灵字段报错——一并清掉。
+    /// 保留它们只会让后续校验对着幽灵字段报错——一并清掉。ALSO admits
+    /// `authoring_questionnaire` / `planning` as sources — the same manual
+    /// escape hatch `retry_questionnaire`/`retry_plan` have for those two
+    /// states (an engine-owned background task died with nothing left to
+    /// resolve them): a user who would rather change the brief entirely than
+    /// retry the same one is never trapped either.
     pub fn update_brief(&mut self, brief: String, now_ms: u64) -> Result<(), AppError> {
         self.ensure_workflow(
             "update_brief",
@@ -303,6 +319,8 @@ impl AppState {
                 AppWorkflowState::CollectingSpec,
                 AppWorkflowState::QuestionnaireFailed,
                 AppWorkflowState::PlanFailed,
+                AppWorkflowState::AuthoringQuestionnaire,
+                AppWorkflowState::Planning,
             ],
         )?;
         let trimmed = brief.trim();
@@ -371,9 +389,17 @@ impl AppState {
         Ok(())
     }
 
-    /// `plan_failed -> planning`.
+    /// `plan_failed -> planning`. ALSO admits `planning` itself as a source
+    /// (a self-transition) — the same manual escape hatch `retry_questionnaire`
+    /// has for `authoring_questionnaire`, and for the same reason: `planning`
+    /// is driven entirely by an engine-owned background task, so a crash mid
+    /// round trip (or a load-time sweep that missed it) can leave it stuck
+    /// with nothing left to resolve it.
     pub fn retry_plan(&mut self, now_ms: u64) -> Result<(), AppError> {
-        self.ensure_workflow("retry_plan", &[AppWorkflowState::PlanFailed])?;
+        self.ensure_workflow(
+            "retry_plan",
+            &[AppWorkflowState::PlanFailed, AppWorkflowState::Planning],
+        )?;
         self.set_workflow(AppWorkflowState::Planning, now_ms);
         Ok(())
     }

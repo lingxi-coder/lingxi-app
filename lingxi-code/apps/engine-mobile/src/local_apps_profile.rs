@@ -104,12 +104,21 @@ impl ClientEventSink for ClientEventFanout {
 /// cell instead of holding its own `Arc<LocalAppsLlm>`. `clock` /
 /// `mobile_linux` stay genuinely pinned to whichever connection first loaded
 /// the profile (their doc above explains why); the model is different: it
-/// carries auth and the user's live model choice, and a reconnect or a
-/// `/model` switch can change either. Pinning THOSE silently would mean
-/// generation keeps authenticating as a rotated-out credential, or keeps
-/// authoring against a model the user switched away from, with no error and
-/// no log — so [`profile_apps`] refreshes this cell on every call, cached
-/// hit or not.
+/// carries auth, and a RECONNECT (a fresh `MobileEngineHandle` — possibly
+/// rotated credentials, possibly a different `ApiService`) hits this exact
+/// cache-hit path with a brand-new `LocalAppsLlm`. Pinning that silently
+/// would mean generation keeps authenticating as a rotated-out credential
+/// with no error and no log — so [`profile_apps`] refreshes this cell on
+/// every call, cached hit or not.
+///
+/// This does NOT cover a live `/model` switch — `ClientCommand::SetModel`
+/// never rebuilds the engine, so it never reaches `profile_apps` at all.
+/// That path is fixed separately and more narrowly: `ApiServiceModel`
+/// (`local_apps_llm.rs`) holds its own model/profile behind a lock and
+/// `SetModel`'s handler mutates it in place via
+/// [`crate::local_apps_llm::LocalAppsModel::set_model`] — the SAME
+/// `Arc<LocalAppsLlm>` this cell holds for the connection's lifetime, no
+/// swap needed.
 pub(crate) struct SharedLlm(RwLock<Arc<LocalAppsLlm>>);
 
 impl SharedLlm {
@@ -130,6 +139,170 @@ impl SharedLlm {
     pub(crate) fn replace(&self, llm: Arc<LocalAppsLlm>) {
         *self.0.write().expect("shared llm poisoned") = llm;
     }
+}
+
+/// Where a background authoring/planning task ([`spawn_authoring`] /
+/// [`spawn_planning`]) reports the ONE thing it might need to tell a client
+/// directly: a synthesized `AppOperationFailed` for an error that never
+/// reaches the domain-event pipeline (e.g. the app record itself could not
+/// be read before authoring even started). Every OTHER outcome —
+/// `questionnaire_ready`, `questionnaire_failed`, `plan_ready`,
+/// `plan_failed` — is a normal service mutation and already reaches every
+/// subscribed client through the service's own `AppEventObserver` fanout
+/// regardless of who triggered it (the wire client via `host.rs`, or the MCP
+/// `create` tool via `LocalAppsHostBroker`) — this trait is NOT that path,
+/// only the engine-synthesized-failure one.
+#[async_trait]
+pub(crate) trait AppFailureNotifier: Send + Sync {
+    async fn notify_failure(
+        &self,
+        service: Option<&AppService>,
+        app_id: Option<String>,
+        error: &AppError,
+    );
+}
+
+/// Best-effort log for a failed FAIL-CLOSE. `questionnaire_ready`/
+/// `plan_ready` failing is expected (a stale or malformed LLM answer); the
+/// FOLLOW-UP `questionnaire_failed`/`plan_failed` call ALSO failing means the
+/// app's workflow state already moved out from under this task before it
+/// could record the failure — e.g. a second authoring attempt (the
+/// `retry_questionnaire`-from-`authoring_questionnaire` escape hatch) beat
+/// this one to a terminal state. Nothing is silently lost: SOME transition
+/// already committed (that's how the state moved), and
+/// [`AppFailureNotifier::notify_failure`] below still reports the ORIGINAL
+/// error — this is a defense-in-depth log for an edge case, not the only
+/// signal a caller gets.
+fn log_failed_fail_close(
+    app_id: &str,
+    stage: &'static str,
+    original: &AppError,
+    fail_close_error: AppError,
+) {
+    tracing::warn!(
+        app_id,
+        stage,
+        original_error = %original,
+        fail_close_error = %fail_close_error,
+        "fail-closed transition itself failed — the app's workflow state moved out from \
+         under this task before it could record the failure",
+    );
+}
+
+/// 出题跑在后台：创建命令立刻返回，界面进「出题中」，模型往返
+/// 落定后再推状态。失败落 questionnaire_failed，绝不静默降级
+/// —— 模版已经删了，没有可退的默认问卷。
+///
+/// A free function (not a `MobileEngineHandle` method) so the wire-client
+/// trigger (`host.rs`'s `handle_create_app`/`handle_update_app_brief`/
+/// `handle_retry_app_questionnaire`) and the MCP `create` tool
+/// (`LocalAppsHostBroker::trigger_authoring`) share ONE fail-closed
+/// implementation. Two drifting copies of exactly this logic is the shape of
+/// gap this whole task exists to close — the fabrication tripwire was about
+/// wiring ONE entry point and silently leaving a second one behind.
+///
+/// Spawned on [`worker_runtime`], NOT the caller's own connection-owned
+/// runtime: `worker_runtime`'s own doc explains why — a `MobileEngineHandle`
+/// dies on reconnect/project-switch while the process-wide profile survives,
+/// so a task anchored to the connection's runtime would be silently aborted
+/// mid round trip by an ordinary reconnect, not just a crash. Anchoring here
+/// is what the generation worker already does for the identical reason.
+pub(crate) fn spawn_authoring(
+    service: Arc<AppService>,
+    llm: Arc<LocalAppsLlm>,
+    notifier: Arc<dyn AppFailureNotifier>,
+    app_id: String,
+) -> tokio::task::JoinHandle<()> {
+    worker_runtime().spawn(async move {
+        let brief = match service.record(&app_id).await {
+            Ok(record) => record.brief,
+            Err(error) => {
+                notifier
+                    .notify_failure(Some(&service), Some(app_id), &error)
+                    .await;
+                return;
+            }
+        };
+        match llm.author_questionnaire(&brief).await {
+            Ok((name, steps)) => {
+                if let Err(error) = service.questionnaire_ready(&app_id, steps, name).await {
+                    if let Err(fail_error) =
+                        service.questionnaire_failed(&app_id, &format!("{error}")).await
+                    {
+                        log_failed_fail_close(&app_id, "questionnaire_ready", &error, fail_error);
+                    }
+                    notifier
+                        .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                        .await;
+                }
+            }
+            Err(error) => {
+                if let Err(fail_error) =
+                    service.questionnaire_failed(&app_id, &format!("{error}")).await
+                {
+                    log_failed_fail_close(&app_id, "author_questionnaire", &error, fail_error);
+                }
+                notifier
+                    .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                    .await;
+            }
+        }
+        service.announce_apps().await;
+    })
+}
+
+/// 出方案跑在后台，形状同 [`spawn_authoring`]：读 brief + 问卷 + 答案，
+/// 调模型出方案；成功落 `plan_ready`（打开确认门），失败落
+/// `plan_failed`，绝不静默降级。See [`spawn_authoring`]'s doc for why this
+/// is a shared free function and why it runs on [`worker_runtime`].
+pub(crate) fn spawn_planning(
+    service: Arc<AppService>,
+    llm: Arc<LocalAppsLlm>,
+    notifier: Arc<dyn AppFailureNotifier>,
+    app_id: String,
+) -> tokio::task::JoinHandle<()> {
+    worker_runtime().spawn(async move {
+        let loaded = async {
+            let record = service.record(&app_id).await?;
+            let draft = service.draft(&app_id).await?;
+            Ok::<_, AppError>((record, draft))
+        }
+        .await;
+        let (record, draft) = match loaded {
+            Ok(pair) => pair,
+            Err(error) => {
+                notifier
+                    .notify_failure(Some(&service), Some(app_id), &error)
+                    .await;
+                return;
+            }
+        };
+        match llm
+            .plan(&record.brief, &draft.questionnaire, &draft.fields)
+            .await
+        {
+            Ok(plan) => {
+                if let Err(error) = service.plan_ready(&app_id, plan).await {
+                    if let Err(fail_error) = service.plan_failed(&app_id, &format!("{error}")).await
+                    {
+                        log_failed_fail_close(&app_id, "plan_ready", &error, fail_error);
+                    }
+                    notifier
+                        .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                        .await;
+                }
+            }
+            Err(error) => {
+                if let Err(fail_error) = service.plan_failed(&app_id, &format!("{error}")).await {
+                    log_failed_fail_close(&app_id, "plan", &error, fail_error);
+                }
+                notifier
+                    .notify_failure(Some(&service), Some(app_id.clone()), &error)
+                    .await;
+            }
+        }
+        service.announce_apps().await;
+    })
 }
 
 pub(crate) struct ProfileApps {
@@ -178,6 +351,8 @@ impl ProfileApps {
             .map_err(|_| AppError::Io("local-app generation host was already attached".into()))?;
         host.attach_service(service.clone())
             .map_err(|_| AppError::Io("local-app host was already attached".into()))?;
+        host.attach_llm(llm.clone())
+            .map_err(|_| AppError::Io("local-app host llm was already attached".into()))?;
         Ok(Arc::new(Self {
             service,
             generation,

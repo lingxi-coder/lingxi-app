@@ -35,6 +35,16 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn inspect_ui(&self, input: Value) -> Result<Value, String>;
     async fn act_on_ui(&self, input: Value) -> Result<Value, String>;
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String>;
+    /// Kick off background questionnaire authoring for `app_id`, fire-and-
+    /// forget — mirrors `host.rs`'s wire-client trigger exactly (same shared
+    /// `spawn_authoring`), so an MCP-created app does not sit in
+    /// `authoring_questionnaire` forever with the tool description's own
+    /// claim ("start[s] the LLM-authored design questionnaire") having been
+    /// false the whole time. Never fails the caller: the `create` tool call
+    /// already committed the record before this runs, and the app stays
+    /// recoverable (load-time sweep, `retry_questionnaire`) even if THIS
+    /// call is dropped entirely (host capability not yet attached).
+    async fn trigger_authoring(&self, app_id: String);
 }
 
 /// Mobile-local implementation of the MCP transport boundary.
@@ -375,6 +385,22 @@ impl LocalAppsMcpTransport {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
+                // Fire-and-forget, same as the wire-client `CreateApp` path
+                // (`host.rs`'s `handle_create_app` — both call the SAME
+                // shared `spawn_authoring`): the record already committed
+                // above, so a missing/unattached host capability here does
+                // NOT fail this call — `retry_questionnaire` and the
+                // load-time sweep both still recover the app if this is
+                // dropped.
+                if let Ok(host) = self.host() {
+                    host.trigger_authoring(record.id.clone()).await;
+                } else {
+                    tracing::warn!(
+                        app_id = %record.id,
+                        "local-apps host capability unavailable; questionnaire authoring was \
+                         not triggered from MCP create — retry_questionnaire can still recover it"
+                    );
+                }
                 Self::result(json!({
                     "app": record,
                     "next_step": "The app is being set up; wait for its questionnaire before designing."
@@ -743,6 +769,89 @@ mod tests {
         let app = &result.structured_content.expect("structured")["app"];
         assert!(app["id"].as_str().is_some(), "got {app}");
         assert_eq!(app["brief"], "一个记事本 app");
+    }
+
+    /// A minimal [`LocalAppsMcpHost`] double that only records
+    /// `trigger_authoring` calls — every other method is unreachable from
+    /// the `create` tool and panics if ever called.
+    struct RecordingAuthoringHost {
+        calls: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl LocalAppsMcpHost for RecordingAuthoringHost {
+        async fn manage_runtime(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn query_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn mutate_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn inspect_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn act_on_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn trigger_authoring(&self, app_id: String) {
+            self.calls.lock().expect("lock").push(app_id);
+        }
+    }
+
+    /// PINS the Critical-1 fix from the Task 11 review: `create` used to
+    /// persist a record and stop — nothing ever started the questionnaire
+    /// authoring the tool's own `next_step` text claims is happening, so an
+    /// agent that believed it and polled `get` would poll forever. `create`
+    /// must reach the attached host's `trigger_authoring` with the NEW app's
+    /// id, the same way `host.rs`'s wire-client `CreateApp` path does.
+    #[tokio::test]
+    async fn create_triggers_background_authoring_via_the_attached_host() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        let host = Arc::new(RecordingAuthoringHost {
+            calls: StdMutex::new(Vec::new()),
+        });
+        assert!(transport
+            .attach_host(host.clone() as Arc<dyn LocalAppsMcpHost>)
+            .is_ok());
+
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("create");
+        let app = &result.structured_content.expect("structured")["app"];
+        let app_id = app["id"].as_str().expect("id").to_string();
+
+        assert_eq!(
+            host.calls.lock().expect("lock").as_slice(),
+            &[app_id],
+            "create must trigger background authoring for the app it just persisted"
+        );
+    }
+
+    /// A `create` call still succeeds and returns the persisted record even
+    /// when NO host capability is attached (e.g. a build wiring gap) — the
+    /// record is real and recoverable (`retry_questionnaire`, the load-time
+    /// sweep) even though authoring did not start yet.
+    #[tokio::test]
+    async fn create_still_succeeds_when_no_host_is_attached_to_trigger_authoring() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = attached_transport(root.path()).await;
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("create must not fail just because authoring couldn't be triggered");
+        let app = &result.structured_content.expect("structured")["app"];
+        let app_id = app["id"].as_str().expect("id").to_string();
+        assert_eq!(
+            service.record(&app_id).await.expect("record").workflow_state,
+            local_apps::AppWorkflowState::AuthoringQuestionnaire
+        );
     }
 
     #[tokio::test]

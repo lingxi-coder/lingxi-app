@@ -20,7 +20,7 @@ use local_apps::questionnaire::{
 use local_apps::{AppError, DesignValue};
 use protocol::{ConversationMessage, MessageId};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 const AUTHOR_PROMPT: &str = include_str!("../assets/prompts/author_questionnaire.md");
 const PLAN_PROMPT: &str = include_str!("../assets/prompts/plan.md");
@@ -53,6 +53,14 @@ pub trait LocalAppsModel: Send + Sync {
         tool_name: &str,
         schema: serde_json::Value,
     ) -> Result<serde_json::Value, AppError>;
+
+    /// Update the default model/profile future `structured` calls route
+    /// through — `ClientCommand::SetModel` calls this so the three local-app
+    /// LLM stages follow a `/model` switch instead of staying pinned to
+    /// whatever was live at engine build time. Default is a no-op: only
+    /// [`ApiServiceModel`] (the production implementation) has a live
+    /// selection to update; test doubles ignore it.
+    fn set_model(&self, _model: String, _profile: Option<String>) {}
 }
 
 /// Real [`LocalAppsModel`] over the shared `ApiService` — forced tool call via
@@ -70,14 +78,24 @@ pub trait LocalAppsModel: Send + Sync {
 /// caller's budget policy.
 pub struct ApiServiceModel {
     service: Arc<ApiService>,
-    model: String,
-    profile: Option<String>,
+    /// `RwLock`-backed, NOT a plain `String`: `ClientCommand::SetModel`
+    /// updates this in place (via [`LocalAppsModel::set_model`]) so the
+    /// three local-app LLM stages follow a live `/model` switch instead of
+    /// staying pinned to whatever `default_model_id`/`default_model_profile`
+    /// were at engine build time — the same class of "silently stale after
+    /// the user changed something" bug `SharedLlm` closes for a reconnect.
+    model: RwLock<String>,
+    profile: RwLock<Option<String>>,
 }
 
 impl ApiServiceModel {
     #[must_use]
     pub fn new(service: Arc<ApiService>, model: impl Into<String>, profile: Option<String>) -> Self {
-        Self { service, model: model.into(), profile }
+        Self {
+            service,
+            model: RwLock::new(model.into()),
+            profile: RwLock::new(profile),
+        }
     }
 
     fn max_tokens_for(tool_name: &str) -> u32 {
@@ -105,11 +123,17 @@ impl LocalAppsModel for ApiServiceModel {
             "input_schema": schema,
         });
         let message = ConversationMessage::user(MessageId::new(), user);
+        // Snapshot both under their own locks (never held across the `.await`
+        // below) rather than holding a guard across the network call — a
+        // concurrent `set_model` must never block, or be blocked by, an
+        // in-flight structured call.
+        let model = self.model.read().expect("model lock poisoned").clone();
+        let profile = self.profile.read().expect("profile lock poisoned").clone();
         let response = self
             .service
             .messages_create_side_query(
-                &self.model,
-                self.profile.as_deref(),
+                &model,
+                profile.as_deref(),
                 Some(system),
                 vec![message],
                 vec![tool],
@@ -121,6 +145,11 @@ impl LocalAppsModel for ApiServiceModel {
             .await
             .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
         extract_single_tool_call(response.content, tool_name)
+    }
+
+    fn set_model(&self, model: String, profile: Option<String>) {
+        *self.model.write().expect("model lock poisoned") = model;
+        *self.profile.write().expect("profile lock poisoned") = profile;
     }
 }
 
@@ -228,6 +257,11 @@ impl LocalAppsLlm {
     #[must_use]
     pub fn new(model: Arc<dyn LocalAppsModel>) -> Self {
         Self { model }
+    }
+
+    /// Follow a live `/model` switch: see [`LocalAppsModel::set_model`].
+    pub fn set_model(&self, model: String, profile: Option<String>) {
+        self.model.set_model(model, profile);
     }
 
     /// Author a questionnaire for this brief. Returns `(suggested name, questionnaire)`.
@@ -623,6 +657,52 @@ mod tests {
             "capabilities": ["data_mutation"],
             "domains": []
         })
+    }
+
+    /// A [`LocalAppsModel`] double that only records `set_model` calls —
+    /// proves [`LocalAppsLlm::set_model`] actually delegates to the
+    /// underlying model instead of silently no-op'ing (the DEFAULT trait
+    /// method every OTHER test double relies on).
+    struct RecordingModel {
+        calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl LocalAppsModel for RecordingModel {
+        async fn structured(
+            &self,
+            _system: &str,
+            _user: String,
+            _tool_name: &str,
+            _schema: serde_json::Value,
+        ) -> Result<serde_json::Value, AppError> {
+            unreachable!("not exercised by this test")
+        }
+
+        fn set_model(&self, model: String, profile: Option<String>) {
+            self.calls.lock().expect("lock").push((model, profile));
+        }
+    }
+
+    /// PINS the Important-3 fix from the Task 11 review: `ClientCommand::
+    /// SetModel` must reach the local-apps LLM, not just the orchestrator's
+    /// own model selection — otherwise the three local-app LLM stages stay
+    /// silently pinned to whatever was live at engine build time forever.
+    #[test]
+    fn set_model_delegates_to_the_underlying_model() {
+        let model = Arc::new(RecordingModel {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let llm = LocalAppsLlm::new(model.clone());
+        llm.set_model("claude-opus-5".into(), Some("anthropic".into()));
+        llm.set_model("gpt-5.5".into(), None);
+        assert_eq!(
+            model.calls.lock().expect("lock").as_slice(),
+            &[
+                ("claude-opus-5".to_string(), Some("anthropic".to_string())),
+                ("gpt-5.5".to_string(), None),
+            ]
+        );
     }
 
     #[tokio::test]

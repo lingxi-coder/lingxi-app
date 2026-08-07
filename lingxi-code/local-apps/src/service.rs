@@ -39,7 +39,7 @@ use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppDesignDraft, AppDesignPatch,
     AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress, AppInteractionKind,
     AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeMode, AppRuntimeRecord,
-    AppRuntimeState, DesignValue,
+    AppRuntimeState, AppWorkflowState, DesignValue,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -367,8 +367,54 @@ impl AppService {
             emit_order: Arc::new(Mutex::new(())),
             retired_ids: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
         };
+        service.fail_interrupted_llm_rounds().await;
         service.announce_pending_gates().await;
         Ok(service)
+    }
+
+    /// Fail closed any app left in `authoring_questionnaire` / `planning`
+    /// from a PREVIOUS process. Those two states are driven entirely by a
+    /// background task the ENGINE owns (`host.rs`'s `spawn_authoring` /
+    /// `spawn_planning`), not by this service — a crash, a panic, or the OS
+    /// killing a backgrounded app mid round trip leaves the record here with
+    /// no task left anywhere to finish it. Nothing else can rescue it either:
+    /// `questionnaire_ready`/`plan_ready` and their `_failed` siblings are
+    /// guarded to the SAME state they leave, so only the (engine-owned) task
+    /// that started it may resolve it, and that task no longer exists. This
+    /// runs unconditionally at every load, so the record is never stuck for
+    /// longer than one restart — the client sees the same retryable-failure
+    /// UI a live LLM error would produce, not a spinner that never resolves.
+    async fn fail_interrupted_llm_rounds(&self) {
+        let stuck: Vec<(String, AppWorkflowState)> = {
+            let apps = self.state.lock().await;
+            apps.iter()
+                .filter_map(|app| match app.record.workflow_state {
+                    state @ (AppWorkflowState::AuthoringQuestionnaire
+                    | AppWorkflowState::Planning) => Some((app.record.id.clone(), state)),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (app_id, state) in stuck {
+            let result = match state {
+                AppWorkflowState::AuthoringQuestionnaire => {
+                    self.questionnaire_failed(&app_id, "interrupted by an engine restart")
+                        .await
+                }
+                AppWorkflowState::Planning => {
+                    self.plan_failed(&app_id, "interrupted by an engine restart")
+                        .await
+                }
+                _ => unreachable!("filtered to only these two states above"),
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %error,
+                    "failed to fail-close an app interrupted mid authoring/planning at load"
+                );
+            }
+        }
     }
 
     /// Run one blocking storage closure on the blocking pool. A join failure
@@ -1099,14 +1145,17 @@ impl AppService {
     }
 
     /// Retry questionnaire authoring (`questionnaire_failed ->
-    /// authoring_questionnaire`).
+    /// authoring_questionnaire`), or re-fire it from `authoring_questionnaire`
+    /// itself — the manual escape for an app stuck there with no live task
+    /// behind it (see [`AppState::retry_questionnaire`]).
     pub async fn retry_questionnaire(&self, app_id: &str) -> Result<(), AppError> {
         self.workflow_step(app_id, None, AppState::retry_questionnaire)
             .await
     }
 
     /// Change the brief and re-author from scratch (`collecting_spec |
-    /// questionnaire_failed | plan_failed -> authoring_questionnaire`).
+    /// questionnaire_failed | plan_failed | authoring_questionnaire |
+    /// planning -> authoring_questionnaire`).
     /// Discards the questionnaire, every answer, and any plan — a new brief
     /// can invalidate all three. Unlike every OTHER plain transition (which
     /// reuses [`Self::workflow_step`] and so only ever emits
@@ -1206,7 +1255,9 @@ impl AppService {
     }
 
     /// Retry planning with the SAME answers (`plan_failed -> planning`) —
-    /// useful when the failure was transient (e.g. an LLM hiccup).
+    /// useful when the failure was transient (e.g. an LLM hiccup) — or
+    /// re-fire it from `planning` itself, the manual escape for an app stuck
+    /// there with no live task behind it (see [`AppState::retry_plan`]).
     pub async fn retry_plan(&self, app_id: &str) -> Result<(), AppError> {
         self.workflow_step(app_id, None, AppState::retry_plan).await
     }
@@ -2027,15 +2078,144 @@ mod tests {
         let events = h.take_events().await;
         assert!(matches!(&events[..], [AppEvent::AppsChanged { apps }] if apps.len() == 1));
 
-        // Rebuild from disk alone.
+        // Rebuild from disk alone. The app never left `authoring_questionnaire`
+        // (no engine-owned background task ever ran for it in this test, and
+        // NOTHING besides that task can carry it forward) — `AppService::load`
+        // fails it closed on this exact reload rather than resurrecting a
+        // record whose questionnaire round trip is provably gone (the task
+        // that would have finished it died with the process). This is the
+        // load-time half of the local-apps#questionnaire Task 11 fix: the
+        // OTHER half admits `authoring_questionnaire` itself as a
+        // `retry_questionnaire` source, so the client is never trapped even
+        // if this sweep ever missed a case.
         drop(h);
         let h2 = harness(dir.path()).await;
-        assert_eq!(h2.service.list_apps().await, vec![record.clone()]);
+        let reloaded = h2.service.list_apps().await;
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].id, record.id);
+        assert_eq!(
+            reloaded[0].workflow_state,
+            AppWorkflowState::QuestionnaireFailed,
+            "authoring_questionnaire with no live task behind it fails closed at load"
+        );
         assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 0);
         assert_eq!(
             h2.service.runtime_record(&record.id).await.unwrap().state,
             AppRuntimeState::Stopped
         );
+    }
+
+    /// The `planning` half of `create_list_and_reload_from_disk`'s fix:
+    /// `planning` is driven by the SAME kind of engine-owned background task
+    /// as `authoring_questionnaire` (`spawn_planning`, not this service), so
+    /// it fails closed at load exactly the same way.
+    #[tokio::test]
+    async fn planning_left_stuck_fails_closed_at_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Stuck"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        h.service.begin_planning(&record.id).await.unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Planning
+        );
+
+        // Rebuild from disk alone — no task ever finishes this `planning`.
+        drop(h);
+        let h2 = harness(dir.path()).await;
+        assert_eq!(
+            h2.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::PlanFailed,
+            "planning with no live task behind it fails closed at load"
+        );
+        // The questionnaire survives — `plan_failed` (unlike `update_brief`)
+        // never touches it. (The fixture questionnaire's one field is
+        // optional and never answered here, so `fields` staying empty is
+        // expected, not evidence of anything being cleared.)
+        let draft = h2.service.draft(&record.id).await.unwrap();
+        assert!(!draft.questionnaire.is_empty());
+    }
+
+    /// The manual escape hatch for a stuck app WITHIN the same running
+    /// process (no restart, so the load-time sweep above never runs): both
+    /// `retry_questionnaire` and `update_brief` now admit
+    /// `authoring_questionnaire` itself as a source, not just
+    /// `questionnaire_failed`.
+    #[tokio::test]
+    async fn retry_questionnaire_and_update_brief_escape_a_stuck_authoring_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Stuck"), "a test app", None)
+            .await
+            .unwrap();
+        assert_eq!(record.workflow_state, AppWorkflowState::AuthoringQuestionnaire);
+
+        // `retry_questionnaire` from `authoring_questionnaire` itself is a
+        // valid self-transition (re-fires the trigger on the engine side;
+        // here it just proves the state guard admits it).
+        h.service.retry_questionnaire(&record.id).await.unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+
+        // `update_brief` from `authoring_questionnaire` is ALSO valid — the
+        // other escape, for a user who would rather change the brief than
+        // retry the same one.
+        h.service
+            .update_brief(&record.id, "a completely different app")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::AuthoringQuestionnaire
+        );
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().brief,
+            "a completely different app"
+        );
+    }
+
+    /// As above, for the `planning` side: `retry_plan` and `update_brief`
+    /// both admit `planning` itself as a source.
+    #[tokio::test]
+    async fn retry_plan_and_update_brief_escape_a_stuck_planning_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Stuck"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        h.service.begin_planning(&record.id).await.unwrap();
+
+        h.service.retry_plan(&record.id).await.unwrap();
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Planning
+        );
+
+        h.service
+            .update_brief(&record.id, "a completely different app")
+            .await
+            .unwrap();
+        let after = h.service.record(&record.id).await.unwrap();
+        assert_eq!(after.workflow_state, AppWorkflowState::AuthoringQuestionnaire);
+        assert_eq!(after.brief, "a completely different app");
+        // `update_brief` clears the questionnaire/answers/plan whenever
+        // there was one to clear — same as escaping from `plan_failed`.
+        let draft = h.service.draft(&record.id).await.unwrap();
+        assert!(draft.questionnaire.is_empty());
+        assert!(draft.fields.is_empty());
+        assert!(draft.plan.is_none());
     }
 
     #[tokio::test]

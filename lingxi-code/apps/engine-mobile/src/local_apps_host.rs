@@ -4,6 +4,7 @@
 //! WebView handles.  This broker is the single trust boundary for those
 //! operations and is also used by the native client command surface.
 
+use crate::local_apps_bridge::lower_error_code;
 use crate::local_apps_mcp::LocalAppsMcpHost;
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
@@ -278,6 +279,11 @@ pub(crate) struct LocalAppsHostBroker {
     runtime_root: Option<PathBuf>,
     service: OnceLock<Arc<AppService>>,
     generation: OnceLock<Arc<AppGenerationCoordinator>>,
+    /// Set once at profile load (same call site as `attach_service`), so the
+    /// MCP `create` tool can trigger background authoring the same way
+    /// `host.rs`'s wire-client path does — see
+    /// [`LocalAppsMcpHost::trigger_authoring`].
+    llm: OnceLock<Arc<crate::local_apps_profile::SharedLlm>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
@@ -337,6 +343,7 @@ impl LocalAppsHostBroker {
             runtime_root,
             service: OnceLock::new(),
             generation: OnceLock::new(),
+            llm: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
@@ -356,6 +363,13 @@ impl LocalAppsHostBroker {
         generation: Arc<AppGenerationCoordinator>,
     ) -> Result<(), Arc<AppGenerationCoordinator>> {
         self.generation.set(generation)
+    }
+
+    pub(crate) fn attach_llm(
+        &self,
+        llm: Arc<crate::local_apps_profile::SharedLlm>,
+    ) -> Result<(), Arc<crate::local_apps_profile::SharedLlm>> {
+        self.llm.set(llm)
     }
 
     pub(crate) fn full_runtime_enabled(&self) -> bool {
@@ -1633,6 +1647,49 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String> {
         self.restore_checkpoint_value(input).await
+    }
+
+    async fn trigger_authoring(&self, app_id: String) {
+        let (Ok(service), Some(llm)) = (self.service(), self.llm.get()) else {
+            // `service`/`llm` are attached together with `generation` at
+            // profile load, right after `create_app` itself becomes
+            // reachable — this should not happen. If it ever does, the app
+            // is not stuck forever: the load-time sweep and the
+            // `retry_questionnaire`-from-`authoring_questionnaire` escape
+            // hatch both still apply.
+            tracing::error!(
+                app_id,
+                "local-apps host: service or llm not attached; MCP-triggered authoring \
+                 was skipped — the app stays recoverable via retry_questionnaire"
+            );
+            return;
+        };
+        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
+            Arc::new(BrokerFailureNotifier(self.event_sink.clone()));
+        crate::local_apps_profile::spawn_authoring(service, llm.current(), notifier, app_id);
+    }
+}
+
+/// The MCP host's [`crate::local_apps_profile::AppFailureNotifier`]: lowers
+/// a synthesized failure directly onto the broker's own profile-wide client
+/// fanout (the same sink every OTHER broker-originated event already rides —
+/// `event_sink`, not the connection-scoped `AppEmissionQueue` `host.rs` uses,
+/// since a profile-scoped broker has no single connection to prefer).
+struct BrokerFailureNotifier(Arc<dyn ClientEventSink>);
+
+#[async_trait]
+impl crate::local_apps_profile::AppFailureNotifier for BrokerFailureNotifier {
+    async fn notify_failure(&self, service: Option<&AppService>, app_id: Option<String>, error: &local_apps::AppError) {
+        if let Some(service) = service {
+            service.flush_events().await;
+        }
+        self.0
+            .emit(ClientEvent::AppOperationFailed {
+                app_id,
+                code: lower_error_code(error.code()),
+                message: error.to_string(),
+            })
+            .await;
     }
 }
 

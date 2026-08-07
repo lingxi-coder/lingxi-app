@@ -166,6 +166,21 @@ impl AppEmissionQueue {
     }
 }
 
+/// The wire-client's [`crate::local_apps_profile::AppFailureNotifier`]:
+/// `spawn_authoring`/`spawn_planning`'s synthesized-failure path rides the
+/// SAME ordered channel every other `host.rs` command reply does.
+#[async_trait]
+impl crate::local_apps_profile::AppFailureNotifier for AppEmissionQueue {
+    async fn notify_failure(
+        &self,
+        service: Option<&AppService>,
+        app_id: Option<String>,
+        error: &AppError,
+    ) {
+        self.emit_failure(service, app_id, error).await;
+    }
+}
+
 /// [`AppEventObserver`] that hands every domain event to the bridge's ordered
 /// emission channel. Installed on the engine-owned `AppService` at build time
 /// so service-driven events (including the phase-3 generator's, later) ride

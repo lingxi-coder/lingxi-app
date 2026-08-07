@@ -249,10 +249,20 @@ class LocalAppsViewModel(
         // longer carries a template selection at all. This whole template-based
         // create flow is superseded by the brief-based one; replacing it is
         // Task 20's job, not this task's.
+        //
+        // NOTE (local-apps#questionnaire, Task 11): `brief` is now REQUIRED on
+        // the wire (it seeds the LLM questionnaire-authoring round trip the
+        // engine starts in the background right after `create_app` commits)
+        // and this legacy template picker collects no brief of its own —
+        // reusing `name` (the display name) is the SAME stopgap the engine
+        // side used before Task 11 wired a real brief input. Task 20 replaces
+        // this whole flow with the conversational one, which collects an
+        // actual brief from the user.
         submit(
             ClientCommand.CreateApp(
                 name = name,
                 origin = AppCreateOriginDto.LIBRARY,
+                brief = name,
                 conversationId = null,
             ),
         )

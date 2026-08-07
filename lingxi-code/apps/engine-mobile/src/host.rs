@@ -3053,126 +3053,58 @@ impl MobileEngineHandle {
     /// (or is about to) by the time the LLM round trip lands. The eventual
     /// `questionnaire_ready` / `questionnaire_failed` transition and its
     /// `AppsChanged` snapshot ride the same app-emission channel as every
-    /// other app event.
+    /// other app event. Delegates to the shared
+    /// [`crate::local_apps_profile::spawn_authoring`] — see its doc for why
+    /// this is a free function and why it runs on
+    /// [`crate::local_apps_profile::worker_runtime`] rather than
+    /// `self.runtime`.
     fn trigger_authoring(&self, service: &Arc<AppService>, app_id: String) {
         // `self.local_apps` was `Ok` (checked by every caller via
         // `local_apps_or_report`) iff `self.profile_apps` is `Some` — both are
         // set together from the same `loaded_profile` match at build time.
+        // `debug_assert!` because a violation here is the SAME permanent
+        // hang this whole task exists to close, just via a different door —
+        // cheap enough to check even in release (a `tracing::error!` fires
+        // there too), since silently returning is exactly the failure mode
+        // under review.
         let Some(profile) = &self.profile_apps else {
+            debug_assert!(
+                false,
+                "trigger_authoring called with local_apps Ok but profile_apps None"
+            );
+            tracing::error!(
+                app_id,
+                "local-apps profile unavailable; authoring was not triggered — the app is \
+                 stuck in authoring_questionnaire with no recovery until an engine restart"
+            );
             return;
         };
-        let handle = Self::spawn_authoring(
-            self.runtime.handle(),
-            service.clone(),
-            profile.llm.current(),
-            self.app_emissions.clone(),
-            app_id,
-        );
+        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
+            Arc::new(self.app_emissions.clone());
+        let handle =
+            crate::local_apps_profile::spawn_authoring(service.clone(), profile.llm.current(), notifier, app_id);
         self.local_apps_background.track(handle);
     }
 
     /// As [`Self::trigger_authoring`], for background plan derivation.
     fn trigger_planning(&self, service: &Arc<AppService>, app_id: String) {
         let Some(profile) = &self.profile_apps else {
+            debug_assert!(
+                false,
+                "trigger_planning called with local_apps Ok but profile_apps None"
+            );
+            tracing::error!(
+                app_id,
+                "local-apps profile unavailable; planning was not triggered — the app is \
+                 stuck in planning with no recovery until an engine restart"
+            );
             return;
         };
-        let handle = Self::spawn_planning(
-            self.runtime.handle(),
-            service.clone(),
-            profile.llm.current(),
-            self.app_emissions.clone(),
-            app_id,
-        );
+        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
+            Arc::new(self.app_emissions.clone());
+        let handle =
+            crate::local_apps_profile::spawn_planning(service.clone(), profile.llm.current(), notifier, app_id);
         self.local_apps_background.track(handle);
-    }
-
-    /// 出题跑在后台：创建命令立刻返回，界面进「出题中」，模型往返
-    /// 落定后再推状态。失败落 questionnaire_failed，绝不静默降级
-    /// —— 模版已经删了，没有可退的默认问卷。
-    fn spawn_authoring(
-        runtime: &tokio::runtime::Handle,
-        service: Arc<AppService>,
-        llm: Arc<LocalAppsLlm>,
-        emissions: crate::local_apps_bridge::AppEmissionQueue,
-        app_id: String,
-    ) -> tokio::task::JoinHandle<()> {
-        runtime.spawn(async move {
-            let brief = match service.record(&app_id).await {
-                Ok(record) => record.brief,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                    return;
-                }
-            };
-            match llm.author_questionnaire(&brief).await {
-                Ok((name, steps)) => {
-                    if let Err(error) = service.questionnaire_ready(&app_id, steps, name).await {
-                        let _ = service.questionnaire_failed(&app_id, &format!("{error}")).await;
-                        emissions
-                            .emit_failure(Some(&service), Some(app_id.clone()), &error)
-                            .await;
-                    }
-                }
-                Err(error) => {
-                    let _ = service.questionnaire_failed(&app_id, &format!("{error}")).await;
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id.clone()), &error)
-                        .await;
-                }
-            }
-            Self::emit_apps_snapshot(&service).await;
-        })
-    }
-
-    /// 出方案跑在后台，形状同 [`Self::spawn_authoring`]：读 brief + 问卷 +
-    /// 答案，调模型出方案；成功落 `plan_ready`（打开确认门），失败落
-    /// `plan_failed`，绝不静默降级。
-    fn spawn_planning(
-        runtime: &tokio::runtime::Handle,
-        service: Arc<AppService>,
-        llm: Arc<LocalAppsLlm>,
-        emissions: crate::local_apps_bridge::AppEmissionQueue,
-        app_id: String,
-    ) -> tokio::task::JoinHandle<()> {
-        runtime.spawn(async move {
-            let loaded = async {
-                let record = service.record(&app_id).await?;
-                let draft = service.draft(&app_id).await?;
-                Ok::<_, AppError>((record, draft))
-            }
-            .await;
-            let (record, draft) = match loaded {
-                Ok(pair) => pair,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                    return;
-                }
-            };
-            match llm
-                .plan(&record.brief, &draft.questionnaire, &draft.fields)
-                .await
-            {
-                Ok(plan) => {
-                    if let Err(error) = service.plan_ready(&app_id, plan).await {
-                        let _ = service.plan_failed(&app_id, &format!("{error}")).await;
-                        emissions
-                            .emit_failure(Some(&service), Some(app_id.clone()), &error)
-                            .await;
-                    }
-                }
-                Err(error) => {
-                    let _ = service.plan_failed(&app_id, &format!("{error}")).await;
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id.clone()), &error)
-                        .await;
-                }
-            }
-            Self::emit_apps_snapshot(&service).await;
-        })
     }
 
     // The seven mutate-then-announce handlers below are cancellation-atomic:
@@ -3743,6 +3675,18 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
                     })?;
+                // The local-app LLM stages (author/plan/write-source) ride
+                // their OWN `ApiServiceModel`, not the orchestrator's model
+                // selection — without this they would stay silently pinned
+                // to whatever was live at engine build time even after a
+                // `/model` switch. `local_apps_llm` is stable for this
+                // connection's whole lifetime (only a reconnect gets a new
+                // one, via `profile_apps`'s `SharedLlm::replace`), so
+                // mutating it in place here is exactly the model every
+                // future authoring/planning/generation call will read.
+                self.inner
+                    .local_apps_llm
+                    .set_model(model_id.clone(), profile.clone());
                 let snapshot = handle.get_status_snapshot().await;
                 let selected =
                     traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());

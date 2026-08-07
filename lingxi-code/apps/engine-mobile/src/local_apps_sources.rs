@@ -61,11 +61,25 @@ fn screen_path(path: &str) -> Result<(), AppError> {
     if path.is_empty() {
         return Err(reject("empty write path"));
     }
-    // 反斜杠先于任何 `/` 分段判断处理：否则 `app\..\secret.js` 会被
-    // 当成单个合法分段混过去。
+    // 反斜杠检查独立于下面的 `/` 分段判断，且不依赖顺序：`contains('\\')`
+    // 扫描的是完整原始字符串，不受 `split('/')` 影响。它存在的理由不是
+    // "抢在分段之前跑"（`split` 不消费 `path`，顺序其实无关），而是分段
+    // 判断本身认不出反斜杠——`app/x\..\..\secret.js` 这类混合输入里，
+    // 根段 `app` 合法、`x\..\..\secret.js` 又不是字面的 `..`，逐段判断
+    // 会放行；必须有这条独立检查才能挡住它。
     if path.contains('\\') {
         return Err(reject(format!("`{path}` contains a backslash")));
     }
+    // Note for the next reader: given `WRITABLE_ROOTS` never contains `""`,
+    // the root-membership check a few lines down independently rejects
+    // every leading-`/` path anyway (`"/app/x".split('/')` yields `""` as
+    // the root token), so this branch is not reachable-as-necessary against
+    // the current parser — verified by deleting it and re-running the
+    // absolute-path tests, which stayed green. It stays as defense-in-depth
+    // (a clearer, dedicated error message, and a guard against a future
+    // change to the root/segment parsing — e.g. filtering out empty
+    // segments to tolerate `//` — quietly turning a leading `/` into a
+    // no-op).
     if path.starts_with('/') {
         return Err(reject(format!("`{path}` is absolute")));
     }
@@ -78,10 +92,22 @@ fn screen_path(path: &str) -> Result<(), AppError> {
             "`{path}` is outside the writable roots {WRITABLE_ROOTS:?}"
         )));
     }
-    for segment in path.split('/') {
+    // `segments` now holds everything after the root (it was already
+    // advanced once above), so this reuses one split instead of taking a
+    // second pass over `path`. A write that names only the root itself
+    // (e.g. `"app"`) must still be rejected: it would collide with the
+    // directory `AppLayout::initialize()` scaffolds at that root.
+    let mut has_child = false;
+    for segment in segments {
+        has_child = true;
         if segment.is_empty() || segment == "." || segment == ".." {
             return Err(reject(format!("`{path}` contains a `{segment}` segment")));
         }
+    }
+    if !has_child {
+        return Err(reject(format!(
+            "`{path}` writes directly to the root `{root}`, not a file beneath it"
+        )));
     }
     Ok(())
 }
@@ -119,12 +145,40 @@ mod tests {
     #[test]
     fn rejects_an_absolute_path() {
         screen_writes(&[write("/etc/passwd")]).expect_err("absolute paths are rejected");
+        // NOTE: this second case does NOT mutation-isolate the dedicated
+        // `path.starts_with('/')` check in `screen_path`, and neither can any
+        // other input. Verified by deleting that check and re-running this
+        // test: it stayed green, because `"/app/page.jsx".split('/')` yields
+        // `""` as the root token, and `""` is never in `WRITABLE_ROOTS` — the
+        // root-membership check a few lines below independently rejects
+        // every leading-`/` path on its own. Kept anyway (see the comment on
+        // the check itself) as a behavioral requirement and defense-in-depth,
+        // not because this test can prove the line is load-bearing.
+        screen_writes(&[write("/app/page.jsx")])
+            .expect_err("a leading slash is rejected even when the rest of the path looks writable");
     }
 
     #[test]
     fn rejects_a_windows_style_separator() {
         screen_writes(&[write("app\\..\\secret.js")])
             .expect_err("backslashes must not smuggle a traversal past a `/`-only check");
+    }
+
+    #[test]
+    fn rejects_a_backslash_traversal_mixed_with_a_valid_root() {
+        // Root segment `app` is legitimate and the offending segment is not
+        // literally `..`, so this only fails if the backslash scan runs
+        // independently of the per-segment `.`/`..` check.
+        screen_writes(&[write("app/x\\..\\..\\secret.js")])
+            .expect_err("a backslash-encoded traversal under a valid root is still rejected");
+    }
+
+    #[test]
+    fn rejects_a_bare_root_name() {
+        for root in ["app", "components", "lib", "styles", "public"] {
+            screen_writes(&[write(root)])
+                .expect_err("a write naming only the root itself, with no child segment, is rejected");
+        }
     }
 
     #[test]

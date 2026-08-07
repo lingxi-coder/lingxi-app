@@ -120,33 +120,40 @@ impl LocalAppsModel for ApiServiceModel {
             )
             .await
             .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
+        extract_single_tool_call(response.content, tool_name)
+    }
+}
 
-        // `ToolChoice::Tool { name }` forces the model to call the named
-        // tool, but it carries only a name — it does NOT disable parallel
-        // tool use, so a response can legally contain more than one
-        // `ToolCall` block naming `tool_name`. Taking only the first match
-        // (the earlier version of this method) would silently discard every
-        // later one: under the overlay write semantics a `emit_sources`
-        // response with two tool calls would drop the second batch of files
-        // with no error anywhere — `screen_writes` only ever sees the
-        // truncated first batch. Collect every match and require exactly one.
-        let mut matches: Vec<serde_json::Value> = response
-            .content
-            .into_iter()
-            .filter_map(|block| match block {
-                ContentBlock::ToolCall { name, input, .. } if name == tool_name => Some(input),
-                _ => None,
-            })
-            .collect();
-        match matches.len() {
-            1 => Ok(matches.remove(0)),
-            0 => Err(AppError::LlmOutputRejected(
-                "the model did not call the required tool".into(),
-            )),
-            count => Err(AppError::LlmOutputRejected(format!(
-                "the model called `{tool_name}` {count} times; expected exactly one call"
-            ))),
-        }
+/// `ToolChoice::Tool { name }` forces the model to call the named tool, but
+/// it carries only a name — it does NOT disable parallel tool use, so a
+/// response can legally contain more than one `ToolCall` block naming
+/// `tool_name`. Taking only the first match (an earlier version of this
+/// scan) would silently discard every later one: under the overlay write
+/// semantics an `emit_sources` response with two tool calls would drop the
+/// second batch of files with no error anywhere — `screen_writes` only ever
+/// sees the truncated first batch. Collect every match and require exactly
+/// one. A free function (rather than inlined in [`ApiServiceModel::structured`])
+/// so the three-way branch is unit-testable against hand-built
+/// `ContentBlock` values, with no `ApiService` or network involved.
+fn extract_single_tool_call(
+    content: Vec<ContentBlock>,
+    tool_name: &str,
+) -> Result<serde_json::Value, AppError> {
+    let mut matches: Vec<serde_json::Value> = content
+        .into_iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall { name, input, .. } if name == tool_name => Some(input),
+            _ => None,
+        })
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(AppError::LlmOutputRejected(
+            "the model did not call the required tool".into(),
+        )),
+        count => Err(AppError::LlmOutputRejected(format!(
+            "the model called `{tool_name}` {count} times; expected exactly one call"
+        ))),
     }
 }
 
@@ -158,9 +165,18 @@ pub struct SourceRequest {
     pub brief: String,
     pub plan: AppPlan,
     pub answers: BTreeMap<String, DesignValue>,
-    /// Existing source on a revision pass; empty on the first generation.
+    /// Current workspace source. Empty for the FIRST attempt of an initial
+    /// generation (there is nothing to show yet); populated for a revision's
+    /// first attempt, AND refreshed by the caller before every repair
+    /// attempt of any job kind — once a rejected write has landed on disk,
+    /// the model must see it, or a repair pass reads as "nothing to fix"
+    /// against `validator_feedback` describing bytes it can't see.
     ///
-    /// 修订时的现有源码；初次生成为空。
+    /// 当前工作区源码。初次生成的第一次尝试为空（还没有可展示的内容）；
+    /// 修订的第一次尝试会带上现有源码；此外无论哪种 job kind，调用方都会
+    /// 在每次修复重试前刷新它——一旦被拒绝的写入已经落盘，模型就必须看到，
+    /// 否则修复这一轮会被读成"没什么要改的"，跟同时给出的
+    /// `validator_feedback` 自相矛盾。
     pub existing: Vec<FileWrite>,
     /// A note about the `existing` dump above — e.g. how many files were left
     /// out because the tree exceeded the read budget. Kept separate from
@@ -300,11 +316,19 @@ impl LocalAppsLlm {
             // the overlay-write ruling) or "each file's full contents, not a
             // patch" (the intended meaning). Spelled out so only the second
             // reading survives: only the files touched by the fix, each given
-            // in full, everything else left unsent.
+            // in full, everything else left unsent. The "files not mentioned
+            // need not be resent" half only makes sense when the model was
+            // actually shown a tree to compare against (`existing` above) —
+            // an empty `existing` with that clause still attached would read
+            // as "don't resend anything", which is nonsensical advice.
+            let skip_unchanged = if request.existing.is_empty() {
+                ""
+            } else {
+                "，没有改动的文件无需重新发送"
+            };
             user.push_str(&format!(
                 "\n\n上一次生成没有通过校验，原文如下。请修正问题，只需重新给出改动涉及的\
-                 那些文件——每个文件都给出完整内容（不是补丁片段），没有改动的文件无需重新\
-                 发送：\n{feedback}"
+                 那些文件——每个文件都给出完整内容（不是补丁片段）{skip_unchanged}：\n{feedback}"
             ));
         }
         let value = self
@@ -744,6 +768,72 @@ mod tests {
         llm.generate_sources(&request).await.expect("repair");
         let prompt = model.prompt_at(0);
         assert!(prompt.contains("eval()"), "got {prompt}");
+    }
+
+    #[tokio::test]
+    async fn existing_note_reaches_the_model_prompt() {
+        let model = ScriptedModel::new(vec![Ok(good_sources())]);
+        let llm = LocalAppsLlm::new(model.clone());
+        let mut request = initial_request();
+        request.existing_note =
+            Some("现有源码树超过了读取预算，省略了 3 个文件".into());
+        llm.generate_sources(&request).await.expect("generation");
+        let prompt = model.prompt_at(0);
+        assert!(
+            prompt.contains("省略了 3 个文件"),
+            "the existing-tree truncation note must reach the model's prompt text: {prompt}"
+        );
+    }
+
+    #[test]
+    fn extract_single_tool_call_accepts_exactly_one_match() {
+        let blocks = vec![
+            ContentBlock::Text { text: "thinking out loud".into(), cache_control: None },
+            ContentBlock::ToolCall {
+                id: "call-1".into(),
+                name: TOOL_SOURCES.into(),
+                input: serde_json::json!({"files": []}),
+            },
+        ];
+        let value = extract_single_tool_call(blocks, TOOL_SOURCES).expect("exactly one match");
+        assert_eq!(value, serde_json::json!({"files": []}));
+    }
+
+    #[test]
+    fn extract_single_tool_call_rejects_zero_matches() {
+        let blocks = vec![ContentBlock::Text { text: "no tool call here".into(), cache_control: None }];
+        let err = extract_single_tool_call(blocks, TOOL_SOURCES)
+            .expect_err("no matching ToolCall block must be rejected");
+        assert!(
+            matches!(err, AppError::LlmOutputRejected(_)),
+            "a missing tool call must surface as LlmOutputRejected: {err:?}"
+        );
+    }
+
+    #[test]
+    fn extract_single_tool_call_rejects_more_than_one_match() {
+        // `ToolChoice::Tool { name }` forces the tool but does not disable
+        // parallel tool use — a response can legally carry the SAME tool
+        // name twice. Taking the first would silently drop the second batch
+        // of files under the overlay write semantics.
+        let blocks = vec![
+            ContentBlock::ToolCall {
+                id: "call-1".into(),
+                name: TOOL_SOURCES.into(),
+                input: serde_json::json!({"files": [{"path": "app/a.jsx", "contents": "a"}]}),
+            },
+            ContentBlock::ToolCall {
+                id: "call-2".into(),
+                name: TOOL_SOURCES.into(),
+                input: serde_json::json!({"files": [{"path": "app/b.jsx", "contents": "b"}]}),
+            },
+        ];
+        let err = extract_single_tool_call(blocks, TOOL_SOURCES)
+            .expect_err("two matching tool calls must be rejected, not silently truncated");
+        assert!(
+            matches!(err, AppError::LlmOutputRejected(_)),
+            "an ambiguous multi-call response must surface as LlmOutputRejected: {err:?}"
+        );
     }
 
     #[tokio::test]

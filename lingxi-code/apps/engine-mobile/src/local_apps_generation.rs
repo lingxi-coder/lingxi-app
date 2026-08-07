@@ -376,7 +376,7 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
         // from scratch.
         const MAX_ATTEMPTS: usize = 3;
         let mut last_error = None;
-        for _ in 0..MAX_ATTEMPTS {
+        for attempt in 0..MAX_ATTEMPTS {
             let writes = self.llm.generate_sources(&source_request).await?;
             // Overlay write, never a clear-then-write: the model names only
             // the files it wants to create or replace, everything else in the
@@ -394,6 +394,20 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
                     source_request.validator_feedback = Some(message);
                     last_error = Some(error);
                 }
+            }
+            // The write above landed on disk BEFORE validation ran, so a
+            // rejected attempt's bytes are real workspace content by now —
+            // for every job kind, not only `Revision`: an `Initial` job's
+            // `existing` started empty, but after this failure the
+            // workspace no longer matches that empty snapshot. Refresh from
+            // disk before the next attempt so the model sees what it
+            // actually broke, not a stale pre-attempt tree that contradicts
+            // `validator_feedback` (and would read as "nothing to fix").
+            // Skipped on the last attempt: no further call will read it.
+            if attempt + 1 < MAX_ATTEMPTS {
+                let (refreshed, note) = read_generated_tree(&workspace)?;
+                source_request.existing = refreshed;
+                source_request.existing_note = note;
             }
         }
         Err(last_error.unwrap_or_else(|| {
@@ -1139,6 +1153,41 @@ mod tests {
         );
     }
 
+    /// The rejected write from attempt 1 lands on disk BEFORE validation
+    /// runs. If the repair pass's `existing` tree is never refreshed, attempt
+    /// 2 sees the CLEAN pre-attempt snapshot while `validator_feedback` talks
+    /// about bytes it can't see — the consistent reading is "nothing to fix",
+    /// so the model re-emits nothing and the poisoned file survives forever.
+    /// This is `Initial`, not `Revision`, on purpose: it is the sharper case
+    /// (the pre-fix code never populated `existing` at all for an initial
+    /// job), and it is the common case a first-ever generation attempt hits.
+    #[tokio::test]
+    async fn a_repair_pass_sees_the_rejected_attempts_bytes_not_a_stale_snapshot() {
+        let harness = generation_harness(vec![
+            // Attempt 1: a forbidden `fetch(` call. Rejected, but written first.
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export const marker = fetch('https://evil.example')"}]
+            })),
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            })),
+        ])
+        .await;
+
+        harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect("the repair pass succeeds");
+
+        let second = harness.prompt_at(1);
+        assert!(
+            second.contains("evil.example"),
+            "the repair prompt must show the REJECTED bytes actually on disk, not a stale \
+             pre-attempt snapshot that contradicts the validator feedback: {second}"
+        );
+    }
+
     #[tokio::test]
     async fn three_consecutive_validation_failures_give_up() {
         let dirty = || {
@@ -1148,7 +1197,7 @@ mod tests {
         };
         let harness = generation_harness(vec![dirty(), dirty(), dirty()]).await;
 
-        harness
+        let error = harness
             .executor
             .generate_source(&harness.initial_request(), &harness.layout)
             .await
@@ -1158,6 +1207,11 @@ mod tests {
             harness.model_calls(),
             3,
             "one initial attempt plus at most two repairs — never an unbounded loop"
+        );
+        assert!(
+            format!("{error}").contains("eval"),
+            "exhausting the repair loop must surface the LAST REAL validator error, \
+             not a generic 'gave up' message: {error}"
         );
     }
 
@@ -1221,14 +1275,21 @@ mod tests {
 
         let (files, note) = read_generated_tree(&workspace).expect("walk the workspace");
 
-        assert!(
-            note.as_deref().is_some_and(|note| note.contains('4')),
-            "a truncated tree must say so in the prompt text: {note:?}"
-        );
-        assert!(
-            files.len() < 5,
-            "a batch over budget must not silently include every file: {} files",
-            files.len()
+        // 5 files of 1 MiB each sum to 5 MiB against a 4 MiB budget: exactly
+        // 4 fit (running total after the 4th is 4 MiB, still <= budget; the
+        // 5th would push it to 5 MiB) — so exactly 1 file must be omitted.
+        // Asserting the exact count (rather than `note.contains('4')`, which
+        // any `Some(note)` satisfies once the budget constant itself
+        // contains a '4') is what actually pins the truncation math.
+        assert_eq!(files.len(), 4, "exactly one of the five files must be cut");
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "现有源码树超过了 4194304 字节的读取预算，按路径字典序\
+                 截断，有 1 个文件的内容未在上面展示。它们仍然存在于工作区里，没有\
+                 被删除——只是这次没有塞进 prompt，不要假设它们不存在。"
+            ),
+            "the note must name exactly how many files were left out"
         );
     }
 

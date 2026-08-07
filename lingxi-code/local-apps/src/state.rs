@@ -290,6 +290,24 @@ impl AppState {
             &[AppWorkflowState::AuthoringQuestionnaire],
         )?;
         crate::questionnaire::validate_questionnaire(&steps)?;
+        // A field with a `default_value` renders pre-selected on every
+        // client (both treat the default as if it were already answered)
+        // — so it must actually BE the answer here too, or a required
+        // field the user never touched fails `validate_answers` even
+        // though it visibly shows a value. `fields` is guaranteed empty at
+        // this point: `questionnaire_ready` only fires from
+        // `authoring_questionnaire`, which `update_draft` cannot touch (it
+        // is not in `DRAFT_EDITABLE_STATES`), so there is nothing here yet
+        // to collide with. `.entry(..).or_insert(..)` is defensive, not
+        // load-bearing.
+        for field in steps.iter().flat_map(|step| step.fields.iter()) {
+            if let Some(default_value) = &field.default_value {
+                self.draft
+                    .fields
+                    .entry(field.id.clone())
+                    .or_insert_with(|| default_value.clone());
+            }
+        }
         self.draft.questionnaire = steps;
         if let Some(name) = name {
             let trimmed = name.trim();
@@ -1658,6 +1676,114 @@ mod tests {
         assert_eq!(app.record.workflow_state, AppWorkflowState::CollectingSpec);
         assert_eq!(app.draft.questionnaire.len(), 1);
         assert_eq!(app.record.name, "记事本", "a suggested name replaces the placeholder");
+    }
+
+    /// A field with a `default_value` renders pre-selected on both clients,
+    /// and neither client sends an explicit answer for it unless the user
+    /// changes it — so the server must treat the default as the answer from
+    /// the moment the questionnaire lands, or `begin_planning` rejects a
+    /// field that visibly shows a value with a raw "field `theme` is
+    /// required".
+    #[test]
+    fn questionnaire_ready_seeds_the_declared_default_as_the_answer() {
+        let mut app = authoring_app();
+        let epoch = app.record.llm_round;
+        let steps = vec![AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "基础".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "theme".into(),
+                label: "theme".into(),
+                description: None,
+                field_type: AppDesignFieldType::ShortText,
+                required: true,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: Some(DesignValue::ShortText("dark".into())),
+                options: vec![],
+            }],
+        }];
+        app.questionnaire_ready(steps, None, epoch, 2)
+            .expect("authoring succeeds");
+        assert_eq!(
+            app.draft.fields.get("theme"),
+            Some(&DesignValue::ShortText("dark".into())),
+            "the declared default must count as an answer, not just a rendering hint"
+        );
+        // The user never touched `theme` at all — `begin_planning` must not
+        // reject it as missing.
+        app.begin_planning(3)
+            .expect("a seeded default satisfies a required field the user never touched");
+    }
+
+    /// The default-seeding fix must not swallow real validation: a required
+    /// field with NO declared default is still enforced.
+    #[test]
+    fn a_required_field_without_a_default_is_still_enforced() {
+        let mut app = authoring_app();
+        let epoch = app.record.llm_round;
+        let steps = vec![AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "基础".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "theme".into(),
+                label: "theme".into(),
+                description: None,
+                field_type: AppDesignFieldType::ShortText,
+                required: true,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: None,
+                options: vec![],
+            }],
+        }];
+        app.questionnaire_ready(steps, None, epoch, 2)
+            .expect("authoring succeeds");
+        assert!(
+            app.draft.fields.is_empty(),
+            "nothing to seed when there is no declared default"
+        );
+        let err = app.begin_planning(3).unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
+    }
+
+    /// A default answers `begin_planning`'s gate but is still an ordinary
+    /// draft value — the user can override it before submitting, same as
+    /// any other field, and the override (not the default) is what sticks.
+    #[test]
+    fn a_seeded_default_can_still_be_overridden_before_planning() {
+        let mut app = authoring_app();
+        let epoch = app.record.llm_round;
+        let steps = vec![AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "基础".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "theme".into(),
+                label: "theme".into(),
+                description: None,
+                field_type: AppDesignFieldType::ShortText,
+                required: true,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: Some(DesignValue::ShortText("dark".into())),
+                options: vec![],
+            }],
+        }];
+        app.questionnaire_ready(steps, None, epoch, 2)
+            .expect("authoring succeeds");
+        app.update_draft(0, &set_patch("theme", "light"), 3)
+            .expect("the user may override a seeded default");
+        assert_eq!(
+            app.draft.fields.get("theme"),
+            Some(&DesignValue::ShortText("light".into())),
+            "the explicit override replaces the seeded default"
+        );
     }
 
     #[test]

@@ -1408,6 +1408,21 @@ private fun LocalAppPreviewScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.local_apps_continue_design)) }
             }
+            // `openApp` routes a failed revision here too, where — same as
+            // GenerationFailed above — nothing else on this screen is
+            // actionable and `showsRevisionInput` deliberately excludes this
+            // state (a second revision submit would race the one that just
+            // failed). The engine's only exit from `ValidationFailed` is
+            // `begin_revision`, reachable via `RetryAppGeneration`
+            // (generation.rs `retry_app`); `RetryGeneration` already submits
+            // that command (see `retryGeneration` in the view model) — this
+            // was the one workflow state with no dispatch site for it.
+            if (app?.workflow == LocalAppWorkflow.ValidationFailed) {
+                Button(
+                    onClick = { onAction(LocalAppsAction.RetryGeneration(appId)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.local_apps_retry_generate)) }
+            }
             // Only the WebView needs a url; approval needs just the gate's
             // interaction id, so it must stay reachable while the runtime is
             // still coming up.

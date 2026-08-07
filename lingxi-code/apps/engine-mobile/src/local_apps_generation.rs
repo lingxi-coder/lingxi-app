@@ -12,9 +12,9 @@ use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto};
 use local_apps::{
     load_manifest, save_manifest, validate_workspace_source, AppDataStore, AppError,
-    AppGenerationExecutor, AppLayout, AppManifest, AppService, DataCollectionSchema, DesignValue,
-    GenerationJob, GenerationJobObserver, GenerationJobStatus, GenerationRequest,
-    GenerationRequestKind, WorkspaceSourcePolicy, WRITABLE_ROOTS,
+    AppGenerationExecutor, AppLayout, AppManifest, AppService, GenerationJob,
+    GenerationJobObserver, GenerationJobStatus, GenerationRequest, GenerationRequestKind,
+    WorkspaceSourcePolicy, WRITABLE_ROOTS,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -130,32 +130,26 @@ impl MobileAppGenerationExecutor {
         let service = self.service()?;
         let record = service.record(&request.key.app_id).await?;
         let draft = service.draft(&request.key.app_id).await?;
+        // The manifest's collections/domains come from the validated
+        // `AppPlan` the user confirmed at the designer gate
+        // (`questionnaire::validate_plan`), not from raw questionnaire
+        // answers — the plan is the LLM's derivation from those answers,
+        // and it is the only thing the human actually approved. A missing
+        // plan means generation was reached without ever clearing the
+        // designer gate, which is a workflow bug, not a legal "no data"
+        // app — `generate_source` (a sibling `AppGenerationExecutor`
+        // method run in the same pipeline) fails the identical way for the
+        // identical reason.
+        let plan = draft.plan.ok_or_else(|| {
+            AppError::WorkflowStateInvalid(
+                "manifest reconciliation requires a confirmed plan".into(),
+            )
+        })?;
         let mut manifest = load_manifest(layout)?;
         manifest.name = record.name;
         manifest.revision = request.key.revision;
-        if let Some(DesignValue::DataFieldList(fields)) = draft.fields.get("collection_fields") {
-            if manifest.collections.is_empty() {
-                // TODO(local-apps#questionnaire, Task 9): the per-template
-                // collection id ("records"/"items"/"entries"/"submissions")
-                // this used to pick lost its input — `AppRecord` no longer
-                // carries a template — and `AppManifest::for_new_app` now
-                // starts every app with zero collections regardless (Task 2).
-                // Task 9 replaces this whole reconciliation with the real
-                // `AppPlan.collections` the LLM plan step authors (validated
-                // by `questionnaire::validate_plan`); until then a single
-                // fixed id keeps this path a legal, non-fabricated manifest.
-                manifest.collections.push(DataCollectionSchema {
-                    id: "records".into(),
-                    name: "App Data".into(),
-                    fields: fields.clone(),
-                });
-            } else if let Some(collection) = manifest.collections.first_mut() {
-                collection.fields = fields.clone();
-            }
-        }
-        if let Some(DesignValue::DomainList(domains)) = draft.fields.get("network_domains") {
-            manifest.allowed_domains = domains.clone();
-        }
+        manifest.collections = plan.collections;
+        manifest.allowed_domains = plan.domains;
         manifest.validate()?;
         migrate_manifest_with_approval(&self.host, layout, &manifest).await?;
         save_manifest(layout, &manifest)
@@ -1295,6 +1289,257 @@ mod tests {
                  被删除——只是这次没有塞进 prompt，不要假设它们不存在。"
             ),
             "the note must name exactly how many files were left out"
+        );
+    }
+
+    fn plan_collection(
+        id: &str,
+        fields: Vec<local_apps::DataFieldSchema>,
+    ) -> local_apps::DataCollectionSchema {
+        local_apps::DataCollectionSchema {
+            id: id.into(),
+            name: id.into(),
+            fields,
+        }
+    }
+
+    fn plan_with(
+        collections: Vec<local_apps::DataCollectionSchema>,
+        domains: Vec<String>,
+    ) -> local_apps::AppPlan {
+        local_apps::AppPlan {
+            collections,
+            capabilities: Vec::new(),
+            domains,
+            summary: "a plan the user confirmed".into(),
+        }
+    }
+
+    /// A loaded service plus a `MobileAppGenerationExecutor` wired to its own
+    /// `MockSink`-backed host — like [`generation_harness`], but stops
+    /// BEFORE `prepare_scaffold` and hands the caller everything
+    /// (`service`, `sink`, `layout`) needed to stamp a specific plan, run
+    /// `prepare_scaffold` explicitly, and — for a destructive migration —
+    /// resolve the capability gate concurrently.
+    struct ManifestHarness {
+        _root: tempfile::TempDir,
+        service: Arc<AppService>,
+        sink: Arc<MockSink>,
+        executor: Arc<MobileAppGenerationExecutor>,
+        layout: AppLayout,
+        app_id: String,
+    }
+
+    impl ManifestHarness {
+        fn request(&self, revision: u64, continuation_seq: u64) -> GenerationRequest {
+            GenerationRequest {
+                key: local_apps::GenerationJobKey {
+                    app_id: self.app_id.clone(),
+                    revision,
+                    continuation_seq,
+                },
+                kind: GenerationRequestKind::Initial,
+                prompt: None,
+            }
+        }
+    }
+
+    async fn manifest_harness() -> ManifestHarness {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            AppService::load(
+                root.path(),
+                Arc::new(local_apps::test_support::FixedClock::new(1)),
+                Arc::new(local_apps::NoopContinuationSink),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("load service"),
+        );
+        let record = service
+            .create_app(Some("Habits"), "a habit tracker", None)
+            .await
+            .expect("create app");
+        let sink = MockSink::arc();
+        let host =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(ScriptedModel::new(
+            Vec::new(),
+        )))));
+        let executor = MobileAppGenerationExecutor::new(None, host, llm);
+        executor
+            .attach_service(service.clone())
+            .map_err(|_| "service already attached")
+            .unwrap();
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).unwrap();
+        ManifestHarness {
+            _root: root,
+            service,
+            sink,
+            executor,
+            layout,
+            app_id: record.id,
+        }
+    }
+
+    /// F1: `reconcile_manifest` must source `collections`/`allowed_domains`
+    /// from the user-confirmed `AppPlan`, not from questionnaire-answer
+    /// field ids that no longer exist. Drives the real designer gate
+    /// (`open_designer` → `stamp_plan` → `confirm_design`) rather than
+    /// hand-building an `AppManifest`, so this fails if reconciliation ever
+    /// stops reading `draft.plan` again.
+    #[tokio::test]
+    async fn reconcile_manifest_writes_the_confirmed_plans_collections_and_domains() {
+        let h = manifest_harness().await;
+        local_apps::test_support::advance_to_collecting_spec(&h.service, &h.app_id).await;
+        let interaction = h
+            .service
+            .open_designer(&h.app_id)
+            .await
+            .expect("open designer");
+        let plan = plan_with(
+            vec![plan_collection(
+                "notes",
+                vec![
+                    data_field("title", local_apps::DataFieldKind::Text),
+                    data_field("body", local_apps::DataFieldKind::LongText),
+                ],
+            )],
+            vec!["api.example.com".into()],
+        );
+        local_apps::test_support::stamp_plan(&h.service, &h.app_id, plan.clone()).await;
+        h.service
+            .confirm_design(&h.app_id, &interaction.interaction_id, 0)
+            .await
+            .expect("confirm design");
+
+        h.executor
+            .prepare_scaffold(&h.request(0, 1), &h.layout)
+            .await
+            .expect("scaffold and manifest reconciliation");
+
+        let manifest = load_manifest(&h.layout).expect("manifest persisted");
+        assert_eq!(
+            manifest.collections, plan.collections,
+            "the confirmed plan's collections must reach the manifest — otherwise every \
+             queryCollection/mutateCollection call fails with \"not declared by the app manifest\""
+        );
+        assert_eq!(
+            manifest.allowed_domains, plan.domains,
+            "the confirmed plan's domains must reach the manifest — otherwise every \
+             requestNetwork call is rejected"
+        );
+    }
+
+    /// F1: generation reaching `reconcile_manifest` with no confirmed plan
+    /// at all is a workflow bug (the designer gate was never cleared), not
+    /// a legal "no data" app — it must fail closed with a clear error
+    /// rather than silently writing an empty manifest, exactly like its
+    /// sibling `generate_source` already does for the same precondition.
+    #[tokio::test]
+    async fn reconcile_manifest_fails_closed_without_a_confirmed_plan() {
+        let h = manifest_harness().await;
+        // No `advance_to_collecting_spec` / `stamp_plan` / `confirm_design`
+        // at all — `draft.plan` is `None` exactly as `AppState::create`
+        // leaves it.
+
+        let error = h
+            .executor
+            .prepare_scaffold(&h.request(0, 1), &h.layout)
+            .await
+            .expect_err("no confirmed plan must not produce an empty-but-legal manifest");
+
+        assert!(
+            matches!(&error, AppError::WorkflowStateInvalid(message) if message.contains("confirmed plan")),
+            "unexpected error: {error}"
+        );
+        assert!(
+            load_manifest(&h.layout)
+                .expect("create_app already wrote the initial empty manifest")
+                .collections
+                .is_empty(),
+            "a failed reconciliation must not leave a fabricated non-empty manifest behind"
+        );
+    }
+
+    /// F1 second-order effect: once collections are real, a revision whose
+    /// plan drops a collection field takes `migrate_manifest_with_approval`'s
+    /// DESTRUCTIVE path (a real schema shrink, not a hand-built
+    /// `AppManifest` bypassing `reconcile_manifest` the way
+    /// `manifest_with_score`/`manifest_without_score` do below). It must
+    /// still gate on human approval and land the shrunk schema once granted.
+    #[tokio::test]
+    async fn a_revision_that_shrinks_a_plans_collection_takes_the_destructive_path_and_survives_approval(
+    ) {
+        let h = manifest_harness().await;
+        local_apps::test_support::advance_to_collecting_spec(&h.service, &h.app_id).await;
+        let interaction = h
+            .service
+            .open_designer(&h.app_id)
+            .await
+            .expect("open designer");
+        let wide_plan = plan_with(
+            vec![plan_collection(
+                "notes",
+                vec![
+                    data_field("title", local_apps::DataFieldKind::Text),
+                    data_field("body", local_apps::DataFieldKind::LongText),
+                ],
+            )],
+            Vec::new(),
+        );
+        local_apps::test_support::stamp_plan(&h.service, &h.app_id, wide_plan).await;
+        h.service
+            .confirm_design(&h.app_id, &interaction.interaction_id, 0)
+            .await
+            .expect("confirm design");
+        h.executor
+            .prepare_scaffold(&h.request(0, 1), &h.layout)
+            .await
+            .expect("initial scaffold — additive, no approval needed");
+        assert_eq!(
+            h.sink.events().await.len(),
+            0,
+            "the FIRST reconciliation is purely additive over an empty manifest — it must not \
+             ask for destructive-migration approval"
+        );
+
+        // A later round re-plans the SAME collection with `body` dropped —
+        // exactly the shrink F1 flags as needing real (not synthetic) cover.
+        let narrow_plan = plan_with(
+            vec![plan_collection(
+                "notes",
+                vec![data_field("title", local_apps::DataFieldKind::Text)],
+            )],
+            Vec::new(),
+        );
+        local_apps::test_support::stamp_plan(&h.service, &h.app_id, narrow_plan.clone()).await;
+
+        let approver = tokio::spawn(spawn_capability_resolution(
+            h.sink.clone(),
+            h.executor.host.clone(),
+            AppAuthorizationDecisionDto::AllowAlways,
+            None,
+        ));
+        h.executor
+            .prepare_scaffold(&h.request(1, 2), &h.layout)
+            .await
+            .expect("the shrink succeeds once the destructive migration is approved");
+        approver.await.unwrap();
+
+        let manifest = load_manifest(&h.layout).expect("manifest persisted");
+        assert_eq!(
+            manifest.collections, narrow_plan.collections,
+            "the approved shrink must actually land"
+        );
+        let events = h.sink.events().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| capability_request(event).is_some())
+                .count(),
+            1,
+            "the shrink must have gone through exactly one destructive-migration approval"
         );
     }
 

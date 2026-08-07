@@ -105,13 +105,28 @@ pub async fn advance_to_collecting_spec(service: &AppService, app_id: &str) -> A
 /// `update_draft`/`apply_suggestion` since the last stamp moves the revision
 /// (and `update_draft` explicitly invalidates the stamped plan) — call this
 /// again immediately before each `confirm_design`.
+///
+/// Uses the empty `fixture_plan()` — fine for every test that only cares
+/// about the workflow gate itself, not about what the plan actually
+/// contains. Tests that DO care (e.g. that a confirmed plan's collections
+/// and domains actually reach the manifest) want [`stamp_plan`] instead.
 pub async fn stamp_fresh_plan(service: &AppService, app_id: &str) {
+    stamp_plan(service, app_id, fixture_plan()).await;
+}
+
+/// Like [`stamp_fresh_plan`], but with a caller-supplied plan instead of the
+/// empty fixture — for tests that need a plan with real collections,
+/// capabilities, or domains in it (`stamp_fresh_plan`'s fixture is
+/// deliberately empty in every one of those fields, which is exactly why it
+/// alone can never catch a bug in code that reads `AppPlan.collections`/
+/// `.domains`).
+pub async fn stamp_plan(service: &AppService, app_id: &str, plan: AppPlan) {
     let mut apps = service.state.lock().await;
     let app = apps
         .iter_mut()
         .find(|a| a.record.id == app_id)
         .expect("app exists");
-    app.draft.plan = Some(fixture_plan());
+    app.draft.plan = Some(plan);
     app.draft.plan_for_revision = Some(app.draft.revision);
     storage::save_app_files(&service.root, app).expect("persist stamped plan");
 }

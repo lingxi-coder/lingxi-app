@@ -275,6 +275,18 @@ final class LocalAppsStore {
                 if case .running = runtimes[appId] {
                     runtimes[appId] = .running(previewURL)
                 }
+                // Mirrors `appUiRequest`'s use of this same field below: the
+                // preview confirm gate just armed for `appId`, so route the
+                // app the same way an inbound UI-automation request already
+                // does (`RootView`'s `onChange(of: requestedPresentationAppID)`
+                // -> `navigation.openLocalApps`). Previously only
+                // `appUiRequest` set this, so a user who confirmed a design
+                // and was not already sitting on `.preview(appId)` (e.g. they
+                // backed out of the local-apps cover, or `LocalAppDesignerView`
+                // never navigates `path` on its own) had no way back to the
+                // gate that just opened except manually re-tapping the app row
+                // from the library (review F2).
+                requestedPresentationAppID = appId
 
             case let .appCheckpointCreated(appId, checkpoint):
                 let item = LocalAppsProtocolAdapter.checkpoint(checkpoint)

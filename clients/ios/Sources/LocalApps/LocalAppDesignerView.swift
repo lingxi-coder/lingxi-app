@@ -179,9 +179,18 @@ struct LocalAppDesignerView: View {
         planSheetBusy = false
     }
 
-    /// The five intermediate/failure states this screen renders instead of
-    /// the editable form, plus a fallback for everything else the designer
-    /// can transiently be pushed onto. `awaitingSpecConfirmation` is
+    /// The intermediate/failure states this screen renders instead of the
+    /// editable form, plus a fallback for everything else the designer can
+    /// transiently be pushed onto. `.generating`/`.validating`/
+    /// `.awaitingPreviewConfirmation` are the sequence Task 15's plan
+    /// confirmation sheet (`onConfirm` -> `confirmDesign`) hands off into:
+    /// closing that sheet does not navigate `path` (see its doc comment),
+    /// so this screen — still `.designer(appID)` on the stack — is the only
+    /// thing on screen through the whole round trip. Before this fix all
+    /// three fell into the generic `default:` below, which shows a
+    /// deliberately no-op "重试" (review F2: a confirmed design stranded the
+    /// user on a dead "设计器未就绪" screen with no progress and no way to
+    /// the preview gate). `awaitingSpecConfirmation` is
     /// normally owned by Task 15's `LocalAppPlanConfirmView` sheet
     /// (presented from `body` whenever `store.plans[appID] != nil`) rather
     /// than by this case — this case's own copy only shows once the plan is
@@ -266,6 +275,45 @@ struct LocalAppDesignerView: View {
                 Button("local_apps_plan_confirm_back") { Task { await cancelPlan() } }
                     .buttonStyle(.borderedProminent)
                     .disabled(planSheetBusy)
+            }
+        case .generating, .validating:
+            // `confirm_design`/`retry_generation` accepted and the engine is
+            // now generating (or validating) the app. Renders the same
+            // `LocalAppGenerationCard` progress the editable branch shows
+            // (`body`, above) so progress is visible here too instead of a
+            // blank "not ready" screen — `.task(id: app?.workflow)` keeps
+            // `prepare()`/this view live as `appGenerationProgress` events
+            // update `store.generationProgress[appID]` underneath it.
+            ContentUnavailableView {
+                ProgressView()
+            } description: {
+                if let progress = store.generationProgress[appID] {
+                    VStack(spacing: 4) {
+                        Text(workflow.label)
+                        Text(progress.detail ?? progress.stage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("local_apps_awaiting_generation_job")
+                }
+            }
+        case .awaitingPreviewConfirmation:
+            // The preview confirmation gate just armed (`appPreviewReady`,
+            // now wired in `LocalAppsStore` to also set
+            // `requestedPresentationAppID` the same way `appUiRequest`
+            // already does). This screen is still `.designer(appID)` on
+            // `path`, so route to `.preview(appID)` — the SAME destination
+            // `LocalAppsLibraryScreen.open(_:)` and `LocalAppDetailView`'s
+            // "打开预览" button already use — rather than the generic
+            // `default:` fallback's inert retry.
+            ContentUnavailableView {
+                Label("local_apps_workflow_awaiting_preview", systemImage: "checkmark.seal")
+            } description: {
+                Text("local_apps_workflow_awaiting_preview_label")
+            } actions: {
+                Button("local_apps_open_preview") { path.append(.preview(appID)) }
+                    .buttonStyle(.borderedProminent)
             }
         default:
             ContentUnavailableView {

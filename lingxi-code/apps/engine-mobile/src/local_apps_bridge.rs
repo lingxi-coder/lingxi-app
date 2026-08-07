@@ -1058,8 +1058,16 @@ mod tests {
                 label: "语气".into(),
                 description: None,
                 field_type: AppDesignFieldType::MultipleChoice,
+                // NOT all-identical (review finding): with only two possible
+                // `bool` states, three fields can never be fully pairwise
+                // distinct, but `required == allows_defer` here (the least
+                // risky pair — non-adjacent, dissimilar names) while
+                // `allows_custom` differs from both, so a transposition
+                // involving `allows_custom` (the likelier bug, given its
+                // adjacency to `allows_defer` in both the struct and this
+                // literal) still fails the assertions below.
                 required: true,
-                allows_custom: true,
+                allows_custom: false,
                 allows_defer: true,
                 default_value: None,
                 options: vec![AppDesignFieldOption {
@@ -1070,7 +1078,7 @@ mod tests {
         };
         let dto = lower_design_step(&step);
         assert!(
-            dto.fields[0].allows_custom,
+            !dto.fields[0].allows_custom,
             "allows_custom must survive the wire"
         );
         assert!(
@@ -1115,6 +1123,84 @@ mod tests {
         });
         dto.capabilities = vec![AppCapabilityKindDto::NetworkDomain];
         raise_plan(&dto).expect_err("NetworkDomain has no domain-side capability yet");
+    }
+
+    /// Review finding on this task: `lower_details`'s `.questionnaire`/`.plan`
+    /// wiring (`local_apps_bridge.rs`) had zero test coverage — reverting
+    /// both fields back to their old `Vec::new()`/`None` placeholders left
+    /// every other test in the crate green. `AppDetailsChanged`
+    /// (`host.rs:2769`) is how a reconnecting/late-subscribing client learns
+    /// the questionnaire/plan at all (Tasks 13-15/18-20's primary consumer),
+    /// so this pins both fields through `lower_details` directly with
+    /// POPULATED values — a regression back to the placeholders fails here
+    /// even though every event-shaped test elsewhere stays green.
+    #[test]
+    fn lower_details_wires_the_questionnaire_and_plan_through() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let record = AppRecord {
+            id: "app00001".into(),
+            name: "Habits".into(),
+            brief: "a habit tracker".into(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            workflow_state: AppWorkflowState::AwaitingSpecConfirmation,
+            conversation_id: None,
+            workspace_rel: "apps/app00001/workspace".into(),
+        };
+        let step = AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "Basics".into(),
+            description: None,
+            fields: vec![AppDesignField {
+                id: "tone".into(),
+                label: "Tone".into(),
+                description: None,
+                field_type: AppDesignFieldType::ShortText,
+                required: true,
+                allows_custom: false,
+                allows_defer: false,
+                default_value: None,
+                options: Vec::new(),
+            }],
+        };
+        let plan = AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: vec!["api.example.com".into()],
+            summary: "记事本".into(),
+        };
+        let draft = AppDesignDraft {
+            schema_version: local_apps::APPS_SCHEMA_VERSION,
+            revision: 3,
+            questionnaire: vec![step.clone()],
+            fields: BTreeMap::new(),
+            plan: Some(plan.clone()),
+            plan_for_revision: Some(3),
+            pending_suggestion: None,
+            confirmed_revision: None,
+        };
+        let runtime = AppRuntimeRecord {
+            schema_version: local_apps::APPS_SCHEMA_VERSION,
+            app_id: "app00001".into(),
+            state: AppRuntimeState::Stopped,
+            mode: None,
+            port: None,
+            pid: None,
+            last_error: None,
+            updated_at_ms: 2,
+        };
+        let details = lower_details(root.path(), &record, &draft, &runtime, &[]).expect("lowers");
+        assert_eq!(
+            details.questionnaire,
+            vec![lower_design_step(&step)],
+            "the authored questionnaire must reach AppDetailsDto, not an empty placeholder"
+        );
+        assert_eq!(
+            details.plan,
+            Some(lower_plan(&plan)),
+            "the authored plan must reach AppDetailsDto, not a None placeholder"
+        );
     }
 
     #[test]
@@ -1351,8 +1437,11 @@ mod tests {
                             label: "Tone".into(),
                             description: Some("field desc".into()),
                             field_type: AppDesignFieldType::SingleChoice,
+                            // Not all-identical — see the comment on the same
+                            // trio in `a_questionnaire_round_trips_through_
+                            // the_wire_types`.
                             required: true,
-                            allows_custom: true,
+                            allows_custom: false,
                             allows_defer: true,
                             default_value: Some(DesignValue::SingleChoice("a".into())),
                             options: vec![AppDesignFieldOption {
@@ -1377,7 +1466,7 @@ mod tests {
                                 description: Some("field desc".into()),
                                 field_type: AppDesignFieldTypeDto::SingleChoice,
                                 required: true,
-                                allows_custom: true,
+                                allows_custom: false,
                                 allows_defer: true,
                                 default_value: Some(DesignValueDto::SingleChoice {
                                     value: "a".into(),

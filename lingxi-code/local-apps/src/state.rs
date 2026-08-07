@@ -311,6 +311,18 @@ impl AppState {
         }
         self.record.brief = trimmed.to_string();
         self.draft.questionnaire.clear();
+        // `fields` (the answers) and `pending_suggestion` are cleared here
+        // too, alongside `questionnaire`/`plan`, but get no dedicated
+        // invalidation event of their own — this is safe, not an oversight:
+        // `validate_questionnaire` rejects an empty questionnaire (Ok only
+        // ever holds `steps.len() >= 1`), so every reachable state where
+        // `fields`/`pending_suggestion` could be non-empty already has a
+        // non-empty `questionnaire` too. The service's `QuestionnaireChanged
+        // { steps: [] }` (emitted below this call, when there was a
+        // questionnaire to clear) therefore ALWAYS accompanies this answer
+        // clear and carries the bumped revision — a client that reacts to it
+        // by dropping its local answer state is reacting to accurate news,
+        // not racing a separate announcement for `fields`.
         self.draft.fields.clear();
         self.draft.plan = None;
         self.draft.plan_for_revision = None;
@@ -480,7 +492,12 @@ impl AppState {
 
     /// Apply the stored suggestion. Same state/revision gating as
     /// [`Self::update_draft`]; a wrong `suggestion_id` fails with
-    /// `interaction_invalid` (the suggestion survives).
+    /// `interaction_invalid` (the suggestion survives). Also mirrors
+    /// [`Self::update_draft`]'s plan invalidation: this is the OTHER path
+    /// that changes `draft.fields` (a user edit is one door, an applied
+    /// agent suggestion is the other), so it must clear a stale plan exactly
+    /// the same way — a plan computed against the pre-suggestion answers is
+    /// no more valid here than after a manual edit.
     ///
     /// `based_on_revision` is LOAD-BEARING: the addressed suggestion is
     /// applied only when its `based_on_revision` equals the CURRENT draft
@@ -529,6 +546,9 @@ impl AppState {
         }
         self.apply_patch(&suggestion.patch);
         self.draft.revision += 1;
+        // 答案变了，方案就不再是对这份答案的方案。同 update_draft。
+        self.draft.plan = None;
+        self.draft.plan_for_revision = None;
         self.record.updated_at_ms = now_ms;
         Ok(self.draft.revision)
     }

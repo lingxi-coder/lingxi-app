@@ -1351,7 +1351,12 @@ impl AppService {
 
     /// Apply the stored suggestion at `expected_revision`. Same conflict
     /// semantics as [`Self::update_draft`]; a wrong `suggestion_id` fails
-    /// with `interaction_invalid`.
+    /// with `interaction_invalid`. Also mirrors `update_draft`'s plan
+    /// invalidation announcement: an applied suggestion is the OTHER door
+    /// that changes `draft.fields` (alongside a manual edit), and
+    /// `AppState::apply_suggestion` clears a stale plan exactly the same way
+    /// `AppState::update_draft` does — so this emits `PlanChanged { plan:
+    /// None }` under the same `had_plan` guard when one was cleared.
     ///
     /// `based_on_revision` is load-bearing (finding 8): a suggestion whose
     /// `based_on_revision` is not the CURRENT draft revision is refused with
@@ -1386,19 +1391,25 @@ impl AppService {
                     }
                 }
                 let had_pending = app.draft.pending_suggestion.is_some();
+                let had_plan = app.draft.plan.is_some();
                 match app.apply_suggestion(suggestion_id, expected_revision, now) {
                     Ok(revision) => {
                         if let Err(error) = ensure_draft_field_count(&app.draft) {
                             return (Err(error), Vec::new());
                         }
-                        (
-                            Ok(SuggestionOutcome::Applied(revision)),
-                            vec![AppEvent::DesignDraftChanged {
+                        let mut events = vec![AppEvent::DesignDraftChanged {
+                            app_id: app.record.id.clone(),
+                            revision,
+                            fields: app.draft.fields.clone(),
+                        }];
+                        if had_plan {
+                            events.push(AppEvent::PlanChanged {
                                 app_id: app.record.id.clone(),
                                 revision,
-                                fields: app.draft.fields.clone(),
-                            }],
-                        )
+                                plan: None,
+                            });
+                        }
+                        (Ok(SuggestionOutcome::Applied(revision)), events)
                     }
                     Err(error) => {
                         let events = Self::conflict_events(&app.record.id, &error);
@@ -3430,6 +3441,59 @@ mod tests {
             .unwrap()
             .pending_suggestion
             .is_none());
+    }
+
+    /// `apply_suggestion` is the OTHER door that changes `draft.fields`
+    /// (alongside `update_draft`'s manual edit) — `AppState::apply_suggestion`
+    /// clears a stale plan the same way `AppState::update_draft` does
+    /// (review finding on this task: an applied suggestion silently nulled
+    /// the plan with no announcement, exactly like the manual-edit hole
+    /// `update_draft_announces_the_plan_it_invalidates` covers). Reachable
+    /// with a live plan on screen: `awaiting_spec_confirmation` — reached via
+    /// `plan_ready` — is itself in `DRAFT_EDITABLE_STATES`, so an agent
+    /// suggestion can be proposed and applied while the confirmation gate is
+    /// still open, without any `cancel_design` round trip.
+    #[tokio::test]
+    async fn apply_suggestion_announces_the_plan_it_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("SuggestInvalidate"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        stamp_fresh_plan(&h.service, &record.id).await;
+        let suggestion = h
+            .service
+            .store_suggestion(&record.id, patch("accent", "#3366ff"))
+            .await
+            .unwrap();
+        let _ = h.take_events().await;
+
+        let revision = h
+            .service
+            .apply_suggestion(&record.id, &suggestion.suggestion_id, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.take_events().await,
+            vec![
+                AppEvent::DesignDraftChanged {
+                    app_id: record.id.clone(),
+                    revision,
+                    fields: h.service.draft(&record.id).await.unwrap().fields.clone(),
+                },
+                AppEvent::PlanChanged {
+                    app_id: record.id.clone(),
+                    revision,
+                    plan: None,
+                },
+            ],
+            "the applied suggestion's own event first, the invalidation it causes second"
+        );
+        assert!(h.service.draft(&record.id).await.unwrap().plan.is_none());
     }
 
     #[tokio::test]

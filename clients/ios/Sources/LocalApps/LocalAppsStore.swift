@@ -140,13 +140,18 @@ final class LocalAppsStore {
                    let created = updatedApps.first(where: { !pendingCreation.knownAppIDs.contains($0.id) }) {
                     self.pendingCreation = nil
                     createdAppIDForDesigner = created.id
-                    // NOTE (local-apps#questionnaire, Task 13): a freshly created
-                    // app starts in `authoring_questionnaire`, not `collecting_spec`
-                    // — `open_designer` is only legal from the latter (and from
-                    // `generation_failed`), so eagerly opening it here would just be
-                    // rejected. Task 14's questionnaire screen is expected to call
-                    // `openDesigner(appID:)` itself once the app actually reaches
-                    // `collecting_spec`.
+                    // A freshly created app starts in `authoring_questionnaire`,
+                    // not `collecting_spec` — `open_designer` is only legal from
+                    // the latter (and from `generation_failed`). This dictionary
+                    // entry still fires the navigation to `.designer(appID)`
+                    // (LocalAppsLibraryView.openCreatedAppIfNeeded) immediately,
+                    // but LocalAppDesignerView.prepare() is what actually decides
+                    // whether to call `openDesigner` — it now no-ops while the
+                    // workflow is still `.generating`-mapped and retries itself
+                    // via `.task(id: app?.workflow)` once the questionnaire
+                    // arrives, instead of eagerly issuing a doomed command
+                    // (caught in Task 13 review: this exact path fired on every
+                    // app creation).
                 }
                 lastRefreshAt = .now
                 isRefreshing = false
@@ -1078,18 +1083,6 @@ final class LocalAppsStore {
     }
 
     #if canImport(engine_mobileFFI)
-        /// Builds a single-op design patch without requiring the field's
-        /// declared `LocalAppFieldType` — only correct for `.deferred`
-        /// ("let the model decide"), whose wire encoding does not depend on
-        /// field type at all (see `LocalAppsProtocolAdapter.designValue(_:fieldType:)`,
-        /// which checks `.deferred` before ever consulting `fieldType`). A
-        /// real per-field edit still goes through `edit(field:value:appID:)`,
-        /// which knows the field's actual type.
-        func designPatch(fieldID: String, value: LocalAppDesignValue) -> AppDesignPatchDto {
-            let dtoValue = LocalAppsProtocolAdapter.designValue(value, fieldType: .shortText) ?? .shortText(value: "")
-            return AppDesignPatchDto(ops: [.set(fieldId: fieldID, value: dtoValue)], note: nil)
-        }
-
         private func send(_ command: ClientCommand) async -> Bool {
             guard let submitCommand else {
                 errorMessage = String(localized: "local_apps_error_engine_not_connected")

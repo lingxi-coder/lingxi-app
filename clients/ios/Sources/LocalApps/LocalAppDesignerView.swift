@@ -83,7 +83,13 @@ struct LocalAppDesignerView: View {
                 .accessibilityIdentifier("local-apps.request-suggestion")
             }
         }
-        .task { await prepare() }
+        // Keyed on workflow (not just `.task { }`, which only runs once on
+        // appear): a freshly created app is in `authoring_questionnaire`
+        // (mapped to `.generating`), where `prepare()` below deliberately
+        // does nothing. `.task(id:)` re-invokes `prepare()` the moment
+        // `questionnaire_ready` flips this app to `.collectingSpec` — no
+        // user action required to pick the retry back up.
+        .task(id: app?.workflow) { await prepare() }
     }
 
     private var values: [String: LocalAppDesignValue] { designer?.fields ?? [:] }
@@ -105,17 +111,39 @@ struct LocalAppDesignerView: View {
 
     private func prepare() async {
         guard store.designers[appID]?.interactionID == nil else { return }
-        // `open_designer` is only legal from collecting_spec / generation_failed.
-        // Once the gate is armed the app sits in awaiting_spec_confirmation and
-        // the engine rejects it outright — which is what a relaunch used to
-        // produce, because the client had no interaction_id yet and asked for a
-        // gate that was already open. Refresh instead; the id arrives with the
-        // re-announced gate (AppService::resync_pending_gates).
-        if store.apps.first(where: { $0.id == appID })?.workflow == .awaitingSpecConfirmation {
+        switch app?.workflow {
+        case .awaitingSpecConfirmation:
+            // `open_designer` is only legal from collecting_spec / generation_failed.
+            // Once the gate is armed the app sits in awaiting_spec_confirmation and
+            // the engine rejects it outright — which is what a relaunch used to
+            // produce, because the client had no interaction_id yet and asked for a
+            // gate that was already open. Refresh instead; the id arrives with the
+            // re-announced gate (AppService::resync_pending_gates).
             await store.getDetails(appID: appID)
+        case .collectingSpec, .generationFailed:
+            // The two states state.rs's `open_designer` actually accepts.
+            // NOTE: `.generationFailed` is a collapsed bucket — it also
+            // stands in for the newer `questionnaire_failed`/`plan_failed`
+            // states (LocalAppsProtocolAdapter.workflow, pending dedicated
+            // Task 14/18 UI), which `open_designer` does NOT accept. Hitting
+            // this arm while actually in one of those two still fails
+            // server-side (surfaced as `errorMessage`, not a crash) — a
+            // known, narrower residual of the same bucketing gap, left for
+            // Task 14/18 rather than expanding `LocalAppWorkflow` here.
+            await store.openDesigner(appID: appID)
+        default:
+            // `.generating`-mapped states include `authoring_questionnaire`
+            // and `planning` — an LLM round trip is still in flight and has
+            // not produced the questionnaire this screen needs yet. A
+            // freshly created app starts exactly here: calling
+            // `open_designer` now is illegal (state.rs only accepts
+            // `collecting_spec`/`generation_failed`) and used to fire
+            // unconditionally on every app creation. Do nothing; the
+            // `.task(id:)` above re-runs `prepare()` the moment the
+            // workflow changes, so this resolves itself without a doomed
+            // command or a user-visible error.
             return
         }
-        await store.openDesigner(appID: appID)
     }
 
     private func selectStep(_ index: Int) {

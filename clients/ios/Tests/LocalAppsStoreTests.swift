@@ -41,13 +41,27 @@ final class LocalAppsStoreTests: XCTestCase {
         }
 
         /// `.deferred` ("let the model decide") must survive the trip through
-        /// `LocalAppsProtocolAdapter.designValue(_:fieldType:)` unchanged,
-        /// regardless of the field's declared type — see the client-side half
-        /// of the contract the brief `.deferred` model value exists for.
-        func testDeferredAnswersRoundTripThroughThePatchWire() {
+        /// the REAL edit path — `edit()` -> `flushNextEdit` ->
+        /// `LocalAppsProtocolAdapter.designValue(_:fieldType:)` — for a field
+        /// type other than `.shortText`. `designValue(_:fieldType:)` checks
+        /// `.deferred` before ever consulting `fieldType`, so a `.shortText`
+        /// field could not have distinguished "fieldType is ignored" from
+        /// "fieldType happens to be right"; `.multipleChoice` here rules that
+        /// out and additionally exercises the non-debounced edit path (see
+        /// `edit(field:value:appID:)`: only `.shortText`/`.longText` debounce).
+        func testDeferredAnswerRoundTripsThroughTheRealEditPathForANonShortTextField() async throws {
             let store = LocalAppsStore()
-            let sent = store.designPatch(fieldID: "tone", value: .deferred)
-            guard case let .set(fieldId, value) = sent.ops.first else {
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+            store.handle(event: .appDesignerRequested(appId: "tracker", interactionId: "gate-1", revision: 5))
+            store.edit(
+                field: designField(id: "tone", type: .multipleChoice),
+                value: .deferred,
+                appID: "tracker"
+            )
+            try await waitUntil("the deferred draft patch") { draftPatches(submitted).count == 1 }
+
+            guard case let .set(fieldId, value) = draftPatches(submitted).first?.patch.ops.first else {
                 return XCTFail("Expected a set op")
             }
             XCTAssertEqual(fieldId, "tone")
@@ -905,6 +919,30 @@ final class LocalAppsStoreTests: XCTestCase {
         // alone — which is satisfied here. The real gate must still refuse.
         XCTAssertTrue(LocalAppDesignerGate.canConfirm([step5], values: values))
         XCTAssertFalse(LocalAppDesignerGate.canConfirm([step1, step5], values: values))
+    }
+
+    /// `.deferred` ("let the model decide") must satisfy a required field
+    /// the same way a real answer does — the questionnaire's "let the LLM
+    /// decide" affordance must not silently block the confirm gate. Checked
+    /// against a genuinely missing answer on the same field/step so this
+    /// cannot pass merely because everything happens to satisfy the gate.
+    func testDeferredSatisfiesARequiredFieldGate() {
+        let step = LocalAppDesignStep(
+            id: "style",
+            order: 0,
+            title: "风格",
+            description: "",
+            fields: [designField(id: "tone", type: .singleChoice)]
+        )
+
+        XCTAssertTrue(
+            LocalAppDesignerGate.isSatisfied(step, values: ["tone": .deferred]),
+            ".deferred must satisfy a required field, not read as missing"
+        )
+        XCTAssertFalse(
+            LocalAppDesignerGate.isSatisfied(step, values: [:]),
+            "a genuinely missing answer must still block the gate"
+        )
     }
 
     /// A pasted URL or a typed capital used to reach the engine verbatim and

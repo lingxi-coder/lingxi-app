@@ -1114,6 +1114,11 @@ pub struct ConversationOrchestrator {
     /// the INERT INVARIANT this plan depends on. Wired at the desktop/mobile
     /// composition roots to the SAME `Arc` handed to `BuiltinToolContext`.
     pub(crate) session_cwd: Arc<tool_api::SessionCwd>,
+    /// Guest→host hop for prompt probes when the session cwd is a
+    /// mobile-linux guest path — see [`Self::with_prompt_probe_cwd_resolver`].
+    /// `None` everywhere but the mobile host.
+    pub(crate) prompt_probe_cwd_resolver:
+        Option<Arc<dyn Fn(&std::path::Path) -> std::path::PathBuf + Send + Sync>>,
     /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
     /// Used by [`Self::computed_transcript_path`] to deterministically derive the
     /// session's transcript path (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`,
@@ -1867,6 +1872,7 @@ impl ConversationOrchestrator {
             memory,
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
+            prompt_probe_cwd_resolver: None,
             cwd,
             config_home: None,
             workspace_trusted: true,
@@ -2518,6 +2524,24 @@ impl ConversationOrchestrator {
             }
         }));
         self.session_cwd = session_cwd;
+        self
+    }
+
+    /// PathAtlas S3 (mobile-linux): resolve the model-visible session cwd to
+    /// the HOST directory the prompt probes should run against.
+    ///
+    /// When the session cwd is a guest path (`/workspace/<id>`), the env
+    /// block must DISPLAY it verbatim while the memory hierarchy, git-status
+    /// probe, and file tree must read the host directory that backs it. This
+    /// resolver performs that guest→host hop in [`Self::build_prompt_context`];
+    /// unset (every desktop caller), probes run on the session cwd itself —
+    /// byte-identical to before.
+    #[must_use]
+    pub fn with_prompt_probe_cwd_resolver(
+        mut self,
+        resolver: Arc<dyn Fn(&std::path::Path) -> std::path::PathBuf + Send + Sync>,
+    ) -> Self {
+        self.prompt_probe_cwd_resolver = Some(resolver);
         self
     }
 
@@ -10893,6 +10917,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `with_session_cwd` was never called, so this is byte-identical to
         // before for every caller that doesn't wire it (INERT INVARIANT).
         let cwd = self.session_cwd.cwd();
+        // PathAtlas S3: when the session cwd is a mobile-linux guest path,
+        // the probes below (memory hierarchy, git status, file tree,
+        // worktree check) must read the HOST directory backing it while the
+        // env block's `Primary working directory:` keeps displaying the
+        // guest path the model actually uses. Desktop never sets the
+        // resolver, so `probe_cwd == cwd` there — byte-identical.
+        let probe_cwd = match &self.prompt_probe_cwd_resolver {
+            Some(resolver) => resolver(&cwd),
+            None => cwd.clone(),
+        };
         // The `<env>` model-identity line ("You are powered by the model named
         // …") must reflect the CURRENT model, not the launch model. `/model`
         // switches update `session.model` (see `OrchestratorHandle::switch_model`
@@ -10905,10 +10939,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `build_system_prompt` caller builds the prompt BEFORE taking the
         // session lock, so there is no reentrancy.
         let model = self.session.lock().await.model.clone();
-        let memory_files = self.memory.load(&cwd).await;
+        let memory_files = self.memory.load(&probe_cwd).await;
 
-        let git = git_status::probe(&cwd);
-        let tree = file_tree::probe(&cwd, file_tree::DEFAULT_DEPTH_LIMIT);
+        let git = git_status::probe(&probe_cwd);
+        let tree = file_tree::probe(&probe_cwd, file_tree::DEFAULT_DEPTH_LIMIT);
 
         // Tool name extraction: ToolRegistry's `all_names()` is the
         // unfiltered set (builtin + plugin + MCP). M5-03 uses the
@@ -10923,7 +10957,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // worktree by checking for the `gitdir` file that git creates in worktree
         // checkouts (a file rather than a directory at .git). Computed before `cwd`
         // is moved into the context struct below.
-        let in_worktree = cwd.join(".git").is_file();
+        let in_worktree = probe_cwd.join(".git").is_file();
 
         SystemPromptContext {
             cwd,

@@ -340,6 +340,104 @@ impl From<ProcessError> for MobileLinuxError {
     }
 }
 
+#[cfg(test)]
+mod map_guest_path_tests {
+    use super::*;
+
+    fn mounts() -> Vec<MountSpec> {
+        vec![
+            MountSpec {
+                host_path: PathBuf::from("/host/ws"),
+                guest_path: "/workspace/abc".into(),
+                read_only: false,
+                purpose: MountPurpose::Workspace,
+            },
+            MountSpec {
+                host_path: PathBuf::from("/host/ext"),
+                guest_path: "/workspace/abc/ext".into(),
+                read_only: false,
+                purpose: MountPurpose::External,
+            },
+        ]
+    }
+
+    #[test]
+    fn maps_longest_prefix_and_rejects_dirty_or_uncovered_paths() {
+        let m = mounts();
+        assert_eq!(
+            map_guest_path_to_host("/workspace/abc/src/a.rs", &m),
+            Some(PathBuf::from("/host/ws/src/a.rs"))
+        );
+        assert_eq!(
+            map_guest_path_to_host("/workspace/abc", &m),
+            Some(PathBuf::from("/host/ws"))
+        );
+        assert_eq!(
+            map_guest_path_to_host("/workspace/abc/ext/d.txt", &m),
+            Some(PathBuf::from("/host/ext/d.txt"))
+        );
+        assert_eq!(map_guest_path_to_host("/workspace/other/x", &m), None);
+        assert_eq!(map_guest_path_to_host("/workspace/abc/../abc/x", &m), None);
+        assert_eq!(map_guest_path_to_host("relative", &m), None);
+        assert_eq!(map_guest_path_to_host("/tmp/x", &m), None);
+    }
+}
+
+/// Map a guest path onto its host twin via the longest-prefix matching
+/// mount. Pure and lexical: no filesystem access. Returns `None` when no
+/// mount covers `path` or the path fails strict guest-path shape checks
+/// (absolute, no `..`/`.` components, no `//`).
+///
+/// This is the shared guest→host hop for PRESENTATION consumers (the mobile
+/// host's prompt-probe resolver). The file-tool translation layer
+/// (`platform_common::GuestPathFileSystem`) keeps its own richer resolution
+/// (fence + read-only enforcement) pinned by its own tests.
+#[must_use]
+pub fn map_guest_path_to_host(path: &str, mounts: &[MountSpec]) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    if !path.starts_with('/') || path.contains("//") || path.as_bytes().contains(&0) {
+        return None;
+    }
+    let components: Vec<&std::ffi::OsStr> = {
+        let mut out = Vec::new();
+        for component in std::path::Path::new(path).components() {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(segment) => out.push(segment),
+                _ => return None,
+            }
+        }
+        out
+    };
+    let mut best: Option<(&MountSpec, usize)> = None;
+    for mount in mounts {
+        let guest: Vec<&std::ffi::OsStr> = {
+            let mut out = Vec::new();
+            for component in std::path::Path::new(&mount.guest_path).components() {
+                match component {
+                    Component::RootDir => {}
+                    Component::Normal(segment) => out.push(segment),
+                    _ => out.clear(),
+                }
+            }
+            out
+        };
+        if !guest.is_empty()
+            && components.len() >= guest.len()
+            && components[..guest.len()] == guest[..]
+            && best.is_none_or(|(_, len)| guest.len() > len)
+        {
+            best = Some((mount, guest.len()));
+        }
+    }
+    let (mount, prefix_len) = best?;
+    let mut host = mount.host_path.clone();
+    for segment in &components[prefix_len..] {
+        host.push(segment);
+    }
+    Some(host)
+}
+
 /// Android/iOS Linux userspace runtime.
 #[async_trait]
 pub trait MobileLinuxRuntime: Send + Sync {

@@ -1530,15 +1530,23 @@ async fn build_mobile_inner_with_ask(
     // containment. Legacy/unavailable runtimes serve an empty table, so this
     // adds nothing off mobile-linux.
     let mut trusted_dirs = vec![cwd.clone()];
-    if let Some(runtime) = mobile_linux.as_ref() {
-        trusted_dirs.extend(
-            runtime
-                .current_mounts()
-                .into_iter()
-                .map(|mount| mount.host_path),
-        );
-    }
-    let session_cwd = SessionCwd::new(cwd.clone(), trusted_dirs);
+    let mobile_linux_mounts = mobile_linux
+        .as_ref()
+        .map(|runtime| runtime.current_mounts())
+        .unwrap_or_default();
+    trusted_dirs.extend(mobile_linux_mounts.iter().map(|m| m.host_path.clone()));
+    // PathAtlas S3: the MODEL-VISIBLE cwd is the guest workspace when one is
+    // mounted — the same coordinate the shell already uses, so file tools and
+    // shell commands name the same files. Relative tool paths resolve against
+    // it and come back through translate_model_path onto the host twin. The
+    // engine-internal cwd (`cwd` — transcripts, .lingxi, memory files) stays
+    // host.
+    let model_cwd = mobile_linux_mounts
+        .iter()
+        .find(|m| matches!(m.purpose, traits::MountPurpose::Workspace))
+        .map(|m| std::path::PathBuf::from(&m.guest_path))
+        .unwrap_or_else(|| cwd.clone());
+    let session_cwd = SessionCwd::new(model_cwd, trusted_dirs);
     let tool_ctx = BuiltinToolContext {
         // No session: this context never persists tool output.
         session_id: None,
@@ -1816,6 +1824,21 @@ async fn build_mobile_inner_with_ask(
     // `.with_session_cwd(session_cwd)`; inert today — see the binding note
     // above).
     .with_session_cwd(session_cwd);
+    // PathAtlas S3: prompt probes (memory hierarchy, git status, file tree)
+    // must read the HOST directory backing the guest session cwd while the
+    // env block displays the guest path itself. Live table: external mounts
+    // added later still resolve.
+    let orchestrator = if let Some(runtime) = mobile_linux.clone() {
+        orchestrator.with_prompt_probe_cwd_resolver(std::sync::Arc::new(move |path| {
+            traits::mobile_linux::map_guest_path_to_host(
+                &path.to_string_lossy(),
+                &runtime.current_mounts(),
+            )
+            .unwrap_or_else(|| path.to_path_buf())
+        }))
+    } else {
+        orchestrator
+    };
     orch_inner = orch_inner.with_mcp_registry(mcp_registry.clone());
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {

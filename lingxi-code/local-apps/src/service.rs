@@ -1108,12 +1108,48 @@ impl AppService {
     /// Change the brief and re-author from scratch (`collecting_spec |
     /// questionnaire_failed | plan_failed -> authoring_questionnaire`).
     /// Discards the questionnaire, every answer, and any plan — a new brief
-    /// can invalidate all three.
+    /// can invalidate all three. Unlike every OTHER plain transition (which
+    /// reuses [`Self::workflow_step`] and so only ever emits
+    /// `WorkflowChanged`), this builds its event list by hand so it can ALSO
+    /// announce the questionnaire/plan clears `AppState::update_brief`
+    /// performs — `events.rs`'s own docs on `QuestionnaireChanged`/
+    /// `PlanChanged` promise `steps: []`/`plan: None` for exactly this
+    /// "invalidated" case, and a client that never hears about the clear
+    /// keeps rendering data the server already deleted. Gated on whether
+    /// there was anything to invalidate: a brief change with no prior
+    /// questionnaire/plan (e.g. straight from `questionnaire_failed`, which
+    /// never got that far) announces neither.
     pub async fn update_brief(&self, app_id: &str, brief: &str) -> Result<(), AppError> {
         ensure_within("brief", brief.len(), MAX_BRIEF_BYTES)?;
         let brief = brief.to_string();
-        self.workflow_step(app_id, None, move |app, now| {
-            app.update_brief(brief.clone(), now)
+        self.with_app(app_id, move |app, now| {
+            let had_questionnaire = !app.draft.questionnaire.is_empty();
+            let had_plan = app.draft.plan.is_some();
+            match app.update_brief(brief.clone(), now) {
+                Ok(()) => {
+                    let mut events = vec![AppEvent::WorkflowChanged {
+                        app_id: app.record.id.clone(),
+                        state: app.record.workflow_state,
+                        detail: None,
+                    }];
+                    if had_questionnaire {
+                        events.push(AppEvent::QuestionnaireChanged {
+                            app_id: app.record.id.clone(),
+                            revision: app.draft.revision,
+                            steps: Vec::new(),
+                        });
+                    }
+                    if had_plan {
+                        events.push(AppEvent::PlanChanged {
+                            app_id: app.record.id.clone(),
+                            revision: app.draft.revision,
+                            plan: None,
+                        });
+                    }
+                    (Ok(()), events)
+                }
+                Err(error) => (Err(error), Vec::new()),
+            }
         })
         .await
     }
@@ -1217,6 +1253,17 @@ impl AppService {
     /// Apply a user edit at `expected_revision`. A stale revision fails with
     /// `revision_conflict` AND emits `DesignConflict`; the user value is
     /// never silently overwritten.
+    ///
+    /// `AppState::update_draft` also clears `draft.plan`/`plan_for_revision`
+    /// on every successful edit (the plan was computed against the answers
+    /// that just changed, so it's stale the instant they do) — when there
+    /// was a plan to invalidate, this ALSO emits `PlanChanged { plan: None
+    /// }` after `DesignDraftChanged`, so the client learns the plan it may
+    /// still be showing (e.g. during `awaiting_spec_confirmation`, reached
+    /// via `cancel_design` back to an editable state) is gone, instead of
+    /// discovering it only as an unexplained staleness error at
+    /// `confirm_design`'s freshness gate. No plan to invalidate (most edits,
+    /// made before `plan_ready` ever ran) announces nothing extra.
     pub async fn update_draft(
         &self,
         app_id: &str,
@@ -1225,19 +1272,25 @@ impl AppService {
     ) -> Result<u64, AppError> {
         validate_patch(patch)?;
         self.with_app(app_id, |app, now| {
+            let had_plan = app.draft.plan.is_some();
             match app.update_draft(expected_revision, patch, now) {
                 Ok(revision) => {
                     if let Err(error) = ensure_draft_field_count(&app.draft) {
                         return (Err(error), Vec::new());
                     }
-                    (
-                        Ok(revision),
-                        vec![AppEvent::DesignDraftChanged {
+                    let mut events = vec![AppEvent::DesignDraftChanged {
+                        app_id: app.record.id.clone(),
+                        revision,
+                        fields: app.draft.fields.clone(),
+                    }];
+                    if had_plan {
+                        events.push(AppEvent::PlanChanged {
                             app_id: app.record.id.clone(),
                             revision,
-                            fields: app.draft.fields.clone(),
-                        }],
-                    )
+                            plan: None,
+                        });
+                    }
+                    (Ok(revision), events)
                 }
                 Err(error) => {
                     let events = Self::conflict_events(&app.record.id, &error);
@@ -2076,6 +2129,83 @@ mod tests {
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 1);
+    }
+
+    /// `AppState::update_draft` clears `draft.plan`/`plan_for_revision` on
+    /// EVERY edit (state.rs:431-432) — the plan was computed against the old
+    /// answers, so it's stale the instant an answer changes. Before this
+    /// test's fix, the service wrapper only emitted `DesignDraftChanged`:
+    /// the client kept rendering a plan the server had already deleted, then
+    /// hit an unexplained staleness error at `confirm_design`'s freshness
+    /// gate. `events.rs`'s own doc on `AppEvent::PlanChanged` promises `plan:
+    /// None` for exactly this "invalidated" case; this asserts the EVENT
+    /// fires, not merely that `draft.plan` reads `None` afterward (a client
+    /// only ever learns about the invalidation through the wire).
+    #[tokio::test]
+    async fn update_draft_announces_the_plan_it_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Invalidate"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        stamp_fresh_plan(&h.service, &record.id).await;
+        let _ = h.take_events().await;
+
+        let revision = h
+            .service
+            .update_draft(&record.id, 0, &patch("title", "Mine"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.take_events().await,
+            vec![
+                AppEvent::DesignDraftChanged {
+                    app_id: record.id.clone(),
+                    revision,
+                    fields: h.service.draft(&record.id).await.unwrap().fields.clone(),
+                },
+                AppEvent::PlanChanged {
+                    app_id: record.id.clone(),
+                    revision,
+                    plan: None,
+                },
+            ],
+            "the edit's own event comes first, the invalidation it causes second"
+        );
+        assert!(h.service.draft(&record.id).await.unwrap().plan.is_none());
+    }
+
+    /// The other half of the same fix, gated the other way: when there is no
+    /// plan to invalidate (never planned yet), `update_draft` must not
+    /// announce a phantom `PlanChanged` on every routine edit.
+    #[tokio::test]
+    async fn update_draft_without_a_plan_does_not_announce_a_phantom_invalidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("NoPlanYet"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        let _ = h.take_events().await;
+
+        h.service
+            .update_draft(&record.id, 0, &patch("title", "Mine"))
+            .await
+            .unwrap();
+
+        let events = h.take_events().await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AppEvent::PlanChanged { .. })),
+            "no plan existed yet, so nothing was invalidated: {events:?}"
+        );
     }
 
     /// `DesignValue::Deferred` ("let the model decide") is a legal draft
@@ -3044,6 +3174,91 @@ mod tests {
         assert_eq!(
             refreshed.workflow_state,
             AppWorkflowState::AuthoringQuestionnaire
+        );
+    }
+
+    /// `AppState::update_brief` clears BOTH `draft.questionnaire` and
+    /// `draft.plan` (state.rs:313/315) — a new brief invalidates the old
+    /// questions and whatever plan was computed against the old answers.
+    /// Before this test's fix the service wrapper emitted only
+    /// `WorkflowChanged`, same silent-invalidation hole as `update_draft`'s
+    /// (see `update_draft_announces_the_plan_it_invalidates`): the client
+    /// never learned either clear happened.
+    #[tokio::test]
+    async fn update_brief_announces_the_questionnaire_and_plan_it_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Rebrief"), "a test app", None)
+            .await
+            .unwrap();
+        let record = advance_to_collecting_spec(&h.service, &record.id).await;
+        stamp_fresh_plan(&h.service, &record.id).await;
+        let _ = h.take_events().await;
+
+        h.service
+            .update_brief(&record.id, "改成一个待办清单")
+            .await
+            .unwrap();
+
+        let draft = h.service.draft(&record.id).await.unwrap();
+        assert_eq!(
+            h.take_events().await,
+            vec![
+                AppEvent::WorkflowChanged {
+                    app_id: record.id.clone(),
+                    state: AppWorkflowState::AuthoringQuestionnaire,
+                    detail: None,
+                },
+                AppEvent::QuestionnaireChanged {
+                    app_id: record.id.clone(),
+                    revision: draft.revision,
+                    steps: Vec::new(),
+                },
+                AppEvent::PlanChanged {
+                    app_id: record.id.clone(),
+                    revision: draft.revision,
+                    plan: None,
+                },
+            ],
+            "state change first, then the two invalidations it caused"
+        );
+        assert!(draft.questionnaire.is_empty());
+        assert!(draft.plan.is_none());
+    }
+
+    /// The gated half of the same fix: a brief change while there is no
+    /// questionnaire/plan yet to invalidate (e.g. escaping straight from
+    /// `questionnaire_failed`) must not announce phantom invalidations.
+    #[tokio::test]
+    async fn update_brief_without_a_questionnaire_or_plan_announces_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("FreshFail"), "a test app", None)
+            .await
+            .unwrap();
+        h.service
+            .questionnaire_failed(&record.id, "model offline")
+            .await
+            .unwrap();
+        let _ = h.take_events().await;
+
+        h.service
+            .update_brief(&record.id, "改成一个待办清单")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.take_events().await,
+            vec![AppEvent::WorkflowChanged {
+                app_id: record.id.clone(),
+                state: AppWorkflowState::AuthoringQuestionnaire,
+                detail: None,
+            }],
+            "nothing existed yet, so nothing was invalidated"
         );
     }
 

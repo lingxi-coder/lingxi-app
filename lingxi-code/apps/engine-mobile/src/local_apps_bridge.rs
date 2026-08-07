@@ -30,16 +30,19 @@ use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
-    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto,
-    AppDataFieldDto, AppDataFieldTypeDto, AppDesignFieldValueDto, AppDesignPatchDto,
-    AppDesignPatchOpDto, AppDetailsDto, AppErrorCodeDto, AppManifestDto, AppRecordDto,
-    AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
+    AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDesignFieldDto,
+    AppDesignFieldOptionDto, AppDesignFieldTypeDto, AppDesignFieldValueDto, AppDesignPatchDto,
+    AppDesignPatchOpDto, AppDesignStepDto, AppDetailsDto, AppErrorCodeDto, AppEventDto,
+    AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto, DensityLevelDto,
+    DesignValueDto,
 };
 use local_apps::{
-    load_manifest, AppCheckpoint, AppCheckpointKind, AppDesignDraft, AppDesignPatch,
-    AppDesignPatchOp, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest,
-    AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppWorkflowState,
+    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppDesignDraft,
+    AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignPatch, AppDesignPatchOp,
+    AppDesignStep, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest,
+    AppPlan, AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppWorkflowState,
     DataCollectionSchema, DataFieldKind, DataFieldSchema, DensityLevel, DesignValue,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -194,59 +197,46 @@ impl AppEventObserver for SinkAppEventObserver {
 /// `AppOperationFailed` has no domain twin — the engine synthesizes it from
 /// typed [`AppError`]s at the command boundary).
 ///
-/// Returns `None` for the two variants with no wire representation YET
-/// (`QuestionnaireChanged`/`PlanChanged` — see their arms below); the single
-/// caller ([`AppEmissionQueue::spawn`]'s forwarder loop) simply skips
-/// emitting on `None`. This is a real return path, not a defensive
-/// leftover: NOTHING gates these two (unlike the `Deferred` value
-/// [`lower_design_value`] used to gate on write/load rejections before Task
-/// 5 gave it a real `DesignValueDto::Deferred` mapping) — the forwarder task
-/// that calls this function is spawned once, detached, with its
-/// `JoinHandle` discarded (`AppEmissionQueue::spawn` below), so a
-/// `panic!`/`todo!()` here would silently kill the ENTIRE app-event stream
-/// for every app, forever, with no crash and no log (the panicked task's
-/// `JoinError` is never awaited, and `enqueue`'s
+/// Every variant maps to `Some` today, but the return type stays
+/// `Option<ClientEvent>` DELIBERATELY, not just as a historical leftover:
+/// the forwarder task that calls this function is spawned once, detached,
+/// with its `JoinHandle` discarded (`AppEmissionQueue::spawn` below), so a
+/// `panic!`/`todo!()`/`unreachable!()` arm here would silently kill the
+/// ENTIRE app-event stream for every app, forever, with no crash and no log
+/// (the panicked task's `JoinError` is never awaited, and `enqueue`'s
 /// `let _ = self.tx.send(..)` swallows the resulting closed-channel error).
+/// `QuestionnaireChanged`/`PlanChanged` lived behind a logged `None` for
+/// exactly this reason between Task 4 (which added the domain events) and
+/// Task 6 (which gave them a wire DTO to lower onto, below) — keeping the
+/// `Option` signature means the NEXT domain event that outruns its DTO can
+/// degrade the same safe way instead of reintroducing that window.
 pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
     match event {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
         }),
-        // TODO(local-apps#questionnaire, Task 6): `QuestionnaireChanged` and
-        // `PlanChanged` are Task 4's new domain events for the conversational
-        // designer's authoring/planning round trips. Task 5 landed their wire
-        // twins (`AppEventDto::{AppQuestionnaireChanged, AppPlanChanged}`,
-        // client-protocol) — what's still missing is THIS bridge's mapping
-        // from the domain event to that DTO, which is Task 6's job. Nothing
-        // in engine-mobile calls the `AppService` methods that emit these
-        // (`questionnaire_ready`, `plan_ready`) until Task 8 wires the LLM
-        // round trip, so these arms cannot fire today — but UNLIKE
-        // `lower_design_value`'s (former) `Deferred` arm, that "cannot fire"
-        // is an observation, not an enforced invariant: nothing stops Task 8
-        // from calling `questionnaire_ready`/`plan_ready` before Task 6 gives
-        // this function something to lower them to. Log-and-drop instead of
-        // `todo!()`/`unreachable!()` so that sequencing mistake degrades to
-        // "the client falls behind on these two events" instead of silently
-        // killing the whole app-event stream (see the function doc above).
-        AppEvent::QuestionnaireChanged { app_id, .. } => {
-            tracing::error!(
-                app_id = %app_id,
-                "dropping QuestionnaireChanged: this bridge does not map it onto \
-                 AppEventDto::AppQuestionnaireChanged yet (Task 6); the client will \
-                 not learn the conversational designer's authored questionnaire \
-                 until that lands"
-            );
-            None
-        }
-        AppEvent::PlanChanged { app_id, .. } => {
-            tracing::error!(
-                app_id = %app_id,
-                "dropping PlanChanged: this bridge does not map it onto \
-                 AppEventDto::AppPlanChanged yet (Task 6); the client will not \
-                 learn the conversational designer's authored plan until that lands"
-            );
-            None
-        }
+        AppEvent::QuestionnaireChanged {
+            app_id,
+            revision,
+            steps,
+        } => Some(ClientEvent::AppEvent {
+            event: AppEventDto::AppQuestionnaireChanged {
+                app_id,
+                revision,
+                steps: steps.iter().map(lower_design_step).collect(),
+            },
+        }),
+        AppEvent::PlanChanged {
+            app_id,
+            revision,
+            plan,
+        } => Some(ClientEvent::AppEvent {
+            event: AppEventDto::AppPlanChanged {
+                app_id,
+                revision,
+                plan: plan.as_ref().map(lower_plan),
+            },
+        }),
         AppEvent::DesignerRequested {
             app_id,
             interaction_id,
@@ -474,6 +464,84 @@ fn lower_collection(value: DataCollectionSchema, enabled_by_default: bool) -> Ap
     }
 }
 
+fn lower_design_field_type(field_type: AppDesignFieldType) -> AppDesignFieldTypeDto {
+    match field_type {
+        AppDesignFieldType::ShortText => AppDesignFieldTypeDto::ShortText,
+        AppDesignFieldType::LongText => AppDesignFieldTypeDto::LongText,
+        AppDesignFieldType::SingleChoice => AppDesignFieldTypeDto::SingleChoice,
+        AppDesignFieldType::MultipleChoice => AppDesignFieldTypeDto::MultipleChoice,
+        AppDesignFieldType::Boolean => AppDesignFieldTypeDto::Boolean,
+        AppDesignFieldType::Color => AppDesignFieldTypeDto::Color,
+        AppDesignFieldType::Density => AppDesignFieldTypeDto::Density,
+        AppDesignFieldType::ScreenList => AppDesignFieldTypeDto::ScreenList,
+        AppDesignFieldType::FeatureList => AppDesignFieldTypeDto::FeatureList,
+        AppDesignFieldType::DataFieldList => AppDesignFieldTypeDto::DataFieldList,
+        AppDesignFieldType::DomainList => AppDesignFieldTypeDto::DomainList,
+    }
+}
+
+fn lower_design_field_option(option: &AppDesignFieldOption) -> AppDesignFieldOptionDto {
+    AppDesignFieldOptionDto {
+        value: option.value.clone(),
+        label: option.label.clone(),
+    }
+}
+
+/// Lower one dynamic questionnaire field. `default_value`/`options` are the
+/// same wire shape [`lower_design_value`]/[`AppDesignFieldOptionDto`] already
+/// use elsewhere — no new encoding invented here.
+fn lower_design_field(field: &AppDesignField) -> AppDesignFieldDto {
+    AppDesignFieldDto {
+        id: field.id.clone(),
+        label: field.label.clone(),
+        description: field.description.clone(),
+        field_type: lower_design_field_type(field.field_type),
+        required: field.required,
+        allows_custom: field.allows_custom,
+        allows_defer: field.allows_defer,
+        default_value: field.default_value.clone().map(lower_design_value),
+        options: field.options.iter().map(lower_design_field_option).collect(),
+    }
+}
+
+/// Lower one questionnaire step for `AppEventDto::AppQuestionnaireChanged`
+/// and [`AppDetailsDto::questionnaire`].
+pub(crate) fn lower_design_step(step: &AppDesignStep) -> AppDesignStepDto {
+    AppDesignStepDto {
+        id: step.id.clone(),
+        order: step.order,
+        title: step.title.clone(),
+        description: step.description.clone(),
+        fields: step.fields.iter().map(lower_design_field).collect(),
+    }
+}
+
+fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
+    match capability {
+        AppCapability::DataMutation => AppCapabilityKindDto::DataMutation,
+        AppCapability::UiControl => AppCapabilityKindDto::UiControl,
+    }
+}
+
+/// Lower the LLM-derived plan for `AppEventDto::AppPlanChanged` and
+/// [`AppDetailsDto::plan`]. Plan collections are declared by the design
+/// itself (not an optional add-on the user toggles later, unlike a
+/// manifest's post-hoc collection list), so `enabled_by_default` is always
+/// `true` here — same as [`lower_manifest`]'s call into [`lower_collection`].
+pub(crate) fn lower_plan(plan: &AppPlan) -> AppPlanDto {
+    AppPlanDto {
+        collections: plan
+            .collections
+            .iter()
+            .cloned()
+            .map(|collection| lower_collection(collection, true))
+            .collect(),
+        capabilities: plan.capabilities.iter().copied().map(lower_capability).collect(),
+        domains: plan.domains.clone(),
+        summary: plan.summary.clone(),
+    }
+}
+
 pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDetailsDto {
     AppRuntimeDetailsDto {
         state: lower_runtime_state(runtime.state),
@@ -549,14 +617,8 @@ pub(crate) fn lower_details(
         app: lower_record(record),
         design_revision: draft.revision,
         design_fields: lower_design_field_values(draft),
-        // TODO(local-apps#questionnaire, Task 6): `draft.questionnaire` /
-        // `draft.plan` are real domain data (Task 2) with a real wire shape
-        // (`AppDesignStepDto` / `AppPlanDto`, Task 5) but no lowering
-        // function yet — same "not wired" placeholder as `generation_job`
-        // below, not a design decision. Task 6 owns
-        // `lower_questionnaire`/`lower_plan` and wiring them in here.
-        questionnaire: Vec::new(),
-        plan: None,
+        questionnaire: draft.questionnaire.iter().map(lower_design_step).collect(),
+        plan: draft.plan.as_ref().map(lower_plan),
         manifest: load_manifest_snapshot(root, &record.id)?,
         runtime: lower_runtime_details(runtime),
         generation_job: None,
@@ -726,6 +788,128 @@ fn raise_density(level: DensityLevelDto) -> Result<DensityLevel, AppError> {
     }
 }
 
+// The `raise_design_step`/`raise_plan` family below has no production
+// caller today: the questionnaire/plan DTOs only ever flow server -> client
+// (`AppDetailsDto`, `AppEventDto::{AppQuestionnaireChanged,AppPlanChanged}`)
+// — nothing raises one back from the wire, unlike `raise_patch`/
+// `raise_design_value`, which `ApplyDesignPatch` actually calls. They exist
+// so the round-trip tests below can pin that `lower_design_step`/`lower_plan`
+// are lossless, and so a future client->server use (if one is ever added)
+// starts from a real bidirectional mapping instead of a one-way one. Same
+// `#[cfg_attr(not(test), allow(dead_code))]` shape as
+// [`AppEmissionQueue::flush`] above, for the same reason: test-only callers
+// in a non-test build.
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_design_field_type(field_type: AppDesignFieldTypeDto) -> Result<AppDesignFieldType, AppError> {
+    Ok(match field_type {
+        AppDesignFieldTypeDto::ShortText => AppDesignFieldType::ShortText,
+        AppDesignFieldTypeDto::LongText => AppDesignFieldType::LongText,
+        AppDesignFieldTypeDto::SingleChoice => AppDesignFieldType::SingleChoice,
+        AppDesignFieldTypeDto::MultipleChoice => AppDesignFieldType::MultipleChoice,
+        AppDesignFieldTypeDto::Boolean => AppDesignFieldType::Boolean,
+        AppDesignFieldTypeDto::Color => AppDesignFieldType::Color,
+        AppDesignFieldTypeDto::Density => AppDesignFieldType::Density,
+        AppDesignFieldTypeDto::ScreenList => AppDesignFieldType::ScreenList,
+        AppDesignFieldTypeDto::FeatureList => AppDesignFieldType::FeatureList,
+        AppDesignFieldTypeDto::DataFieldList => AppDesignFieldType::DataFieldList,
+        AppDesignFieldTypeDto::DomainList => AppDesignFieldType::DomainList,
+        other => {
+            return Err(AppError::InvalidRequest(format!(
+                "unsupported design field type: {other:?}"
+            )))
+        }
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_design_field_option(dto: &AppDesignFieldOptionDto) -> AppDesignFieldOption {
+    AppDesignFieldOption {
+        value: dto.value.clone(),
+        label: dto.label.clone(),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_design_field(dto: &AppDesignFieldDto) -> Result<AppDesignField, AppError> {
+    Ok(AppDesignField {
+        id: dto.id.clone(),
+        label: dto.label.clone(),
+        description: dto.description.clone(),
+        field_type: raise_design_field_type(dto.field_type)?,
+        required: dto.required,
+        allows_custom: dto.allows_custom,
+        allows_defer: dto.allows_defer,
+        default_value: dto
+            .default_value
+            .clone()
+            .map(raise_design_value)
+            .transpose()?,
+        options: dto.options.iter().map(raise_design_field_option).collect(),
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_design_step(dto: &AppDesignStepDto) -> Result<AppDesignStep, AppError> {
+    Ok(AppDesignStep {
+        id: dto.id.clone(),
+        order: dto.order,
+        title: dto.title.clone(),
+        description: dto.description.clone(),
+        fields: dto
+            .fields
+            .iter()
+            .map(raise_design_field)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_capability(dto: AppCapabilityKindDto) -> Result<AppCapability, AppError> {
+    Ok(match dto {
+        AppCapabilityKindDto::DataMutation => AppCapability::DataMutation,
+        AppCapabilityKindDto::UiControl => AppCapability::UiControl,
+        other => {
+            return Err(AppError::InvalidRequest(format!(
+                "unsupported capability: {other:?}"
+            )))
+        }
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_collection(dto: AppDataCollectionDto) -> Result<DataCollectionSchema, AppError> {
+    Ok(DataCollectionSchema {
+        id: dto.id,
+        name: dto.label,
+        fields: dto
+            .fields
+            .into_iter()
+            .map(raise_data_field)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn raise_plan(dto: &AppPlanDto) -> Result<AppPlan, AppError> {
+    Ok(AppPlan {
+        collections: dto
+            .collections
+            .iter()
+            .cloned()
+            .map(raise_collection)
+            .collect::<Result<Vec<_>, _>>()?,
+        capabilities: dto
+            .capabilities
+            .iter()
+            .copied()
+            .map(raise_capability)
+            .collect::<Result<Vec<_>, _>>()?,
+        domains: dto.domains.clone(),
+        summary: dto.summary.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,32 +1040,81 @@ mod tests {
         }
     }
 
-    /// `QuestionnaireChanged`/`PlanChanged` have no wire representation yet
-    /// (Task 5/6) — `lower_app_event` must degrade to a logged drop
-    /// (`None`), never `panic!`/`todo!()`. This pins the failure mode
-    /// directly: the forwarder task that calls `lower_app_event`
-    /// (`AppEmissionQueue::spawn`) is detached with its `JoinHandle`
-    /// discarded, so a panic here would silently kill the entire app-event
-    /// stream for every app, forever, with no crash and no log — see the
-    /// function's own doc comment for the full trace.
+    /// `a_questionnaire_round_trips_through_the_wire_types` and
+    /// `a_plan_round_trips_through_the_wire_types` below cover
+    /// `QuestionnaireChanged`/`PlanChanged` losslessly reaching their DTOs
+    /// (Task 6); `every_app_event_arm_lowers_field_exact` further down pins
+    /// the exact field mapping of both `lower_app_event` arms.
+
     #[test]
-    fn events_with_no_wire_representation_yet_are_dropped_not_panicked() {
-        assert_eq!(
-            lower_app_event(AppEvent::QuestionnaireChanged {
-                app_id: "abcd1234".into(),
-                revision: 0,
-                steps: Vec::new(),
-            }),
-            None
+    fn a_questionnaire_round_trips_through_the_wire_types() {
+        let step = AppDesignStep {
+            id: "basics".into(),
+            order: 0,
+            title: "基础".into(),
+            description: Some("说明".into()),
+            fields: vec![AppDesignField {
+                id: "tone".into(),
+                label: "语气".into(),
+                description: None,
+                field_type: AppDesignFieldType::MultipleChoice,
+                required: true,
+                allows_custom: true,
+                allows_defer: true,
+                default_value: None,
+                options: vec![AppDesignFieldOption {
+                    value: "a".into(),
+                    label: "A".into(),
+                }],
+            }],
+        };
+        let dto = lower_design_step(&step);
+        assert!(
+            dto.fields[0].allows_custom,
+            "allows_custom must survive the wire"
         );
-        assert_eq!(
-            lower_app_event(AppEvent::PlanChanged {
-                app_id: "abcd1234".into(),
-                revision: 0,
-                plan: None,
-            }),
-            None
+        assert!(
+            dto.fields[0].allows_defer,
+            "allows_defer must survive the wire"
         );
+        assert_eq!(raise_design_step(&dto).expect("round trip"), step);
+    }
+
+    #[test]
+    fn a_plan_round_trips_through_the_wire_types() {
+        let plan = AppPlan {
+            collections: vec![DataCollectionSchema {
+                id: "notes".into(),
+                name: "Notes".into(),
+                fields: vec![DataFieldSchema {
+                    id: "title".into(),
+                    label: "Title".into(),
+                    kind: DataFieldKind::Text,
+                    required: true,
+                    enum_options: Vec::new(),
+                }],
+            }],
+            capabilities: vec![AppCapability::DataMutation, AppCapability::UiControl],
+            domains: vec!["api.example.com".into()],
+            summary: "记事本".into(),
+        };
+        assert_eq!(raise_plan(&lower_plan(&plan)).expect("round trip"), plan);
+    }
+
+    /// `AppCapabilityKindDto` is `#[non_exhaustive]` and already carries two
+    /// variants (`NetworkDomain`, `RestoreCheckpoint`) with no domain
+    /// `AppCapability` twin — `raise_plan` must fail typed on them instead of
+    /// silently dropping the capability or defaulting it away.
+    #[test]
+    fn raise_plan_rejects_a_capability_with_no_domain_twin() {
+        let mut dto = lower_plan(&AppPlan {
+            collections: Vec::new(),
+            capabilities: Vec::new(),
+            domains: Vec::new(),
+            summary: "s".into(),
+        });
+        dto.capabilities = vec![AppCapabilityKindDto::NetworkDomain];
+        raise_plan(&dto).expect_err("NetworkDomain has no domain-side capability yet");
     }
 
     #[test]
@@ -1104,19 +1337,116 @@ mod tests {
                     },
                 },
             ),
+            (
+                AppEvent::QuestionnaireChanged {
+                    app_id: "app00001".into(),
+                    revision: 10,
+                    steps: vec![AppDesignStep {
+                        id: "basics".into(),
+                        order: 0,
+                        title: "Basics".into(),
+                        description: Some("first step".into()),
+                        fields: vec![AppDesignField {
+                            id: "tone".into(),
+                            label: "Tone".into(),
+                            description: Some("field desc".into()),
+                            field_type: AppDesignFieldType::SingleChoice,
+                            required: true,
+                            allows_custom: true,
+                            allows_defer: true,
+                            default_value: Some(DesignValue::SingleChoice("a".into())),
+                            options: vec![AppDesignFieldOption {
+                                value: "a".into(),
+                                label: "A".into(),
+                            }],
+                        }],
+                    }],
+                },
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppQuestionnaireChanged {
+                        app_id: "app00001".into(),
+                        revision: 10,
+                        steps: vec![AppDesignStepDto {
+                            id: "basics".into(),
+                            order: 0,
+                            title: "Basics".into(),
+                            description: Some("first step".into()),
+                            fields: vec![AppDesignFieldDto {
+                                id: "tone".into(),
+                                label: "Tone".into(),
+                                description: Some("field desc".into()),
+                                field_type: AppDesignFieldTypeDto::SingleChoice,
+                                required: true,
+                                allows_custom: true,
+                                allows_defer: true,
+                                default_value: Some(DesignValueDto::SingleChoice {
+                                    value: "a".into(),
+                                }),
+                                options: vec![AppDesignFieldOptionDto {
+                                    value: "a".into(),
+                                    label: "A".into(),
+                                }],
+                            }],
+                        }],
+                    },
+                },
+            ),
+            (
+                AppEvent::PlanChanged {
+                    app_id: "app00001".into(),
+                    revision: 11,
+                    plan: Some(AppPlan {
+                        collections: vec![DataCollectionSchema {
+                            id: "notes".into(),
+                            name: "Notes".into(),
+                            fields: vec![DataFieldSchema {
+                                id: "title".into(),
+                                label: "Title".into(),
+                                kind: DataFieldKind::Text,
+                                required: true,
+                                enum_options: Vec::new(),
+                            }],
+                        }],
+                        capabilities: vec![AppCapability::DataMutation],
+                        domains: vec!["api.example.com".into()],
+                        summary: "记事本".into(),
+                    }),
+                },
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppPlanChanged {
+                        app_id: "app00001".into(),
+                        revision: 11,
+                        plan: Some(AppPlanDto {
+                            collections: vec![AppDataCollectionDto {
+                                id: "notes".into(),
+                                label: "Notes".into(),
+                                fields: vec![AppDataFieldDto {
+                                    id: "title".into(),
+                                    label: "Title".into(),
+                                    field_type: AppDataFieldTypeDto::Text,
+                                    required: true,
+                                    options: Vec::new(),
+                                }],
+                                enabled_by_default: true,
+                            }],
+                            capabilities: vec![AppCapabilityKindDto::DataMutation],
+                            domains: vec!["api.example.com".into()],
+                            summary: "记事本".into(),
+                        }),
+                    },
+                },
+            ),
         ];
-        // Every `AppEvent` variant EXCEPT `QuestionnaireChanged`/`PlanChanged`
-        // appears exactly once above. That pair is deliberately excluded,
-        // not an oversight: neither has a wire `ClientEvent` to pair with
-        // yet (Task 5/6), so `lower_app_event` returns `None` for both —
-        // see `events_with_no_wire_representation_yet_are_dropped_not_panicked`
-        // for their coverage instead. A genuinely NEW variant still forces a
-        // compile error into `lower_app_event`'s match, but — unlike what
-        // this comment used to claim — that compile error does NOT, by
-        // itself, force a new pair into this list; the two `todo!()`-turned-
-        // `None` arms are exactly the proof (they compiled fine with no
-        // entry here). Whoever adds the next variant should add a case here
-        // too, but the compiler will not make them.
+        // Every `AppEvent` variant appears exactly once above (Task 6 closed
+        // the `QuestionnaireChanged`/`PlanChanged` gap this comment used to
+        // carve out — see the removed `events_with_no_wire_representation_
+        // yet_are_dropped_not_panicked` test). That completeness is
+        // hand-maintained, same honest weakness as `every_design_value()`
+        // above: a genuinely NEW `AppEvent` variant forces a compile error
+        // into `lower_app_event`'s match, but that compile error does NOT,
+        // by itself, force a new pair into this list. Whoever adds the next
+        // variant should add a case here too, but the compiler will not make
+        // them.
         for (domain, expected) in cases {
             assert_eq!(lower_app_event(domain), Some(expected));
         }

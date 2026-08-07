@@ -1522,7 +1522,23 @@ async fn build_mobile_inner_with_ask(
     // (see above), so this cell never actually swaps today; wiring it keeps
     // the orchestrator's cwd source consistent with desktop and future-proofs
     // a mobile worktree tool without a second staleness bug to fix later.
-    let session_cwd = SessionCwd::new(cwd.clone(), vec![cwd.clone()]);
+    // PathAtlas S2: guest paths translate onto the mount table's HOST roots
+    // (workspace under `Application Support/workspaces/<id>`, persistent
+    // `/root` under the managed rootfs dir) — SIBLINGS of the app-sandbox
+    // cwd, not children. Without trusting them, every translated path would
+    // pass translation and then die at `canonicalize_and_validate`
+    // containment. Legacy/unavailable runtimes serve an empty table, so this
+    // adds nothing off mobile-linux.
+    let mut trusted_dirs = vec![cwd.clone()];
+    if let Some(runtime) = mobile_linux.as_ref() {
+        trusted_dirs.extend(
+            runtime
+                .current_mounts()
+                .into_iter()
+                .map(|mount| mount.host_path),
+        );
+    }
+    let session_cwd = SessionCwd::new(cwd.clone(), trusted_dirs);
     let tool_ctx = BuiltinToolContext {
         // No session: this context never persists tool output.
         session_id: None,

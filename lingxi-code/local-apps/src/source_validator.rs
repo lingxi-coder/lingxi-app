@@ -14,7 +14,9 @@ use std::path::{Component, Path, PathBuf};
 const MAX_SOURCE_FILES: usize = 5_000;
 const MAX_SOURCE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
-const WRITABLE_ROOTS: &[&str] = &["app", "components", "lib", "styles", "public"];
+/// Root directories a generated workspace may write under. Shared with the
+/// `engine-mobile` LLM-write screen so the two never drift apart.
+pub const WRITABLE_ROOTS: &[&str] = &["app", "components", "lib", "styles", "public"];
 
 /// Exact immutable scaffold files expected beside generated source.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -60,6 +60,8 @@ mod local_apps_host;
 mod local_apps_mcp;
 #[cfg(feature = "uniffi")]
 mod local_apps_profile;
+#[cfg(feature = "uniffi")]
+mod local_apps_sources;
 
 #[cfg(feature = "uniffi")]
 pub use host::{

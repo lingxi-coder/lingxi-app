@@ -7429,15 +7429,30 @@ mod tests {
     /// the client-protocol Task-5 note), so this reaches past the wire and
     /// pins what actually lands on disk, which is what Task 8's
     /// questionnaire-authoring stage will read.
+    ///
+    /// The test name is deliberately LONGER than
+    /// `AppService::create_app`'s 24-char placeholder cut: `handle_create_app`
+    /// must call `service.create_app(Some(name), name, conversation_id)` —
+    /// were it to regress to `create_app(None, name, conversation_id)` (`name`
+    /// silently dropped, only `brief` passed through), a name at or under 24
+    /// chars would come back byte-for-byte identical via the placeholder
+    /// path and this test would stay green over the regression. A name that
+    /// only survives verbatim through the EXPLICIT path is what makes the
+    /// pin meaningful again.
     #[test]
     fn create_app_persists_name_as_brief_until_task_11_adds_a_real_one() {
+        const NAME: &str = "Habit Tracker Deluxe Edition";
+        assert!(
+            NAME.chars().count() > 24,
+            "test fixture must exceed the placeholder cut to be meaningful"
+        );
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
             handle
                 .submit(ClientCommand::CreateApp {
-                    name: "Habit Tracker".into(),
+                    name: NAME.into(),
                     template: AppTemplateKindDto::Dashboard,
                     origin: AppCreateOriginDto::Library,
                     conversation_id: None,
@@ -7452,9 +7467,9 @@ mod tests {
 
             let service = handle.local_apps().expect("local-apps service");
             let record = service.record(&app_id).await.expect("record");
-            assert_eq!(record.name, "Habit Tracker");
+            assert_eq!(record.name, NAME);
             assert_eq!(
-                record.brief, "Habit Tracker",
+                record.brief, NAME,
                 "until Task 11 adds a real brief input, CreateApp must persist `name` as \
                  `brief` verbatim — not empty, not silently something else"
             );

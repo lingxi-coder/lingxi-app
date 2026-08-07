@@ -93,7 +93,15 @@ impl AppEmissionQueue {
         runtime.spawn(async move {
             while let Some(emission) = rx.recv().await {
                 match emission {
-                    AppEmission::Domain(event) => sink.emit(lower_app_event(event)).await,
+                    AppEmission::Domain(event) => {
+                        // `None` means `lower_app_event` deliberately dropped
+                        // an event with no wire representation yet (its own
+                        // doc); skip it and keep the forwarder alive instead
+                        // of emitting a placeholder.
+                        if let Some(client_event) = lower_app_event(event) {
+                            sink.emit(client_event).await;
+                        }
+                    }
                     AppEmission::Engine(event) => sink.emit(event).await,
                     AppEmission::Flush(ack) => {
                         // A dropped receiver just means the flusher stopped
@@ -185,11 +193,24 @@ impl AppEventObserver for SinkAppEventObserver {
 /// Lower one domain event onto its `App*` [`ClientEvent`] (1:1 by design;
 /// `AppOperationFailed` has no domain twin — the engine synthesizes it from
 /// typed [`AppError`]s at the command boundary).
-pub(crate) fn lower_app_event(event: AppEvent) -> ClientEvent {
+///
+/// Returns `None` for the two variants with no wire representation YET
+/// (`QuestionnaireChanged`/`PlanChanged` — see their arms below); the single
+/// caller ([`AppEmissionQueue::spawn`]'s forwarder loop) simply skips
+/// emitting on `None`. This is a real return path, not a defensive
+/// leftover: unlike [`lower_design_value`]'s `Deferred` arm (gated
+/// unreachable by two write-time/load-time service rejections), NOTHING
+/// gates these two — the forwarder task that calls this function is spawned
+/// once, detached, with its `JoinHandle` discarded (`AppEmissionQueue::spawn`
+/// below), so a `panic!`/`todo!()` here would silently kill the ENTIRE
+/// app-event stream for every app, forever, with no crash and no log (the
+/// panicked task's `JoinError` is never awaited, and `enqueue`'s
+/// `let _ = self.tx.send(..)` swallows the resulting closed-channel error).
+pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
     match event {
-        AppEvent::AppsChanged { apps } => ClientEvent::AppsChanged {
+        AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
-        },
+        }),
         // TODO(local-apps#questionnaire, Task 5/6): `QuestionnaireChanged`
         // and `PlanChanged` are Task 4's new domain events for the
         // conversational designer's authoring/planning round trips. Neither
@@ -197,90 +218,110 @@ pub(crate) fn lower_app_event(event: AppEvent) -> ClientEvent {
         // (client-protocol DTO) and Task 6 (this bridge's mapping). Nothing
         // in engine-mobile calls the `AppService` methods that emit these
         // (`questionnaire_ready`, `plan_ready`) until Task 8 wires the LLM
-        // round trip, so these arms cannot fire today — `todo!()` rather
-        // than `unreachable!()` for the same reason as `lower_design_value`'s
-        // `Deferred` arm below: a real mapping is expected to land here, not
-        // a permanent invariant.
-        AppEvent::QuestionnaireChanged { .. } => {
-            todo!("no wire representation for QuestionnaireChanged yet (T5/T6)")
+        // round trip, so these arms cannot fire today — but UNLIKE
+        // `lower_design_value`'s `Deferred` arm below, that "cannot fire" is
+        // an observation, not an enforced invariant: nothing stops Task 8
+        // from calling `questionnaire_ready`/`plan_ready` before Task 5/6
+        // give this function something to lower them to. Log-and-drop
+        // instead of `todo!()`/`unreachable!()` so that sequencing mistake
+        // degrades to "the client falls behind on these two events" instead
+        // of silently killing the whole app-event stream (see the function
+        // doc above).
+        AppEvent::QuestionnaireChanged { app_id, .. } => {
+            tracing::error!(
+                app_id = %app_id,
+                "dropping QuestionnaireChanged: no wire ClientEvent/AppEventDto \
+                 representation yet (Task 5/6); the client will not learn the \
+                 conversational designer's authored questionnaire until those \
+                 land"
+            );
+            None
         }
-        AppEvent::PlanChanged { .. } => {
-            todo!("no wire representation for PlanChanged yet (T5/T6)")
+        AppEvent::PlanChanged { app_id, .. } => {
+            tracing::error!(
+                app_id = %app_id,
+                "dropping PlanChanged: no wire ClientEvent/AppEventDto \
+                 representation yet (Task 5/6); the client will not learn the \
+                 conversational designer's authored plan until those land"
+            );
+            None
         }
         AppEvent::DesignerRequested {
             app_id,
             interaction_id,
             revision,
-        } => ClientEvent::AppDesignerRequested {
+        } => Some(ClientEvent::AppDesignerRequested {
             app_id,
             interaction_id,
             revision,
-        },
+        }),
         AppEvent::DesignDraftChanged {
             app_id,
             revision,
             fields,
-        } => ClientEvent::AppDesignDraftChanged {
+        } => Some(ClientEvent::AppDesignDraftChanged {
             app_id,
             revision,
             fields: lower_fields(fields),
-        },
+        }),
         AppEvent::DesignSuggestionAvailable {
             app_id,
             suggestion_id,
             based_on_revision,
             patch,
-        } => ClientEvent::AppDesignSuggestionAvailable {
+        } => Some(ClientEvent::AppDesignSuggestionAvailable {
             app_id,
             suggestion_id,
             based_on_revision,
             patch: lower_patch(patch),
-        },
+        }),
         AppEvent::DesignConflict {
             app_id,
             expected_revision,
             actual_revision,
-        } => ClientEvent::AppDesignConflict {
+        } => Some(ClientEvent::AppDesignConflict {
             app_id,
             expected_revision,
             actual_revision,
-        },
+        }),
         AppEvent::WorkflowChanged {
             app_id,
             state,
             detail,
-        } => ClientEvent::AppWorkflowChanged {
+        } => Some(ClientEvent::AppWorkflowChanged {
             app_id,
             state: lower_workflow_state(state),
             detail,
-        },
-        AppEvent::GenerationProgress(progress) => ClientEvent::AppGenerationProgress {
+        }),
+        AppEvent::GenerationProgress(progress) => Some(ClientEvent::AppGenerationProgress {
             app_id: progress.app_id,
             stage: progress.stage,
             percent: progress.percent,
             detail: progress.detail,
-        },
-        AppEvent::RuntimeChanged { app_id, runtime } => ClientEvent::AppRuntimeChanged {
+        }),
+        AppEvent::RuntimeChanged { app_id, runtime } => Some(ClientEvent::AppRuntimeChanged {
             app_id,
             state: lower_runtime_state(runtime.state),
             details: Some(lower_runtime_details(&runtime)),
             last_error: runtime.last_error,
-        },
+        }),
         AppEvent::PreviewReady {
             app_id,
             interaction_id,
             revision,
             url,
-        } => ClientEvent::AppPreviewReady {
+        } => Some(ClientEvent::AppPreviewReady {
             app_id,
             interaction_id,
             revision,
             url,
-        },
-        AppEvent::CheckpointCreated { app_id, checkpoint } => ClientEvent::AppCheckpointCreated {
-            app_id,
-            checkpoint: lower_checkpoint(&checkpoint),
-        },
+        }),
+        AppEvent::CheckpointCreated { app_id, checkpoint } => {
+            Some(ClientEvent::AppCheckpointCreated {
+                app_id,
+                checkpoint: lower_checkpoint(&checkpoint),
+            })
+        }
     }
 }
 
@@ -792,7 +833,8 @@ mod tests {
             app_id: "abcd1234".into(),
             state: AppWorkflowState::Generating,
             detail: Some("confirmed".into()),
-        });
+        })
+        .expect("WorkflowChanged always has a wire representation");
         match event {
             ClientEvent::AppWorkflowChanged {
                 app_id,
@@ -805,6 +847,34 @@ mod tests {
             }
             other => panic!("expected AppWorkflowChanged, got {other:?}"),
         }
+    }
+
+    /// `QuestionnaireChanged`/`PlanChanged` have no wire representation yet
+    /// (Task 5/6) — `lower_app_event` must degrade to a logged drop
+    /// (`None`), never `panic!`/`todo!()`. This pins the failure mode
+    /// directly: the forwarder task that calls `lower_app_event`
+    /// (`AppEmissionQueue::spawn`) is detached with its `JoinHandle`
+    /// discarded, so a panic here would silently kill the entire app-event
+    /// stream for every app, forever, with no crash and no log — see the
+    /// function's own doc comment for the full trace.
+    #[test]
+    fn events_with_no_wire_representation_yet_are_dropped_not_panicked() {
+        assert_eq!(
+            lower_app_event(AppEvent::QuestionnaireChanged {
+                app_id: "abcd1234".into(),
+                revision: 0,
+                steps: Vec::new(),
+            }),
+            None
+        );
+        assert_eq!(
+            lower_app_event(AppEvent::PlanChanged {
+                app_id: "abcd1234".into(),
+                revision: 0,
+                plan: None,
+            }),
+            None
+        );
     }
 
     #[test]
@@ -1027,10 +1097,20 @@ mod tests {
                 },
             ),
         ];
-        // Every `AppEvent` variant appears exactly once above; a new variant
-        // extends `lower_app_event`'s match (compile error) and belongs here.
+        // Every `AppEvent` variant EXCEPT `QuestionnaireChanged`/`PlanChanged`
+        // appears exactly once above. That pair is deliberately excluded,
+        // not an oversight: neither has a wire `ClientEvent` to pair with
+        // yet (Task 5/6), so `lower_app_event` returns `None` for both —
+        // see `events_with_no_wire_representation_yet_are_dropped_not_panicked`
+        // for their coverage instead. A genuinely NEW variant still forces a
+        // compile error into `lower_app_event`'s match, but — unlike what
+        // this comment used to claim — that compile error does NOT, by
+        // itself, force a new pair into this list; the two `todo!()`-turned-
+        // `None` arms are exactly the proof (they compiled fine with no
+        // entry here). Whoever adds the next variant should add a case here
+        // too, but the compiler will not make them.
         for (domain, expected) in cases {
-            assert_eq!(lower_app_event(domain), expected);
+            assert_eq!(lower_app_event(domain), Some(expected));
         }
     }
 }

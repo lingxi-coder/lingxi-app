@@ -661,21 +661,32 @@ mod tests {
     /// call — fails this test and forces a conscious look at the comment
     /// above `service.create_app(Some(name), name, conversation_id)`, instead of
     /// silently shipping a still-wrong value.
+    ///
+    /// The fixture name is deliberately LONGER than `AppService::create_app`'s
+    /// 24-char placeholder cut: a regression to `create_app(None, name, ..)`
+    /// (`name` silently dropped from the `create` tool call, only `brief`
+    /// passed through) would come back byte-for-byte identical for any name
+    /// at or under 24 chars via the placeholder path, leaving this test green
+    /// over the regression. Only a name that survives verbatim through the
+    /// EXPLICIT path makes the pin on "how `name` is supplied" meaningful,
+    /// not just the pin on `brief`'s value.
     #[tokio::test]
     async fn create_persists_name_as_brief_until_task_10_adds_a_real_one() {
+        const NAME: &str = "Habit Tracker Deluxe Edition";
+        assert!(
+            NAME.chars().count() > 24,
+            "test fixture must exceed the placeholder cut to be meaningful"
+        );
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
         let created = transport
-            .call(
-                "create",
-                json!({"name": "Habit Tracker", "template": "dashboard"}),
-            )
+            .call("create", json!({"name": NAME, "template": "dashboard"}))
             .await
             .expect("create");
         let app = &created.structured_content.expect("structured")["app"];
-        assert_eq!(app["name"], "Habit Tracker");
+        assert_eq!(app["name"], NAME);
         assert_eq!(
-            app["brief"], "Habit Tracker",
+            app["brief"], NAME,
             "until Task 10 adds a real brief input, `create` must persist `name` as `brief` \
              verbatim — not a template tag, not empty, not silently something else"
         );

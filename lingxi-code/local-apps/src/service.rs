@@ -2878,6 +2878,34 @@ mod tests {
         );
     }
 
+    /// The placeholder-name rule cuts at 24 CHARS, not 24 bytes — a byte
+    /// truncation of a CJK brief would slice a multi-byte codepoint in half.
+    /// `"一个记事本 app"` above (8 chars, 19 bytes — under BOTH a 24-char and
+    /// a 24-byte cut) can't tell the two implementations apart; this uses a
+    /// brief long enough, in an ALL-multi-byte script, that a byte-boundary
+    /// bug would produce a visibly different (or panicking) result.
+    #[tokio::test]
+    async fn create_app_placeholder_name_truncates_by_char_not_by_byte() {
+        let service = test_service().await;
+        let brief = "记".repeat(30);
+        let record = service
+            .create_app(None, &brief, None)
+            .await
+            .expect("create");
+        assert_eq!(
+            record.name.chars().count(),
+            24,
+            "the placeholder is exactly 24 CHARACTERS"
+        );
+        assert_eq!(record.name, "记".repeat(24));
+        assert_eq!(
+            record.name.len(),
+            24 * "记".len(),
+            "24 three-byte chars is 72 bytes, not 24 — a byte-boundary cut \
+             would have stopped after 8 whole chars"
+        );
+    }
+
     #[tokio::test]
     async fn create_app_rejects_an_empty_brief() {
         let service = test_service().await;
@@ -2889,17 +2917,44 @@ mod tests {
 
     #[tokio::test]
     async fn a_stored_questionnaire_survives_a_reload() {
-        let service = test_service().await;
-        let record = service
+        // Uses `harness` (not `test_service`) so `take_events` can pin that
+        // `questionnaire_ready` actually CONSTRUCTS `QuestionnaireChanged` —
+        // `service.rs`'s only construction site for that variant. Without
+        // this, a future refactor collapsing `questionnaire_ready` back onto
+        // the plain `workflow_step` wrapper the brief originally specified
+        // (the shape all seven sibling methods use) would make the event
+        // permanently dead again with every other test in this file green,
+        // and Tasks 13/14's iOS designer would never receive the
+        // questionnaire it exists to deliver.
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
             .create_app(None, "一个记事本", None)
             .await
             .expect("create");
-        service
+        let _ = h.take_events().await;
+        h.service
             .questionnaire_ready(&record.id, one_step(), Some("记事本".into()))
             .await
             .expect("authoring succeeds");
+        assert_eq!(
+            h.take_events().await,
+            vec![
+                AppEvent::WorkflowChanged {
+                    app_id: record.id.clone(),
+                    state: AppWorkflowState::CollectingSpec,
+                    detail: None,
+                },
+                AppEvent::QuestionnaireChanged {
+                    app_id: record.id.clone(),
+                    revision: 0,
+                    steps: one_step(),
+                },
+            ]
+        );
 
-        let reloaded = reload_service(&service).await;
+        let reloaded = reload_service(&h.service).await;
         let draft = reloaded.draft(&record.id).await.expect("draft is readable");
         assert_eq!(draft.questionnaire.len(), 1);
         assert_eq!(

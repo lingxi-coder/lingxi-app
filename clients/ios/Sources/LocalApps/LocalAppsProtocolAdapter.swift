@@ -135,20 +135,20 @@ enum LocalAppsProtocolAdapter {
 
     static func workflow(_ dto: AppWorkflowStateDto) -> LocalAppWorkflow {
         switch dto {
-        // TODO(local-apps#questionnaire, Task 13/18): `authoringQuestionnaire` /
-        // `questionnaireFailed` / `planning` / `planFailed` are new
-        // conversational-design states (core Task 3) with no dedicated iOS
-        // UI yet. Until Task 13/18 add real screens for them, they map onto
-        // the closest existing bucket by KIND (an LLM round trip in
-        // progress → `.generating`'s busy/spinner treatment; a failed round
-        // trip → `.generationFailed`'s retry treatment) — explicit arms,
-        // not a catch-all, so this switch still breaks the moment a real
-        // state is removed or renamed.
-        case .authoringQuestionnaire: .generating
-        case .questionnaireFailed: .generationFailed
+        // (local-apps#questionnaire, Task 14, closing the Task 13-review
+        // TODO that lived here): `authoringQuestionnaire`/`questionnaireFailed`/
+        // `planning`/`planFailed` used to collapse onto `.generating`/
+        // `.generationFailed` by KIND. That collapse was more than a display
+        // nicety — it let `LocalAppDesignerView.prepare()`'s `.generationFailed`
+        // arm call `store.openDesigner(appID:)` for an app that was actually in
+        // `questionnaire_failed`/`plan_failed`, neither of which `open_designer`
+        // accepts (state.rs:491-501), so the call failed server-side. Each DTO
+        // case now maps 1:1 onto its own `LocalAppWorkflow` case instead.
+        case .authoringQuestionnaire: .authoringQuestionnaire
+        case .questionnaireFailed: .questionnaireFailed
         case .collectingSpec: .collectingSpec
-        case .planning: .generating
-        case .planFailed: .generationFailed
+        case .planning: .planning
+        case .planFailed: .planFailed
         case .awaitingSpecConfirmation: .awaitingSpecConfirmation
         case .generating: .generating
         case .validating: .validating

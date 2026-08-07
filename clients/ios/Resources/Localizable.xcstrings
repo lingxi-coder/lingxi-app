@@ -15370,70 +15370,70 @@
         }
       }
     },
-    "local_apps_confirm_generate": {
+    "local_apps_generate_plan": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "确认并生成"
+            "value": "生成方案"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "確認並生成"
+            "value": "生成方案"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm & Generate"
+            "value": "Generate Plan"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "確認して生成"
+            "value": "プランを生成"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "확인하고 생성"
+            "value": "플랜 생성"
           }
         }
       }
     },
-    "local_apps_confirming": {
+    "local_apps_generating_plan": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "确认中…"
+            "value": "生成中…"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "確認中…"
+            "value": "生成中…"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirming…"
+            "value": "Generating…"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "確認中…"
+            "value": "生成中…"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "확인하는 중…"
+            "value": "생성하는 중…"
           }
         }
       }
@@ -16424,6 +16424,74 @@
         }
       }
     },
+    "local_apps_authoring_questionnaire": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在准备问题…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在準備問題…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing your questions…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "質問を準備しています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "질문을 준비하는 중입니다…"
+          }
+        }
+      }
+    },
+    "local_apps_custom_other": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "その他…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기타…"
+          }
+        }
+      }
+    },
     "local_apps_designer_not_ready": {
       "localizations": {
         "zh-Hans": {
@@ -16565,31 +16633,201 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在等待 Rust 模板和应用详情。"
+            "value": "正在等待应用详情。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在等待 Rust 模板和應用詳情。"
+            "value": "正在等待應用詳情。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for the Rust template and app details."
+            "value": "Waiting for app details."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Rust テンプレートとアプリの詳細を待っています。"
+            "value": "アプリの詳細を待っています。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Rust 템플릿과 앱 세부 정보를 기다리는 중입니다."
+            "value": "앱 세부 정보를 기다리는 중입니다."
+          }
+        }
+      }
+    },
+    "local_apps_plan_failed_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成方案时出了点问题。可以重试，用的还是同一份回答。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成方案時出了點問題。可以重試，用的還是同一份回答。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something went wrong while planning your app. You can retry with the same answers."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プランの作成中に問題が発生しました。同じ回答で再試行できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "플랜을 만드는 중 문제가 발생했습니다. 같은 답변으로 다시 시도할 수 있습니다."
+          }
+        }
+      }
+    },
+    "local_apps_planning": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理方案…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理方案…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Putting together your plan…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プランをまとめています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "플랜을 정리하는 중입니다…"
+          }
+        }
+      }
+    },
+    "local_apps_questionnaire_failed_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "准备问题时出了点问题。可以重试，或换一种方式描述这个应用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "準備問題時出了點問題。可以重試，或換一種方式描述這個應用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something went wrong while preparing your questions. You can retry, or describe the app differently."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "質問の準備中に問題が発生しました。再試行するか、アプリの説明を変えてみてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "질문을 준비하는 중 문제가 발생했습니다. 다시 시도하거나 앱 설명을 바꿔보세요."
+          }
+        }
+      }
+    },
+    "local_apps_update_brief": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新简介"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新簡介"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Brief"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "概要を更新"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "개요 업데이트"
+          }
+        }
+      }
+    },
+    "local_apps_updating_brief": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新中…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新中…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updating…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "업데이트하는 중…"
           }
         }
       }
@@ -22782,6 +23020,40 @@
         }
       }
     },
+    "local_apps_workflow_authoring_questionnaire": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在出题"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在出題"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing Questions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "質問を準備中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "질문 준비 중"
+          }
+        }
+      }
+    },
     "local_apps_workflow_awaiting_preview": {
       "localizations": {
         "zh-Hans": {
@@ -23016,6 +23288,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "생성 실패"
+          }
+        }
+      }
+    },
+    "local_apps_workflow_plan_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "方案生成失败"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "方案生成失敗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Planning Failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プラン生成に失敗"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "플랜 생성 실패"
+          }
+        }
+      }
+    },
+    "local_apps_workflow_planning": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在规划"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在規劃"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Planning"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プラン作成中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "플랜 작성 중"
+          }
+        }
+      }
+    },
+    "local_apps_workflow_questionnaire_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "出题失败"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "出題失敗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing Questions Failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "質問の準備に失敗"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "질문 준비 실패"
           }
         }
       }

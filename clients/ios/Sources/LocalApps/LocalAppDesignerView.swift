@@ -21,46 +21,63 @@ struct LocalAppDesignerView: View {
         return steps[stepIndex]
     }
 
+    /// Whether the answering form is interactive. `false` for every state
+    /// but `collectingSpec` — in particular for `authoringQuestionnaire` and
+    /// `planning`, where an LLM round trip owns the draft and a concurrent
+    /// user edit would race it (local-apps#questionnaire, Task 14). A pure
+    /// function of workflow so it is directly testable without a live view.
+    static func isEditable(_ workflow: LocalAppWorkflow) -> Bool {
+        workflow == .collectingSpec
+    }
+
+    private var isFormEditable: Bool {
+        app.map { LocalAppDesignerView.isEditable($0.workflow) } ?? false
+    }
+
     var body: some View {
         Group {
-            if let app, let currentStep {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        DesignerStepHeader(
-                            appName: app.name,
-                            steps: steps,
-                            selectedIndex: stepIndex,
-                            onSelect: selectStep
-                        )
-                        if let suggestion = store.suggestions[appID] {
-                            LocalAppSuggestionPanel(
-                                suggestion: suggestion,
-                                onApply: { Task { await store.applySuggestion(appID: appID) } },
-                                onDismiss: { Task { await store.dismissSuggestion(appID: appID) } }
+            if let app {
+                if isFormEditable, let currentStep {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 18) {
+                            DesignerStepHeader(
+                                appName: app.name,
+                                steps: steps,
+                                selectedIndex: stepIndex,
+                                onSelect: selectStep
                             )
+                            if let suggestion = store.suggestions[appID] {
+                                LocalAppSuggestionPanel(
+                                    suggestion: suggestion,
+                                    onApply: { Task { await store.applySuggestion(appID: appID) } },
+                                    onDismiss: { Task { await store.dismissSuggestion(appID: appID) } }
+                                )
+                            }
+                            DesignerStepCard(
+                                step: currentStep,
+                                appID: appID,
+                                values: designer?.fields ?? [:],
+                                onEdit: handleEdit
+                            )
+                            if let progress = store.generationProgress[appID] {
+                                LocalAppGenerationCard(progress: progress, workflow: app.workflow)
+                            }
                         }
-                        DesignerStepCard(
-                            step: currentStep,
-                            appID: appID,
-                            values: designer?.fields ?? [:],
-                            onEdit: handleEdit
-                        )
-                        if let progress = store.generationProgress[appID] {
-                            LocalAppGenerationCard(progress: progress, workflow: app.workflow)
-                        }
+                        .padding()
                     }
-                    .padding()
-                }
-                .background(theme.windowBg)
-                .safeAreaInset(edge: .bottom) {
-                    DesignerBottomBar(
-                        stepIndex: stepIndex,
-                        stepCount: steps.count,
-                        canContinue: canAdvance,
-                        isConfirming: confirming,
-                        onPrevious: previous,
-                        onNext: next
-                    )
+                    .background(theme.windowBg)
+                    .safeAreaInset(edge: .bottom) {
+                        DesignerBottomBar(
+                            stepIndex: stepIndex,
+                            stepCount: steps.count,
+                            canContinue: canAdvance,
+                            isConfirming: confirming,
+                            onPrevious: previous,
+                            onNext: next
+                        )
+                    }
+                } else {
+                    unavailableView(for: app.workflow)
                 }
             } else {
                 ContentUnavailableView {
@@ -79,17 +96,74 @@ struct LocalAppDesignerView: View {
                 Button("local_apps_agent_suggestion", systemImage: "sparkles") {
                     Task { await store.requestDesignSuggestion(appID: appID) }
                 }
-                .disabled(designer == nil)
+                .disabled(designer == nil || !isFormEditable)
                 .accessibilityIdentifier("local-apps.request-suggestion")
             }
         }
         // Keyed on workflow (not just `.task { }`, which only runs once on
-        // appear): a freshly created app is in `authoring_questionnaire`
-        // (mapped to `.generating`), where `prepare()` below deliberately
-        // does nothing. `.task(id:)` re-invokes `prepare()` the moment
-        // `questionnaire_ready` flips this app to `.collectingSpec` — no
-        // user action required to pick the retry back up.
+        // appear): a freshly created app is in `authoring_questionnaire`,
+        // where `prepare()` below deliberately does nothing. `.task(id:)`
+        // re-invokes `prepare()` the moment `questionnaire_ready` flips this
+        // app to `.collectingSpec` — no user action required to pick the
+        // retry back up.
         .task(id: app?.workflow) { await prepare() }
+    }
+
+    /// The four intermediate/failure states this screen renders instead of
+    /// the editable form, plus a fallback for everything else the designer
+    /// can transiently be pushed onto (`awaitingSpecConfirmation` — Task
+    /// 15's plan-confirmation screen owns that state; until it lands this is
+    /// an honest "not ready" holding pattern, not a broken one, because
+    /// `prepare()` never issues a doomed command for it) — see `prepare()`.
+    @ViewBuilder
+    private func unavailableView(for workflow: LocalAppWorkflow) -> some View {
+        switch workflow {
+        case .authoringQuestionnaire:
+            ContentUnavailableView {
+                ProgressView()
+            } description: {
+                Text("local_apps_authoring_questionnaire")
+            }
+        case .questionnaireFailed:
+            ContentUnavailableView {
+                Label("local_apps_workflow_questionnaire_failed", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text("local_apps_questionnaire_failed_detail")
+            } actions: {
+                VStack(spacing: 12) {
+                    Button("common_retry") {
+                        Task { await store.retryQuestionnaire(appID: appID) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    DesignerBriefEditor(store: store, appID: appID, brief: app?.brief ?? "")
+                }
+            }
+        case .planning:
+            ContentUnavailableView {
+                ProgressView()
+            } description: {
+                Text("local_apps_planning")
+            }
+        case .planFailed:
+            ContentUnavailableView {
+                Label("local_apps_workflow_plan_failed", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text("local_apps_plan_failed_detail")
+            } actions: {
+                Button("common_retry") {
+                    Task { await store.retryPlan(appID: appID) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        default:
+            ContentUnavailableView {
+                Label("local_apps_designer_not_ready", systemImage: "slider.horizontal.3")
+            } description: {
+                Text(steps.isEmpty ? String(localized: "local_apps_designer_waiting") : String(localized: "local_apps_designer_opening"))
+            } actions: {
+                Button("common_retry") { Task { await prepare() } }
+            }
+        }
     }
 
     private var values: [String: LocalAppDesignValue] { designer?.fields ?? [:] }
@@ -99,8 +173,11 @@ struct LocalAppDesignerView: View {
         return LocalAppDesignerGate.isSatisfied(currentStep, values: values)
     }
 
-    /// The step pills are ungated forward jumps and `confirm_design` has no
-    /// required-field check of its own, so the terminal action re-checks every step.
+    /// The step pills are ungated forward jumps, so the terminal action
+    /// re-checks every step rather than trusting the currently visible one.
+    /// `begin_planning` (state.rs) runs the identical `validate_answers`
+    /// check server-side, but the client gate exists so a missing answer
+    /// disables the button instead of costing a round trip.
     private var canConfirm: Bool {
         LocalAppDesignerGate.canConfirm(steps, values: values)
     }
@@ -120,28 +197,40 @@ struct LocalAppDesignerView: View {
             // gate that was already open. Refresh instead; the id arrives with the
             // re-announced gate (AppService::resync_pending_gates).
             await store.getDetails(appID: appID)
-        case .collectingSpec, .generationFailed:
-            // The two states state.rs's `open_designer` actually accepts.
-            // NOTE: `.generationFailed` is a collapsed bucket — it also
-            // stands in for the newer `questionnaire_failed`/`plan_failed`
-            // states (LocalAppsProtocolAdapter.workflow, pending dedicated
-            // Task 14/18 UI), which `open_designer` does NOT accept. Hitting
-            // this arm while actually in one of those two still fails
-            // server-side (surfaced as `errorMessage`, not a crash) — a
-            // known, narrower residual of the same bucketing gap, left for
-            // Task 14/18 rather than expanding `LocalAppWorkflow` here.
+        case .collectingSpec:
+            // Deliberately `getDetails`, NOT `openDesigner`. `open_designer`
+            // (state.rs:491-501) transitions collecting_spec straight to
+            // awaiting_spec_confirmation — arming the confirm gate and
+            // moving the workflow off collecting_spec before the user has
+            // even seen a question. `beginPlanning()` below requires
+            // exactly collecting_spec, so that eager transition would make
+            // every 生成方案 tap fail with workflow_state_invalid the
+            // moment this screen was ever opened. Answering questions does
+            // not need a gate at all: `update_draft` (state.rs) does not
+            // check workflow state, so `getDetails` alone is enough to load
+            // the current draft answers for editing.
+            await store.getDetails(appID: appID)
+        case .generationFailed:
+            // `open_designer` is legal here too: after a code-generation
+            // failure the design was already planned and confirmed once, so
+            // re-arming the SAME confirm gate (rather than re-running
+            // planning) is how the user retries. The screen that actually
+            // renders `awaiting_spec_confirmation` is Task 15's plan
+            // confirmation UI; until it lands this falls into the
+            // `unavailableView(for:)` fallback below, same as the
+            // plan-ready path above — an honest "not ready" holding
+            // pattern, not a broken command.
             await store.openDesigner(appID: appID)
         default:
-            // `.generating`-mapped states include `authoring_questionnaire`
-            // and `planning` — an LLM round trip is still in flight and has
-            // not produced the questionnaire this screen needs yet. A
-            // freshly created app starts exactly here: calling
-            // `open_designer` now is illegal (state.rs only accepts
-            // `collecting_spec`/`generation_failed`) and used to fire
-            // unconditionally on every app creation. Do nothing; the
-            // `.task(id:)` above re-runs `prepare()` the moment the
-            // workflow changes, so this resolves itself without a doomed
-            // command or a user-visible error.
+            // `.authoringQuestionnaire`/`.planning` (an LLM round trip still
+            // in flight) and `.questionnaireFailed`/`.planFailed` (a
+            // failure awaiting a user-initiated retry, wired in
+            // `unavailableView(for:)`) all deliberately no-op here: firing
+            // a command automatically — especially a retry — without the
+            // user asking would turn a workflow re-render into a retry
+            // storm. `.task(id: app?.workflow)` already re-invokes
+            // `prepare()` the moment the workflow actually changes, so a
+            // busy state resolves itself without polling.
             return
         }
     }
@@ -159,17 +248,23 @@ struct LocalAppDesignerView: View {
         if stepIndex + 1 < steps.count {
             store.setCurrentStep(stepIndex + 1, appID: appID)
         } else {
-            Task { await confirm() }
+            Task { await beginPlanning() }
         }
     }
 
-    private func confirm() async {
+    /// The final step's action. Starts the plan-authoring LLM round trip
+    /// (`collecting_spec -> planning`) — NOT `confirmDesign`/`confirm_design`,
+    /// which is the LATER "confirm the derived plan" gate
+    /// (`awaiting_spec_confirmation -> generating`, Task 15's screen) that
+    /// `plan_ready` arms automatically once planning finishes. Stays on this
+    /// screen either way: on success `.task(id: app?.workflow)` re-runs
+    /// `prepare()` as soon as the workflow flips to `.planning`, and the
+    /// busy `unavailableView(for:)` branch takes over without any
+    /// navigation needed here.
+    private func beginPlanning() async {
         confirming = true
-        let succeeded = await store.confirmDesign(appID: appID)
+        _ = await store.beginPlanning(appID: appID)
         confirming = false
-        if succeeded {
-            path = [.details(appID)]
-        }
     }
 
     private func handleEdit(_ field: LocalAppDesignField, _ value: LocalAppDesignValue) {
@@ -309,6 +404,25 @@ private struct LocalAppFieldEditor: View {
                     .foregroundStyle(theme.text3)
             }
             editor
+            // `.singleChoice`/`.multipleChoice` already render their
+            // `allowsCustom`/`allowsDefer` affordances AS `DesignerFieldChips`
+            // above (that's the field's whole editor for those two types).
+            // Every other field type keeps its existing dedicated editor, so
+            // this appends a second, options-less `DesignerFieldChips` row
+            // underneath — `allowsDefer` is legal on ANY field
+            // (`AppDesignField::allows_defer`, local-apps#questionnaire), not
+            // only choice fields, so a shortText/color/etc. field can still
+            // offer 「由你决定」 even though it has no options to chip.
+            if showsSupplementaryChips {
+                DesignerFieldChips(field: field, value: value, onChange: onChange)
+            }
+        }
+    }
+
+    private var showsSupplementaryChips: Bool {
+        switch field.type {
+        case .singleChoice, .multipleChoice: false
+        default: field.allowsDefer || field.allowsCustom
         }
     }
 
@@ -324,17 +438,12 @@ private struct LocalAppFieldEditor: View {
                 .padding(6)
                 .background(theme.windowBg, in: .rect(cornerRadius: 10))
                 .overlay { RoundedRectangle(cornerRadius: 10).stroke(theme.border) }
-        case .singleChoice:
-            Picker(field.label, selection: textBinding) {
-                Text("local_apps_please_select").tag("")
-                ForEach(field.options) { option in
-                    Text(option.label).tag(option.value)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        case .multipleChoice:
-            LocalAppMultipleChoiceEditor(options: field.options, selection: stringsBinding)
+        case .singleChoice, .multipleChoice:
+            // The chips ARE the options here — `field.options` populates
+            // `DesignerFieldChips.chipValues`, so this replaces the old
+            // `Picker`/`LocalAppMultipleChoiceEditor` outright rather than
+            // sitting alongside it (local-apps#questionnaire, Task 14).
+            DesignerFieldChips(field: field, value: value, onChange: onChange)
         case .boolean:
             Toggle(field.label, isOn: booleanBinding)
                 .labelsHidden()
@@ -432,24 +541,159 @@ private struct LocalAppFieldEditor: View {
     }
 }
 
-private struct LocalAppMultipleChoiceEditor: View {
-    let options: [LocalAppDesignOption]
-    @Binding var selection: [String]
+/// Renders a field's options as tappable chips, plus (independently of the
+/// options list) the `Other…` free-text box when `allowsCustom` and the
+/// 「由你决定」 chip when `allowsDefer` — both mirror `AppDesignFieldDto`
+/// (local-apps#questionnaire, Task 13/14). Used as the WHOLE editor for
+/// `.singleChoice`/`.multipleChoice` fields (their `options` populate
+/// `chipValues`) and, options-less, appended under every other field type
+/// that sets `allowsCustom`/`allowsDefer` — both flags are legal on any
+/// field, not only choice fields.
+///
+/// `chipValues`/`showsCustomInput`/`select(_:)` are plain, state-independent
+/// computations over `field`/`value` so they are directly unit-testable
+/// without a live view host (see `LocalAppsStoreTests.swift`).
+struct DesignerFieldChips: View {
+    enum Chip: Hashable {
+        case option(String)
+        case deferred
+    }
+
+    @Environment(\.theme) private var theme
+    let field: LocalAppDesignField
+    let value: LocalAppDesignValue?
+    let onChange: (LocalAppDesignValue) -> Void
+
+    @State private var customText: String
+
+    init(
+        field: LocalAppDesignField,
+        value: LocalAppDesignValue? = nil,
+        onChange: @escaping (LocalAppDesignValue) -> Void = { _ in }
+    ) {
+        self.field = field
+        self.value = value
+        self.onChange = onChange
+        _customText = State(initialValue: DesignerFieldChips.initialCustomText(field: field, value: value))
+    }
+
+    /// The chip row: every declared option, then 「由你决定」 last when
+    /// `allowsDefer`. `allowsCustom` does NOT add a chip — `showsCustomInput`
+    /// below renders it as an always-visible text box instead, matching the
+    /// engine's own framing ("Other…" is a box you type into, not a toggle).
+    var chipValues: [Chip] {
+        var chips = field.options.map { Chip.option($0.value) }
+        if field.allowsDefer { chips.append(.deferred) }
+        return chips
+    }
+
+    var showsCustomInput: Bool { field.allowsCustom }
+
+    /// The option values known to this field — anything in a `.strings`/
+    /// `.text` answer that is NOT among these is what `customText` holds.
+    private var optionValues: Set<String> { Set(field.options.map(\.value)) }
+
+    private var selectedOptions: [String] {
+        switch value {
+        case let .text(text): optionValues.contains(text) ? [text] : []
+        case let .strings(values): values.filter(optionValues.contains)
+        default: []
+        }
+    }
+
+    private static func initialCustomText(field: LocalAppDesignField, value: LocalAppDesignValue?) -> String {
+        let optionValues = Set(field.options.map(\.value))
+        switch value {
+        case let .text(text): return optionValues.contains(text) ? "" : text
+        case let .strings(values): return values.first { !optionValues.contains($0) } ?? ""
+        default: return ""
+        }
+    }
+
+    func select(_ chip: Chip) {
+        switch chip {
+        case let .option(optionValue): onChange(toggled(optionValue))
+        // Selecting 「由你决定」 sends `.deferred` — an ANSWER, not an
+        // absence (local-apps#questionnaire, Task 1/13). It must never be
+        // read back as "cleared the field".
+        case .deferred: onChange(.deferred)
+        }
+    }
+
+    private func toggled(_ optionValue: String) -> LocalAppDesignValue {
+        guard field.type == .multipleChoice else { return .text(optionValue) }
+        var values = selectedOptions
+        if values.contains(optionValue) {
+            values.removeAll { $0 == optionValue }
+        } else {
+            values.append(optionValue)
+        }
+        if !customText.isEmpty { values.append(customText) }
+        return .strings(values)
+    }
+
+    private func commitCustom(_ text: String) {
+        if field.type == .multipleChoice {
+            var values = selectedOptions
+            if !text.isEmpty { values.append(text) }
+            onChange(.strings(values))
+        } else {
+            onChange(.text(text))
+        }
+    }
+
+    private func isSelected(_ chip: Chip) -> Bool {
+        switch chip {
+        case let .option(optionValue): selectedOptions.contains(optionValue)
+        case .deferred:
+            if case .deferred = value { true } else { false }
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(options) { option in
-                Toggle(
-                    option.label,
-                    isOn: Binding(
-                        get: { selection.contains(option.value) },
-                        set: { enabled in
-                            if enabled, !selection.contains(option.value) { selection.append(option.value) }
-                            if !enabled { selection.removeAll { $0 == option.value } }
+        VStack(alignment: .leading, spacing: 8) {
+            if !chipValues.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(chipValues, id: \.self) { chip in
+                            Button(chipLabel(chip)) { select(chip) }
+                                .buttonStyle(.bordered)
+                                .tint(isSelected(chip) ? theme.accent : theme.text4)
+                                .accessibilityIdentifier(chipAccessibilityID(chip))
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+            if showsCustomInput {
+                TextField(
+                    String(localized: "local_apps_custom_other"),
+                    text: Binding(
+                        get: { customText },
+                        set: { newValue in
+                            customText = newValue
+                            commitCustom(newValue)
                         }
                     )
                 )
+                .textFieldStyle(.roundedBorder)
             }
+        }
+    }
+
+    private func chipLabel(_ chip: Chip) -> String {
+        switch chip {
+        case let .option(optionValue):
+            field.options.first { $0.value == optionValue }?.label ?? optionValue
+        case .deferred:
+            String(localized: "local_apps_value_deferred")
+        }
+    }
+
+    private func chipAccessibilityID(_ chip: Chip) -> String {
+        switch chip {
+        case let .option(optionValue): "local-apps.chip.\(field.id).\(optionValue)"
+        case .deferred: "local-apps.chip.\(field.id).deferred"
         }
     }
 }
@@ -641,7 +885,11 @@ private struct DesignerBottomBar: View {
             Spacer()
             Button(
                 stepIndex + 1 == stepCount
-                    ? (isConfirming ? "local_apps_confirming" : "local_apps_confirm_generate")
+                    // The final step starts an LLM round trip
+                    // (`beginPlanning` → `begin_planning`), not a plain
+                    // "next" — the copy must set that expectation instead of
+                    // reusing "下一步" (local-apps#questionnaire, Task 14).
+                    ? (isConfirming ? "local_apps_generating_plan" : "local_apps_generate_plan")
                     : "local_apps_next",
                 action: onNext
             )
@@ -650,6 +898,44 @@ private struct DesignerBottomBar: View {
         }
         .padding()
         .background(.bar)
+    }
+}
+
+/// The "change description" escape hatch offered alongside `questionnaireFailed`'s
+/// retry button. `update_brief` (state.rs) is legal from `questionnaire_failed`
+/// (as well as `collecting_spec`/`plan_failed`) precisely so a bad brief that
+/// produced a bad questionnaire is not a dead end — retrying with the SAME
+/// brief would just reproduce the same failure if the brief itself was the
+/// problem.
+private struct DesignerBriefEditor: View {
+    @Bindable var store: LocalAppsStore
+    let appID: String
+
+    @State private var brief: String
+    @State private var submitting = false
+
+    init(store: LocalAppsStore, appID: String, brief: String) {
+        self.store = store
+        self.appID = appID
+        _brief = State(initialValue: brief)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("local_apps_brief", text: $brief, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3 ... 6)
+            Button(submitting ? "local_apps_updating_brief" : "local_apps_update_brief") {
+                Task {
+                    submitting = true
+                    _ = await store.updateBrief(appID: appID, brief: brief)
+                    submitting = false
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(submitting || brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .frame(maxWidth: 320)
     }
 }
 

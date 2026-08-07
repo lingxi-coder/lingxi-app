@@ -39,7 +39,25 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
 }
 
 enum LocalAppWorkflow: String, Hashable, Sendable {
+    /// The LLM is authoring the questionnaire from the app's brief
+    /// (`AppWorkflowState::AuthoringQuestionnaire`). Was collapsed into
+    /// `.generationFailed`'s sibling `.generating` bucket until Task 14 gave
+    /// it its own case (local-apps#questionnaire, Task 3/13/14 review
+    /// Critical residual) — the collapse is what let `LocalAppDesignerView`
+    /// fall into `openDesigner` for a state `open_designer` does not accept.
+    case authoringQuestionnaire
+    /// Questionnaire authoring failed (`AppWorkflowState::QuestionnaireFailed`).
+    /// Recoverable via `LocalAppsStore.retryQuestionnaire(appID:)` or
+    /// `updateBrief(appID:brief:)` — both already legal from this state
+    /// (state.rs `retry_questionnaire`/`update_brief`).
+    case questionnaireFailed
     case collectingSpec
+    /// The LLM is deriving the plan from the collected answers
+    /// (`AppWorkflowState::Planning`).
+    case planning
+    /// Planning failed (`AppWorkflowState::PlanFailed`). Recoverable via
+    /// `LocalAppsStore.retryPlan(appID:)` (`retry_plan`, same answers).
+    case planFailed
     case awaitingSpecConfirmation
     case generating
     case validating
@@ -51,7 +69,11 @@ enum LocalAppWorkflow: String, Hashable, Sendable {
 
     var label: String {
         switch self {
+        case .authoringQuestionnaire: String(localized: "local_apps_workflow_authoring_questionnaire")
+        case .questionnaireFailed: String(localized: "local_apps_workflow_questionnaire_failed")
         case .collectingSpec: String(localized: "local_apps_workflow_collecting_spec")
+        case .planning: String(localized: "local_apps_workflow_planning")
+        case .planFailed: String(localized: "local_apps_workflow_plan_failed")
         case .awaitingSpecConfirmation: String(localized: "local_apps_workflow_awaiting_spec")
         case .generating: String(localized: "local_apps_workflow_generating")
         case .validating: String(localized: "local_apps_workflow_validating")
@@ -65,7 +87,7 @@ enum LocalAppWorkflow: String, Hashable, Sendable {
 
     var isBusy: Bool {
         switch self {
-        case .generating, .validating, .revising: true
+        case .authoringQuestionnaire, .planning, .generating, .validating, .revising: true
         default: false
         }
     }

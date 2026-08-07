@@ -945,6 +945,100 @@ final class LocalAppsStoreTests: XCTestCase {
         )
     }
 
+    // MARK: - DesignerFieldChips / LocalAppDesignerView.isEditable
+    //
+    // Adapted from the brief's Swift-Testing (`@Test`/`#expect`) pseudocode to
+    // this file's established XCTest conventions, same as Task 13's designer
+    // tests above. `DesignerFieldChips`'s testable surface
+    // (`chipValues`/`showsCustomInput`/`select(_:)`) is deliberately
+    // state-independent so it is exercisable here without a live view host,
+    // the same reason `LocalAppDesignerGate` lives outside the
+    // `#if canImport(engine_mobileFFI)` block above.
+
+    func testAFieldThatAllowsDeferOffersTheDeferChip() {
+        let field = designField(allowsDefer: true)
+        XCTAssertTrue(DesignerFieldChips(field: field).chipValues.contains(.deferred))
+
+        // Not vacuously true: a field that does NOT allow defer must not
+        // offer the chip either.
+        let withoutDefer = designField(allowsDefer: false)
+        XCTAssertFalse(DesignerFieldChips(field: withoutDefer).chipValues.contains(.deferred))
+    }
+
+    func testAFieldThatAllowsCustomOffersTheOtherBox() {
+        let field = designField(allowsCustom: true)
+        XCTAssertTrue(DesignerFieldChips(field: field).showsCustomInput)
+
+        let withoutCustom = designField(allowsCustom: false)
+        XCTAssertFalse(DesignerFieldChips(field: withoutCustom).showsCustomInput)
+    }
+
+    /// `.deferred` is an answer, not an absence — selecting 「由你决定」
+    /// must send `LocalAppDesignValue.deferred`, never clear the field
+    /// (local-apps#questionnaire, Task 1/13/14).
+    func testChoosingDeferStoresTheDeferredValueRatherThanClearingTheField() {
+        var recorded: LocalAppDesignValue?
+        let chips = DesignerFieldChips(field: designField(allowsDefer: true)) { recorded = $0 }
+        chips.select(.deferred)
+        XCTAssertEqual(recorded, .deferred, "defer is an answer, not an absence")
+    }
+
+    func testSelectingAnOptionChipSetsASingleChoiceFieldsTextValue() {
+        let field = LocalAppDesignField(
+            id: "tone",
+            label: "语气",
+            description: "",
+            type: .singleChoice,
+            required: true,
+            allowsCustom: false,
+            allowsDefer: false,
+            defaultValue: nil,
+            options: [LocalAppDesignOption(value: "playful", label: "俏皮")]
+        )
+        var recorded: LocalAppDesignValue?
+        let chips = DesignerFieldChips(field: field) { recorded = $0 }
+        chips.select(.option("playful"))
+        XCTAssertEqual(recorded, .text("playful"))
+    }
+
+    /// A second tap on an already-selected chip removes it — the chips ARE
+    /// the multi-select editor now, not an additive-only list.
+    func testSelectingAnOptionChipTwiceTogglesAMultipleChoiceFieldsMembership() {
+        let field = LocalAppDesignField(
+            id: "features",
+            label: "需要哪些功能",
+            description: "",
+            type: .multipleChoice,
+            required: true,
+            allowsCustom: false,
+            allowsDefer: false,
+            defaultValue: nil,
+            options: [LocalAppDesignOption(value: "list", label: "笔记列表")]
+        )
+        var recorded: LocalAppDesignValue?
+        let chips = DesignerFieldChips(field: field, value: .strings(["list"])) { recorded = $0 }
+        chips.select(.option("list"))
+        XCTAssertEqual(recorded, .strings([]))
+    }
+
+    /// The designer's answering form is only interactive at `collectingSpec`
+    /// — while an LLM round trip owns the draft (`authoringQuestionnaire`/
+    /// `planning`) a concurrent edit would race it.
+    func testTheDesignerIsReadOnlyWhileTheModelIsWorking() {
+        for workflow: LocalAppWorkflow in [.authoringQuestionnaire, .planning] {
+            XCTAssertFalse(LocalAppDesignerView.isEditable(workflow), "\(workflow) must be read-only")
+        }
+        XCTAssertTrue(LocalAppDesignerView.isEditable(.collectingSpec))
+    }
+
+    /// The two failure states must NOT be silently treated as editable —
+    /// each renders its own retry UI instead (`unavailableView(for:)`).
+    func testTheTwoFailureStatesAreAlsoReadOnly() {
+        for workflow: LocalAppWorkflow in [.questionnaireFailed, .planFailed] {
+            XCTAssertFalse(LocalAppDesignerView.isEditable(workflow), "\(workflow) must be read-only")
+        }
+    }
+
     /// A pasted URL or a typed capital used to reach the engine verbatim and
     /// come back as a raw English `invalid_request`.
     func testDomainNormalizationMirrorsTheManifestContract() {

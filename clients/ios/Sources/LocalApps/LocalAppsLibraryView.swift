@@ -219,7 +219,13 @@ private struct LocalAppsLibraryScreen: View {
 
     private func open(_ app: LocalAppSummary) {
         switch app.workflow {
-        case .collectingSpec, .awaitingSpecConfirmation:
+        // `LocalAppDesignerView` owns all of these (local-apps#questionnaire,
+        // Task 14) — the busy/failure states get their own screen there
+        // instead of the generic details view, with retry actions for the
+        // two failure states wired to the store.
+        case .collectingSpec, .awaitingSpecConfirmation,
+             .authoringQuestionnaire, .questionnaireFailed,
+             .planning, .planFailed:
             path.append(.designer(app.id))
         case .awaitingPreviewConfirmation:
             path.append(.preview(app.id))

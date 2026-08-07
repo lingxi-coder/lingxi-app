@@ -1352,6 +1352,14 @@ impl MobileLinuxRuntime for IosIshRuntime {
         Ok(self.rootfs_snapshot())
     }
 
+    fn current_mounts(&self) -> Vec<MountSpec> {
+        self.state
+            .mounts
+            .read()
+            .expect("ios-ish mounts rwlock")
+            .clone()
+    }
+
     async fn configure_mounts(&self, mounts: Vec<MountSpec>) -> Result<(), MobileLinuxError> {
         let mut normalized = Vec::with_capacity(mounts.len().saturating_add(2));
         normalized.push(validate_mount(
@@ -2665,6 +2673,29 @@ mod tests {
             .expect("persistent home mount");
         assert_eq!(home.host_path, config.managed_root.join("persistent/root"));
         assert!(!home.read_only);
+    }
+
+    /// `current_mounts` is the table `GuestPathFileSystem` translates against;
+    /// it must expose the same live state the runtime actually mounts —
+    /// including the persistent `/root` bind the runtime adds on its own.
+    #[test]
+    fn current_mounts_exposes_the_live_workspace_and_home_table() {
+        use traits::MobileLinuxRuntime as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let config = test_config(&root);
+        let runtime = IosIshRuntime::new(config.clone());
+        let mounts = runtime.current_mounts();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(
+            mounts[0].guest_path,
+            traits::mobile_linux::guest_paths::workspace(&config.stable_workspace_id)
+        );
+        assert_eq!(mounts[1].guest_path, traits::mobile_linux::guest_paths::HOME);
+        assert_eq!(
+            mounts[1].host_path,
+            config.managed_root.join("persistent/root")
+        );
     }
 
     #[test]

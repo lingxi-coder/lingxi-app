@@ -93,6 +93,28 @@ pub fn resolve_against_cwd(path: PathBuf, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Apply the filesystem's model-path translation (mobile-linux guest paths →
+/// their host-backed twins) to an already cwd-resolved tool path.
+///
+/// Every file tool calls this between [`resolve_against_cwd`] and
+/// [`canonicalize_and_validate`], so a guest path canonicalizes and
+/// containment-checks as the host directory that actually backs it. On the
+/// default filesystem (`translate_model_path` → `Ok(None)`) this returns the
+/// input unchanged — desktop behavior is byte-identical. `Err` carries the
+/// filesystem's fence message (unbacked guest space, read-only mount) for the
+/// tool to surface to the model.
+pub fn translate_model_path(
+    fs: &std::sync::Arc<dyn traits::FileSystem>,
+    path: PathBuf,
+    write: bool,
+) -> Result<PathBuf, String> {
+    match fs.translate_model_path(&path.to_string_lossy(), write) {
+        Ok(None) => Ok(path),
+        Ok(Some(host)) => Ok(PathBuf::from(host)),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn canonicalize_with_fallback(path: &Path) -> Result<PathBuf, PathValidationError> {
     if let Ok(p) = std::fs::canonicalize(path) {
         Ok(p)

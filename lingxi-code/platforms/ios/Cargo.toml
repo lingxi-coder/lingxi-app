@@ -22,5 +22,10 @@ platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
 http-client = { path = "../../http-client" }
 
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3.13"
+
 [lints]
 workspace = true

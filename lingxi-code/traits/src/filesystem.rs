@@ -195,6 +195,30 @@ pub trait FileSystem: Send + Sync {
     /// Engine code calls this after every important write so a power loss
     /// cannot leave a partially-flushed transcript visible (spec §22.3 / B5).
     async fn fsync(&self, path: &str) -> Result<(), FsError>;
+
+    /// Translate a MODEL-SUPPLIED path into the host path tools should
+    /// operate on, when this filesystem exposes a separate model-visible
+    /// coordinate space (mobile-linux guest paths).
+    ///
+    /// - `Ok(None)` — the path needs no translation; use it as-is. This is
+    ///   the default for every filesystem whose model-visible space IS the
+    ///   host space.
+    /// - `Ok(Some(host))` — `path` was a guest path on a host-backed mount;
+    ///   operate on `host` instead.
+    /// - `Err(_)` — `path` is inside the model-visible space but must not be
+    ///   touched from the host (e.g. iSH fakefs regions, read-only mounts
+    ///   for `write == true`). Tools surface the error to the model.
+    ///
+    /// File tools call this BEFORE canonicalization/containment so a guest
+    /// path validates as its host twin. `write` marks mutating operations.
+    fn translate_model_path(
+        &self,
+        path: &str,
+        write: bool,
+    ) -> Result<Option<String>, FsError> {
+        let _ = (path, write);
+        Ok(None)
+    }
 }
 
 /// Guard for an OS advisory file lock acquired via

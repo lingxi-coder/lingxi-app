@@ -18,7 +18,7 @@
 
 #![forbid(unsafe_code)]
 
-use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
+use platform_common::{GuestPathFileSystem, MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
@@ -134,8 +134,20 @@ impl IosPlatform {
                 runtime,
             )
         };
+        // File tools speak guest paths on mobile-linux: the runtime's live
+        // mount table maps them onto their host-backed twins, host paths keep
+        // passing through unchanged, and unbacked (fakefs) guest space is
+        // refused. Legacy mode keeps the bare host filesystem.
+        let base_fs: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(inputs.app_sandbox_root));
+        let fs: Arc<dyn FileSystem> = match (&effective_runtime, mobile_linux_selected) {
+            (Some(runtime), true) => {
+                Arc::new(GuestPathFileSystem::new(base_fs, runtime.clone()))
+            }
+            _ => base_fs,
+        };
         Self {
-            fs: Arc::new(PosixFileSystem::new(inputs.app_sandbox_root)),
+            fs,
             http: Arc::new(http_client::ReqwestHttp::new()),
             clock: Arc::new(PosixClock::new()),
             process,
@@ -219,4 +231,108 @@ impl Platform for IosPlatform {
     }
     // computer_control() defaults to None — screen automation is not an iOS
     // capability in M8.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use traits::{
+        CameraError, CapturePhotoOpts, CapturedImage, FsError, SharePayload, ShareError,
+        ShareResult, UnavailableMobileLinuxRuntime, VoiceError, VoiceRecording,
+        VoiceRecordingOpts,
+    };
+
+    struct StubCamera;
+    #[async_trait]
+    impl CameraControl for StubCamera {
+        async fn capture_photo(
+            &self,
+            _opts: CapturePhotoOpts,
+        ) -> Result<CapturedImage, CameraError> {
+            Err(CameraError::DeviceUnavailable)
+        }
+        async fn pick_from_library(&self) -> Result<CapturedImage, CameraError> {
+            Err(CameraError::DeviceUnavailable)
+        }
+    }
+
+    struct StubVoice;
+    #[async_trait]
+    impl VoiceRecorder for StubVoice {
+        async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
+            Err(VoiceError::Other("stub".to_string()))
+        }
+        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
+            Err(VoiceError::Other("stub".to_string()))
+        }
+        async fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    struct StubShare;
+    #[async_trait]
+    impl SharingService for StubShare {
+        async fn share(&self, _payload: SharePayload) -> Result<ShareResult, ShareError> {
+            Err(ShareError::Unsupported)
+        }
+    }
+
+    fn inputs(
+        root: &std::path::Path,
+        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    ) -> IosPlatformInputs {
+        IosPlatformInputs {
+            app_sandbox_root: root.to_path_buf(),
+            camera: Arc::new(StubCamera),
+            voice: Arc::new(StubVoice),
+            share: Arc::new(StubShare),
+            stt: None,
+            tts: None,
+            notifications: None,
+            clipboard: None,
+            secure_storage: None,
+            mobile_linux,
+            workspace_host_path: Some(root.join("workspace")),
+            stable_workspace_id: Some("abc".to_string()),
+        }
+    }
+
+    /// The assembly seam this pins: selecting mobile-linux mode must wrap the
+    /// filesystem in the guest-path translation layer. The unavailable stub
+    /// runtime keeps an empty mount table, so guest space is fenced with
+    /// `PermissionDenied` — an unwrapped host filesystem would report a plain
+    /// I/O error for the same missing path.
+    #[tokio::test]
+    async fn mobile_linux_mode_wraps_the_filesystem_in_guest_translation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                SandboxBackend::IosIsh,
+                MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test stub",
+            ));
+        let platform = IosPlatform::new(inputs(temp.path(), Some(runtime)));
+        let fenced = platform
+            .filesystem()
+            .read_file("/tmp/does-not-exist", None, None)
+            .await;
+        assert!(
+            matches!(fenced, Err(FsError::PermissionDenied(_))),
+            "guest scratch must be fenced through the wrapper: {fenced:?}"
+        );
+
+        let legacy = IosPlatform::new(inputs(temp.path(), None));
+        let passthrough = legacy
+            .filesystem()
+            .read_file("/tmp/does-not-exist", None, None)
+            .await;
+        assert!(
+            !matches!(passthrough, Err(FsError::PermissionDenied(_))),
+            "legacy mode must keep the bare host filesystem: {passthrough:?}"
+        );
+    }
 }

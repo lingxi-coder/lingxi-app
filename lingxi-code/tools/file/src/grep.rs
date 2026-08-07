@@ -56,7 +56,9 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::util::path_validation::{
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
+};
 use tool_api::BuiltinToolContext;
 
 /// Tool name byte-lock.
@@ -610,6 +612,14 @@ impl Tool for GrepTool {
 
         let started = Instant::now();
 
+        // Mobile-linux guest paths: rewrite onto the host-backed twin (or
+        // refuse fenced guest space) BEFORE canonicalization/containment, so a
+        // guest path validates as the host directory that actually backs it.
+        // Desktop filesystems translate nothing and this is a no-op.
+        let base = match translate_model_path(&self.ctx.fs, base, false) {
+            Ok(base) => base,
+            Err(message) => return Err(ToolError::InvalidInput(message)),
+        };
         let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
@@ -977,6 +987,34 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+
+    /// S2 (PathAtlas): a guest base directory translates onto its host twin
+    /// (untranslated it would fail containment as a nonexistent path).
+    #[tokio::test]
+    async fn guest_base_dir_translates_onto_the_host_twin() {
+        let host = tempfile::TempDir::new().unwrap();
+        std::fs::write(host.path().join("hit.txt"), "needle here").unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_guest_alias_fs("/workspace/abc", host.path(), "/fenced"),
+            std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+            vec![host.path().to_path_buf()],
+        );
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                serde_json::json!({ "pattern": "needle", "path": "/workspace/abc" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.data.to_string().contains("hit.txt"),
+            "grep over a guest base must search host files: {}",
+            result.data
+        );
+    }
 
     #[test]
     fn locale_compare_matches_js_localecompare() {

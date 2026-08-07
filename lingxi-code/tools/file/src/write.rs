@@ -25,7 +25,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd,
+    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -250,6 +250,14 @@ impl Tool for FileWriteTool {
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
         let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        // Mobile-linux guest paths: rewrite onto the host-backed twin (or
+        // refuse fenced guest space) BEFORE canonicalization/containment, so a
+        // guest path validates as the host directory that actually backs it.
+        // Desktop filesystems translate nothing and this is a no-op.
+        let path = match translate_model_path(&self.ctx.fs, path, true) {
+            Ok(path) => path,
+            Err(message) => return Err(ToolError::InvalidInput(message)),
+        };
 
         // A subagent must NOT write a REPORT/SUMMARY/FINDINGS/ANALYSIS `*.md`
         // report file — it should return findings as text (claude-code:
@@ -569,6 +577,29 @@ mod tests {
     fn tool_name_is_write() {
         assert_eq!(TOOL_NAME, "Write");
     }
+
+    /// S2 (PathAtlas): a Write to a guest path lands the bytes in the
+    /// host-backed twin directory.
+    #[tokio::test]
+    async fn guest_path_write_lands_on_the_host_twin() {
+        let host = tempfile::TempDir::new().unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_guest_alias_fs("/workspace/abc", host.path(), "/fenced"),
+            std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+            vec![host.path().to_path_buf()],
+        );
+        let tool = FileWriteTool::new(ctx);
+        tool.call(
+            serde_json::json!({ "file_path": "/workspace/abc/new.txt", "content": "from guest" }),
+            tool_api::test_support::fresh_ctx(),
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let written = std::fs::read_to_string(host.path().join("new.txt")).unwrap();
+        assert_eq!(written, "from guest");
+    }
+
 
     #[tokio::test]
     async fn prompt_is_model_gated() {

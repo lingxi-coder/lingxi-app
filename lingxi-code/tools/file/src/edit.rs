@@ -25,7 +25,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd,
+    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -475,6 +475,17 @@ impl Tool for FileEditTool {
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
         let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        // Mobile-linux guest paths: rewrite onto the host-backed twin (or
+        // refuse fenced guest space) BEFORE canonicalization/containment, so a
+        // guest path validates as the host directory that actually backs it.
+        // Desktop filesystems translate nothing and this is a no-op.
+        let path = match translate_model_path(&self.ctx.fs, path, true) {
+            Ok(path) => path,
+            Err(message) => {
+                self.emit_failed(&invocation_id, "path_blocked").await;
+                return Err(ToolError::InvalidInput(message));
+            }
+        };
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 

@@ -1531,7 +1531,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn path_is_within_guest_path(path: &str, candidate_parent: &str) -> bool {
+pub(crate) fn path_is_within_guest_path(path: &str, candidate_parent: &str) -> bool {
     let Ok(path) = normalized_guest_path(path) else {
         return false;
     };
@@ -1541,7 +1541,7 @@ fn path_is_within_guest_path(path: &str, candidate_parent: &str) -> bool {
     path == parent || path.starts_with(&(parent.clone() + "/"))
 }
 
-fn normalized_guest_path(path: &str) -> Result<String, RootfsManifestError> {
+pub(crate) fn normalized_guest_path(path: &str) -> Result<String, RootfsManifestError> {
     validate_guest_path(path)?;
     let mut normalized = PathBuf::from("/");
     for component in Path::new(path).components() {

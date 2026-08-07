@@ -31,7 +31,7 @@ use tool_api::tool_trait::{
 };
 use tool_api::util::ids::ulid_or_uuid;
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd,
+    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -1750,6 +1750,17 @@ impl Tool for FileReadTool {
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
         let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        // Mobile-linux guest paths: rewrite onto the host-backed twin (or
+        // refuse fenced guest space) BEFORE canonicalization/containment, so a
+        // guest path validates as the host directory that actually backs it.
+        // Desktop filesystems translate nothing and this is a no-op.
+        let path = match translate_model_path(&self.ctx.fs, path, false) {
+            Ok(path) => path,
+            Err(message) => {
+                self.emit_failed(&invocation_id, "path_blocked").await;
+                return Err(ToolError::InvalidInput(message));
+            }
+        };
         self.emit_started(&invocation_id, &path).await;
 
         // #11: refuse blocking device/special files (claude-code `$3p` in
@@ -3317,6 +3328,59 @@ mod tests {
             "expected PathBlocked, got {err:?}"
         );
     }
+
+    /// S2 (PathAtlas): a guest path maps onto its host twin BEFORE
+    /// canonicalization, so the read serves the host file's bytes. The alias
+    /// fs panics on every I/O method — passing also proves the tool still
+    /// reads through raw `tokio::fs`.
+    #[tokio::test]
+    async fn guest_path_reads_through_its_host_twin() {
+        let host = TempDir::new().unwrap();
+        std::fs::write(host.path().join("note.txt"), "guest sees host bytes").unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_guest_alias_fs("/workspace/abc", host.path(), "/fenced"),
+            Arc::new(AnalyticsBus::new()),
+            vec![host.path().to_path_buf()],
+        );
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": "/workspace/abc/note.txt" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["file"]["content"], "guest sees host bytes");
+    }
+
+    /// S2 (PathAtlas): guest space the filesystem refuses to host-back
+    /// surfaces the fs's own fence message as `InvalidInput`.
+    #[tokio::test]
+    async fn fenced_guest_path_is_refused_with_the_fs_message() {
+        let host = TempDir::new().unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_guest_alias_fs("/workspace/abc", host.path(), "/fenced"),
+            Arc::new(AnalyticsBus::new()),
+            vec![host.path().to_path_buf()],
+        );
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": "/fenced/secret.txt" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(message) => {
+                assert!(message.contains("not host-backed"), "{message}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
 
     #[tokio::test]
     async fn empty_file_emits_empty_warning_model_content() {

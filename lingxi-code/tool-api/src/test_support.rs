@@ -125,6 +125,113 @@ pub fn make_dummy_fs() -> Arc<dyn traits::filesystem::FileSystem> {
     Arc::new(PanickingFs) as _
 }
 
+/// Test filesystem whose ONLY live behavior is `translate_model_path`:
+/// `guest_prefix/…` maps onto `host_prefix/…` and anything under
+/// `fence_prefix` is refused — the mobile-linux guest-path contract the file
+/// tools consult before canonicalization. Every I/O method panics like
+/// [`PanickingFs`], which doubles as proof that the tools still run their I/O
+/// on raw `tokio::fs`, never through this trait.
+struct GuestAliasFs {
+    guest_prefix: String,
+    host_prefix: std::path::PathBuf,
+    fence_prefix: String,
+}
+
+#[async_trait]
+impl traits::filesystem::FileSystem for GuestAliasFs {
+    async fn read_file(
+        &self,
+        _: &str,
+        _: Option<u64>,
+        _: Option<u64>,
+    ) -> Result<traits::filesystem::FileContent, traits::filesystem::FsError> {
+        panic!("file tools run on raw tokio::fs, not FileSystem::read_file")
+    }
+    async fn write_file(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
+        panic!("file tools run on raw tokio::fs, not FileSystem::write_file")
+    }
+    fn is_within_workspace(&self, _: &str) -> bool {
+        true
+    }
+    async fn watch(
+        &self,
+        _: &str,
+    ) -> Result<
+        std::pin::Pin<Box<dyn futures::Stream<Item = traits::filesystem::FileEvent> + Send>>,
+        traits::filesystem::FsError,
+    > {
+        panic!("not called")
+    }
+    async fn append_file(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn truncate(&self, _: &str, _: u64) -> Result<(), traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn file_mtime(
+        &self,
+        _: &str,
+    ) -> Result<std::time::SystemTime, traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn file_size(&self, _: &str) -> Result<u64, traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn delete_file(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn symlink(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn flock_exclusive(
+        &self,
+        _: &str,
+    ) -> Result<Box<dyn traits::filesystem::FlockGuard>, traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    async fn fsync(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
+        panic!("not called")
+    }
+    fn translate_model_path(
+        &self,
+        path: &str,
+        _write: bool,
+    ) -> Result<Option<String>, traits::filesystem::FsError> {
+        if path == self.fence_prefix
+            || path
+                .strip_prefix(&self.fence_prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return Err(traits::filesystem::FsError::PermissionDenied(format!(
+                "guest path is not host-backed: {path}"
+            )));
+        }
+        if let Some(rest) = path.strip_prefix(&self.guest_prefix) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return Ok(Some(format!(
+                    "{}{rest}",
+                    self.host_prefix.to_string_lossy()
+                )));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Build a [`GuestAliasFs`] as `Arc<dyn FileSystem>` — see its docs.
+#[must_use]
+pub fn make_guest_alias_fs(
+    guest_prefix: &str,
+    host_prefix: &std::path::Path,
+    fence_prefix: &str,
+) -> Arc<dyn traits::filesystem::FileSystem> {
+    Arc::new(GuestAliasFs {
+        guest_prefix: guest_prefix.to_string(),
+        host_prefix: host_prefix.to_path_buf(),
+        fence_prefix: fence_prefix.to_string(),
+    }) as _
+}
+
 /// Process-wide HOME lock for tests that mutate `$HOME` via `std::env::set_var`.
 ///
 /// M4-08 builtin tools (Brief, Config, CronCreate, RemoteTrigger) each

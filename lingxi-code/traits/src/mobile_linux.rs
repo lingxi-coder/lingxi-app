@@ -432,6 +432,18 @@ pub trait MobileLinuxRuntime: Send + Sync {
     /// Replace the active bind-mount set.
     async fn configure_mounts(&self, mounts: Vec<MountSpec>) -> Result<(), MobileLinuxError>;
 
+    /// Snapshot of the live guest↔host mount table, in mount order.
+    ///
+    /// Every entry is a host-backed bind mount, so a guest path under an
+    /// entry has a host twin reachable without entering the emulated kernel —
+    /// this is the table `GuestPathFileSystem` translates file-tool paths
+    /// against. Runtimes that keep no host-backed mounts (stubs, unavailable
+    /// placeholders) inherit the default empty table, which reads as
+    /// "nothing is host-backed".
+    fn current_mounts(&self) -> Vec<MountSpec> {
+        Vec::new()
+    }
+
     /// Read runtime events after the supplied sequence number (exclusive).
     async fn read_events(
         &self,

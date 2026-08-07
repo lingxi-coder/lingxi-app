@@ -1616,4 +1616,36 @@ that bypasses Perforce tracking."
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello boot");
     }
+
+    /// S2 (PathAtlas): fenced guest space is refused before any file-state
+    /// or old-string validation runs.
+    #[tokio::test]
+    async fn fenced_guest_path_is_refused_before_file_state() {
+        let host = TempDir::new().unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_guest_alias_fs("/workspace/abc", host.path(), "/fenced"),
+            Arc::new(AnalyticsBus::new()),
+            vec![host.path().to_path_buf()],
+        );
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "file_path": "/fenced/config.txt",
+                    "old_string": "a",
+                    "new_string": "b"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(message) => {
+                assert!(message.contains("not host-backed"), "{message}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
 }

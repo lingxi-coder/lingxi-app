@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod guest_fs;
 pub mod http;
 pub mod llm_config;
 pub mod mcp_http;
@@ -21,6 +22,7 @@ pub mod mobile_linux;
 pub mod worktree_create_guard;
 pub mod worktree_include;
 
+pub use guest_fs::GuestPathFileSystem;
 pub use http::ReqwestHttp;
 pub use llm_client::LlmTransportBridge;
 pub use llm_config::{

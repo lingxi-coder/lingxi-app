@@ -314,8 +314,17 @@ struct LocalAppCreateView: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
 
-    @State private var brief = ""
+    @State var brief = ""
     @State private var creating = false
+
+    /// Test-facing mirror of the toolbar button's guard below (minus the
+    /// transient `creating` flag) — same source of truth `body` disables on,
+    /// not a parallel description of it. `createApp(brief:)` itself repeats
+    /// this same empty check server-side, so this is belt-and-suspenders,
+    /// not the only gate.
+    var canSubmit: Bool {
+        !brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         Form {
@@ -334,7 +343,7 @@ struct LocalAppCreateView: View {
                 Button(creating ? "local_apps_creating" : "local_apps_create") {
                     Task { await create() }
                 }
-                .disabled(creating || brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(creating || !canSubmit)
                 .accessibilityIdentifier("local-apps.create.submit")
             }
         }

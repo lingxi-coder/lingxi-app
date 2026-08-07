@@ -29,9 +29,24 @@ struct LocalAppDetailView: View {
     @Binding var path: [LocalAppsRoute]
 
     @State private var section: LocalAppDetailSection = .overview
+    @State private var revisionFeedback = ""
+    @State private var isSubmittingRevision = false
 
     private var app: LocalAppSummary? { store.app(id: appID) }
     private var runtime: LocalAppRuntimeStatus { store.runtimes[appID] ?? .stopped }
+
+    /// Whether a persistent "keep refining" input should be offered for the
+    /// given workflow state. Mirrors `AppState::request_revision`'s accepted
+    /// source states exactly (`lingxi-code/local-apps/src/state.rs`:
+    /// `[AwaitingPreviewConfirmation, Ready]`) — showing the control in any
+    /// other state would reproduce the "looks available, fails on tap"
+    /// defect class Tasks 13-15 already hit.
+    static func showsRevisionInput(for workflow: LocalAppWorkflow) -> Bool {
+        switch workflow {
+        case .ready, .awaitingPreviewConfirmation: true
+        default: false
+        }
+    }
 
     var body: some View {
         content
@@ -54,6 +69,11 @@ struct LocalAppDetailView: View {
                     sectionContent(app)
                 }
                 .background(theme.windowBg)
+                .safeAreaInset(edge: .bottom) {
+                    if Self.showsRevisionInput(for: app.workflow) {
+                        revisionInputBar(appID: app.id)
+                    }
+                }
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
                         if case .running = runtime {
@@ -110,6 +130,56 @@ struct LocalAppDetailView: View {
             LocalAppHistorySection(store: store, appID: appID)
         case .permissions:
             LocalAppPermissionsSection(store: store, appID: appID)
+        }
+    }
+
+    /// The persistent "keep refining" bar — reachable from every section tab
+    /// while the app is in a state that accepts a revision, not just from a
+    /// one-shot feedback sheet. Submits through the same
+    /// `store.requestRevision(appID:feedback:)` the preview gate's sheet
+    /// already uses (`LocalAppPreviewView`, unchanged below); this widens the
+    /// entry point, it does not replace it.
+    @ViewBuilder
+    private func revisionInputBar(appID: String) -> some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("local_apps_revision_placeholder", text: $revisionFeedback, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1 ... 4)
+                .disabled(isSubmittingRevision)
+                .accessibilityIdentifier("local-apps.detail.revision.input")
+            Button {
+                Task { await submitRevision(appID: appID) }
+            } label: {
+                if isSubmittingRevision {
+                    ProgressView()
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                }
+            }
+            .disabled(
+                isSubmittingRevision
+                    || revisionFeedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+            .accessibilityIdentifier("local-apps.detail.revision.submit")
+            .accessibilityLabel("local_apps_submit")
+        }
+        .padding()
+        .background(.bar)
+    }
+
+    /// Guards against a double-tap firing two revision round trips — the
+    /// same defect class Task 14 had to add to its retry buttons after the
+    /// fact (`retryingQuestionnaire`/`retryingPlan` in
+    /// `LocalAppDesignerView`).
+    private func submitRevision(appID: String) async {
+        guard !isSubmittingRevision else { return }
+        isSubmittingRevision = true
+        let succeeded = await store.requestRevision(appID: appID, feedback: revisionFeedback)
+        isSubmittingRevision = false
+        if succeeded {
+            revisionFeedback = ""
         }
     }
 }
@@ -437,6 +507,7 @@ struct LocalAppPreviewView: View {
 
     @State private var feedback = ""
     @State private var showFeedback = false
+    @State private var isSubmittingFeedback = false
 
     private var previewURL: URL? {
         store.runtimes[appID]?.url ?? store.previews[appID]?.url
@@ -478,21 +549,30 @@ struct LocalAppPreviewView: View {
                 Form {
                     TextEditor(text: $feedback)
                         .frame(minHeight: 140)
+                        .disabled(isSubmittingFeedback)
                 }
                 .navigationTitle("local_apps_feedback")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("common_cancel") { showFeedback = false }
+                            .disabled(isSubmittingFeedback)
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("local_apps_submit") {
+                        Button(isSubmittingFeedback ? "local_apps_submitting" : "local_apps_submit") {
                             Task {
-                                if await store.requestRevision(appID: appID, feedback: feedback) {
+                                guard !isSubmittingFeedback else { return }
+                                isSubmittingFeedback = true
+                                let succeeded = await store.requestRevision(appID: appID, feedback: feedback)
+                                isSubmittingFeedback = false
+                                if succeeded {
                                     showFeedback = false
                                 }
                             }
                         }
-                        .disabled(feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(
+                            isSubmittingFeedback
+                                || feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
                     }
                 }
             }

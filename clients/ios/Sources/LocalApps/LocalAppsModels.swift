@@ -38,7 +38,7 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     var workspaceRelativePath: String
 }
 
-enum LocalAppWorkflow: String, Hashable, Sendable {
+enum LocalAppWorkflow: String, CaseIterable, Hashable, Sendable {
     /// The LLM is authoring the questionnaire from the app's brief
     /// (`AppWorkflowState::AuthoringQuestionnaire`). Was collapsed into
     /// `.generationFailed`'s sibling `.generating` bucket until Task 14 gave

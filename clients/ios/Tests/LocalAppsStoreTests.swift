@@ -1093,6 +1093,52 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertTrue(view.summaryLines.contains { $0.contains("无需额外权限") })
     }
 
+    // MARK: - Task 16: create entry point + persistent revision input
+
+    /// `LocalAppCreateView` (Task 13's replacement for the deleted
+    /// `LocalAppCreateSheet`) refuses a whitespace-only brief — the same
+    /// empty-input-refused acceptance criterion the brief's now-stale
+    /// `theCreateSheetRefusesAnEmptyDescription` targeted, adapted to the
+    /// view that actually exists.
+    func testTheCreateViewRefusesAWhitespaceOnlyBrief() {
+        var view = LocalAppCreateView(store: makeStore(), path: .constant([]))
+        view.brief = "   \n  "
+        XCTAssertFalse(view.canSubmit)
+    }
+
+    func testTheCreateViewAcceptsANonEmptyBrief() {
+        var view = LocalAppCreateView(store: makeStore(), path: .constant([]))
+        view.brief = "a shared grocery list for my household"
+        XCTAssertTrue(view.canSubmit)
+    }
+
+    /// `showsRevisionInput` must mirror `AppState::request_revision`'s
+    /// accepted source states exactly (`lingxi-code/local-apps/src/state.rs`
+    /// `ensure_workflow("request_revision", &[AwaitingPreviewConfirmation,
+    /// Ready])`) — enumerating every `LocalAppWorkflow` case, not just the
+    /// four the original brief named, so a future workflow addition can't
+    /// silently widen or narrow the gate without this test noticing.
+    func testShowsRevisionInputMatchesExactlyTheStatesTheEngineAccepts() {
+        let accepting: Set<LocalAppWorkflow> = [.ready, .awaitingPreviewConfirmation]
+        for workflow in LocalAppWorkflow.allCases {
+            XCTAssertEqual(
+                LocalAppDetailView.showsRevisionInput(for: workflow),
+                accepting.contains(workflow),
+                "workflow \(workflow) diverged from AppState::request_revision's accepted states"
+            )
+        }
+    }
+
+    func testAReadyAppShowsAPersistentRevisionInput() {
+        XCTAssertTrue(LocalAppDetailView.showsRevisionInput(for: .ready))
+        XCTAssertTrue(LocalAppDetailView.showsRevisionInput(for: .awaitingPreviewConfirmation))
+    }
+
+    func testAnAppStillGeneratingDoesNotShowTheRevisionInput() {
+        XCTAssertFalse(LocalAppDetailView.showsRevisionInput(for: .generating))
+        XCTAssertFalse(LocalAppDetailView.showsRevisionInput(for: .authoringQuestionnaire))
+    }
+
     #if canImport(engine_mobileFFI)
         /// Creation has two independent callers of `openDesigner` — the
         /// `appsChanged` handler and the designer view's `prepare()` — and the

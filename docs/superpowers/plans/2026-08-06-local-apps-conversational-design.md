@@ -3287,6 +3287,11 @@ EOF
 
 ### Task 16: iOS 创建入口与常驻迭代输入
 
+> ⚠️ **T13 已经吃掉了这个任务的一半，落地前先读这段。**
+> T13 删掉了 `LocalAppCreateSheet`，换成了一个形态不同的 `LocalAppCreateView`（push 目的地，不是 sheet），现在在 `LocalAppsLibraryView.swift:307-345`。所以下面按名字指向 `LocalAppCreateSheet` 和 `:370-425` 的步骤**找不到目标**。
+> **创建入口这一半基本已完成**：只有一个描述输入框、空输入拒绝提交、`createApp(brief:)` 不再伪造 brief。落地时先核对现状，不要重做。
+> **仍然属于本任务的**：`LocalAppDetailView.swift` 的常驻迭代输入条（`requestRevision` 目前只挂在预览门的反馈 sheet 上，约 `:438-495`，未被 T13 触碰），以及创建入口现状与下面验收条件的差距。
+
 **Files:**
 - Modify: `clients/ios/Sources/LocalApps/LocalAppsLibraryView.swift:370-425`（`LocalAppCreateSheet`）
 - Modify: `clients/ios/Sources/LocalApps/LocalAppDetailView.swift:476-499`

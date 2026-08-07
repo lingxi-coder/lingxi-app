@@ -25,10 +25,9 @@
 //! on every call, so external mounts added via `configure_mounts` translate
 //! without rebuilding the filesystem.
 
-use crate::mobile_linux::{normalized_guest_path, path_is_within_guest_path};
 use async_trait::async_trait;
 use futures::Stream;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use traits::mobile_linux::guest_paths;
@@ -65,25 +64,14 @@ impl GuestPathFileSystem {
     /// space / refused writes.
     fn resolve_translation(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let mounts = self.runtime.current_mounts();
-        let mut best: Option<&MountSpec> = None;
-        for mount in &mounts {
-            if path_is_within_guest_path(path, &mount.guest_path) {
-                let better = best.is_none_or(|current: &MountSpec| {
-                    mount.guest_path.len() > current.guest_path.len()
-                });
-                if better {
-                    best = Some(mount);
-                }
-            }
-        }
-        if let Some(mount) = best {
+        if let Some((mount, host)) = traits::mobile_linux::find_guest_mount(path, &mounts) {
             if write && mount.read_only {
                 return Err(FsError::PermissionDenied(format!(
                     "guest path is on a read-only mount ({}): {path}",
                     mount.guest_path
                 )));
             }
-            return rebase_guest_path(path, mount).map(Some);
+            return Ok(Some(host.to_string_lossy().into_owned()));
         }
         // Not under any mount: refuse the rest of guest space (fakefs) before
         // falling through to host passthrough. The raw textual check also
@@ -114,31 +102,6 @@ fn raw_path_has_prefix(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with('/'))
-}
-
-/// Rebase a validated guest `path` from `mount.guest_path` onto
-/// `mount.host_path`, component by component.
-fn rebase_guest_path(path: &str, mount: &MountSpec) -> Result<String, FsError> {
-    let normalized = normalized_guest_path(path)
-        .map_err(|error| FsError::PermissionDenied(format!("invalid guest path: {error}")))?;
-    let normalized_prefix = normalized_guest_path(&mount.guest_path)
-        .map_err(|error| FsError::PermissionDenied(format!("invalid mount guest path: {error}")))?;
-    let relative = normalized
-        .strip_prefix(&normalized_prefix)
-        .unwrap_or_default();
-    let mut host = mount.host_path.clone();
-    for component in Path::new(relative.trim_start_matches('/')).components() {
-        match component {
-            Component::Normal(segment) => host.push(segment),
-            Component::CurDir => {}
-            _ => {
-                return Err(FsError::PermissionDenied(format!(
-                    "unsupported guest path component: {path}"
-                )))
-            }
-        }
-    }
-    Ok(host.to_string_lossy().into_owned())
 }
 
 #[async_trait]

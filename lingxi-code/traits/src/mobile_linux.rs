@@ -394,6 +394,18 @@ mod map_guest_path_tests {
 /// (fence + read-only enforcement) pinned by its own tests.
 #[must_use]
 pub fn map_guest_path_to_host(path: &str, mounts: &[MountSpec]) -> Option<std::path::PathBuf> {
+    find_guest_mount(path, mounts).map(|(_, host)| host)
+}
+
+/// Like [`map_guest_path_to_host`], but also returns WHICH mount matched —
+/// the file-tool translation layer needs it to honor `read_only`. This is
+/// the ONE longest-prefix guest-mount matcher; every consumer (the prompt
+/// probe resolver, `GuestPathFileSystem`) resolves through it.
+#[must_use]
+pub fn find_guest_mount<'a>(
+    path: &str,
+    mounts: &'a [MountSpec],
+) -> Option<(&'a MountSpec, std::path::PathBuf)> {
     use std::path::Component;
     if !path.starts_with('/') || path.contains("//") || path.as_bytes().contains(&0) {
         return None;
@@ -435,7 +447,7 @@ pub fn map_guest_path_to_host(path: &str, mounts: &[MountSpec]) -> Option<std::p
     for segment in &components[prefix_len..] {
         host.push(segment);
     }
-    Some(host)
+    Some((mount, host))
 }
 
 /// Android/iOS Linux userspace runtime.

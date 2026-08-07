@@ -81,7 +81,7 @@ impl IosIshRuntimeConfig {
     fn persistent_home_mount(&self) -> MountSpec {
         MountSpec {
             host_path: self.persistent_home_host_path(),
-            guest_path: "/root".to_string(),
+            guest_path: traits::mobile_linux::guest_paths::HOME.to_string(),
             read_only: false,
             purpose: MountPurpose::Shared,
         }
@@ -1994,7 +1994,7 @@ fn validate_mount(
     let lingxi_root = normalize_host_path(&config.lingxi_root(), ".lingxi root")?;
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
 
-    if guest_path_has_prefix(&mount.guest_path, "/root") {
+    if guest_path_has_prefix(&mount.guest_path, traits::mobile_linux::guest_paths::HOME) {
         return Err(MobileLinuxError::InvalidRequest(
             "request mounts may not replace the runtime-managed persistent /root".to_string(),
         ));

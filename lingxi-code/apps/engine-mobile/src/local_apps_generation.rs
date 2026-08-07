@@ -1,7 +1,10 @@
 //! Concrete mobile executor for the fixed local-app generation pipeline.
 
 use crate::local_apps_host::LocalAppsHostBroker;
-use crate::local_apps_llm::{LocalAppsLlm, SourceRequest};
+#[cfg(test)]
+use crate::local_apps_llm::LocalAppsLlm;
+use crate::local_apps_llm::SourceRequest;
+use crate::local_apps_profile::SharedLlm;
 use crate::local_apps_sources::{FileWrite, MAX_GENERATED_TOTAL_BYTES};
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
@@ -91,14 +94,14 @@ pub(crate) struct MobileAppGenerationExecutor {
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     host: Arc<LocalAppsHostBroker>,
     service: OnceLock<Arc<AppService>>,
-    llm: Arc<LocalAppsLlm>,
+    llm: Arc<SharedLlm>,
 }
 
 impl MobileAppGenerationExecutor {
     pub(crate) fn new(
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
         host: Arc<LocalAppsHostBroker>,
-        llm: Arc<LocalAppsLlm>,
+        llm: Arc<SharedLlm>,
     ) -> Arc<Self> {
         Arc::new(Self {
             mobile_linux,
@@ -377,7 +380,7 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
         const MAX_ATTEMPTS: usize = 3;
         let mut last_error = None;
         for attempt in 0..MAX_ATTEMPTS {
-            let writes = self.llm.generate_sources(&source_request).await?;
+            let writes = self.llm.current().generate_sources(&source_request).await?;
             // Overlay write, never a clear-then-write: the model names only
             // the files it wants to create or replace, everything else in the
             // workspace stays untouched. A "move the search box" edit should
@@ -923,7 +926,9 @@ mod tests {
             Some(runtime_root),
         );
         let runtime = Arc::new(RecordingMobileLinuxRuntime::default());
-        let llm = Arc::new(LocalAppsLlm::new(ScriptedModel::new(Vec::new())));
+        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(ScriptedModel::new(
+            Vec::new(),
+        )))));
         let executor = MobileAppGenerationExecutor::new(Some(runtime.clone()), host, llm);
         let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
 
@@ -1062,7 +1067,7 @@ mod tests {
         let host =
             LocalAppsHostBroker::new(root.path().to_path_buf(), MockSink::arc(), None, false, None);
         let model = ScriptedModel::new(responses);
-        let llm = Arc::new(LocalAppsLlm::new(model.clone()));
+        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(model.clone()))));
         let executor = MobileAppGenerationExecutor::new(None, host, llm);
         executor
             .attach_service(service.clone())

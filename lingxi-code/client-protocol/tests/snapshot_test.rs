@@ -834,7 +834,33 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::CreateApp {
                 name: "Habits".to_string(),
                 origin: AppCreateOriginDto::Chat,
+                brief: "Track daily habits with streaks".to_string(),
                 conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+            },
+        ),
+        (
+            "command/update_app_brief.json",
+            ClientCommand::UpdateAppBrief {
+                app_id: "habits-1a2b".to_string(),
+                brief: "A todo list instead".to_string(),
+            },
+        ),
+        (
+            "command/retry_app_questionnaire.json",
+            ClientCommand::RetryAppQuestionnaire {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/begin_app_planning.json",
+            ClientCommand::BeginAppPlanning {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/retry_app_plan.json",
+            ClientCommand::RetryAppPlan {
+                app_id: "habits-1a2b".to_string(),
             },
         ),
         (

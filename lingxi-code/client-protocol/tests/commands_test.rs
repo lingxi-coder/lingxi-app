@@ -530,21 +530,25 @@ fn extended_local_app_commands_round_trip() {
     }
 }
 
-/// `CreateApp` — name + bare-string origin + an optional `conversation_id`
-/// (present for `origin: chat`, skipped when `None`). `template` was removed
-/// (local-apps#questionnaire, Task 5, coordinator ruling: total removal of
-/// the static template catalog).
+/// `CreateApp` — name + bare-string origin + a required `brief` + an
+/// optional `conversation_id` (present for `origin: chat`, skipped when
+/// `None`). `template` was removed (local-apps#questionnaire, Task 5,
+/// coordinator ruling: total removal of the static template catalog);
+/// `brief` was added by Task 11 (the questionnaire-authoring seed, distinct
+/// from `name`).
 #[test]
 fn create_app_round_trips() {
     let cmd = ClientCommand::CreateApp {
         name: "Habits".to_string(),
         origin: AppCreateOriginDto::Chat,
+        brief: "Track daily habits with streaks".to_string(),
         conversation_id: Some("conv-42".to_string()),
     };
     let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
     assert_eq!(json["type"], "create_app");
     assert_eq!(json["name"], "Habits");
     assert_eq!(json["origin"], "chat");
+    assert_eq!(json["brief"], "Track daily habits with streaks");
     assert_eq!(json["conversation_id"], "conv-42");
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize CreateApp");
     assert_eq!(back, cmd);
@@ -553,6 +557,7 @@ fn create_app_round_trips() {
     let from_library = ClientCommand::CreateApp {
         name: "Recipes".to_string(),
         origin: AppCreateOriginDto::Library,
+        brief: "A recipe box with tags".to_string(),
         conversation_id: None,
     };
     let json_l = serde_json::to_value(&from_library).expect("serialize library CreateApp");
@@ -564,6 +569,48 @@ fn create_app_round_trips() {
     let back_l: ClientCommand =
         serde_json::from_value(json_l).expect("deserialize library CreateApp");
     assert_eq!(back_l, from_library);
+}
+
+/// `UpdateAppBrief` / `RetryAppQuestionnaire` / `BeginAppPlanning` /
+/// `RetryAppPlan` — the Task 11 authoring/planning trigger commands. Plain
+/// `app_id` (+ `brief` for the first) round trips.
+#[test]
+fn authoring_and_planning_trigger_commands_round_trip() {
+    let cmd = ClientCommand::UpdateAppBrief {
+        app_id: "habits-1a2b".to_string(),
+        brief: "A todo list instead".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize UpdateAppBrief");
+    assert_eq!(json["type"], "update_app_brief");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["brief"], "A todo list instead");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize UpdateAppBrief");
+    assert_eq!(back, cmd);
+
+    let cmd = ClientCommand::RetryAppQuestionnaire {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize RetryAppQuestionnaire");
+    assert_eq!(json["type"], "retry_app_questionnaire");
+    let back: ClientCommand =
+        serde_json::from_value(json).expect("deserialize RetryAppQuestionnaire");
+    assert_eq!(back, cmd);
+
+    let cmd = ClientCommand::BeginAppPlanning {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize BeginAppPlanning");
+    assert_eq!(json["type"], "begin_app_planning");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize BeginAppPlanning");
+    assert_eq!(back, cmd);
+
+    let cmd = ClientCommand::RetryAppPlan {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize RetryAppPlan");
+    assert_eq!(json["type"], "retry_app_plan");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize RetryAppPlan");
+    assert_eq!(back, cmd);
 }
 
 /// `OpenAppDesigner` — opens the design-spec gate for one app.
@@ -836,7 +883,21 @@ fn no_live_command_carries_session_id() {
         ClientCommand::CreateApp {
             name: "Habits".to_string(),
             origin: AppCreateOriginDto::Chat,
+            brief: "Track daily habits with streaks".to_string(),
             conversation_id: Some("conv-42".to_string()),
+        },
+        ClientCommand::UpdateAppBrief {
+            app_id: "habits-1a2b".to_string(),
+            brief: "A todo list instead".to_string(),
+        },
+        ClientCommand::RetryAppQuestionnaire {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::BeginAppPlanning {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::RetryAppPlan {
+            app_id: "habits-1a2b".to_string(),
         },
         ClientCommand::OpenAppDesigner {
             app_id: "habits-1a2b".to_string(),

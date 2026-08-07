@@ -94,7 +94,7 @@ use crate::{
     local_apps_host::LocalAppsHostBroker,
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
-    local_apps_profile::{profile_apps, ProfileApps},
+    local_apps_profile::{profile_apps, ProfileApps, SharedLlm},
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
     mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
 };
@@ -2021,6 +2021,59 @@ pub enum MobileEngineError {
 /// listener) survive an in-place orchestrator swap on New / Resume (§0.5); F3-05
 /// adds the async `submit` that resolves the parked permission gate from inbound
 /// commands and drives the turn on the owned runtime.
+/// Test-only bookkeeping for the fire-and-forget authoring/planning tasks
+/// [`MobileEngineHandle::spawn_authoring`] / [`MobileEngineHandle::spawn_planning`]
+/// launch. Production drops their `JoinHandle` outright — the whole point of
+/// those triggers is that `submit(CreateApp)` etc. return before the LLM round
+/// trip lands — but a test needs a deterministic way to wait for that round
+/// trip to settle without sleeping (a poll loop would work but is exactly the
+/// kind of flake-prone timing dependency §0's ban on sleeps exists to avoid).
+/// Compiles to a true no-op outside `cfg(test)`, so this can never accumulate
+/// handles in a long-running process.
+#[cfg(test)]
+#[derive(Default)]
+struct LocalAppsBackgroundTracker(StdMutex<Vec<tokio::task::JoinHandle<()>>>);
+
+#[cfg(test)]
+impl LocalAppsBackgroundTracker {
+    fn track(&self, handle: tokio::task::JoinHandle<()>) {
+        self.0
+            .lock()
+            .expect("local-apps background tracker poisoned")
+            .push(handle);
+    }
+
+    /// Await every handle queued so far, INCLUDING ones a just-awaited task
+    /// itself queued (e.g. `update_brief` re-triggering authoring) — loops
+    /// until a full pass finds nothing new.
+    async fn settle(&self) {
+        loop {
+            let handles: Vec<_> = {
+                let mut guard = self
+                    .0
+                    .lock()
+                    .expect("local-apps background tracker poisoned");
+                std::mem::take(&mut *guard)
+            };
+            if handles.is_empty() {
+                break;
+            }
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Default)]
+struct LocalAppsBackgroundTracker;
+
+#[cfg(not(test))]
+impl LocalAppsBackgroundTracker {
+    fn track(&self, _handle: tokio::task::JoinHandle<()>) {}
+}
+
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
@@ -2101,6 +2154,8 @@ pub struct MobileEngineHandle {
     app_client_subscription: Option<u64>,
     app_domain_subscription: Option<local_apps::AppEventSubscription>,
     app_domain_observer: Option<Arc<crate::local_apps_bridge::SinkAppEventObserver>>,
+    /// See [`LocalAppsBackgroundTracker`] — a true no-op outside `cfg(test)`.
+    local_apps_background: LocalAppsBackgroundTracker,
 }
 
 impl Drop for MobileEngineHandle {
@@ -2712,6 +2767,24 @@ impl MobileEngineHandle {
         self.local_apps.clone()
     }
 
+    /// Test-only seam: swap the profile's [`LocalAppsLlm`] for a scripted
+    /// double, exercising the SAME [`SharedLlm::replace`] path a real
+    /// reconnect / `/model` switch takes (Task 11's `profile_apps` fix), so
+    /// authoring/planning tests are deterministic without a network.
+    #[cfg(test)]
+    fn set_local_apps_model(&self, model: Arc<dyn crate::local_apps_llm::LocalAppsModel>) {
+        if let Some(profile) = &self.profile_apps {
+            profile.llm.replace(Arc::new(LocalAppsLlm::new(model)));
+        }
+    }
+
+    /// Test-only: await every authoring/planning task spawned so far. See
+    /// [`LocalAppsBackgroundTracker`].
+    #[cfg(test)]
+    async fn settle_local_apps(&self) {
+        self.local_apps_background.settle().await;
+    }
+
     /// The live service, or emit the boot-time load failure and yield `None`.
     async fn local_apps_or_report(&self, app_id: Option<&str>) -> Option<Arc<AppService>> {
         match &self.local_apps {
@@ -2771,6 +2844,23 @@ impl MobileEngineHandle {
         }
     }
 
+    /// As [`Self::join_app_mutation`], but the task also reports whether ITS
+    /// OWN mutation committed — used by the four handlers below that gate a
+    /// SEPARATE, un-joined background LLM round trip (authoring/planning) on
+    /// that outcome. A cancelled join (runtime shutting down) reports `false`:
+    /// there is nothing left to trigger.
+    async fn join_app_mutation_outcome(task: tokio::task::JoinHandle<bool>) -> bool {
+        match task.await {
+            Ok(succeeded) => succeeded,
+            Err(error) => {
+                if error.is_panic() {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                false
+            }
+        }
+    }
+
     async fn handle_list_apps(&self) {
         let Some(service) = self.local_apps_or_report(None).await else {
             return;
@@ -2815,6 +2905,7 @@ impl MobileEngineHandle {
         &self,
         name: &str,
         origin: AppCreateOriginDto,
+        brief: &str,
         conversation_id: Option<String>,
     ) {
         let Some(service) = self.local_apps_or_report(None).await else {
@@ -2835,25 +2926,253 @@ impl MobileEngineHandle {
         // never binds one. Derived from the RAISED origin (an exhaustive
         // match — see `AppCreateOrigin::conversation_binding`).
         let conversation_id = origin.conversation_binding(conversation_id);
-        // TODO(local-apps#questionnaire, Task 11): `ClientCommand::CreateApp`
-        // still has no `brief` field (its template-era `template` field was
-        // deleted outright — local-apps#questionnaire, Task 5, coordinator
-        // ruling: total removal of the static template catalog; it did NOT
-        // become a `brief`). Task 11 replaces this wire shape with the real
-        // conversational-design one. Until then `name` doubles as the brief:
-        // a real, user-supplied string (not a fabricated placeholder), so
-        // `create` keeps working for the existing tests that exercise
-        // `ClientCommand::CreateApp` end to end. This is DELIBERATELY pinned,
-        // not silent: `create_app_persists_name_as_brief_until_task_11_adds_a_real_one`
-        // asserts `AppRecord.brief == name` and fails the moment this
-        // changes, forcing Task 11 to touch this comment and this call
-        // instead of leaving the gap for Task 8's questionnaire authoring to
-        // discover at runtime.
         // Success needs no extra emit: `create_app` announces the new record
-        // set via its own `AppsChanged` domain event.
-        if let Err(error) = service.create_app(Some(name), name, conversation_id).await {
-            self.emit_app_failure(None, &error).await;
+        // set via its own `AppsChanged` domain event. `brief` is the LLM's
+        // real seed now (Task 11) — `name` is a display label, never the
+        // spec the questionnaire gets authored from; see
+        // `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
+        match service.create_app(Some(name), brief, conversation_id).await {
+            Ok(record) => self.trigger_authoring(&service, record.id),
+            Err(error) => self.emit_app_failure(None, &error).await,
         }
+    }
+
+    async fn handle_update_app_brief(&self, app_id: String, brief: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+            match task_service.update_brief(&task_app_id, &brief).await {
+                Ok(()) => {
+                    Self::emit_apps_snapshot(&task_service).await;
+                    true
+                }
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                        .await;
+                    false
+                }
+            }
+        }))
+        .await;
+        if succeeded {
+            self.trigger_authoring(&service, app_id);
+        }
+    }
+
+    async fn handle_retry_app_questionnaire(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+            match task_service.retry_questionnaire(&task_app_id).await {
+                Ok(()) => {
+                    Self::emit_apps_snapshot(&task_service).await;
+                    true
+                }
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                        .await;
+                    false
+                }
+            }
+        }))
+        .await;
+        if succeeded {
+            self.trigger_authoring(&service, app_id);
+        }
+    }
+
+    async fn handle_begin_app_planning(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        // `begin_planning` validates the collected answers are self-consistent
+        // BEFORE flipping to `planning` — a failure here never starts the
+        // background plan round trip.
+        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+            match task_service.begin_planning(&task_app_id).await {
+                Ok(()) => {
+                    Self::emit_apps_snapshot(&task_service).await;
+                    true
+                }
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                        .await;
+                    false
+                }
+            }
+        }))
+        .await;
+        if succeeded {
+            self.trigger_planning(&service, app_id);
+        }
+    }
+
+    async fn handle_retry_app_plan(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let emissions = self.app_emissions.clone();
+        let task_service = service.clone();
+        let task_app_id = app_id.clone();
+        let succeeded = Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
+            match task_service.retry_plan(&task_app_id).await {
+                Ok(()) => {
+                    Self::emit_apps_snapshot(&task_service).await;
+                    true
+                }
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&task_service), Some(task_app_id), &error)
+                        .await;
+                    false
+                }
+            }
+        }))
+        .await;
+        if succeeded {
+            self.trigger_planning(&service, app_id);
+        }
+    }
+
+    /// Kick off background questionnaire authoring for `app_id`, fire-and-
+    /// forget from the caller's perspective: `submit` has already returned
+    /// (or is about to) by the time the LLM round trip lands. The eventual
+    /// `questionnaire_ready` / `questionnaire_failed` transition and its
+    /// `AppsChanged` snapshot ride the same app-emission channel as every
+    /// other app event.
+    fn trigger_authoring(&self, service: &Arc<AppService>, app_id: String) {
+        // `self.local_apps` was `Ok` (checked by every caller via
+        // `local_apps_or_report`) iff `self.profile_apps` is `Some` — both are
+        // set together from the same `loaded_profile` match at build time.
+        let Some(profile) = &self.profile_apps else {
+            return;
+        };
+        let handle = Self::spawn_authoring(
+            self.runtime.handle(),
+            service.clone(),
+            profile.llm.current(),
+            self.app_emissions.clone(),
+            app_id,
+        );
+        self.local_apps_background.track(handle);
+    }
+
+    /// As [`Self::trigger_authoring`], for background plan derivation.
+    fn trigger_planning(&self, service: &Arc<AppService>, app_id: String) {
+        let Some(profile) = &self.profile_apps else {
+            return;
+        };
+        let handle = Self::spawn_planning(
+            self.runtime.handle(),
+            service.clone(),
+            profile.llm.current(),
+            self.app_emissions.clone(),
+            app_id,
+        );
+        self.local_apps_background.track(handle);
+    }
+
+    /// 出题跑在后台：创建命令立刻返回，界面进「出题中」，模型往返
+    /// 落定后再推状态。失败落 questionnaire_failed，绝不静默降级
+    /// —— 模版已经删了，没有可退的默认问卷。
+    fn spawn_authoring(
+        runtime: &tokio::runtime::Handle,
+        service: Arc<AppService>,
+        llm: Arc<LocalAppsLlm>,
+        emissions: crate::local_apps_bridge::AppEmissionQueue,
+        app_id: String,
+    ) -> tokio::task::JoinHandle<()> {
+        runtime.spawn(async move {
+            let brief = match service.record(&app_id).await {
+                Ok(record) => record.brief,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                    return;
+                }
+            };
+            match llm.author_questionnaire(&brief).await {
+                Ok((name, steps)) => {
+                    if let Err(error) = service.questionnaire_ready(&app_id, steps, name).await {
+                        let _ = service.questionnaire_failed(&app_id, &format!("{error}")).await;
+                        emissions
+                            .emit_failure(Some(&service), Some(app_id.clone()), &error)
+                            .await;
+                    }
+                }
+                Err(error) => {
+                    let _ = service.questionnaire_failed(&app_id, &format!("{error}")).await;
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id.clone()), &error)
+                        .await;
+                }
+            }
+            Self::emit_apps_snapshot(&service).await;
+        })
+    }
+
+    /// 出方案跑在后台，形状同 [`Self::spawn_authoring`]：读 brief + 问卷 +
+    /// 答案，调模型出方案；成功落 `plan_ready`（打开确认门），失败落
+    /// `plan_failed`，绝不静默降级。
+    fn spawn_planning(
+        runtime: &tokio::runtime::Handle,
+        service: Arc<AppService>,
+        llm: Arc<LocalAppsLlm>,
+        emissions: crate::local_apps_bridge::AppEmissionQueue,
+        app_id: String,
+    ) -> tokio::task::JoinHandle<()> {
+        runtime.spawn(async move {
+            let loaded = async {
+                let record = service.record(&app_id).await?;
+                let draft = service.draft(&app_id).await?;
+                Ok::<_, AppError>((record, draft))
+            }
+            .await;
+            let (record, draft) = match loaded {
+                Ok(pair) => pair,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                    return;
+                }
+            };
+            match llm
+                .plan(&record.brief, &draft.questionnaire, &draft.fields)
+                .await
+            {
+                Ok(plan) => {
+                    if let Err(error) = service.plan_ready(&app_id, plan).await {
+                        let _ = service.plan_failed(&app_id, &format!("{error}")).await;
+                        emissions
+                            .emit_failure(Some(&service), Some(app_id.clone()), &error)
+                            .await;
+                    }
+                }
+                Err(error) => {
+                    let _ = service.plan_failed(&app_id, &format!("{error}")).await;
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id.clone()), &error)
+                        .await;
+                }
+            }
+            Self::emit_apps_snapshot(&service).await;
+        })
     }
 
     // The seven mutate-then-announce handlers below are cancellation-atomic:
@@ -3684,10 +4003,27 @@ impl MobileEngineHandle {
             ClientCommand::CreateApp {
                 name,
                 origin,
+                brief,
                 conversation_id,
             } => {
-                self.handle_create_app(&name, origin, conversation_id)
+                self.handle_create_app(&name, origin, &brief, conversation_id)
                     .await;
+                Ok(())
+            }
+            ClientCommand::UpdateAppBrief { app_id, brief } => {
+                self.handle_update_app_brief(app_id, brief).await;
+                Ok(())
+            }
+            ClientCommand::RetryAppQuestionnaire { app_id } => {
+                self.handle_retry_app_questionnaire(app_id).await;
+                Ok(())
+            }
+            ClientCommand::BeginAppPlanning { app_id } => {
+                self.handle_begin_app_planning(app_id).await;
+                Ok(())
+            }
+            ClientCommand::RetryAppPlan { app_id } => {
+                self.handle_retry_app_plan(app_id).await;
                 Ok(())
             }
             ClientCommand::OpenAppDesigner { app_id } => {
@@ -5424,7 +5760,7 @@ pub fn build_mobile_engine_inner(
             let executor = MobileAppGenerationExecutor::new(
                 inner.mobile_linux.clone(),
                 host.clone(),
-                inner.local_apps_llm.clone(),
+                Arc::new(SharedLlm::new(inner.local_apps_llm.clone())),
             );
             let generation = AppGenerationCoordinator::new_with_observer(
                 mobile_apps_data_root(&firer_cfg),
@@ -5496,6 +5832,7 @@ pub fn build_mobile_engine_inner(
         app_client_subscription,
         app_domain_subscription,
         app_domain_observer,
+        local_apps_background: LocalAppsBackgroundTracker::default(),
     }))
 }
 
@@ -6117,6 +6454,7 @@ mod tests {
     // ── F3-05: the async `submit` FFI entry point ───────────────────────────
 
     use super::{build_mobile_engine, MobileEngineHandle};
+    use crate::local_apps_llm::test_support::ScriptedModel;
     use client_protocol::commands::ClientCommand;
     use client_protocol::error::ClientError;
     use client_protocol::events::ClientEvent as Ev;
@@ -6126,6 +6464,14 @@ mod tests {
     /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
     /// handle plus the recording listener so a test can read back delivered
     /// events.
+    ///
+    /// Task 11: `CreateApp` (and friends) now trigger a REAL background
+    /// authoring/planning round trip. Off-device tests have no network, so
+    /// this installs a deterministic, always-fails-fast local-apps model
+    /// (zero scripted responses ⇒ an immediate, in-process
+    /// `AppError::Io`, no I/O) instead of leaving every caller race a real
+    /// `api.anthropic.com` request — a test that wants a scripted success
+    /// overrides it via `set_local_apps_model` before triggering.
     fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
         let platform: Arc<dyn traits::Platform> =
             Arc::new(HostFakePlatform::new(root.to_path_buf()));
@@ -6135,6 +6481,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
         (handle, listener)
     }
 
@@ -6151,6 +6498,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
         (handle, listener)
     }
 
@@ -7384,6 +7732,29 @@ mod tests {
         })
     }
 
+    /// Task 11: `CreateApp` triggers a REAL background authoring round trip,
+    /// which `build_submit_handle`'s default test double fails immediately
+    /// (no scripted response) — deterministically, but concurrently with the
+    /// caller. Many tests below need `collecting_spec` for scaffolding
+    /// unrelated to authoring itself; this settles that background failure
+    /// FIRST (so nothing races the reset), resets to
+    /// `authoring_questionnaire` directly on the service (bypassing
+    /// `submit`, so no SECOND background round trip triggers), then splices
+    /// the fixture questionnaire exactly as `advance_to_collecting_spec`
+    /// always has.
+    async fn seed_collecting_spec(
+        handle: &MobileEngineHandle,
+        service: &local_apps::AppService,
+        app_id: &str,
+    ) -> local_apps::AppRecord {
+        handle.settle_local_apps().await;
+        service
+            .retry_questionnaire(app_id)
+            .await
+            .expect("reset to authoring_questionnaire for test scaffolding");
+        local_apps::test_support::advance_to_collecting_spec(service, app_id).await
+    }
+
     /// (local-apps#questionnaire, Task 5, coordinator ruling: total removal of
     /// the static template catalog): this test used to also cover
     /// `ListAppTemplates` → `AppTemplatesChanged` before the FIRST assertion
@@ -7400,6 +7771,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Tracker".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -7428,30 +7800,35 @@ mod tests {
         });
     }
 
-    /// PINS the gap `handle_create_app`'s TODO names: until Task 11 gives
-    /// `ClientCommand::CreateApp` a real `brief` field, the core
-    /// `AppRecord.brief` persisted for a chat/library create is exactly
-    /// `name` — verbatim, not the (ignored) `template`, not empty. Checked
-    /// against the CORE record (`AppRecordDto` carries no `brief` yet — see
-    /// the client-protocol Task-5 note), so this reaches past the wire and
-    /// pins what actually lands on disk, which is what Task 8's
-    /// questionnaire-authoring stage will read.
+    /// PINS the Task 11 fix: `ClientCommand::CreateApp` now carries a real
+    /// `brief` field, and `handle_create_app` persists the CALLER-SUPPLIED
+    /// brief — not `name` doubling as the brief (the deliberate placeholder
+    /// this test used to pin, `create_app_persists_name_as_brief_until_
+    /// task_11_adds_a_real_one`, until this task landed). All three LLM
+    /// stages read `AppRecord.brief`, so a client-created app must author
+    /// its questionnaire from the caller's real spec, not a bare display
+    /// name.
     ///
-    /// The test name is deliberately LONGER than
-    /// `AppService::create_app`'s 24-char placeholder cut: `handle_create_app`
-    /// must call `service.create_app(Some(name), name, conversation_id)` —
-    /// were it to regress to `create_app(None, name, conversation_id)` (`name`
-    /// silently dropped, only `brief` passed through), a name at or under 24
-    /// chars would come back byte-for-byte identical via the placeholder
-    /// path and this test would stay green over the regression. A name that
-    /// only survives verbatim through the EXPLICIT path is what makes the
-    /// pin meaningful again.
+    /// Mirrors `create_persists_the_caller_supplied_brief_and_does_not_
+    /// overwrite_a_supplied_name` in `local_apps_mcp.rs` (Task 10's side of
+    /// this same fix): `name` and `brief` are asserted UNEQUAL and both
+    /// checked, so this cannot pass by conflating them back together. The
+    /// `NAME` fixture stays longer than `AppService::create_app`'s 24-char
+    /// placeholder cut so a regression to `create_app(None, brief, ..)`
+    /// (`name` silently dropped) is visible too: it would come back as the
+    /// brief's own 24-char prefix instead of `NAME`.
     #[test]
-    fn create_app_persists_name_as_brief_until_task_11_adds_a_real_one() {
+    fn create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name() {
         const NAME: &str = "Habit Tracker Deluxe Edition";
+        const BRIEF: &str = "一个记事本 app，用来跟踪每天的习惯打卡";
         assert!(
             NAME.chars().count() > 24,
             "test fixture must exceed the placeholder cut to be meaningful"
+        );
+        assert_ne!(
+            NAME, BRIEF,
+            "name and brief must be distinct fixtures so the test cannot pass by \
+             conflating them"
         );
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
@@ -7461,6 +7838,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: NAME.into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: BRIEF.into(),
                     conversation_id: None,
                 })
                 .await
@@ -7473,12 +7851,268 @@ mod tests {
 
             let service = handle.local_apps().expect("local-apps service");
             let record = service.record(&app_id).await.expect("record");
-            assert_eq!(record.name, NAME);
             assert_eq!(
-                record.brief, NAME,
-                "until Task 11 adds a real brief input, CreateApp must persist `name` as \
-                 `brief` verbatim — not empty, not silently something else"
+                record.name, NAME,
+                "a caller-supplied name must not be silently overwritten"
             );
+            assert_eq!(
+                record.brief, BRIEF,
+                "the brief the caller supplied is the brief that gets stored — not the \
+                 name, not empty, not anything else"
+            );
+        });
+    }
+
+    // ── Task 11: host-orchestrated authoring / planning triggers ────────────
+
+    /// A valid `emit_questionnaire` tool payload — one step, one deferrable
+    /// multiple-choice field, matching `local_apps_llm.rs`'s own fixture
+    /// shape (already exercised there against the real validator).
+    fn good_questionnaire() -> serde_json::Value {
+        serde_json::json!({
+            "suggestedName": "记事本",
+            "steps": [{
+                "id": "basics", "order": 0, "title": "功能",
+                "fields": [{
+                    "id": "features", "label": "需要哪些功能",
+                    "fieldType": "multiple_choice", "required": true,
+                    "allowsCustom": true, "allowsDefer": true,
+                    "options": [{"value": "list", "label": "笔记列表"}]
+                }]
+            }]
+        })
+    }
+
+    /// A second, DIFFERENT valid questionnaire (distinct step id) — proves a
+    /// re-authoring round trip actually replaced the old questionnaire
+    /// rather than coincidentally matching it.
+    fn other_questionnaire() -> serde_json::Value {
+        serde_json::json!({
+            "suggestedName": "待办清单",
+            "steps": [{
+                "id": "todo_basics", "order": 0, "title": "任务",
+                "fields": [{
+                    "id": "priority", "label": "需要区分优先级吗",
+                    "fieldType": "boolean", "required": true,
+                    "allowsCustom": false, "allowsDefer": true,
+                    "options": []
+                }]
+            }]
+        })
+    }
+
+    /// A valid `emit_plan` tool payload, matching `local_apps_llm.rs`'s own
+    /// fixture shape.
+    fn good_plan() -> serde_json::Value {
+        serde_json::json!({
+            "summary": "一个记事本，帮你记录日常想法。",
+            "collections": [{
+                "id": "notes", "name": "笔记",
+                "fields": [{"id": "title", "label": "标题", "kind": "text", "required": true}]
+            }],
+            "capabilities": ["data_mutation"],
+            "domains": []
+        })
+    }
+
+    /// `CreateApp` starts authoring in the background; once it settles, the
+    /// app has moved past `authoring_questionnaire` to `collecting_spec` and
+    /// the LLM's suggested name has replaced the create-time placeholder.
+    #[test]
+    fn creating_an_app_drives_authoring_to_collecting_spec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![Ok(good_questionnaire())]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            let service = handle.local_apps().expect("local-apps service");
+            let record = service.record(&app_id).await.expect("record");
+            assert_eq!(
+                record.workflow_state,
+                local_apps::AppWorkflowState::CollectingSpec
+            );
+            assert_eq!(
+                record.name, "记事本",
+                "the suggested name replaced the create-time placeholder"
+            );
+        });
+    }
+
+    /// A model failure during authoring fails closed — `questionnaire_failed`,
+    /// never a silent fallback — and `RetryAppQuestionnaire` recovers from
+    /// there once the model is available again.
+    #[test]
+    fn a_model_failure_lands_in_questionnaire_failed_and_stays_retryable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![
+            Err(local_apps::AppError::LlmUnavailable("offline".into())),
+            Ok(good_questionnaire()),
+        ]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            let service = handle.local_apps().expect("local-apps service");
+            assert_eq!(
+                service.record(&app_id).await.expect("record").workflow_state,
+                local_apps::AppWorkflowState::QuestionnaireFailed
+            );
+
+            handle
+                .submit(ClientCommand::RetryAppQuestionnaire {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(RetryAppQuestionnaire)");
+            handle.settle_local_apps().await;
+            assert_eq!(
+                service.record(&app_id).await.expect("record").workflow_state,
+                local_apps::AppWorkflowState::CollectingSpec
+            );
+        });
+    }
+
+    /// `BeginAppPlanning` validates the answers, starts planning in the
+    /// background, and — once it settles — opens the spec-confirmation gate
+    /// with a plan stamped against the current draft revision.
+    #[test]
+    fn beginning_planning_drives_through_to_the_confirmation_gate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![
+            Ok(good_questionnaire()),
+            Ok(good_plan()),
+        ]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: AppDesignPatchDto {
+                        ops: vec![AppDesignPatchOpDto::Set {
+                            field_id: "features".into(),
+                            value: DesignValueDto::MultipleChoice {
+                                value: vec!["list".into()],
+                            },
+                        }],
+                        note: None,
+                    },
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft)");
+
+            handle
+                .submit(ClientCommand::BeginAppPlanning {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(BeginAppPlanning)");
+            handle.settle_local_apps().await;
+
+            let service = handle.local_apps().expect("local-apps service");
+            let record = service.record(&app_id).await.expect("record");
+            assert_eq!(
+                record.workflow_state,
+                local_apps::AppWorkflowState::AwaitingSpecConfirmation
+            );
+            let draft = service.draft(&app_id).await.expect("draft");
+            assert_eq!(draft.plan_for_revision, Some(draft.revision));
+        });
+    }
+
+    /// `UpdateAppBrief` discards the old questionnaire/answers and
+    /// re-authors from scratch — once it settles, the draft carries the
+    /// FRESH questionnaire, not the one authored from the original brief.
+    #[test]
+    fn changing_the_brief_reauthors_the_questionnaire() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.set_local_apps_model(ScriptedModel::new(vec![
+            Ok(good_questionnaire()),
+            Ok(other_questionnaire()),
+        ]));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: String::new(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "一个记事本".into(),
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            handle.settle_local_apps().await;
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            handle
+                .submit(ClientCommand::UpdateAppBrief {
+                    app_id: app_id.clone(),
+                    brief: "改成一个待办清单".into(),
+                })
+                .await
+                .expect("submit(UpdateAppBrief)");
+            handle.settle_local_apps().await;
+
+            let service = handle.local_apps().expect("local-apps service");
+            let draft = service.draft(&app_id).await.expect("draft");
+            assert_eq!(
+                draft.questionnaire[0].id, "todo_basics",
+                "a fresh questionnaire replaced the old one"
+            );
+            assert!(draft.fields.is_empty());
         });
     }
 
@@ -7504,17 +8138,27 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Habit Tracker".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: Some("conv-ignored".into()),
                 })
                 .await
                 .expect("submit(CreateApp)");
+            // Task 11: `CreateApp` triggers a background authoring round trip.
+            // `build_submit_handle`'s default model has no scripted response,
+            // so it fails immediately and deterministically —
+            // `settle_local_apps` waits for that to land BEFORE any event/
+            // state read below, so `workflow_state` is read once settled
+            // rather than raced against the still-running background task.
+            handle.settle_local_apps().await;
             let events = drain_events(&handle, &listener).await;
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             assert_eq!(apps.len(), 1);
             assert_eq!(apps[0].name, "Habit Tracker");
             assert_eq!(
                 apps[0].workflow_state,
-                AppWorkflowStateDto::AuthoringQuestionnaire
+                AppWorkflowStateDto::QuestionnaireFailed,
+                "the default test double has no scripted response, so background \
+                 authoring fails immediately"
             );
             assert_eq!(
                 apps[0].conversation_id, None,
@@ -7526,7 +8170,7 @@ mod tests {
             // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
             // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
 
             // Open the designer gate; the interaction id reaches the client
             // ONLY through this event (spec §I gating).
@@ -7826,6 +8470,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Board".into(),
                     origin: AppCreateOriginDto::Chat,
+                    brief: "a test app".into(),
                     conversation_id: Some("conv-7".into()),
                 })
                 .await
@@ -7934,6 +8579,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Persist".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -7942,7 +8588,7 @@ mod tests {
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             let app_id = apps[0].id.clone();
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::UpdateAppDesignDraft {
                     app_id: app_id.clone(),
@@ -8011,6 +8657,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Moodboard".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8024,7 +8671,7 @@ mod tests {
             // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
             // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
 
             // The designer gate opens at revision 0; its interaction id
             // reaches the client only through this event.
@@ -8257,6 +8904,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Gallery".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8267,7 +8915,7 @@ mod tests {
             .id
             .clone();
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
 
             handle
                 .submit(ClientCommand::OpenAppDesigner {
@@ -8444,6 +9092,10 @@ mod tests {
         let handle =
             build_mobile_engine(test_config(tmp.path()), platform, listener_dyn, perm_sink)
                 .expect("build_mobile_engine failed");
+        // See `build_submit_handle`'s doc: a deterministic, no-network local-
+        // apps model so `seed_collecting_spec` below never races (or hangs
+        // on) a real `api.anthropic.com` request.
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
         *listener.engine.lock().unwrap() = Some(handle.clone());
 
         handle.runtime().block_on(async {
@@ -8454,6 +9106,7 @@ mod tests {
                     .submit(ClientCommand::CreateApp {
                         name: "Reentrant".into(),
                         origin: AppCreateOriginDto::Library,
+                        brief: "a test app".into(),
                         conversation_id: None,
                     })
                     .await
@@ -8464,7 +9117,7 @@ mod tests {
                     .id
                     .clone();
                 let service = handle.local_apps().expect("local-apps service");
-                local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+                seed_collecting_spec(&handle, &service, &app_id).await;
 
                 // Delivering AppDesignerRequested makes the listener drive
                 // the draft edit from inside `on_event`; both the outer and
@@ -8527,6 +9180,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Sweep".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8537,7 +9191,7 @@ mod tests {
             .id
             .clone();
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8656,6 +9310,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Telemetry".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8756,6 +9411,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Conflicted".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8766,7 +9422,7 @@ mod tests {
             .id
             .clone();
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -8864,6 +9520,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Fifo".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await
@@ -8874,7 +9531,7 @@ mod tests {
             .id
             .clone();
             let service = handle.local_apps().expect("local-apps service");
-            local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
+            seed_collecting_spec(&handle, &service, &app_id).await;
             handle
                 .submit(ClientCommand::OpenAppDesigner {
                     app_id: app_id.clone(),
@@ -9030,6 +9687,7 @@ mod tests {
                 .submit(ClientCommand::CreateApp {
                     name: "Habit Tracker".into(),
                     origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
                     conversation_id: None,
                 })
                 .await

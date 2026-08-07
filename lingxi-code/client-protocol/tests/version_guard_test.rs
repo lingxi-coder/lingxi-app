@@ -626,7 +626,24 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp", "create_app");
     put("ClientCommand::CreateApp.name", "String");
     put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
+    put("ClientCommand::CreateApp.brief", "String");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
+
+    put("ClientCommand::UpdateAppBrief", "update_app_brief");
+    put("ClientCommand::UpdateAppBrief.app_id", "String");
+    put("ClientCommand::UpdateAppBrief.brief", "String");
+
+    put(
+        "ClientCommand::RetryAppQuestionnaire",
+        "retry_app_questionnaire",
+    );
+    put("ClientCommand::RetryAppQuestionnaire.app_id", "String");
+
+    put("ClientCommand::BeginAppPlanning", "begin_app_planning");
+    put("ClientCommand::BeginAppPlanning.app_id", "String");
+
+    put("ClientCommand::RetryAppPlan", "retry_app_plan");
+    put("ClientCommand::RetryAppPlan.app_id", "String");
 
     put("ClientCommand::OpenAppDesigner", "open_app_designer");
     put("ClientCommand::OpenAppDesigner.app_id", "String");

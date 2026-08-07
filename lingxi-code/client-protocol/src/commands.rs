@@ -326,16 +326,58 @@ pub enum ClientCommand {
     },
 
     /// Create a new local-app record and its workspace. Confirmed by an
-    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event.
+    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event. The
+    /// engine starts authoring the questionnaire from `brief` in the
+    /// background — `CreateApp` returns as soon as the record is persisted,
+    /// well before that LLM round trip lands
+    /// ([`AppQuestionnaireChanged`](crate::events::ClientEvent::AppEvent)/
+    /// `WorkflowChanged` follow later on the same channel).
     CreateApp {
         /// User-facing display name.
         name: String,
         /// Where the creation originated (`chat` / `library`).
         origin: AppCreateOriginDto,
+        /// One-line description of what the app should do — the seed the
+        /// LLM authors the questionnaire from. Distinct from `name`: a
+        /// display label is not a spec, and conflating the two used to leave
+        /// the questionnaire authored from a bare app name.
+        brief: String,
         /// Conversation the app was created from (`origin: chat`). Skipped
         /// from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+    },
+
+    /// Replace an app's brief and re-author its questionnaire from scratch
+    /// (discarding any prior questionnaire/answers/plan). Valid from
+    /// `collecting_spec`, `questionnaire_failed`, or `plan_failed`.
+    UpdateAppBrief {
+        /// App whose brief to replace.
+        app_id: String,
+        /// The new one-line description.
+        brief: String,
+    },
+
+    /// Retry questionnaire authoring after it failed (`questionnaire_failed
+    /// -> authoring_questionnaire`), reusing the same brief.
+    RetryAppQuestionnaire {
+        /// App whose questionnaire authoring to retry.
+        app_id: String,
+    },
+
+    /// Begin planning from the collected answers (`collecting_spec ->
+    /// planning`). The engine validates the answers are self-consistent
+    /// before starting the background plan round trip.
+    BeginAppPlanning {
+        /// App to begin planning for.
+        app_id: String,
+    },
+
+    /// Retry planning after it failed (`plan_failed -> planning`), reusing
+    /// the same answers.
+    RetryAppPlan {
+        /// App whose planning to retry.
+        app_id: String,
     },
 
     /// Open the design-spec confirmation gate. Replied with an

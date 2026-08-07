@@ -10,7 +10,7 @@ use local_apps::{AppError, AppEventFanout, AppGenerationCoordinator, AppService}
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use tokio::sync::OnceCell;
 use traits::{Clock, MobileLinuxRuntime};
 
@@ -95,12 +95,50 @@ impl ClientEventSink for ClientEventFanout {
     }
 }
 
+/// Swappable holder for a profile's [`LocalAppsLlm`].
+///
+/// `ProfileApps` is cached process-wide (see [`profile_apps`]'s `OnceCell`),
+/// but its `llm` is NOT — every consumer that runs the three LLM round
+/// trips (`host.rs`'s authoring/planning triggers, and
+/// `MobileAppGenerationExecutor`'s source generation) reads through this
+/// cell instead of holding its own `Arc<LocalAppsLlm>`. `clock` /
+/// `mobile_linux` stay genuinely pinned to whichever connection first loaded
+/// the profile (their doc above explains why); the model is different: it
+/// carries auth and the user's live model choice, and a reconnect or a
+/// `/model` switch can change either. Pinning THOSE silently would mean
+/// generation keeps authenticating as a rotated-out credential, or keeps
+/// authoring against a model the user switched away from, with no error and
+/// no log — so [`profile_apps`] refreshes this cell on every call, cached
+/// hit or not.
+pub(crate) struct SharedLlm(RwLock<Arc<LocalAppsLlm>>);
+
+impl SharedLlm {
+    pub(crate) fn new(llm: Arc<LocalAppsLlm>) -> Self {
+        Self(RwLock::new(llm))
+    }
+
+    /// The current model. Read fresh on every use (not cached by the
+    /// caller) so a swap takes effect for the very next LLM call, including
+    /// one already in flight when the swap lands but that has not yet
+    /// reached `structured()`.
+    pub(crate) fn current(&self) -> Arc<LocalAppsLlm> {
+        self.0.read().expect("shared llm poisoned").clone()
+    }
+
+    /// Swap in a new model — called by [`profile_apps`] with the calling
+    /// connection's own `ApiService`-backed model.
+    pub(crate) fn replace(&self, llm: Arc<LocalAppsLlm>) {
+        *self.0.write().expect("shared llm poisoned") = llm;
+    }
+}
+
 pub(crate) struct ProfileApps {
     pub(crate) service: Arc<AppService>,
     pub(crate) generation: Arc<AppGenerationCoordinator>,
     pub(crate) host: Arc<LocalAppsHostBroker>,
     pub(crate) domain_events: Arc<AppEventFanout>,
     pub(crate) client_events: Arc<ClientEventFanout>,
+    pub(crate) llm: Arc<SharedLlm>,
 }
 
 impl ProfileApps {
@@ -112,6 +150,7 @@ impl ProfileApps {
         runtime_root: Option<PathBuf>,
         llm: Arc<LocalAppsLlm>,
     ) -> Result<Arc<Self>, AppError> {
+        let llm = Arc::new(SharedLlm::new(llm));
         let client_events = Arc::new(ClientEventFanout::new());
         let host = LocalAppsHostBroker::new(
             root.clone(),
@@ -120,7 +159,7 @@ impl ProfileApps {
             full_runtime,
             runtime_root,
         );
-        let executor = MobileAppGenerationExecutor::new(mobile_linux, host.clone(), llm);
+        let executor = MobileAppGenerationExecutor::new(mobile_linux, host.clone(), llm.clone());
         let generation = AppGenerationCoordinator::new_with_observer(
             root.clone(),
             clock.clone(),
@@ -145,6 +184,7 @@ impl ProfileApps {
             host,
             domain_events,
             client_events,
+            llm,
         }))
     }
 }
@@ -166,21 +206,27 @@ pub(crate) async fn profile_apps(
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone()
     };
-    cell.get_or_try_init(|| async move {
-        worker_runtime()
-            .spawn(ProfileApps::load(
-                root,
-                clock,
-                mobile_linux,
-                full_runtime,
-                runtime_root,
-                llm,
-            ))
-            .await
-            .map_err(|error| AppError::Io(format!("local-app profile load failed: {error}")))?
-    })
-    .await
-    .cloned()
+    // Cloned BEFORE `llm` moves into the (maybe-never-run) init closure below,
+    // so it survives to refresh a CACHED profile too — see `SharedLlm`'s doc.
+    let refresh_llm = llm.clone();
+    let profile = cell
+        .get_or_try_init(|| async move {
+            worker_runtime()
+                .spawn(ProfileApps::load(
+                    root,
+                    clock,
+                    mobile_linux,
+                    full_runtime,
+                    runtime_root,
+                    llm,
+                ))
+                .await
+                .map_err(|error| AppError::Io(format!("local-app profile load failed: {error}")))?
+        })
+        .await
+        .cloned()?;
+    profile.llm.replace(refresh_llm);
+    Ok(profile)
 }
 
 #[cfg(test)]

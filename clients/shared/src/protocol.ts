@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '1.2.0';
+export const CLIENT_PROTOCOL_VERSION = '3.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -149,15 +149,18 @@ export type ClientCommand =
   | { type: 'task_stop'; task_id: string }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'list_apps' }
-  | { type: 'list_app_templates' }
   | { type: 'get_app_details'; app_id: string }
   | {
       type: 'create_app';
       name: string;
-      template: AppTemplateKindDto;
       origin: AppCreateOriginDto;
+      brief: string;
       conversation_id?: string;
     }
+  | { type: 'update_app_brief'; app_id: string; brief: string }
+  | { type: 'retry_app_questionnaire'; app_id: string }
+  | { type: 'begin_app_planning'; app_id: string }
+  | { type: 'retry_app_plan'; app_id: string }
   | { type: 'open_app_designer'; app_id: string }
   | {
       type: 'update_app_design_draft';
@@ -476,16 +479,13 @@ export interface TaskRowDto {
 // discriminators the local-apps spec fixes.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Scaffold template an app is designed from (local_apps.rs `AppTemplateKindDto`). */
-export type AppTemplateKindDto =
-  | 'dashboard'
-  | 'crud_tracker'
-  | 'content_showcase'
-  | 'form_utility';
-
 /** Designer/generation workflow state (local_apps.rs `AppWorkflowStateDto`). */
 export type AppWorkflowStateDto =
+  | 'authoring_questionnaire'
+  | 'questionnaire_failed'
   | 'collecting_spec'
+  | 'planning'
+  | 'plan_failed'
   | 'awaiting_spec_confirmation'
   | 'generating'
   | 'validating'
@@ -511,7 +511,9 @@ export type AppErrorCodeDto =
   | 'not_yet_available'
   | 'storage_corrupt'
   | 'invalid_request'
-  | 'io';
+  | 'io'
+  | 'llm_unavailable'
+  | 'llm_output_rejected';
 
 /** Why a checkpoint was recorded (local_apps.rs `AppCheckpointKindDto`). */
 export type AppCheckpointKindDto =
@@ -580,6 +582,10 @@ export interface AppDesignFieldDto {
   description?: string;
   field_type: AppDesignFieldTypeDto;
   required: boolean;
+  /** Renders an `Other…` free-text box. */
+  allows_custom: boolean;
+  /** Renders "let the LLM decide". */
+  allows_defer: boolean;
   default_value?: DesignValueDto;
   options: AppDesignFieldOptionDto[];
 }
@@ -593,14 +599,17 @@ export interface AppDesignStepDto {
   fields: AppDesignFieldDto[];
 }
 
-/** A versioned, server-owned template definition (local_apps.rs `AppTemplateDto`). */
-export interface AppTemplateDto {
-  kind: AppTemplateKindDto;
-  version: number;
-  name: string;
-  description: string;
-  steps: AppDesignStepDto[];
+/**
+ * The "will be created" summary shown on the confirmation page. Derived by the
+ * LLM from the answers, validated by `local-apps` (local_apps.rs `AppPlanDto`).
+ */
+export interface AppPlanDto {
   collections: AppDataCollectionDto[];
+  capabilities: AppCapabilityKindDto[];
+  /** External HTTPS host names. */
+  domains: string[];
+  /** Human-readable summary; every deferred field's final resolution is spelled out here. */
+  summary: string;
 }
 
 /** One draft field value, tagged by field kind (local_apps.rs `DesignValueDto`). */
@@ -615,7 +624,9 @@ export type DesignValueDto =
   | { kind: 'screen_list'; value: string[] }
   | { kind: 'feature_list'; value: string[] }
   | { kind: 'data_field_list'; value: AppDataFieldDto[] }
-  | { kind: 'domain_list'; value: string[] };
+  | { kind: 'domain_list'; value: string[] }
+  /** The user explicitly chose to let the LLM decide this field. No payload. */
+  | { kind: 'deferred' };
 
 /** One patch operation against the draft field map (local_apps.rs `AppDesignPatchOpDto`). */
 export type AppDesignPatchOpDto =
@@ -632,7 +643,8 @@ export interface AppDesignPatchDto {
 export interface AppRecordDto {
   id: string;
   name: string;
-  template: AppTemplateKindDto;
+  /** One-line description the user gave at creation time. */
+  brief: string;
   created_at_ms: number;
   updated_at_ms: number;
   workflow_state: AppWorkflowStateDto;
@@ -697,7 +709,6 @@ export interface AppManifestDto {
   schema_version: number;
   app_id: string;
   name: string;
-  template: AppTemplateKindDto;
   design_revision: number;
   collections: AppDataCollectionDto[];
   allowed_domains: string[];
@@ -724,6 +735,10 @@ export interface AppDetailsDto {
   app: AppRecordDto;
   design_revision: number;
   design_fields: AppDesignFieldValueDto[];
+  /** The LLM-authored questionnaire driving the designer. Empty before authoring completes. */
+  questionnaire: AppDesignStepDto[];
+  /** The LLM-derived plan awaiting confirmation, if one has been authored. */
+  plan?: AppPlanDto;
   manifest?: AppManifestDto;
   runtime: AppRuntimeDetailsDto;
   generation_job?: AppGenerationJobDto;
@@ -811,8 +826,11 @@ export type AppAuthorizationDecisionDto =
  * mobile enum metadata bounded. Internally tagged on `type`, `snake_case`.
  */
 export type AppEventDto =
-  | { type: 'app_templates_changed'; templates: AppTemplateDto[] }
   | { type: 'app_details_changed'; details: AppDetailsDto }
+  /** The LLM finished (or discarded) authoring the questionnaire. */
+  | { type: 'app_questionnaire_changed'; app_id: string; revision: number; steps: AppDesignStepDto[] }
+  /** The LLM finished (or discarded) deriving the plan. */
+  | { type: 'app_plan_changed'; app_id: string; revision: number; plan?: AppPlanDto }
   | { type: 'app_generation_job_changed'; job: AppGenerationJobDto }
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
   | { type: 'app_ui_request'; request: AppUiRequestDto }

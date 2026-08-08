@@ -575,15 +575,29 @@ private struct LocalAppFieldEditor: View {
             // only choice fields, so a shortText/color/etc. field can still
             // offer 「由你决定」 even though it has no options to chip.
             if showsSupplementaryChips {
-                DesignerFieldChips(field: field, value: value, onChange: onChange)
+                DesignerFieldChips(
+                    field: field,
+                    value: value,
+                    allowsCustomInput: false,
+                    onChange: onChange
+                )
             }
         }
     }
 
+    /// 「由你决定」 only, and only for field types whose own editor cannot
+    /// offer it.
+    ///
+    /// `allowsCustom` deliberately does NOT appear here. It used to, which put
+    /// an "Other…" box under editors that already had their own way to add an
+    /// entry — the data-fields editor's `+`, the string-list editor's free
+    /// text — and, worse, one that answered with a choice-shaped value the
+    /// field's type does not accept. A `data_field_list` field with
+    /// `allowsCustom` was unanswerable through that box.
     private var showsSupplementaryChips: Bool {
         switch field.type {
         case .singleChoice, .multipleChoice: false
-        default: field.allowsDefer || field.allowsCustom
+        default: field.allowsDefer
         }
     }
 
@@ -727,13 +741,28 @@ struct DesignerFieldChips: View {
 
     @State private var customText: String
 
+    /// Whether the "Other…" box is this row's to render.
+    ///
+    /// False when the row is a SUPPLEMENT under some other field type's real
+    /// editor: `commitCustom` can only build a choice-shaped answer
+    /// (`.strings` or `.text`), which is not a legal value for a
+    /// `dataFieldList`/`screenList`/`domainList` field. Sending one got
+    /// rejected at the wire adapter as "the current engine doesn't yet support
+    /// structured values for field …" — a message that blamed the engine for a
+    /// value this screen should never have produced. Those editors already
+    /// have their own way to add a custom entry, so the supplementary row
+    /// carries 「由你决定」 alone.
+    let allowsCustomInput: Bool
+
     init(
         field: LocalAppDesignField,
         value: LocalAppDesignValue? = nil,
+        allowsCustomInput: Bool = true,
         onChange: @escaping (LocalAppDesignValue) -> Void = { _ in }
     ) {
         self.field = field
         self.value = value
+        self.allowsCustomInput = allowsCustomInput
         self.onChange = onChange
         _customText = State(initialValue: DesignerFieldChips.initialCustomText(field: field, value: value))
     }
@@ -748,7 +777,7 @@ struct DesignerFieldChips: View {
         return chips
     }
 
-    var showsCustomInput: Bool { field.allowsCustom }
+    var showsCustomInput: Bool { field.allowsCustom && allowsCustomInput }
 
     /// The option values known to this field — anything in a `.strings`/
     /// `.text` answer that is NOT among these is what `customText` holds.

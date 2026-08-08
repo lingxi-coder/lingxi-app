@@ -1124,6 +1124,40 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertFalse(DesignerFieldChips(field: withoutCustom).showsCustomInput)
     }
 
+    /// A supplementary chips row — the one shown UNDER another field type's
+    /// own editor — must not offer "Other…".
+    ///
+    /// `commitCustom` can only build a choice-shaped answer, and a real
+    /// questionnaire shipped `nutrition_fields` as `data_field_list` with
+    /// `allowsCustom: true`. Typing in that box answered a data-field list
+    /// with `.text`, which the wire adapter has no case for, so the screen
+    /// reported "the current engine doesn't yet support structured values for
+    /// field 需要记录哪些营养数据" and the field could not be answered at all.
+    func testASupplementaryChipsRowOffersNoOtherBoxEvenWhenTheFieldAllowsCustom() {
+        let dataFieldList = LocalAppDesignField(
+            id: "nutrition_fields",
+            label: "需要记录哪些营养数据",
+            description: "",
+            type: .dataFieldList,
+            required: true,
+            allowsCustom: true,
+            allowsDefer: false,
+            defaultValue: nil,
+            options: []
+        )
+
+        XCTAssertFalse(
+            DesignerFieldChips(field: dataFieldList, allowsCustomInput: false).showsCustomInput,
+            "the data-fields editor owns adding entries; a second box answers with the wrong shape"
+        )
+
+        // Not vacuously true: the choice fields that OWN their chips row still
+        // get the box, which is where "Other…" belongs.
+        XCTAssertTrue(
+            DesignerFieldChips(field: designField(allowsCustom: true)).showsCustomInput
+        )
+    }
+
     /// `.deferred` is an answer, not an absence — selecting 「由你决定」
     /// must send `LocalAppDesignValue.deferred`, never clear the field
     /// (local-apps#questionnaire, Task 1/13/14).

@@ -63,11 +63,22 @@ pub trait LocalAppsModel: Send + Sync {
     fn set_model(&self, _model: String, _profile: Option<String>) {}
 }
 
-/// Real [`LocalAppsModel`] over the shared `ApiService` — forced tool call via
-/// [`ApiService::messages_create_side_query`], `tool_choice: Some(ToolChoice::Tool { name })`
-/// (`llm-client/src/service.rs:2672`). This is the repo's existing structured-
-/// output mechanism (`sidequery::ProviderSideQueryClient` uses the same call);
-/// nothing new is invented here.
+/// Real [`LocalAppsModel`] over the shared `ApiService` — a tool call via
+/// [`ApiService::messages_create_side_query`] (`llm-client/src/service.rs:2672`),
+/// forced with `tool_choice` wherever the provider accepts one.
+///
+/// This is deliberately NOT the shape the repo's other side queries use, and an
+/// earlier version of this comment wrongly claimed otherwise. The only two
+/// `SideQueryRequest` callers — `tools/web/src/web_fetch.rs` and
+/// `memory/src/selector.rs` — both send `tools: vec![]` + `tool_choice: None`
+/// and recover structure by parsing JSON out of the reply TEXT
+/// (`sidequery::decode_response`). That shape is portable but unenforced: it
+/// asks for a schema and hopes. The forced-tool-call shape — what
+/// `agent/src/runner.rs:834` uses for subagent structured output — makes a
+/// schema-shaped answer a wire-level guarantee instead. Local apps want the
+/// guarantee, because a malformed plan here is not a bad answer, it is a wedged
+/// app. So `structured` keeps the guarantee where it exists and degrades to the
+/// portable shape only where the provider refuses it.
 ///
 /// `max_tokens` is not part of the [`LocalAppsModel::structured`] signature —
 /// the trait is shared by all three calls, but the brief assigns each a
@@ -135,21 +146,38 @@ impl LocalAppsModel for ApiServiceModel {
         // Ask for a forced tool call first, and fall back to an UNFORCED one if
         // the provider rejects the directive itself.
         //
-        // Two shapes were tried on a real device against DeepSeek with
-        // reasoning on, and BOTH 400:
+        // Measured against the live DeepSeek API (api.deepseek.com), not
+        // inferred — every row below is an observed response:
         //
-        //   ToolChoice::Tool { name }  -> {"type":"function","function":{…}}
-        //   ToolChoice::Required       -> "required"
-        //   both: "Thinking mode does not support this tool_choice"
+        //   thinking on   + tools + tool_choice=required    -> 400
+        //   thinking on   + tools + tool_choice={named fn}  -> 400
+        //   NO thinking field + tools + tool_choice         -> 400   (!)
+        //   thinking on   + tools + NO tool_choice          -> 200, tool_calls
+        //   thinking off  + tools + tool_choice=required    -> 200, tool_calls
+        //   every 400: "Thinking mode does not support this tool_choice"
         //
-        // So this provider rejects *any* explicit `tool_choice` while thinking,
-        // not merely the named form. It still supports tools — the conversation
-        // loop works there, because it never sends the directive at all.
+        // Two things follow. (1) The trigger is NOT our session thinking config.
+        // DeepSeek V4 has thinking enabled by default server-side, so omitting
+        // the field entirely still 400s: `deepseek_legacy_model`
+        // (`llm-client/src/providers/openai.rs:61`) only maps the legacy
+        // `deepseek-chat`/`deepseek-reasoner` ids, so the native
+        // `deepseek-v4-flash`/`deepseek-v4-pro` ids send no `thinking` at all
+        // and inherit that default. Turning thinking off for side queries would
+        // therefore not have fixed this. (2) Unforced tool calling genuinely
+        // works there — including at the write-code stage's size (a 3-file,
+        // 14 KB `emit_sources` call returning finish_reason `tool_calls`), which
+        // is the case most likely to degrade into prose. This is a verified
+        // fallback, not a hopeful one.
+        //
+        // The restriction is undocumented: DeepSeek's thinking-mode guide says
+        // only "thinking mode supports tool calls" and never mentions
+        // tool_choice. LangChain, pydantic-ai, opencode and claude-code-router
+        // have all filed the same 400.
         //
         // Dropping the directive unconditionally would be the wrong trade: on
-        // Anthropic the forced call is what guarantees a structured answer
-        // instead of prose. So: try forced, and retry once without it only when
-        // the provider says the directive is the problem.
+        // Anthropic the forced call is what makes a schema-shaped answer a
+        // guarantee. So: try forced, and retry once without it only when the
+        // provider says the directive is the problem.
         //
         // Nothing is weakened by the fallback. `extract_single_tool_call` still
         // requires exactly one tool call naming THIS tool, so an unforced reply

@@ -49,6 +49,10 @@ pub struct MockApiClient {
     /// `last_rate_limit_error_message()`. Same sync-Mutex rationale as
     /// `rate_limit_full`.
     rate_limit_error_message: std::sync::Mutex<Option<String>>,
+    /// The catalog returned by `list_model_listings()`. Empty by default (the
+    /// trait default); tests that exercise provider-qualified model-ref parsing
+    /// seed it with the rows they need.
+    model_listings: std::sync::Mutex<Vec<traits::ModelListing>>,
 }
 
 /// Captured startup Responses WebSocket prewarm call.
@@ -82,7 +86,15 @@ impl MockApiClient {
             raw_utilization: std::sync::Mutex::new(None),
             fail_with: std::sync::Mutex::new(None),
             rate_limit_error_message: std::sync::Mutex::new(None),
+            model_listings: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Seed the catalog `list_model_listings()` returns, so a test can exercise
+    /// `traits::parse_model_ref` (which resolves a `profile/model` reference
+    /// only against real listings).
+    pub fn set_model_listings(&self, listings: Vec<traits::ModelListing>) {
+        *self.model_listings.lock().unwrap() = listings;
     }
 
     /// Task 6 (batch 5): make every subsequent `messages_create` fail with a
@@ -240,6 +252,12 @@ impl OrchestratorApiClient for MockApiClient {
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         *self.close_responses_ws_count.lock().await += 1;
         Ok(())
+    }
+
+    /// The catalog seeded by [`MockApiClient::set_model_listings`] (empty by
+    /// default, matching the trait's own default).
+    fn list_model_listings(&self) -> Vec<traits::ModelListing> {
+        self.model_listings.lock().unwrap().clone()
     }
 }
 

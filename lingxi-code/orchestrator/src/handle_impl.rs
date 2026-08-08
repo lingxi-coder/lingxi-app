@@ -161,8 +161,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let old_session_id = s.session_id;
         s.history = history;
         if !runtime.model.is_empty() {
-            s.model = runtime.model.clone();
-            s.model_profile = runtime.model_profile.clone();
+            // `session.model` is the WIRE model id; the provider profile rides
+            // beside it. A transcript can hand back a provider-QUALIFIED
+            // reference with no profile (an older engine, another client, or a
+            // session whose `modelProfile` was never persisted), and adopting
+            // that verbatim ships `"deepseek/deepseek-v4-flash"` as the wire id
+            // — the provider 404s on every message of the resumed session.
+            // Re-split it exactly as `SetModel` does, so the resumed session
+            // lands on the same (model, profile) pair a fresh pick produces.
+            // `parse_model_ref` only splits a prefix a real listing claims, so
+            // an unknown ref and an id whose own name contains a slash
+            // (`openrouter/auto`) are both preserved.
+            let (model, profile) = match &runtime.model_profile {
+                Some(profile) => (runtime.model.clone(), Some(profile.clone())),
+                None => traits::parse_model_ref(&runtime.model, &self.api.list_model_listings()),
+            };
+            s.model = model;
+            s.model_profile = profile;
         }
         s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
         s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
@@ -1416,6 +1431,117 @@ mod tests {
         StaticMemoryProvider,
     };
     use std::sync::Arc;
+
+    /// A transcript can carry a PROVIDER-QUALIFIED model reference with no
+    /// `modelProfile` alongside it — written by an older engine, by another
+    /// client, or by any session whose profile was never persisted. Adopting it
+    /// verbatim makes `session.model` the whole `"deepseek/deepseek-v4-flash"`
+    /// string, which is then sent as the WIRE model id: the provider 404s and
+    /// the turn reports `model unavailable: the provider does not serve
+    /// 'deepseek/deepseek-v4-flash'` for every message, with no way out of that
+    /// session short of re-picking a model.
+    #[tokio::test]
+    async fn hot_resume_splits_a_qualified_model_ref_with_no_profile() {
+        let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        api.set_model_listings(vec![traits::ModelListing {
+            display_model: "deepseek-v4-flash".to_string(),
+            request_model: "deepseek-v4-flash".to_string(),
+            provider_id: "deepseek".to_string(),
+            provider_label: "DeepSeek".to_string(),
+            description: None,
+            supports_reasoning: true,
+        }]);
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api,
+            tools,
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot {
+                model: "deepseek/deepseek-v4-flash".to_string(),
+                model_profile: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hot resume");
+
+        let session = orch.session.lock().await;
+        assert_eq!(
+            session.model, "deepseek-v4-flash",
+            "the resumed model must be the BARE wire id, never the qualified ref"
+        );
+        assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
+    }
+
+    /// The split must not corrupt a reference that is legitimately un-splittable:
+    /// an OpenRouter wire id contains a slash of its own, and a bare id that no
+    /// listing claims stays exactly as recorded.
+    #[tokio::test]
+    async fn hot_resume_leaves_unqualified_and_unknown_model_refs_alone() {
+        let listings = vec![traits::ModelListing {
+            display_model: "openrouter/auto".to_string(),
+            request_model: "openrouter/auto".to_string(),
+            provider_id: "openrouter".to_string(),
+            provider_label: "OpenRouter".to_string(),
+            description: None,
+            supports_reasoning: false,
+        }];
+        for (recorded, want_model, want_profile) in [
+            // An openrouter wire id whose OWN name contains a slash: the
+            // qualified form splits to the full wire id, not to "auto".
+            ("openrouter/openrouter/auto", "openrouter/auto", Some("openrouter")),
+            // No listing claims this pair ⇒ keep the string verbatim.
+            ("someproxy/some-model", "someproxy/some-model", None),
+            ("claude-sonnet-5", "claude-sonnet-5", None),
+        ] {
+            let api = Arc::new(MockApiClient::new(Vec::new()));
+            api.set_model_listings(listings.clone());
+            let orch = crate::ConversationOrchestrator::new(
+                crate::OrchestratorConfig::default(),
+                api,
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            );
+            traits::OrchestratorHandle::resume_session(
+                &orch,
+                protocol::SessionId::new(),
+                Vec::new(),
+                None,
+                None,
+                traits::ResumeRuntimeSnapshot {
+                    model: recorded.to_string(),
+                    model_profile: None,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("hot resume");
+            let session = orch.session.lock().await;
+            assert_eq!(session.model, want_model, "recorded {recorded:?}");
+            assert_eq!(
+                session.model_profile.as_deref(),
+                want_profile,
+                "recorded {recorded:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn hot_resume_restores_compaction_visibility_and_deferred_tools() {

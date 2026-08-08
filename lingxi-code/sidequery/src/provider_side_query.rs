@@ -310,7 +310,11 @@ impl SideQueryClient for ProviderSideQueryClient {
                     request.system_prompt.as_deref(),
                     request.messages,
                     request.tools,
-                    request.max_tokens,
+                    // `SideQueryRequest` carries its own ceiling, so this
+                    // backend keeps sending it. Unlike the local-app stages it
+                    // is not an invented number: compaction/recap size their
+                    // budget from the summary they are asking for.
+                    Some(request.max_tokens),
                     convert_tool_choice(request.tool_choice.as_ref()),
                     request.stop_sequences,
                     request.temperature,

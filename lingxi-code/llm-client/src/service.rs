@@ -2668,6 +2668,16 @@ impl ApiService {
     /// must not inherit a main-turn `StructuredOutput` requirement. All other
     /// session-scoped wire behavior, including thinking configuration and
     /// request metadata, remains shared.
+    ///
+    /// `max_tokens` is `None` for "whatever this model can emit" — the same
+    /// signal the main turn passes, which [`Self::build_request`] resolves to
+    /// `max_output_tokens_for_model` and then bounds against the context
+    /// window. It was previously a bare `u32`, which forced every caller to
+    /// invent a ceiling; on a reasoning model that invented number silently
+    /// capped the THINKING pass as well as the answer, so a figure sized for
+    /// the answer alone truncated the response mid-tool-call. Pass `Some(n)`
+    /// only where a caller has a real reason to spend less than the model
+    /// allows.
     #[allow(clippy::too_many_arguments)]
     pub async fn messages_create_side_query(
         &self,
@@ -2676,20 +2686,13 @@ impl ApiService {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-        max_tokens: u32,
+        max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
     ) -> Result<LlmResponse, LlmError> {
-        let mut req = self.build_request(
-            model,
-            profile,
-            system,
-            messages,
-            tools,
-            false,
-            Some(max_tokens),
-        )?;
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
 
         // `build_request` applies main-turn-only overrides. A forked summary
         // owns these fields independently, so restore its explicit values.

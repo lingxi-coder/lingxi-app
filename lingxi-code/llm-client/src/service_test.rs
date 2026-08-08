@@ -574,6 +574,57 @@ mod tests {
     }
 
     #[test]
+    /// `None` must mean "whatever this model can emit", not a codec default.
+    ///
+    /// This is what makes `messages_create_side_query`'s `Option<u32>` worth
+    /// having. A caller with no real reason to spend less than the model allows
+    /// used to be forced to invent a ceiling, and an invented ceiling is sized
+    /// against the ANSWER while the provider bills THINKING to the same number:
+    /// the local-app questionnaire stage picked 4096, and on `deepseek-v4-pro`
+    /// a 3123-token reasoning pass hit `finish_reason: length` at 4098, cutting
+    /// the tool call mid-JSON. If `None` ever stops resolving to the model's own
+    /// limit, every such caller silently inherits a cliff again.
+    #[test]
+    fn a_side_query_without_a_ceiling_takes_the_models_own_max_output() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let model = "claude-sonnet-4-20250514";
+        let build = |max_tokens| {
+            adapter
+                .build_request(
+                    model,
+                    None,
+                    None,
+                    vec![text_user_msg("hello")],
+                    vec![],
+                    false,
+                    max_tokens,
+                )
+                .expect("build_request")
+                .max_tokens
+        };
+
+        let model_ceiling =
+            u32::try_from(crate::model::context_window::max_output_tokens_for_model(model))
+                .expect("the model ceiling fits u32");
+        assert_eq!(
+            build(None),
+            Some(model_ceiling),
+            "an absent ceiling must resolve to the model's own max output"
+        );
+        assert!(
+            model_ceiling > 4096,
+            "this model must have headroom above the figure the local-app stages \
+             used to invent, or the test cannot tell the two apart"
+        );
+        assert_eq!(
+            build(Some(4096)),
+            Some(4096),
+            "an explicit ceiling must still be honored verbatim"
+        );
+    }
+
+    #[test]
     fn build_request_omits_cache_breakpoints_when_disabled() {
         use crate::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

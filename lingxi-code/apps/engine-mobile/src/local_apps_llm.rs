@@ -26,11 +26,11 @@ const AUTHOR_PROMPT: &str = include_str!("../assets/prompts/author_questionnaire
 const PLAN_PROMPT: &str = include_str!("../assets/prompts/plan.md");
 const SOURCES_PROMPT: &str = include_str!("../assets/prompts/generate_sources.md");
 
-// Forced-tool names. Hoisted to constants (rather than inline string
-// literals at each call site) so [`ApiServiceModel::max_tokens_for`] cannot
-// silently desync from the names [`LocalAppsLlm`] actually calls with — a
-// rename or a fourth call that only updated one of the two spots would
-// otherwise fall through to the smaller default and truncate mid-tool-call.
+// Forced-tool names. Hoisted to constants (rather than inline string literals
+// at each call site) so the name a stage ASKS for and the name
+// `extract_single_tool_call` REQUIRES cannot drift apart — a rename that
+// updated only one of the two spots would make every response of that stage
+// fail as "the model did not call the required tool".
 const TOOL_QUESTIONNAIRE: &str = "emit_questionnaire";
 const TOOL_PLAN: &str = "emit_plan";
 const TOOL_SOURCES: &str = "emit_sources";
@@ -80,13 +80,10 @@ pub trait LocalAppsModel: Send + Sync {
 /// app. So `structured` keeps the guarantee where it exists and degrades to the
 /// portable shape only where the provider refuses it.
 ///
-/// `max_tokens` is not part of the [`LocalAppsModel::structured`] signature —
-/// the trait is shared by all three calls, but the brief assigns each a
-/// different budget (author/plan 16384, write-code 32768). `tool_name` is the
-/// only per-call signal `structured` receives, and [`LocalAppsLlm`] always
-/// calls with one of exactly three names, so `structured` switches its
-/// `max_tokens` on that name rather than growing the trait signature for one
-/// caller's budget policy.
+/// `max_tokens` is not part of the [`LocalAppsModel::structured`] signature and
+/// no longer part of this module at all: all three stages send `None` and take
+/// the model's own output ceiling. See [`ApiServiceModel::send_side_query`] for
+/// why a per-stage figure was the wrong shape.
 pub struct ApiServiceModel {
     service: Arc<ApiService>,
     /// `(model, profile)` behind ONE `RwLock`, NOT two independent locks:
@@ -109,36 +106,6 @@ impl ApiServiceModel {
         Self {
             service,
             selection: RwLock::new((model.into(), profile)),
-        }
-    }
-
-    /// Per-stage output budget.
-    ///
-    /// The author/plan figure is NOT the brief's original 4096. On a reasoning
-    /// model the thinking tokens are billed against `max_tokens` alongside the
-    /// answer, and 4096 does not cover both. Measured on the live DeepSeek API
-    /// with this module's real `author_questionnaire` prompt and schema, five
-    /// briefs × two models:
-    ///
-    ///   reasoning tokens 1468–3379, total completion 2190–4417
-    ///   deepseek-v4-pro @ 4096, "一个可以记录我每天读了哪些书…"
-    ///     -> finish_reason `length` at 4098 completion tokens
-    ///
-    /// One brief in five already overran, and the survivors cleared the cap by
-    /// as little as ~250 tokens. An overrun is not a soft failure: the tool
-    /// call is cut mid-JSON, so `function.arguments` no longer parses and
-    /// `llm-client` rejects the whole response as `InvalidRequest` — surfacing
-    /// as `LlmUnavailable`, which reads as "the model is unreachable" when the
-    /// model in fact answered and we truncated it.
-    ///
-    /// 16384 leaves ~13k for the answer after the worst measured thinking pass.
-    /// `max_tokens` is a ceiling, not a reservation — raising it costs nothing
-    /// on requests that do not use it, and `build_request` still clamps it to
-    /// the model's context window.
-    fn max_tokens_for(tool_name: &str) -> u32 {
-        match tool_name {
-            TOOL_SOURCES => 32768,
-            _ => 16384,
         }
     }
 }
@@ -219,7 +186,6 @@ impl LocalAppsModel for ApiServiceModel {
                 system,
                 user.clone(),
                 &tool,
-                tool_name,
                 Some(ToolChoice::Required),
             )
             .await;
@@ -238,7 +204,6 @@ impl LocalAppsModel for ApiServiceModel {
                     system,
                     user,
                     &tool,
-                    tool_name,
                     None,
                 )
                 .await
@@ -269,7 +234,6 @@ impl ApiServiceModel {
         system: &str,
         user: String,
         tool: &serde_json::Value,
-        tool_name: &str,
         tool_choice: Option<ToolChoice>,
     ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
         self.service
@@ -279,7 +243,27 @@ impl ApiServiceModel {
                 Some(system),
                 vec![ConversationMessage::user(MessageId::new(), user)],
                 vec![tool.clone()],
-                Self::max_tokens_for(tool_name),
+                // No ceiling of our own — `build_request` resolves `None` to
+                // `max_output_tokens_for_model` and bounds it against the
+                // context window, exactly as the main turn does.
+                //
+                // These stages used to pass hand-picked figures (author/plan
+                // 4096, write-code 32768), sized by how large the ANSWER should
+                // be. On a reasoning model that is the wrong quantity: thinking
+                // is billed against the same number. Measured on the live
+                // DeepSeek API with this module's own questionnaire prompt, the
+                // thinking pass alone ran 1468–3379 tokens, and `deepseek-v4-pro`
+                // @ 4096 hit `finish_reason: length` at 4098 on a realistic
+                // brief — cutting the tool call mid-JSON, so
+                // `function.arguments` no longer parsed and llm-client rejected
+                // the whole response as `InvalidRequest`, which then surfaced as
+                // `LlmUnavailable` ("the model is unreachable") for a model that
+                // had in fact answered.
+                //
+                // Raising the constants would only move that cliff. The model's
+                // own limit is the one number that cannot be miscalibrated
+                // against a thinking budget nobody here can see.
+                None,
                 tool_choice,
                 vec![],
                 None,
@@ -1188,31 +1172,6 @@ mod tests {
         assert!(
             !message.contains("did not call"),
             "a truncated answer must NOT read as the model refusing: {message}"
-        );
-    }
-
-    /// Pins the measured budget. On the live DeepSeek API the questionnaire
-    /// stage's own prompt burned 1468–3379 reasoning tokens before emitting a
-    /// single byte of answer, and `deepseek-v4-pro` hit `finish_reason: length`
-    /// at 4098 completion tokens on a realistic brief. A future edit that walks
-    /// this back to a figure a reasoning pass can exhaust reintroduces exactly
-    /// that failure, so assert the floor rather than the literal.
-    #[test]
-    fn the_author_and_plan_budget_clears_a_measured_reasoning_pass() {
-        const WORST_MEASURED_COMPLETION: u32 = 4417;
-        for tool in [TOOL_QUESTIONNAIRE, TOOL_PLAN] {
-            let budget = ApiServiceModel::max_tokens_for(tool);
-            assert!(
-                budget > WORST_MEASURED_COMPLETION * 2,
-                "{tool}'s budget ({budget}) must leave room for a reasoning pass plus the \
-                 answer; the worst measured DeepSeek completion was \
-                 {WORST_MEASURED_COMPLETION} tokens"
-            );
-        }
-        assert!(
-            ApiServiceModel::max_tokens_for(TOOL_SOURCES)
-                > ApiServiceModel::max_tokens_for(TOOL_QUESTIONNAIRE),
-            "write-code emits whole source files and must keep the largest budget"
         );
     }
 

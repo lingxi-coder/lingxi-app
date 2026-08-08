@@ -119,7 +119,15 @@ pub struct MobileEngineConfig {
 impl Default for MobileEngineConfig {
     fn default() -> Self {
         Self {
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            // The host's boot default for the Anthropic route. Must stay a
+            // CURATED id (`traits::is_curated_model`), otherwise a client with
+            // no configured provider boots on a model the picker only shows
+            // because `curated_model_refs` pins the active one — the dated
+            // `claude-sonnet-4-20250514` rendered as a stray "Claude Sonnet 4
+            // 20250514" row above the real Anthropic shortlist.
+            default_model: traits::provider_default_model("anthropic")
+                .unwrap_or("claude-sonnet-5")
+                .to_string(),
         }
     }
 }

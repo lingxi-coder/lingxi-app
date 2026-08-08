@@ -560,7 +560,16 @@ class ProviderSettingsRepository(
                 name = "Anthropic",
                 url = secureKeyStore?.apiBase().orEmpty().ifBlank { "https://api.anthropic.com" },
                 key = "",
-                model = "claude-sonnet-4-5",
+                // Derived from the preset, never hardcoded: this value becomes
+                // the engine's `default_model`, and a non-curated id
+                // (`traits::is_curated_model`) is registered only because it is
+                // the configured default, so the picker renders it as a stray
+                // row above the real Anthropic shortlist.
+                model = ProviderKind.Llm.presets
+                    .firstOrNull { it.id == "anthropic" }
+                    ?.models
+                    ?.firstOrNull()
+                    .orEmpty(),
                 status = ConnStatus.Configured,
                 isDefault = true,
                 enabled = true,

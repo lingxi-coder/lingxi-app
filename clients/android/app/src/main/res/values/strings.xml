@@ -8,8 +8,7 @@
     <string name="local_apps_refresh">刷新应用</string>
     <string name="local_apps_search">搜索应用</string>
     <string name="local_apps_empty">还没有本地应用</string>
-    <string name="local_apps_empty_detail">从模板开始，Agent 会在确认设计后生成应用。</string>
-    <string name="local_apps_templates_title">选择模板</string>
+    <string name="local_apps_empty_detail">用一句话描述你想要的应用，接下来会问你几个问题。</string>
     <string name="local_apps_designer_title">应用设计</string>
     <string name="local_apps_confirm_generate">确认并生成</string>
     <string name="local_apps_plan_confirm_title">确认方案</string>
@@ -538,7 +537,6 @@
     <string name="local_apps_browser_error_too_large">单个可编辑源码文件不能超过 1 MiB。</string>
     <string name="local_apps_confirming">确认中…</string>
     <string name="local_apps_continue_design">继续设计</string>
-    <string name="local_apps_create_detail">创建后进入五步设计向导。生成只有在你确认设计后才会开始。</string>
     <string name="local_apps_creating">创建中…</string>
     <string name="local_apps_current_step">当前步骤</string>
     <string name="local_apps_data_sqlite">SQLite 由 Rust AppService 独占管理</string>
@@ -550,7 +548,6 @@
     <string name="local_apps_designer_waiting">正在等待应用详情。</string>
     <string name="local_apps_detail_title">应用详情</string>
     <string name="local_apps_domain">域名</string>
-    <string name="local_apps_empty_hint">从模板开始设计，Agent 会在确认后生成应用。</string>
     <string name="local_apps_empty_loading">正在读取应用库…</string>
     <string name="local_apps_error_bridge_failed">Bridge 请求失败。</string>
     <string name="local_apps_error_bridge_invalid_json">Bridge 返回了无效 JSON。</string>
@@ -646,10 +643,6 @@
     <string name="local_apps_suspension_exited">进程已退出</string>
     <string name="local_apps_suspension_memory">内存压力</string>
     <string name="local_apps_suspension_quota">运行配额</string>
-    <string name="local_apps_template">模板</string>
-    <string name="local_apps_templates_all">全部模板</string>
-    <string name="local_apps_templates_loading">正在读取模板</string>
-    <string name="local_apps_templates_loading_detail">模板结构由 Rust AppService 下发，客户端不会使用内置字段副本。</string>
     <string name="local_apps_ui_action_back">返回</string>
     <string name="local_apps_ui_action_click">点击</string>
     <string name="local_apps_ui_action_fill">填写</string>
@@ -1081,7 +1074,7 @@
     <string name="common_got_it">知道了</string>
     <string name="drawer_account_subtitle_mock">Pro · 5.5 / 8 段</string>
     <string name="drawer_apps_count">本地应用 %1$d 个</string>
-    <string name="drawer_apps_empty_detail">从模板创建、设计、生成并运行本地应用。</string>
+    <string name="drawer_apps_empty_detail">描述你想要的应用，AI 会问几个问题后为你生成并运行。</string>
     <string name="drawer_chats_temp_notice">临时对话 30 天后自动归档 · 转为项目</string>
     <string name="drawer_close_sidebar_a11y">关闭侧栏</string>
     <string name="drawer_crons_unavailable">定时任务数据源尚未接入</string>
@@ -1136,7 +1129,6 @@
     <string name="local_apps_design_unsaved_retry">设计尚未保存完成，请重试</string>
     <string name="local_apps_error_bridge_unsupported_op">应用请求了不支持的 Bridge 操作：%1$s</string>
     <string name="local_apps_error_load_apps">无法加载应用：%1$s</string>
-    <string name="local_apps_error_load_templates">无法加载应用模板：%1$s</string>
     <string name="local_apps_field_enabled">已启用</string>
     <string name="local_apps_filter_all">全部</string>
     <string name="local_apps_history_notice">恢复只回退 Git 管理的源码，SQLite 数据不会回滚。恢复前会自动创建 pre_restore 检查点。</string>
@@ -1183,8 +1175,6 @@
     <string name="local_apps_step_progress">步骤 %1$d / %2$d</string>
     <string name="local_apps_submit_to_agent">提交给 Agent</string>
     <string name="local_apps_suggestion_default_summary">建议调整 %1$d 个字段</string>
-    <string name="local_apps_template_meta">%1$d 步 · 模板 v%2$s</string>
-    <string name="local_apps_templates_not_loaded">模板尚未从本地引擎加载</string>
     <string name="local_apps_ui_action_missing_target">UI 请求缺少有效目标或参数</string>
     <string name="local_apps_ui_action_reason">Agent 请求执行 %1$s 操作。</string>
     <string name="local_apps_workflow_awaiting_preview_label">待批准预览</string>

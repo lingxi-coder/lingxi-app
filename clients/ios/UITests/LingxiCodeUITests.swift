@@ -282,6 +282,60 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(primaryAction.isHittable)
     }
 
+    /// Regression: the model picker is an `.overlay` on the composer, so SwiftUI
+    /// proposed the COMPOSER's height to it. A `ScrollView` takes whatever it is
+    /// proposed and `frame(maxHeight:)` only caps a proposal, so the menu
+    /// collapsed to ~50pt — one section header and half of the first row — no
+    /// matter how many models the engine listed.
+    func testModelPickerOpensFullHeightAndReachesTheLastProvider() {
+        let chip = app.buttons["composer.model"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(chip, timeout: 5), app.debugDescription)
+        chip.tap()
+
+        let menu = app.descendants(matching: .any)["composer.model.menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5), app.debugDescription)
+
+        // The seeded catalog is far taller than the 360pt cap, so a menu that
+        // sizes itself to its content must hit the cap. The old behavior
+        // produced roughly the composer's height minus the 50pt inset.
+        XCTAssertGreaterThan(menu.frame.height, 300, "menu collapsed to \(menu.frame.height)pt")
+        XCTAssertLessThanOrEqual(menu.frame.height, 361)
+        // It grows UPWARD from the composer and stays on screen at BOTH edges —
+        // `minY > 0` alone would still pass for a menu hanging off the bottom.
+        XCTAssertGreaterThan(menu.frame.minY, 0)
+        XCTAssertLessThanOrEqual(menu.frame.maxY, app.frame.maxY)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "模型选择器展开"
+        shot.lifetime = .keepAlways
+        add(shot)
+
+        // The first section's rows are visible without scrolling. Assert the row
+        // is WHOLLY inside the menu, not just its top-left corner: the collapsed
+        // menu this test guards against was ~50pt — one section header and half
+        // of the first row — so the row's ORIGIN was inside it either way.
+        let firstRow = app.buttons["composer.model.row.anthropic/claude-sonnet-5"]
+        XCTAssertTrue(firstRow.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(menu.frame.contains(firstRow.frame), app.debugDescription)
+
+        // … and the last provider is reachable by scrolling the menu, i.e. the
+        // whole engine catalog is represented, not just the top of it. Every row
+        // is materialised (plain `VStack`, not `LazyVStack`), so `exists` is
+        // already true and only hittability discriminates — and one swipe is not
+        // guaranteed to carry ~645pt of content far enough in a 350pt viewport,
+        // so scroll in a bounded loop rather than exactly once.
+        let lastRow = app.buttons["composer.model.row.zai/glm-5.1"]
+        XCTAssertTrue(lastRow.waitForExistence(timeout: 3), app.debugDescription)
+        for _ in 0..<5 where !lastRow.isHittable {
+            menu.swipeUp()
+        }
+        XCTAssertTrue(waitUntilHittable(lastRow, timeout: 3), app.debugDescription)
+        lastRow.tap()
+
+        XCTAssertTrue(waitUntilGone(menu, timeout: 3), app.debugDescription)
+        XCTAssertEqual(chip.label, "GLM-5.1", app.debugDescription)
+    }
+
     private func openDrawer() {
         let trigger = app.buttons["打开抽屉"]
         XCTAssertTrue(trigger.waitForExistence(timeout: 8), app.debugDescription)

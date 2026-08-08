@@ -3604,14 +3604,28 @@ fn anthropic_models_for(
     // spurious "ambiguous across profiles: anthropic, openrouter". Push the BARE
     // model (so `anthropic/claude-x` registers as `claude-x`, not the qualified
     // ref). `split_profile_model` is the canonical routing split.
+    //
+    // The remainder must additionally be a BARE id. `split_profile_model` only
+    // splits on the FIRST slash, so a DOUBLE-qualified ref
+    // (`anthropic/deepseek/deepseek-v4-flash` — what a client that re-qualified
+    // an already-qualified id sends) yields `("anthropic",
+    // "deepseek/deepseek-v4-flash")` and used to register a DeepSeek model
+    // inside the Anthropic profile, which is the same "DeepSeek V4 Flash under
+    // the ANTHROPIC header" defect `engine_mobile::anthropic_models` guards. A
+    // bare `anthropic/` likewise fails `split_profile_model`'s own non-empty
+    // check and falls through its `_` arm, registering a model literally named
+    // `anthropic/`.
+    let admit = |m: &str| -> Option<String> {
+        let (profile, bare) = llm_client::split_profile_model(m);
+        (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
+    };
     let fallback_models = fallback_model
         .into_iter()
         .flat_map(|csv| csv.split(','))
         .map(str::trim)
         .filter(|m| !m.is_empty());
     for m in std::iter::once(default_model).chain(fallback_models) {
-        let (profile, bare) = llm_client::split_profile_model(m);
-        if profile == "anthropic" {
+        if let Some(bare) = admit(m) {
             ids.push(bare);
         }
     }
@@ -3620,13 +3634,16 @@ fn anthropic_models_for(
     // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
     // Haiku), so such a request resolves instead of failing `ModelUnavailable`.
     // The default Haiku id (`claude-haiku-4-5`) is already in the list above.
+    // Same admission rule: pushing the raw env value bypassed the guard above,
+    // so `ANTHROPIC_SMALL_FAST_MODEL=anthropic/claude-haiku-4-5` registered the
+    // QUALIFIED string as a model id and a foreign ref leaked straight in.
     for var in [
         "ANTHROPIC_SMALL_FAST_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     ] {
         if let Ok(m) = std::env::var(var) {
-            if !m.is_empty() {
-                ids.push(m);
+            if let Some(bare) = admit(m.trim()) {
+                ids.push(bare);
             }
         }
     }

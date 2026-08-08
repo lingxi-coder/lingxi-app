@@ -671,17 +671,22 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
         reasoning: true,
         structured_output: true,
     };
+    // Every id `traits::is_curated_model` lists under the "anthropic" arm must
+    // appear here, otherwise the client picker's ANTHROPIC section renders only
+    // the subset this registry happens to route (the section used to show just
+    // Sonnet 4.6 + Haiku 4.5 while Sonnet 5 / Opus 4.8 / Fable 5 were curated
+    // but unroutable), plus the extra Opus routes the host may still request.
     let mut ids: Vec<String> = vec![
+        "claude-opus-5".to_string(),
+        "claude-opus-4-8".to_string(),
         "claude-opus-4-6".to_string(),
+        "claude-sonnet-5".to_string(),
         "claude-sonnet-4-6".to_string(),
         "claude-haiku-4-5".to_string(),
+        "claude-fable-5".to_string(),
     ];
-    match default_model.split_once('/') {
-        Some(("anthropic", model)) if !model.is_empty() => ids.push(model.to_string()),
-        Some(_) => {}
-        None if !default_model.is_empty() => ids.push(default_model.to_string()),
-        None => {}
-    }
+    // The configured default, when it routes here — see `anthropic_route_id`.
+    ids.extend(anthropic_route_id(default_model));
     // Env-configured small-fast / haiku model a `prompt` hook may resolve to
     // (matching `hook_prompt_runner::resolve_model`'s precedence:
     // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
@@ -691,9 +696,12 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     ] {
         if let Ok(m) = std::env::var(var) {
-            if !m.is_empty() {
-                ids.push(m);
-            }
+            // Same routing rule as the configured default above. Pushing the
+            // raw env value bypassed the guard entirely — `ANTHROPIC_SMALL_
+            // FAST_MODEL=anthropic/claude-haiku-4-5` registered the qualified
+            // string as a model id, and a foreign ref leaked a foreign model
+            // into this registry by the very path the guard exists to close.
+            ids.extend(anthropic_route_id(&m));
         }
     }
     ids.sort();
@@ -708,6 +716,117 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
             capabilities: caps,
         })
         .collect()
+}
+
+/// The BARE model id `model_ref` contributes to the Anthropic profile's
+/// exact-id registry, or `None` when it names a model on another provider.
+///
+/// One rule for every source that can add a route (the configured default and
+/// the `ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` env ids):
+/// the ref must ROUTE to anthropic (a `claude-*` id, an unqualified custom id,
+/// or an `anthropic/…` ref) AND the remainder must be a BARE model id. A ref
+/// qualified for another provider must never land here — a client that stored a
+/// qualified id and re-qualified it on the way back in
+/// (`anthropic/deepseek/deepseek-v4-flash`) otherwise registered a `deepseek`
+/// model inside the Anthropic profile, and the picker then rendered that
+/// model's name under the ANTHROPIC header in Anthropic's colour.
+fn anthropic_route_id(model_ref: &str) -> Option<String> {
+    let (profile, bare) = llm_client::split_profile_model(model_ref.trim());
+    (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
+}
+
+/// The assembled provider profiles flattened into the [`traits::ModelListing`]s
+/// that [`resolve_default_model_ref`] and [`traits::parse_model_ref`] resolve
+/// against.
+///
+/// `display_model` / `provider_label` are immaterial to parsing, so
+/// `request_model` and the profile name stand in for both. Shared with the
+/// tests so they cannot drift from the shape production actually feeds in.
+fn model_listings(providers: &[llm_client::ProviderProfile]) -> Vec<traits::ModelListing> {
+    providers
+        .iter()
+        .flat_map(|p| {
+            let profile = p.profile_name.clone();
+            p.models.iter().map(move |m| traits::ModelListing {
+                display_model: m.request_model.clone(),
+                request_model: m.request_model.clone(),
+                provider_id: profile.clone(),
+                provider_label: profile.clone(),
+                description: m.description.clone(),
+                supports_reasoning: m.capabilities.reasoning,
+            })
+        })
+        .collect()
+}
+
+/// Parse the configured `default_model` into `(request_model, profile)`, and
+/// self-heal a reference that routes to NO registered provider.
+///
+/// A client persists its last-picked model and hands it back on the next
+/// launch, so a client-side bug can hand us a reference no profile serves (iOS
+/// re-qualified an already-qualified id into `anthropic/deepseek/deepseek-v4-
+/// flash`). [`traits::parse_model_ref`] then returns the whole string as a bare
+/// id, which boots the session onto an unroutable model: the picker shows a
+/// junk row and the first turn fails `ModelUnavailable`. Rewriting it to a
+/// model that IS registered keeps the session usable and lets the user re-pick.
+///
+/// Bare custom ids still resolve — [`anthropic_models`] registers them under
+/// the Anthropic profile — so only genuinely unroutable refs are rewritten.
+///
+/// The replacement is picked FROM `listings`, never from a constant: the mobile
+/// allowlist (`mobileEnabledProfiles`) is fail-closed and can strip the
+/// Anthropic profile entirely, and healing onto a hardcoded `claude-sonnet-5`
+/// there would swap one unroutable ref for another while the log claimed the
+/// session was repaired. The chosen profile is returned too — a bare
+/// `ClientEvent::ModelList { current }` matches none of the provider-qualified
+/// rows `traits::curated_model_refs` emits, so the client's picker would render
+/// with nothing selected.
+fn resolve_default_model_ref(
+    default_model: &str,
+    listings: &[traits::ModelListing],
+) -> (String, Option<String>) {
+    let (model, profile) = traits::parse_model_ref(default_model, listings);
+    // `parse_model_ref` returns `Some(profile)` only after matching a listing on
+    // that exact `(provider_id, request_model)` pair, so a qualified ref is
+    // already proven routable and keeps its profile as-is.
+    if profile.is_some() || listings.is_empty() {
+        return (model, profile);
+    }
+    // A BARE id is routable when some listing serves it — and when exactly one
+    // does, scope it to that provider. `curated_model_refs` performs the same
+    // unique-provider inference for the rows it emits, so leaving the profile
+    // unscoped made `ModelList { current }` bare while every row was qualified,
+    // and the client's picker rendered with nothing selected. That is the
+    // default on every fresh launch, since `MobileEngineConfig::default()`'s
+    // `default_model` is a bare id.
+    let mut serving = listings.iter().filter(|l| l.request_model == model);
+    match (serving.next(), serving.next()) {
+        // Ambiguous across profiles — stay unscoped and let the registry report
+        // the ambiguity rather than silently picking a provider.
+        (Some(_), Some(_)) => return (model, profile),
+        (Some(only), None) => return (model, Some(only.provider_id.clone())),
+        (None, _) => {}
+    }
+    let healed = traits::provider_default_model("anthropic")
+        .and_then(|boot| {
+            listings
+                .iter()
+                .find(|l| l.provider_id == "anthropic" && l.request_model == boot)
+        })
+        .or_else(|| listings.first());
+    let Some(healed) = healed else {
+        return (model, profile);
+    };
+    tracing::warn!(
+        configured = %default_model,
+        fallback = %healed.request_model,
+        fallback_profile = %healed.provider_id,
+        "engine-mobile: configured default model routes to no registered provider; using the first registered model"
+    );
+    (
+        healed.request_model.clone(),
+        Some(healed.provider_id.clone()),
+    )
 }
 
 const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";
@@ -986,24 +1105,9 @@ async fn build_mobile_inner_with_ask(
     // `assembled.client_config.providers` is still owned (before `from_config`
     // moves it). `display_model`/`provider_label` are immaterial to parsing, so
     // we reuse `request_model` / the profile name for both fields.
-    let default_listings: Vec<traits::ModelListing> = assembled
-        .client_config
-        .providers
-        .iter()
-        .flat_map(|p| {
-            let profile = p.profile_name.clone();
-            p.models.iter().map(move |m| traits::ModelListing {
-                display_model: m.request_model.clone(),
-                request_model: m.request_model.clone(),
-                provider_id: profile.clone(),
-                provider_label: profile.clone(),
-                description: m.description.clone(),
-                supports_reasoning: m.capabilities.reasoning,
-            })
-        })
-        .collect();
+    let default_listings = model_listings(&assembled.client_config.providers);
     let (default_model_id, default_model_profile) =
-        traits::parse_model_ref(&cfg.default_model, &default_listings);
+        resolve_default_model_ref(&cfg.default_model, &default_listings);
     let profile_auto_mode_provider: std::collections::BTreeMap<String, String> = assembled
         .client_config
         .providers
@@ -6055,7 +6159,10 @@ mod tests {
         assert_eq!(cfg.api_base, "https://api.anthropic.com");
         assert!(cfg.api_key.is_empty());
         assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
-        assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
+        assert_eq!(cfg.default_model, "claude-sonnet-5");
+        // The boot default must be a CURATED Anthropic id, so a client with no
+        // configured provider lands inside the shortlist its picker renders.
+        assert!(traits::is_curated_model("anthropic", &cfg.default_model));
         assert!(cfg.provider_profiles.is_none());
         assert!(cfg.routing.is_none());
         // P0.2: the injectable memory provider defaults to None (empty,
@@ -9826,5 +9933,245 @@ mod mobile_provider_allowlist_tests {
         assert!(!assembled.chains.aliases.contains_key("blocked"));
         assert_eq!(1, assembled.chains.chains["mixed"].len());
         assert!(!assembled.chains.chains.contains_key("blocked"));
+    }
+}
+
+/// The Anthropic profile's exact-id registry — what `/model` (and every client
+/// model picker riding `ClientEvent::ModelList`) can route under "anthropic".
+#[cfg(test)]
+mod anthropic_model_registry_tests {
+    use super::anthropic_models;
+
+    fn ids(default_model: &str) -> Vec<String> {
+        anthropic_models(default_model)
+            .into_iter()
+            .map(|m| m.request_model)
+            .collect()
+    }
+
+    /// Regression: the mobile picker's ANTHROPIC section rendered only Sonnet
+    /// 4.6 + Haiku 4.5 because the other curated ids had no route here, so
+    /// `curated_model_refs` filtered them out of `ModelList`.
+    #[test]
+    fn registry_routes_every_curated_anthropic_model() {
+        let ids = ids("claude-sonnet-5");
+        for curated in [
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "claude-haiku-4-5",
+            "claude-fable-5",
+        ] {
+            assert!(
+                traits::is_curated_model("anthropic", curated),
+                "{curated} is no longer curated; update this test with the shortlist"
+            );
+            assert!(ids.iter().any(|id| id == curated), "missing {curated}: {ids:?}");
+        }
+    }
+
+    /// A configured default that routes to anthropic is registered BARE.
+    #[test]
+    fn qualified_anthropic_default_registers_bare_id() {
+        assert!(ids("anthropic/claude-opus-4-5-20251101")
+            .iter()
+            .any(|id| id == "claude-opus-4-5-20251101"));
+        // An unqualified custom id still routes to anthropic (legacy behavior).
+        assert!(ids("my-proxy-model").iter().any(|id| id == "my-proxy-model"));
+    }
+
+    /// Regression (iOS "DeepSeek V4 Flash under ANTHROPIC"): a default qualified
+    /// for ANOTHER provider — including one a client double-qualified on the way
+    /// in — must never be registered under the Anthropic profile.
+    #[test]
+    fn foreign_qualified_default_is_never_registered_under_anthropic() {
+        // (ref, the BARE id it must not leak). Asserting only "no id contains a
+        // slash" left `github-copilot/claude-opus-4.8` inert — its bare form has
+        // no slash, so that row passed even against the pre-fix code.
+        for (foreign, leaked) in [
+            ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
+            (
+                "anthropic/deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v4-flash",
+            ),
+            ("openrouter/openrouter/auto", "openrouter/auto"),
+            ("github-copilot/claude-opus-4.8", "claude-opus-4.8"),
+        ] {
+            let ids = ids(foreign);
+            assert!(
+                !ids.iter().any(|id| id.contains('/')),
+                "{foreign} leaked a qualified id into the anthropic registry: {ids:?}"
+            );
+            assert!(
+                !ids.iter().any(|id| id == leaked),
+                "{foreign} leaked {leaked} into the anthropic registry: {ids:?}"
+            );
+        }
+    }
+
+    /// The single routing rule both the configured default and the env-
+    /// configured small-fast / haiku ids go through. Tested directly rather
+    /// than through `ids()`, which reads process-wide env state.
+    ///
+    /// Regression: the env ids were pushed RAW, so the guard could be bypassed
+    /// entirely through the env — and a developer with either var exported made
+    /// `foreign_qualified_default_is_never_registered_under_anthropic` fail for
+    /// an unrelated reason.
+    #[test]
+    fn anthropic_route_id_is_the_one_rule_for_every_registered_source() {
+        use super::anthropic_route_id;
+        assert_eq!(
+            anthropic_route_id("claude-sonnet-5").as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            anthropic_route_id("anthropic/claude-haiku-4-5").as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        // An unqualified custom id still routes to anthropic (legacy behavior).
+        assert_eq!(
+            anthropic_route_id(" my-proxy-model ").as_deref(),
+            Some("my-proxy-model")
+        );
+        for rejected in [
+            "",
+            "   ",
+            "anthropic/",
+            "deepseek/deepseek-v4-flash",
+            "anthropic/deepseek/deepseek-v4-flash",
+            "openrouter/openrouter/auto",
+            "github-copilot/claude-opus-4.8",
+        ] {
+            assert_eq!(anthropic_route_id(rejected), None, "accepted {rejected:?}");
+        }
+    }
+
+    /// An empty default (the "let the engine pick" signal) adds nothing.
+    #[test]
+    fn empty_default_adds_no_extra_route() {
+        assert_eq!(ids(""), ids("claude-opus-5"));
+    }
+}
+
+/// `default_model` → `(request_model, profile)`, including the self-heal for a
+/// reference no registered provider serves.
+#[cfg(test)]
+mod default_model_resolution_tests {
+    use super::{anthropic_models, resolve_default_model_ref};
+
+    fn listings() -> Vec<traits::ModelListing> {
+        let assembled = provider_config::assemble(provider_config::AssembleInputs {
+            anthropic_api_base: "https://api.anthropic.com".to_string(),
+            anthropic_models: anthropic_models("claude-sonnet-5"),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: std::collections::BTreeMap::new(),
+            routing: None,
+        });
+        // The SAME mapping production feeds `resolve_default_model_ref`, so a
+        // change to the listing shape cannot leave these tests validating a
+        // stale one.
+        super::model_listings(&assembled.client_config.providers)
+    }
+
+    #[test]
+    fn routable_refs_are_preserved() {
+        let listings = listings();
+        assert_eq!(
+            resolve_default_model_ref("anthropic/claude-sonnet-5", &listings),
+            ("claude-sonnet-5".to_string(), Some("anthropic".to_string()))
+        );
+        assert_eq!(
+            resolve_default_model_ref("deepseek/deepseek-v4-flash", &listings),
+            (
+                "deepseek-v4-flash".to_string(),
+                Some("deepseek".to_string())
+            )
+        );
+        // A bare id routes through the Anthropic profile's exact-id registry —
+        // and is SCOPED to it. Regression: returning `None` here left
+        // `ModelList { current }` bare while `curated_model_refs` emitted
+        // provider-qualified rows, so no row matched the active model and the
+        // client's picker showed no selection on every fresh launch (the boot
+        // default is a bare id).
+        assert_eq!(
+            resolve_default_model_ref("claude-sonnet-5", &listings),
+            ("claude-sonnet-5".to_string(), Some("anthropic".to_string()))
+        );
+    }
+
+    /// A bare id served by MORE THAN ONE profile stays unscoped, so the registry
+    /// reports the ambiguity rather than this function silently picking one.
+    #[test]
+    fn a_bare_id_served_by_two_profiles_stays_unscoped() {
+        let listing = |provider: &str| traits::ModelListing {
+            display_model: "claude-fable-5".to_string(),
+            request_model: "claude-fable-5".to_string(),
+            provider_id: provider.to_string(),
+            provider_label: provider.to_string(),
+            description: None,
+            supports_reasoning: true,
+        };
+        let listings = vec![listing("anthropic"), listing("github-copilot")];
+        assert_eq!(
+            resolve_default_model_ref("claude-fable-5", &listings),
+            ("claude-fable-5".to_string(), None)
+        );
+    }
+
+    /// Regression: a client that re-qualified an already-qualified reference
+    /// used to boot the session onto the whole unroutable string.
+    #[test]
+    fn double_qualified_ref_falls_back_to_the_anthropic_boot_default() {
+        let listings = listings();
+        let (model, profile) =
+            resolve_default_model_ref("anthropic/deepseek/deepseek-v4-flash", &listings);
+        assert_eq!(model, "claude-sonnet-5");
+        // The PROFILE must come back too: `curated_model_refs` emits
+        // provider-qualified rows, so a bare `current` matches none of them and
+        // the client's picker renders with nothing selected.
+        assert_eq!(profile.as_deref(), Some("anthropic"));
+        assert!(traits::is_curated_model("anthropic", &model));
+    }
+
+    #[test]
+    fn unknown_qualified_ref_falls_back() {
+        let listings = listings();
+        assert_eq!(
+            resolve_default_model_ref("nosuchprovider/nosuchmodel", &listings),
+            ("claude-sonnet-5".to_string(), Some("anthropic".to_string()))
+        );
+    }
+
+    /// Regression: the self-heal used to return a hardcoded `claude-sonnet-5`
+    /// without checking it was REGISTERED. `apply_mobile_profile_allowlist` is
+    /// fail-closed and can strip the Anthropic profile, so that swapped one
+    /// unroutable ref for another while the warn log claimed a repair.
+    #[test]
+    fn fallback_is_taken_from_the_listings_when_anthropic_is_not_registered() {
+        let listings = vec![traits::ModelListing {
+            display_model: "deepseek-v4-flash".to_string(),
+            request_model: "deepseek-v4-flash".to_string(),
+            provider_id: "deepseek".to_string(),
+            provider_label: "deepseek".to_string(),
+            description: None,
+            supports_reasoning: false,
+        }];
+        assert_eq!(
+            resolve_default_model_ref("anthropic/claude-sonnet-5", &listings),
+            (
+                "deepseek-v4-flash".to_string(),
+                Some("deepseek".to_string())
+            )
+        );
+    }
+
+    /// No catalog to validate against ⇒ leave the caller's value alone.
+    #[test]
+    fn empty_listings_preserve_the_configured_ref() {
+        assert_eq!(
+            resolve_default_model_ref("anthropic/deepseek/deepseek-v4-flash", &[]),
+            ("anthropic/deepseek/deepseek-v4-flash".to_string(), None)
+        );
     }
 }

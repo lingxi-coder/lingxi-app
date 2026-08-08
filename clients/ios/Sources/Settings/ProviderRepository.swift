@@ -1303,19 +1303,50 @@ final class ProviderRepository {
     }
 
     private static func legacyAnthropicProfile() -> ProviderProfileState? {
-        let legacyKey = Keychain.get(.apiKey)
-        let legacyBase = Keychain.get(.apiBase)
-        let legacyModel = Keychain.get(.model)
-        guard legacyKey != nil || legacyBase != nil || legacyModel != nil else {
+        legacyAnthropicProfile(
+            legacyKey: Keychain.get(.apiKey),
+            legacyBase: Keychain.get(.apiBase),
+            legacyModel: Keychain.get(.model)
+        )
+    }
+
+    /// Rebuild the pre-multi-provider Anthropic configuration from the three
+    /// legacy Keychain slots, for a user upgrading before any profile has been
+    /// persisted.
+    ///
+    /// Only an api key or a base URL override evidences a CONFIGURED Anthropic
+    /// provider. `Keychain.model` alone does NOT: since the multi-provider
+    /// picker landed, `applyActiveModel` writes the engine's active model there
+    /// on every `ModelList`/`ModelChanged` — so a user who never configured any
+    /// provider still has that slot filled. Treating it as evidence fabricated
+    /// an enabled, default Anthropic profile out of thin air, and because that
+    /// slot now holds a provider-QUALIFIED reference, the fabricated profile
+    /// re-qualified it (`anthropic/` + `deepseek/deepseek-v4-flash`) and the
+    /// composer's picker rendered "DeepSeek V4 Flash" under the ANTHROPIC
+    /// header in Anthropic's colour.
+    ///
+    /// The stored model is likewise only adopted when it names an Anthropic
+    /// model: an unqualified id no OTHER preset claims (a custom proxy model
+    /// legitimately routes through this profile), or one qualified with this
+    /// profile's own id. Anything else falls back to the preset's first model
+    /// instead of being smuggled into the Anthropic profile.
+    static func legacyAnthropicProfile(
+        legacyKey: String?,
+        legacyBase: String?,
+        legacyModel: String?
+    ) -> ProviderProfileState? {
+        guard legacyKey != nil || legacyBase != nil else {
             return nil
         }
-        let preset = Presets.llm.first(where: { $0.id == ProviderRepositoryDefaults.anthropicLegacyProfileID })
+        let profileID = ProviderRepositoryDefaults.anthropicLegacyProfileID
+        let preset = Presets.llm.first(where: { $0.id == profileID })
+        let presetModel = preset?.models.first ?? "claude-sonnet-5"
         let profile = ProviderStoredProfile(
-            id: ProviderRepositoryDefaults.anthropicLegacyProfileID,
-            presetID: ProviderRepositoryDefaults.anthropicLegacyProfileID,
+            id: profileID,
+            presetID: profileID,
             name: preset?.name ?? "Anthropic",
             baseURL: legacyBase ?? preset?.defaultUrl ?? "https://api.anthropic.com",
-            modelID: legacyModel ?? preset?.models.first ?? "claude-sonnet-4-5",
+            modelID: anthropicModelID(from: legacyModel, profileID: profileID) ?? presetModel,
             enabled: true,
             isDefault: true
         )
@@ -1325,6 +1356,35 @@ final class ProviderRepository {
             connectionState: .idle,
             hasLegacyAnthropicCredential: legacyKey != nil
         )
+    }
+
+    /// The bare Anthropic model id `reference` names, or `nil` when it names a
+    /// model on some other provider. `qualifiedModelID` re-adds the profile
+    /// prefix, so storing a qualified reference here would double-qualify it.
+    private static func anthropicModelID(from reference: String?, profileID: String) -> String? {
+        guard let reference = reference?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reference.isEmpty
+        else { return nil }
+        guard let slash = reference.firstIndex(of: "/") else {
+            // An UNQUALIFIED id is not automatically Anthropic's. `ModelList`'s
+            // `current` is emitted bare whenever the session carries no
+            // `model_profile`, so `Keychain.model` can hold a bare foreign id
+            // like `deepseek-v4-flash`; adopting it here produced exactly the
+            // reported symptom one qualifier shorter — `anthropic/` +
+            // `deepseek-v4-flash` clears the engine's "bare id" guard and the
+            // picker rendered "DeepSeek V4 Flash" under the ANTHROPIC header.
+            // An id no other preset claims is still adopted: that is how a
+            // custom Anthropic-compatible proxy model survives the migration.
+            let claimedElsewhere = Presets.llm.contains {
+                $0.id != profileID && $0.models.contains(reference)
+            }
+            return claimedElsewhere ? nil : reference
+        }
+        guard reference[..<slash] == profileID else { return nil }
+        let bare = String(reference[reference.index(after: slash)...])
+        // `anthropic/<provider>/<model>` is a double-qualified reference, never
+        // an Anthropic model id.
+        return bare.isEmpty || bare.contains("/") ? nil : bare
     }
 
     private static func defaultPersistenceURL() -> URL {

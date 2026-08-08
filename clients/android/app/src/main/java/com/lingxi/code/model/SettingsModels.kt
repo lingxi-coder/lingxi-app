@@ -142,8 +142,20 @@ data class NotifConfig(
  * `Presets.search`/`Presets.fetch` are dead).
  */
 object Presets {
+    /**
+     * A preset's `models` are the radio choices AND the fallback written into
+     * `GenericProvider.model` when a provider is added, which
+     * `buildEngineLaunchConfig` turns into the engine's `default_model`. Every
+     * id here must therefore be one the engine still curates
+     * (`traits::is_curated_model`) — a stale id is registered only because it
+     * is the configured default, so `curated_model_refs` pins it and the picker
+     * renders it as a stray row above the real shortlist, the same wart
+     * `MobileEngineConfig::default()` was moved off `claude-sonnet-4-20250514`
+     * to avoid. Anthropic's list mirrors `is_curated_model`'s "anthropic" arm,
+     * `provider_default_model` first, and matches the iOS `Presets.llm` twin.
+     */
     val llm: List<ProviderPreset> = listOf(
-        ProviderPreset("anthropic", "Anthropic", "Claude API", Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f), "https://api.anthropic.com", "sk-ant-", listOf("claude-sonnet-4-5", "claude-opus-4", "claude-haiku-4-5")),
+        ProviderPreset("anthropic", "Anthropic", "Claude API", Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f), "https://api.anthropic.com", "sk-ant-", listOf("claude-sonnet-5", "claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5")),
         ProviderPreset("openai", "OpenAI", "ChatGPT API", Color(red = 0.1326f, green = 0.7261f, blue = 0.5350f), "https://api.openai.com/v1", "sk-proj-", listOf("gpt-4o", "gpt-4o-mini", "o1-preview")),
         ProviderPreset("google", "Google", "Gemini API", Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f), "https://generativelanguage.googleapis.com/v1", "AIza", listOf("gemini-2.5-pro", "gemini-2.5-flash")),
         ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com", "sk-", listOf("deepseek-v4-flash", "deepseek-v4-pro")),

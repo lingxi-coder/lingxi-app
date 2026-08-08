@@ -179,8 +179,19 @@ struct LinuxRuntimeState: Equatable {
 // MARK: - Presets data
 
 enum Presets {
+    /// A preset's `models` are suggestions AND the fallback the app writes into
+    /// `ProviderStoredProfile.modelID` when it has no better answer (adding a
+    /// provider, or migrating a legacy Anthropic Keychain whose stored model
+    /// belongs to someone else). That fallback becomes the launch
+    /// `defaultModelID`, so every id here must be one the engine still curates
+    /// (`traits::is_curated_model`) — a stale id is registered only because it
+    /// is the configured default and renders as a stray row above the real
+    /// shortlist, the same wart `MobileEngineConfig::default()` was moved off
+    /// `claude-sonnet-4-20250514` to avoid. Anthropic's list mirrors
+    /// `traits::is_curated_model`'s "anthropic" arm, `provider_default_model`
+    /// first.
     static let llm: [ProviderPreset] = [
-        .init(id: "anthropic",  name: "Anthropic",  sub: "Claude API",     color: Color(srgb: 0.9351, 0.5079, 0.4015), defaultUrl: "https://api.anthropic.com",                       keyPrefix: "sk-ant-",  models: ["claude-sonnet-4-5", "claude-opus-4", "claude-haiku-4-5"]),
+        .init(id: "anthropic",  name: "Anthropic",  sub: "Claude API",     color: Color(srgb: 0.9351, 0.5079, 0.4015), defaultUrl: "https://api.anthropic.com",                       keyPrefix: "sk-ant-",  models: ["claude-sonnet-5", "claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5"]),
         .init(id: "openai",     name: "OpenAI",     sub: "ChatGPT API",    color: Color(srgb: 0.1326, 0.7261, 0.5350), defaultUrl: "https://api.openai.com/v1",                       keyPrefix: "sk-proj-", models: ["gpt-4o", "gpt-4o-mini", "o1-preview"]),
         .init(id: "google",     name: "Google",     sub: "Gemini API",     color: Color(srgb: 0.3503, 0.6649, 0.9741), defaultUrl: "https://generativelanguage.googleapis.com/v1",    keyPrefix: "AIza",     models: ["gemini-2.5-pro", "gemini-2.5-flash"]),
         .init(id: "deepseek",   name: "DeepSeek",   sub: "DeepSeek API",   color: Color(srgb: 0.6451, 0.5662, 1.0000), defaultUrl: "https://api.deepseek.com",                        keyPrefix: "sk-",      models: ["deepseek-v4-flash", "deepseek-v4-pro"]),

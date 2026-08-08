@@ -11494,40 +11494,6 @@
         }
       }
     },
-    "drawer_apps_empty_detail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "从模板创建、设计、生成并运行本地应用。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "從模板建立、設計、生成並執行本地應用。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Create from a template, design it, generate it, and run local apps."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレートからローカルアプリを作成・デザイン・生成・実行できます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿에서 시작해 디자인하고 생성한 뒤 로컬 앱을 실행해 보세요."
-          }
-        }
-      }
-    },
     "drawer_chats_temp_notice": {
       "localizations": {
         "zh-Hans": {
@@ -15540,40 +15506,6 @@
         }
       }
     },
-    "local_apps_create_detail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "创建后进入五步设计向导。生成只有在你确认设计后才会开始。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "建立後進入五步設計嚮導。生成只有在你確認設計後才會開始。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "After creating, you'll go through a five-step design wizard. Generation only starts once you confirm the design."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "作成すると、5 ステップのデザインウィザードに進みます。デザインを確認するまで生成は開始されません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "생성 후 5단계 디자인 마법사로 진입합니다. 생성은 디자인을 확인한 후에만 시작됩니다."
-          }
-        }
-      }
-    },
     "local_apps_create_name_hint": {
       "localizations": {
         "zh-Hans": {
@@ -17478,70 +17410,36 @@
         }
       }
     },
-    "local_apps_empty_detail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "从模板开始，Agent 会在确认设计后生成应用。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "從模板開始，Agent 會在確認設計後生成應用。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Start from a template — the agent will generate your app once you confirm the design."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレートから始めましょう。デザインを確認すると Agent がアプリを生成します。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿으로 시작하면 디자인을 확인한 후 에이전트가 앱을 생성합니다."
-          }
-        }
-      }
-    },
     "local_apps_empty_hint": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "从模板开始设计，Agent 会在确认后生成应用。"
+            "value": "用一句话描述你想要的应用，接下来会问你几个问题。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "從模板開始設計，Agent 會在確認後生成應用。"
+            "value": "用一句話描述你想要的應用，接下來會問你幾個問題。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Start designing from a template — the agent generates the app once you confirm."
+            "value": "Describe the app you want in one line — you'll be asked a few questions next."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "テンプレートからデザインを始めましょう。確認後、Agent がアプリを生成します。"
+            "value": "作りたいアプリを一言で説明してください。続けていくつか質問します。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "템플릿으로 디자인을 시작하면 확인 후 에이전트가 앱을 생성합니다."
+            "value": "원하는 앱을 한 줄로 설명해 주세요. 이어서 몇 가지 질문을 드립니다."
           }
         }
       }
@@ -18052,40 +17950,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱을 불러올 수 없습니다: %1$s"
-          }
-        }
-      }
-    },
-    "local_apps_error_load_templates": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "无法加载应用模板：%1$s"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "無法載入應用模板：%1$s"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Couldn't load app templates: %1$s"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "アプリテンプレートを読み込めません：%1$s"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "앱 템플릿을 불러올 수 없습니다: %1$s"
           }
         }
       }
@@ -22778,278 +22642,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "실행 할당량"
-          }
-        }
-      }
-    },
-    "local_apps_template": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模板"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模板"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Template"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレート"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿"
-          }
-        }
-      }
-    },
-    "local_apps_template_meta": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$d 步 · 模板 v%2$s"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$d 步 · 模板 v%2$s"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$d steps · Template v%2$s"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$d ステップ · テンプレート v%2$s"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$d단계 · 템플릿 v%2$s"
-          }
-        }
-      }
-    },
-    "local_apps_template_steps %lld %llu": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld 个设计步骤 · v%llu"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld 個設計步驟 · v%llu"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld design steps · v%llu"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "デザインステップ %lld 個 · v%llu"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "디자인 단계 %lld개 · v%llu"
-          }
-        }
-      }
-    },
-    "local_apps_templates_all": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全部模板"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全部模板"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "All Templates"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "すべてのテンプレート"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "전체 템플릿"
-          }
-        }
-      }
-    },
-    "local_apps_templates_loading": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在读取模板"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在讀取模板"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Loading templates"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレートを読み込み中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿을 불러오는 중"
-          }
-        }
-      }
-    },
-    "local_apps_templates_loading_detail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模板结构由 Rust AppService 下发，客户端不会使用内置字段副本。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模板結構由 Rust AppService 下發，客戶端不會使用內建欄位副本。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Template structure is delivered by the Rust AppService — the client never uses a built-in copy of the fields."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレート構造は Rust AppService から配信され、クライアントは内蔵フィールドのコピーを使用しません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿 구조는 Rust AppService에서 전달되며, 클라이언트는 내장된 필드 사본을 사용하지 않습니다."
-          }
-        }
-      }
-    },
-    "local_apps_templates_not_loaded": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模板尚未从本地引擎加载"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模板尚未從本地引擎載入"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Templates haven't loaded from the local engine yet"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレートはまだローカルエンジンから読み込まれていません"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿이 아직 로컬 엔진에서 로드되지 않았습니다"
-          }
-        }
-      }
-    },
-    "local_apps_templates_title": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "选择模板"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "選擇模板"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose a Template"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "テンプレートを選択"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "템플릿 선택"
           }
         }
       }

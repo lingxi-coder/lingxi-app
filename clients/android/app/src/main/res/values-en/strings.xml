@@ -8,8 +8,7 @@
     <string name="local_apps_refresh">Refresh Apps</string>
     <string name="local_apps_search">Search Apps</string>
     <string name="local_apps_empty">No local apps yet</string>
-    <string name="local_apps_empty_detail">Start from a template — the agent will generate your app once you confirm the design.</string>
-    <string name="local_apps_templates_title">Choose a Template</string>
+    <string name="local_apps_empty_detail">Describe the app you want in one line — you\'ll be asked a few questions next.</string>
     <string name="local_apps_designer_title">App Designer</string>
     <string name="local_apps_confirm_generate">Confirm &amp; Generate</string>
     <string name="local_apps_plan_confirm_title">Confirm Plan</string>
@@ -538,7 +537,6 @@
     <string name="local_apps_browser_error_too_large">A single editable source file can\'t exceed 1 MiB.</string>
     <string name="local_apps_confirming">Confirming…</string>
     <string name="local_apps_continue_design">Continue Designing</string>
-    <string name="local_apps_create_detail">After creating, you\'ll go through a five-step design wizard. Generation only starts once you confirm the design.</string>
     <string name="local_apps_creating">Creating…</string>
     <string name="local_apps_current_step">Current Step</string>
     <string name="local_apps_data_sqlite">SQLite is managed exclusively by the Rust AppService</string>
@@ -550,7 +548,6 @@
     <string name="local_apps_designer_waiting">Waiting for app details.</string>
     <string name="local_apps_detail_title">App Details</string>
     <string name="local_apps_domain">Domain</string>
-    <string name="local_apps_empty_hint">Start designing from a template — the agent generates the app once you confirm.</string>
     <string name="local_apps_empty_loading">Loading your apps…</string>
     <string name="local_apps_error_bridge_failed">Bridge request failed.</string>
     <string name="local_apps_error_bridge_invalid_json">Bridge returned invalid JSON.</string>
@@ -646,10 +643,6 @@
     <string name="local_apps_suspension_exited">Process Exited</string>
     <string name="local_apps_suspension_memory">Memory Pressure</string>
     <string name="local_apps_suspension_quota">Runtime Quota</string>
-    <string name="local_apps_template">Template</string>
-    <string name="local_apps_templates_all">All Templates</string>
-    <string name="local_apps_templates_loading">Loading templates</string>
-    <string name="local_apps_templates_loading_detail">Template structure is delivered by the Rust AppService — the client never uses a built-in copy of the fields.</string>
     <string name="local_apps_ui_action_back">Back</string>
     <string name="local_apps_ui_action_click">Click</string>
     <string name="local_apps_ui_action_fill">Fill</string>
@@ -1081,7 +1074,7 @@
     <string name="common_got_it">Got it</string>
     <string name="drawer_account_subtitle_mock">Pro · 5.5 / 8 segments</string>
     <string name="drawer_apps_count">%1$d local apps</string>
-    <string name="drawer_apps_empty_detail">Create from a template, design it, generate it, and run local apps.</string>
+    <string name="drawer_apps_empty_detail">Describe the app you want — AI asks a few questions, then builds and runs it.</string>
     <string name="drawer_chats_temp_notice">Temporary chats auto-archive after 30 days · convert to a project</string>
     <string name="drawer_close_sidebar_a11y">Close sidebar</string>
     <string name="drawer_crons_unavailable">Scheduled tasks data source not yet connected</string>
@@ -1136,7 +1129,6 @@
     <string name="local_apps_design_unsaved_retry">The design hasn\'t finished saving yet; please try again</string>
     <string name="local_apps_error_bridge_unsupported_op">The app requested an unsupported Bridge operation: %1$s</string>
     <string name="local_apps_error_load_apps">Couldn\'t load apps: %1$s</string>
-    <string name="local_apps_error_load_templates">Couldn\'t load app templates: %1$s</string>
     <string name="local_apps_field_enabled">Enabled</string>
     <string name="local_apps_filter_all">All</string>
     <string name="local_apps_history_notice">Restoring only rolls back Git-managed source code; SQLite data is not rolled back. A pre_restore checkpoint is created automatically before restoring.</string>
@@ -1183,8 +1175,6 @@
     <string name="local_apps_step_progress">Step %1$d / %2$d</string>
     <string name="local_apps_submit_to_agent">Submit to Agent</string>
     <string name="local_apps_suggestion_default_summary">Suggests adjusting %1$d fields</string>
-    <string name="local_apps_template_meta">%1$d steps · Template v%2$s</string>
-    <string name="local_apps_templates_not_loaded">Templates haven\'t loaded from the local engine yet</string>
     <string name="local_apps_ui_action_missing_target">The UI request is missing a valid target or parameters</string>
     <string name="local_apps_ui_action_reason">The Agent is requesting to perform a %1$s action.</string>
     <string name="local_apps_workflow_awaiting_preview_label">Awaiting preview approval</string>

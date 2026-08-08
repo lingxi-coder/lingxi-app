@@ -141,7 +141,34 @@ impl LocalAppsModel for ApiServiceModel {
                 vec![message],
                 vec![tool],
                 Self::max_tokens_for(tool_name),
-                Some(ToolChoice::Tool { name: tool_name.to_string() }),
+                // `Required` ("some tool must be called"), NOT
+                // `Tool { name }` ("this exact function must be called").
+                //
+                // Exactly ONE tool is declared above, so the two are
+                // semantically identical here — but they are NOT equally
+                // portable. `Tool { name }` encodes to the OpenAI-compatible
+                // object form `{"type":"function","function":{"name":…}}`
+                // (`providers/openai.rs:681`), which DeepSeek rejects outright
+                // while reasoning is on:
+                //
+                //   400 "Thinking mode does not support this tool_choice"
+                //
+                // That 400 made local-app creation impossible on DeepSeek —
+                // found on a real device, never by the suite, because every
+                // test here drives a scripted fake model and so never exercises
+                // the real request shape. The conversation loop was unaffected
+                // precisely because it never pins a specific function.
+                //
+                // `extract_single_tool_call` below still enforces that the
+                // response names THIS tool exactly once, so dropping the
+                // name from the request loses no guarantee.
+                //
+                // This is the narrow fix. The general one — consulting
+                // `Capabilities { reasoning, structured_output }` per profile
+                // and preferring `ResponseFormat::JsonSchema` where supported —
+                // is tracked in
+                // `docs/superpowers/specs/2026-08-07-structured-output-capability-gating.md`.
+                Some(ToolChoice::Required),
                 vec![],
                 None,
             )

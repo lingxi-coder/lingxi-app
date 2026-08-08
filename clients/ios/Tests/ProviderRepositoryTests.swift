@@ -605,6 +605,137 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertNil(kimiState.detailMessage)
     }
 
+    // MARK: legacy Anthropic Keychain migration
+
+    /// Regression: `Keychain.model` holds the engine's ACTIVE model — written on
+    /// every `ModelList`/`ModelChanged`, for every provider — so it is not
+    /// evidence that an Anthropic provider was ever configured. Treating it as
+    /// evidence fabricated an enabled, default Anthropic profile for a user who
+    /// had configured nothing, and the composer chip then showed that profile's
+    /// model as the default.
+    func testStoredActiveModelAloneDoesNotFabricateAnAnthropicProfile() {
+        XCTAssertNil(ProviderRepository.legacyAnthropicProfile(
+            legacyKey: nil,
+            legacyBase: nil,
+            legacyModel: "deepseek/deepseek-v4-flash"
+        ))
+        XCTAssertNil(ProviderRepository.legacyAnthropicProfile(
+            legacyKey: nil,
+            legacyBase: nil,
+            legacyModel: "anthropic/claude-sonnet-5"
+        ))
+        XCTAssertNil(ProviderRepository.legacyAnthropicProfile(
+            legacyKey: nil,
+            legacyBase: nil,
+            legacyModel: nil
+        ))
+    }
+
+    /// A real legacy configuration (api key and/or base URL override) still
+    /// migrates, and a bare stored model is still adopted.
+    func testLegacyCredentialMigratesWithItsBareModelID() throws {
+        let state = try XCTUnwrap(ProviderRepository.legacyAnthropicProfile(
+            legacyKey: "sk-legacy",
+            legacyBase: "https://proxy.example.com",
+            legacyModel: "claude-sonnet-5"
+        ))
+
+        XCTAssertEqual(state.profile.id, "anthropic")
+        XCTAssertEqual(state.profile.baseURL, "https://proxy.example.com")
+        XCTAssertEqual(state.profile.modelID, "claude-sonnet-5")
+        XCTAssertEqual(state.credentialState, .configured)
+        XCTAssertTrue(state.hasLegacyAnthropicCredential)
+    }
+
+    /// An `anthropic/`-qualified stored model is un-qualified before it is
+    /// stored, because `qualifiedModelID` re-adds the prefix on the way out.
+    func testLegacyMigrationStripsItsOwnProviderQualifier() throws {
+        let state = try XCTUnwrap(ProviderRepository.legacyAnthropicProfile(
+            legacyKey: "sk-legacy",
+            legacyBase: nil,
+            legacyModel: "anthropic/claude-opus-4-8"
+        ))
+
+        // `qualifiedModelID` is `id + "/" + modelID`, so a bare modelID here is
+        // exactly what makes the launch snapshot's ref singly-qualified.
+        XCTAssertEqual(state.profile.modelID, "claude-opus-4-8")
+    }
+
+    /// Regression (the iOS "DeepSeek V4 Flash under ANTHROPIC" chip): a stored
+    /// model belonging to ANOTHER provider must not be smuggled into the
+    /// Anthropic profile — `qualifiedModelID` would double-qualify it into
+    /// `anthropic/deepseek/deepseek-v4-flash`, which the engine registered under
+    /// the Anthropic profile and the picker rendered in Anthropic's section.
+    func testLegacyMigrationRejectsAForeignProviderModel() throws {
+        for foreign in [
+            "deepseek/deepseek-v4-flash",
+            "openrouter/openrouter/auto",
+            "anthropic/deepseek/deepseek-v4-flash",
+            // BARE foreign ids too: `ClientEvent::ModelList.current` is emitted
+            // UNQUALIFIED whenever the session carries no `model_profile`, so
+            // this is the shape `Keychain.model` actually ends up holding.
+            // `anthropic/` + `deepseek-v4-flash` clears the engine's "the
+            // remainder must be a bare id" guard, so nothing downstream catches
+            // it — the rejection has to happen here. Coverage is bounded by what
+            // `Presets.llm` knows: a bare id no preset lists is indistinguishable
+            // from a custom Anthropic-compatible proxy model and is adopted.
+            "deepseek-v4-flash",
+            "gpt-4o",
+            "gemini-2.5-pro",
+            "kimi-k3",
+        ] {
+            let state = try XCTUnwrap(ProviderRepository.legacyAnthropicProfile(
+                legacyKey: "sk-legacy",
+                legacyBase: nil,
+                legacyModel: foreign
+            ))
+            let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "anthropic" }))
+
+            XCTAssertEqual(state.profile.modelID, preset.models.first, "leaked \(foreign)")
+            // `qualifiedModelID` prefixes `id + "/"`, so any slash left in
+            // `modelID` becomes a double-qualified launch reference.
+            XCTAssertFalse(
+                state.profile.modelID.contains("/"),
+                "double-qualified from \(foreign)")
+        }
+    }
+
+    /// A bare id that no OTHER preset claims is still adopted — that is how a
+    /// custom Anthropic-compatible proxy model survives the migration, and it is
+    /// the behaviour the foreign-id rejection above must not overreach into.
+    func testLegacyMigrationKeepsAnUnclaimedBareModelID() throws {
+        let state = try XCTUnwrap(ProviderRepository.legacyAnthropicProfile(
+            legacyKey: "sk-legacy",
+            legacyBase: "https://proxy.example.com",
+            legacyModel: "my-in-house-claude-proxy"
+        ))
+
+        XCTAssertEqual(state.profile.modelID, "my-in-house-claude-proxy")
+    }
+
+    /// The migration's fallback becomes the launch `defaultModelID`, so it has to
+    /// be a model the engine still curates. A stale id (`claude-sonnet-4-5`) is
+    /// registered only because it is the configured default and renders as a
+    /// stray row above the real Anthropic shortlist — the same wart
+    /// `MobileEngineConfig::default()` was moved off `claude-sonnet-4-20250514`
+    /// to avoid. Mirrors `traits::is_curated_model`'s "anthropic" arm.
+    func testTheAnthropicPresetOnlyOffersCuratedModels() throws {
+        let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "anthropic" }))
+        let curated: Set<String> = [
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "claude-haiku-4-5",
+            "claude-fable-5",
+        ]
+
+        XCTAssertEqual(preset.models.first, "claude-sonnet-5",
+                       "must match traits::provider_default_model(\"anthropic\")")
+        for model in preset.models {
+            XCTAssertTrue(curated.contains(model), "\(model) is not curated by the engine")
+        }
+    }
+
     private func waitForCommandCount(_ count: Int, recorder: CommandRecorder) async {
         for _ in 0..<100 where recorder.commands.count < count {
             await Task.yield()

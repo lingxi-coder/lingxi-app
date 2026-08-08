@@ -563,8 +563,28 @@ final class MockConversationSource: ConversationSource {
             source.model.items = [.message(user), .run(run), .message(assistant)]
             source.model.messageDetails = [:]
             source.model.isNew = false
+            source.model.availableModels = uiTestModelCatalog
+            source.model.activeModelId = uiTestModelCatalog[0]
             return source
         }
+
+        /// A multi-provider stand-in for `ClientEvent::ModelList` so the composer's
+        /// model picker is reachable in UI tests (the plain mock leaves
+        /// `availableModels` empty, which disables the chip). Shaped like the
+        /// engine's curated refs: provider-qualified, active model first.
+        static let uiTestModelCatalog = [
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-opus-4-8",
+            "anthropic/claude-haiku-4-5",
+            "anthropic/claude-fable-5",
+            "openai/gpt-5.5",
+            "openai/gpt-5.4",
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "kimi/kimi-k3",
+            "gemini/gemini-3.5-flash",
+            "zai/glm-5.1",
+        ]
     #endif
 
     func startNewConversation() {
@@ -645,12 +665,16 @@ final class MockConversationSource: ConversationSource {
 
     func dismissError() { model.error = nil }
 
-    /// Mock model switch: no engine, so just swap the chip from the mock catalog.
-    /// The mock never populates `availableModels`, so the picker stays on
-    /// `MockData.models` and this id is a mock id.
+    /// Mock model switch: no engine, so just swap the chip locally. Ordinarily
+    /// `availableModels` is empty and `id` is a mock id from `MockData.models`;
+    /// the UI-test fixture seeds a curated catalog, and there `id` is a real
+    /// provider-qualified ref that only `activeModelId` can represent.
     func setModel(_ id: String) {
         if let opt = MockData.models.first(where: { $0.id == id }) {
             model.model = opt
+        }
+        if !model.availableModels.isEmpty {
+            model.activeModelId = id
         }
     }
 

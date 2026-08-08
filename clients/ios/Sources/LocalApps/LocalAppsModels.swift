@@ -274,6 +274,42 @@ struct LocalAppGenerationProgress: Hashable, Sendable {
     let detail: String?
 }
 
+/// One run of live output from a generation stage.
+///
+/// Blocks are append-only and coalesced by kind: consecutive chunks of the same
+/// kind grow one block rather than creating a new one, so the transcript reads
+/// as continuous prose instead of as a list of network packets.
+struct LocalAppTranscriptBlock: Identifiable, Hashable, Sendable {
+    /// What this run of output is. The engine marks each chunk via the
+    /// progress event's `stage`; anything else is a pipeline stage, not a
+    /// chunk, and never becomes a block.
+    enum Kind: Hashable, Sendable {
+        /// Extended-thinking output — the model reasoning about the task.
+        case thinking
+        /// Assistant text.
+        case text
+
+        /// Engine `stage` values that mark a live chunk. Kept as an
+        /// initializer (rather than a comparison at the call site) so the two
+        /// wire strings appear exactly once on this side of the boundary.
+        ///
+        /// Mirrors `local_apps_delta::{STAGE_THINKING, STAGE_TEXT}`.
+        init?(stage: String) {
+            switch stage {
+            case "llm_thinking": self = .thinking
+            case "llm_text": self = .text
+            default: return nil
+            }
+        }
+    }
+
+    /// Position in the transcript. Stable across appends, so SwiftUI keeps the
+    /// row identity while the last block grows.
+    let id: Int
+    let kind: Kind
+    var text: String
+}
+
 struct LocalAppCheckpoint: Identifiable, Hashable, Sendable {
     let id: String
     let label: String

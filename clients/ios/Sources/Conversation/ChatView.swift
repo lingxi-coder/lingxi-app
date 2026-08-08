@@ -195,66 +195,54 @@ struct ChatView: View {
 
     // MARK: message list
     private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
-                    ForEach(convo.items) { item in
-                        switch item {
-                        case let .message(message):
-                            MessageBubble(
-                                message: message,
-                                detail: convo.messageDetails[message.id],
-                                onShare: shareMessage
-                            )
-                            .equatable()
-                        case let .run(run):
-                            ConversationExecutionRunCard(run: run, onOpenShellTask: onOpenShellTask)
-                        }
-                    }
-                    if convo.streaming { streamingRow }
-                    // PR-4 item 3: a non-clean turn outcome (MaxTurns / Cancelled),
-                    // surfaced distinctly from a normal end.
-                    if let notice = convo.notice { noticeRow(notice) }
-                    if let status = convo.statusLine { statusRow(status) }
-                    if let cap = captureStatus { statusRow(cap) }
-                    // PR-4 item 4: a persistent, dismissible, kind-aware error
-                    // banner (not the old transient dim line).
-                    if let err = convo.error { ErrorBanner(error: err, onDismiss: dismissError) }
-                    Color.clear
-                        .frame(height: 1)
-                        .id("bottom")
-                        .onAppear {
-                            if !followsLatestMessage { followsLatestMessage = true }
-                        }
-                        .onDisappear {
-                            if followsLatestMessage { followsLatestMessage = false }
-                        }
-                }
-                .frame(maxWidth: 720)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .accessibilityIdentifier("conversation.message-list")
-            .onChange(of: convo.items.count) { _, _ in scrollToLatest(using: proxy) }
-            .onChange(of: convo.streaming) { _, _ in scrollToLatest(using: proxy) }
-            .onChange(of: convo.error) { _, _ in scrollToLatest(using: proxy) }
-            .onChange(of: convo.notice) { _, _ in scrollToLatest(using: proxy) }
-            .onChange(of: composerFocused) { _, focused in
-                guard focused else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+        // The scroll container is shared with local-app generation
+        // (`TranscriptScroll`); what stays here is this screen's content and
+        // its own definition of "something new arrived".
+        TranscriptScroll(
+            follow: FollowSignal(
+                itemCount: convo.items.count,
+                streaming: convo.streaming,
+                error: convo.error,
+                notice: convo.notice
+            ),
+            followsLatest: $followsLatestMessage,
+            focused: composerFocused,
+            accessibilityIdentifier: "conversation.message-list"
+        ) {
+            if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
+            ForEach(convo.items) { item in
+                switch item {
+                case let .message(message):
+                    MessageBubble(
+                        message: message,
+                        detail: convo.messageDetails[message.id],
+                        onShare: shareMessage
+                    )
+                    .equatable()
+                case let .run(run):
+                    ConversationExecutionRunCard(run: run, onOpenShellTask: onOpenShellTask)
                 }
             }
+            if convo.streaming { streamingRow }
+            // PR-4 item 3: a non-clean turn outcome (MaxTurns / Cancelled),
+            // surfaced distinctly from a normal end.
+            if let notice = convo.notice { noticeRow(notice) }
+            if let status = convo.statusLine { statusRow(status) }
+            if let cap = captureStatus { statusRow(cap) }
+            // PR-4 item 4: a persistent, dismissible, kind-aware error
+            // banner (not the old transient dim line).
+            if let err = convo.error { ErrorBanner(error: err, onDismiss: dismissError) }
         }
     }
 
-    private func scrollToLatest(using proxy: ScrollViewProxy) {
-        guard followsLatestMessage else { return }
-        withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo("bottom", anchor: .bottom)
-        }
+    /// The four signals this screen treats as "new content", collapsed into one
+    /// value so `TranscriptScroll` needs a single `onChange` instead of one per
+    /// signal.
+    private struct FollowSignal: Equatable {
+        let itemCount: Int
+        let streaming: Bool
+        let error: ConversationError?
+        let notice: TurnNotice?
     }
 
     private var emptyState: some View {

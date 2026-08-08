@@ -2027,9 +2027,11 @@ fn validate_mount(
             )));
         }
         if host_path != workspace_root {
-            return Err(MobileLinuxError::InvalidRequest(
-                "workspace mount host_path must match workspace_host_path".to_string(),
-            ));
+            return Err(MobileLinuxError::InvalidRequest(format!(
+                "workspace mount host_path must match workspace_host_path {} (got {})",
+                workspace_root.display(),
+                host_path.display()
+            )));
         }
     } else if matches!(mount.purpose, MountPurpose::LocalAppBuild) {
         let (app_id, channel) = parse_local_app_build_guest_path(&mount.guest_path)?;
@@ -2043,9 +2045,15 @@ fn validate_mount(
             "local-app build host_path",
         )?;
         if host_path != expected_host_path {
+            // Both paths, always. A guard that prints only what it WANTED
+            // leaves the reader to guess what it got — and the two differ
+            // here by a prefix (`/var` vs `/private/var`), a stale container
+            // UUID, or a channel mismatch, which are three different bugs
+            // that read identically without the actual value.
             return Err(MobileLinuxError::InvalidRequest(format!(
-                "local-app build mount host_path must be {}",
-                expected_host_path.display()
+                "local-app build mount host_path must be {} (got {})",
+                expected_host_path.display(),
+                host_path.display()
             )));
         }
     } else if mount.guest_path == config.workspace_guest_path() {

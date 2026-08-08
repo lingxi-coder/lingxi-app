@@ -278,26 +278,17 @@ struct LocalAppDesignerView: View {
             }
         case .generating, .validating:
             // `confirm_design`/`retry_generation` accepted and the engine is
-            // now generating (or validating) the app. Renders the same
-            // `LocalAppGenerationCard` progress the editable branch shows
-            // (`body`, above) so progress is visible here too instead of a
-            // blank "not ready" screen — `.task(id: app?.workflow)` keeps
-            // `prepare()`/this view live as `appGenerationProgress` events
-            // update `store.generationProgress[appID]` underneath it.
-            ContentUnavailableView {
-                ProgressView()
-            } description: {
-                if let progress = store.generationProgress[appID] {
-                    VStack(spacing: 4) {
-                        Text(workflow.label)
-                        Text(progress.detail ?? progress.stage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("local_apps_awaiting_generation_job")
-                }
-            }
+            // now generating (or validating). This is a conversation with a
+            // model, so it is rendered BY the conversation's own views
+            // (`LocalAppGenerationTranscriptView` → `TranscriptScroll` +
+            // `MessageBubble` + `Composer`) rather than by a spinner: the
+            // stages take tens of seconds each, and a spinner cannot
+            // distinguish slow from wedged.
+            LocalAppGenerationTranscriptView(
+                appID: appID,
+                workflowLabel: workflow.label,
+                acceptsInput: LocalAppDetailView.showsRevisionInput(for: workflow)
+            )
         case .awaitingPreviewConfirmation:
             // The preview confirmation gate just armed (`appPreviewReady`,
             // now wired in `LocalAppsStore` to also set

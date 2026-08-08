@@ -55,6 +55,35 @@ final class LocalAppsStore {
     private(set) var previews: [String: LocalAppPreviewSession] = [:]
     private(set) var runtimes: [String: LocalAppRuntimeStatus] = [:]
     private(set) var generationProgress: [String: LocalAppGenerationProgress] = [:]
+    /// Live model output for an app whose generation is running, oldest block
+    /// first. Rendered by the same `MessageBubble` the conversation uses.
+    ///
+    /// Separate from `generationProgress` because the two answer different
+    /// questions and have different lifetimes: that map holds ONE latest value
+    /// ("which pipeline stage, how far"), this one ACCUMULATES ("what has the
+    /// model said"). Folding the live chunks into `generationProgress` would
+    /// have each chunk erase the stage the UI needs to keep showing.
+    private(set) var generationTranscript: [String: [LocalAppTranscriptBlock]] = [:]
+
+    /// Append one live chunk, growing the trailing block when the kind is
+    /// unchanged so the transcript reads as prose rather than as packets.
+    private func appendTranscript(appId: String, kind: LocalAppTranscriptBlock.Kind, chunk: String) {
+        var blocks = generationTranscript[appId] ?? []
+        if var last = blocks.last, last.kind == kind {
+            last.text += chunk
+            blocks[blocks.count - 1] = last
+        } else {
+            blocks.append(LocalAppTranscriptBlock(id: blocks.count, kind: kind, text: chunk))
+        }
+        generationTranscript[appId] = blocks
+    }
+
+    /// Drop an app's transcript. Called when a NEW run starts, never when one
+    /// ends: after a failure the last thing the model said is exactly what the
+    /// user needs to read.
+    func clearTranscript(appID: String) {
+        generationTranscript[appID] = nil
+    }
     private(set) var checkpoints: [String: [LocalAppCheckpoint]] = [:]
     private(set) var isRefreshing = false
     private(set) var errorMessage: String?
@@ -273,6 +302,17 @@ final class LocalAppsStore {
                 if let detail, !detail.isEmpty { errorMessage = detail }
 
             case let .appGenerationProgress(appId, stage, percent, detail):
+                // A live model chunk, not a pipeline stage. It carries no
+                // percent and must NOT land in `generationProgress`: the UI
+                // keeps showing "Generating 25%" underneath while the words
+                // scroll past above it.
+                if let kind = LocalAppTranscriptBlock.Kind(stage: stage) {
+                    if let detail, !detail.isEmpty {
+                        appendTranscript(appId: appId, kind: kind, chunk: detail)
+                    }
+                    liveGenerationAppIDs.insert(appId)
+                    break
+                }
                 generationProgress[appId] = LocalAppGenerationProgress(
                     stage: stage,
                     percent: percent,

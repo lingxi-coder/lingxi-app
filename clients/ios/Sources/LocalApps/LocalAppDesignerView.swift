@@ -285,6 +285,7 @@ struct LocalAppDesignerView: View {
             // stages take tens of seconds each, and a spinner cannot
             // distinguish slow from wedged.
             LocalAppGenerationTranscriptView(
+                store: store,
                 appID: appID,
                 workflowLabel: workflow.label,
                 acceptsInput: LocalAppDetailView.showsRevisionInput(for: workflow)

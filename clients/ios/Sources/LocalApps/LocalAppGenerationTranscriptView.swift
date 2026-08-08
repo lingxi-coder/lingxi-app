@@ -14,7 +14,13 @@ import SwiftUI
 /// what the model is thinking, the stage says how far along the job is, and
 /// neither answers the other's question.
 struct LocalAppGenerationTranscriptView: View {
-    @Environment(LocalAppsStore.self) private var store
+    /// Passed in, never read from the environment. Nothing injects a
+    /// `LocalAppsStore` into the environment — the app root installs only
+    /// `AppState` and `LocalizationManager` — so an
+    /// `@Environment(LocalAppsStore.self)` here force-unwrapped a missing
+    /// value and trapped the moment this view laid out. Every other view in
+    /// this module takes the store as a property; so does this one.
+    @Bindable var store: LocalAppsStore
     @Environment(\.theme) private var theme
 
     let appID: String

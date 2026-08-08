@@ -472,6 +472,55 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         )
     }
 
+    /// `fakefs_bind_mount` registers the path it binds and none of its
+    /// parents, so the parents are the runtime's job — and getting the set
+    /// wrong is invisible until a guest lookup walks through one of them.
+    ///
+    /// These are the two real mounts a local-app build issues. The Next build
+    /// died on `lstat '/opt/lingxi/local-app-runtime'`: only `/opt/lingxi`
+    /// ships in the rootfs image, and the leaf `…/node_modules` was registered
+    /// by the bind, leaving exactly the middle component unknown to the guest.
+    func testGuestMountParentsCoverEveryAncestorButNotTheMountPoint() {
+        let mounts = [
+            LXISHMountSpec(
+                hostPath: "/host/app/local-app-runtime/node_modules",
+                guestPath: "/opt/lingxi/local-app-runtime/node_modules",
+                readOnly: true,
+                purpose: "shared"
+            ),
+            LXISHMountSpec(
+                hostPath: "/host/data/apps/abcd1234/build/store",
+                guestPath: "/var/lingxi/local-app-build/abcd1234/store",
+                readOnly: false,
+                purpose: "local_app_build"
+            )
+        ]
+
+        XCTAssertEqual(
+            LXISHRuntimeMountPlanner.guestMountParents(of: mounts),
+            [
+                "/opt",
+                "/var",
+                "/opt/lingxi",
+                "/var/lingxi",
+                "/opt/lingxi/local-app-runtime",
+                "/var/lingxi/local-app-build",
+                "/var/lingxi/local-app-build/abcd1234"
+            ],
+            "shallowest first, deduplicated, and never the mount point itself"
+        )
+
+        // A single-component mount point has no parent to create: `/` is not
+        // something to mkdir, and emitting it would make the guest helper
+        // fail on every run.
+        XCTAssertEqual(
+            LXISHRuntimeMountPlanner.guestMountParents(of: [
+                LXISHMountSpec(hostPath: "/h", guestPath: "/workspace", readOnly: false, purpose: "workspace")
+            ]),
+            []
+        )
+    }
+
     /// The Swift half of the cross-language pin on the guest-path atlas.
     /// `LXISHGuestPaths` twins Rust's `traits::mobile_linux::guest_paths`;
     /// the Rust side pins the SAME literals in

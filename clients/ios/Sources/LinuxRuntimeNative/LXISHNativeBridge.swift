@@ -297,6 +297,42 @@ struct LXISHRuntimeMountPlanner {
         return candidate
     }
 
+    /// Every ancestor directory a mount point hangs from, shallowest first and
+    /// deduplicated across mounts.
+    ///
+    /// The mount point itself is excluded: `fakefs_bind_mount` creates and
+    /// registers that one. Only what is above it is nobody's job.
+    static func guestMountParents(of mounts: [LXISHMountSpec]) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for mount in mounts {
+            let components = mount.guestPath.split(separator: "/").map(String.init)
+            guard components.count > 1,
+                  !components.contains(".."),
+                  !components.contains(".")
+            else {
+                continue
+            }
+            // dropLast() leaves the parents only.
+            var path = ""
+            for component in components.dropLast() {
+                path += "/" + component
+                if seen.insert(path).inserted {
+                    ordered.append(path)
+                }
+            }
+        }
+        return ordered.sorted(by: shallowestFirst)
+    }
+
+    /// Parents before children, and total: `sorted(by:)` is not stable, so
+    /// depth alone would leave siblings in an order that varies run to run.
+    static func shallowestFirst(_ lhs: String, _ rhs: String) -> Bool {
+        let lhsDepth = lhs.split(separator: "/").count
+        let rhsDepth = rhs.split(separator: "/").count
+        return lhsDepth == rhsDepth ? lhs < rhs : lhsDepth < rhsDepth
+    }
+
     static func effectiveMounts(
         requestedMounts: [LXISHMountSpec],
         config: LXISHNativeConfig
@@ -992,7 +1028,8 @@ private final class LXISHNativeCoordinator {
         execute(config: config) { runtime in
             runtime.mounts = mounts
             try self.rootfsManager.cacheMounts(mounts, for: config)
-            try self.ensureMountEndpointsExist(mounts, config: config)
+            try self.ensureHostEndpointsExist(mounts)
+            try self.ensureGuestMountParentsExist(mounts, runtime: &runtime)
             if LXISHKernelRuntimeBridge.isDeviceBridgeAvailable() {
                 try runtime.kernel.configureMounts(mounts.map(self.dictionary(from:)))
             }
@@ -1398,39 +1435,102 @@ private final class LXISHNativeCoordinator {
             requestedMounts: runtime.mounts,
             config: runtime.config
         )
-        try ensureMountEndpointsExist(mounts, config: runtime.config)
+        try ensureHostEndpointsExist(mounts)
+        try ensureGuestMountParentsExist(mounts, runtime: &runtime)
         guard !mounts.isEmpty else { return }
         try runtime.kernel.configureMounts(mounts.map(dictionary(from:)))
     }
 
-    /// A bind mount needs BOTH ends to exist: the host directory being shared,
-    /// and the guest directory it attaches to inside the fakefs.
-    ///
-    /// Only the host side was being created. `ensureGuestDirectories` builds a
-    /// fixed list baked into the rootfs image and never sees request-supplied
-    /// guest paths, so every `/var/lingxi/local-app-build/<app-id>/<channel>`
-    /// mount had no mount point to attach to.
-    private func ensureMountEndpointsExist(
-        _ mounts: [LXISHMountSpec],
-        config: LXISHNativeConfig
-    ) throws {
-        let dataRoot = config.rootfsDataURL.standardizedFileURL
+    /// The host half of every bind: the directory actually being shared.
+    private func ensureHostEndpointsExist(_ mounts: [LXISHMountSpec]) throws {
         for mount in mounts {
             try FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: mount.hostPath, isDirectory: true),
                 withIntermediateDirectories: true
             )
-            guard let guestDirectory = LXISHRuntimeMountPlanner.guestMountPointURL(
-                for: mount.guestPath,
+        }
+    }
+
+    /// The guest half: every ANCESTOR of a mount point must exist *inside the
+    /// fakefs*, which means having a row in `meta.db` — not merely a directory
+    /// under `data/`.
+    ///
+    /// `fakefs_bind_mount` registers exactly the path it binds and none of its
+    /// parents, so a mount at `/opt/lingxi/local-app-runtime/node_modules`
+    /// left `/opt/lingxi/local-app-runtime` unknown to the guest and every
+    /// lookup through it returned ENOENT — which is how a Next build died on
+    /// `lstat '/opt/lingxi/local-app-runtime'` while the leaf symlink sat
+    /// right there on disk. Mount points one level under a directory baked
+    /// into the rootfs image (`/workspace/<id>`) were the only ones that ever
+    /// worked, and they worked by accident.
+    ///
+    /// Creating the parents with `FileManager` — which is what this used to do
+    /// — is worse than doing nothing. `fakefs_mkdir` calls the host `mkdir`
+    /// first and rolls the transaction back on failure, so a directory that
+    /// already exists under `data/` makes EEXIST permanent: the guest can
+    /// never register the path afterwards. They have to be made through the
+    /// guest.
+    private func ensureGuestMountParentsExist(
+        _ mounts: [LXISHMountSpec],
+        runtime: inout RuntimeState
+    ) throws {
+        // Needs a booted kernel: the only way to create a path the fakefs
+        // knows about is to run `mkdir` inside it. Callers that configure
+        // mounts before boot skip this; the run path boots first and then
+        // reaches here before the caller's command.
+        let parents = LXISHRuntimeMountPlanner.guestMountParents(of: mounts)
+        guard !parents.isEmpty,
+              runtime.kernelBooted,
+              LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable()
+        else {
+            return
+        }
+
+        // Ask the guest — not the host filesystem — which are missing. Only
+        // the guest's answer reflects `meta.db`, and `meta.db` is what path
+        // lookup consults.
+        let probe = try runGuestHelper(
+            ["-c", #"for d in "$@"; do [ -d "$d" ] || printf '%s\n' "$d"; done"#, "sh"] + parents,
+            runtime: &runtime
+        )
+        let missing = probe.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        guard !missing.isEmpty else { return }
+
+        // A path the guest cannot see is one nothing in the guest can be
+        // using, so clearing the stale scaffold underneath it is safe — and it
+        // is the only way to lift the EEXIST that would otherwise make the
+        // `mkdir` below fail forever. Shallowest first: removing a parent
+        // takes its children with it. Any bind leaf destroyed here is
+        // re-established by the `configureMounts` that follows.
+        let dataRoot = runtime.config.rootfsDataURL.standardizedFileURL
+        for path in missing.sorted(by: LXISHRuntimeMountPlanner.shallowestFirst) {
+            guard let scaffold = LXISHRuntimeMountPlanner.guestMountPointURL(
+                for: path,
                 under: dataRoot
             ) else {
                 continue
             }
-            try FileManager.default.createDirectory(
-                at: guestDirectory,
-                withIntermediateDirectories: true
-            )
+            try? FileManager.default.removeItem(at: scaffold)
         }
+
+        _ = try runGuestHelper(["-c", #"mkdir -p "$@""#, "sh"] + missing, runtime: &runtime)
+    }
+
+    /// Run one short `/bin/sh` command inside the guest and return its stdout.
+    /// Used only for mount-point bookkeeping, before the caller's real command.
+    private func runGuestHelper(
+        _ arguments: [String],
+        runtime: inout RuntimeState
+    ) throws -> String {
+        let result = try runtime.executor.runExecutable(
+            "/bin/sh",
+            arguments: arguments,
+            environment: ["PATH": "/bin:/usr/bin:/sbin:/usr/sbin"],
+            stdin: nil,
+            cwd: "/",
+            timeout: 30
+        )
+        return result.stdoutText
     }
 
 

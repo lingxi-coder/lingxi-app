@@ -237,7 +237,11 @@ pub(crate) fn spawn_authoring(
                 return;
             }
         };
-        match llm.author_questionnaire(&brief).await {
+        // Live transcript for this stage. Held across the call; dropping it
+        // closes the channel and ends the drain task.
+        let (deltas, _transcript) =
+            crate::local_apps_delta::GenerationTranscript::spawn(service.clone(), app_id.clone());
+        match llm.author_questionnaire(&brief, Some(deltas)).await {
             Ok((name, steps)) => {
                 if let Err(error) = service
                     .questionnaire_ready(&app_id, steps, name, epoch)
@@ -304,8 +308,10 @@ pub(crate) fn spawn_planning(
                 return;
             }
         };
+        let (plan_deltas, _transcript) =
+            crate::local_apps_delta::GenerationTranscript::spawn(service.clone(), app_id.clone());
         match llm
-            .plan(&record.brief, &draft.questionnaire, &draft.fields)
+            .plan(&record.brief, &draft.questionnaire, &draft.fields, Some(plan_deltas))
             .await
         {
             Ok(plan) => {

@@ -374,7 +374,18 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
         const MAX_ATTEMPTS: usize = 3;
         let mut last_error = None;
         for attempt in 0..MAX_ATTEMPTS {
-            let writes = self.llm.current().generate_sources(&source_request).await?;
+            // A live transcript per ATTEMPT: a repair round is its own model
+            // call, and its output belongs to that round rather than being
+            // appended to the failed one's.
+            let (deltas, _transcript) = crate::local_apps_delta::GenerationTranscript::spawn(
+                service.clone(),
+                request.key.app_id.clone(),
+            );
+            let writes = self
+                .llm
+                .current()
+                .generate_sources(&source_request, Some(deltas))
+                .await?;
             // Overlay write, never a clear-then-write: the model names only
             // the files it wants to create or replace, everything else in the
             // workspace stays untouched. A "move the search box" edit should

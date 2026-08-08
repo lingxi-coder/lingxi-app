@@ -10,7 +10,18 @@
 
 #![forbid(unsafe_code)]
 
-mod accumulator;
+/// Streaming assembly, re-exported from `llm-client`.
+///
+/// This module used to OWN the accumulator. It now lives in `llm-client`,
+/// beside the `LlmEvent`/`LlmResponse` it is defined in terms of, so other
+/// stream consumers (the mobile local-app generator) reuse the same assembly
+/// instead of growing a second one. The alias keeps every call site here
+/// unchanged.
+mod accumulator {
+    pub(crate) use llm_client::stream_accumulator::{
+        accumulate_stream_salvaging, response_to_stream_events,
+    };
+}
 pub mod api;
 pub mod builtins;
 pub mod catalog;

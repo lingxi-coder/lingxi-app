@@ -12,7 +12,9 @@
 
 use crate::local_apps_sources::{screen_writes, FileWrite};
 use async_trait::async_trait;
-use llm_client::{ApiService, ContentBlock, ToolChoice};
+use futures_util::StreamExt;
+use llm_client::stream_accumulator::accumulate_stream_salvaging;
+use llm_client::{ApiService, ContentBlock};
 use local_apps::questionnaire::{
     normalize_plan, validate_plan, validate_questionnaire, AppDesignStep, AppPlan,
     MAX_COLLECTIONS, MAX_DOMAINS, MAX_FIELDS_PER_STEP, MAX_OPTIONS, MAX_STEPS,
@@ -35,6 +37,34 @@ const TOOL_QUESTIONNAIRE: &str = "emit_questionnaire";
 const TOOL_PLAN: &str = "emit_plan";
 const TOOL_SOURCES: &str = "emit_sources";
 
+/// What a live delta is, for the client that renders it.
+///
+/// The two are rendered differently (thinking is collapsed/greyed, text is
+/// the answer), so the kind travels with the chunk rather than being guessed
+/// downstream from its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationDeltaKind {
+    /// Extended-thinking output — the model reasoning about the task.
+    Thinking,
+    /// Assistant text.
+    Text,
+}
+
+/// Where a structured call's live output goes while it is still running.
+///
+/// The three local-app stages take tens of seconds each, most of it inside one
+/// model call that used to be a black box: the client could only show a
+/// spinner. Implementations receive chunks AS THEY ARRIVE.
+///
+/// `on_delta` is synchronous and MUST NOT block — it runs inline on the stream
+/// consumer. An implementation that cannot keep up must drop chunks; stalling
+/// here stalls the model call itself.
+pub trait GenerationDeltaSink: Send + Sync {
+    /// One chunk of live output. Chunks are fragments, not whole lines or
+    /// tokens — the receiver concatenates.
+    fn on_delta(&self, kind: GenerationDeltaKind, chunk: &str);
+}
+
 /// A single structured model call. The implementation owns auth, routing,
 /// retry and timeout — the three call sites below only see a proposal in,
 /// a validated JSON value or an error out.
@@ -46,12 +76,16 @@ pub trait LocalAppsModel: Send + Sync {
     /// Force a tool call named `tool_name`, whose input must match `schema`
     /// (a hint to the model — the real gate is the caller's validator), and
     /// return the tool call's `input` value.
+    ///
+    /// `deltas`, when present, receives the model's output as it streams. It is
+    /// observation only: the value returned is identical with or without it.
     async fn structured(
         &self,
         system: &str,
         user: String,
         tool_name: &str,
         schema: serde_json::Value,
+        deltas: Option<Arc<dyn GenerationDeltaSink>>,
     ) -> Result<serde_json::Value, AppError>;
 
     /// Update the default model/profile future `structured` calls route
@@ -118,6 +152,7 @@ impl LocalAppsModel for ApiServiceModel {
         user: String,
         tool_name: &str,
         schema: serde_json::Value,
+        deltas: Option<Arc<dyn GenerationDeltaSink>>,
     ) -> Result<serde_json::Value, AppError> {
         let tool = serde_json::json!({
             "name": tool_name,
@@ -180,17 +215,10 @@ impl LocalAppsModel for ApiServiceModel {
         // `docs/superpowers/specs/2026-08-07-structured-output-capability-gating.md`.
         // This stays a narrow, self-correcting workaround until that lands.
         let forced = self
-            .send_side_query(
-                &model,
-                profile.as_deref(),
-                system,
-                user.clone(),
-                &tool,
-                Some(ToolChoice::Required),
-            )
+            .open_stream(&model, profile.as_deref(), system, user.clone(), &tool, Some(tool_name))
             .await;
-        let response = match forced {
-            Ok(response) => response,
+        let stream = match forced {
+            Ok(stream) => stream,
             Err(error) if rejects_tool_choice(&error) => {
                 tracing::warn!(
                     model = %model,
@@ -198,19 +226,49 @@ impl LocalAppsModel for ApiServiceModel {
                     error = %error,
                     "provider rejected an explicit tool_choice; retrying unforced"
                 );
-                self.send_side_query(
-                    &model,
-                    profile.as_deref(),
-                    system,
-                    user,
-                    &tool,
-                    None,
-                )
-                .await
-                .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?
+                self.open_stream(&model, profile.as_deref(), system, user, &tool, None)
+                    .await
+                    .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?
             }
             Err(error) => return Err(AppError::LlmUnavailable(format!("{error}"))),
         };
+
+        // Tee the live text out to the caller's sink WITHOUT altering the
+        // stream: `inspect` observes each event and passes it through
+        // untouched, so assembly below sees exactly the sequence the provider
+        // sent. The sink is synchronous and must never block — a UI consumer
+        // that falls behind must drop deltas, not stall the model.
+        let observed = deltas.clone();
+        let stream = stream.inspect(move |event| {
+            let (Some(sink), Ok(event)) = (observed.as_ref(), event) else {
+                return;
+            };
+            if let llm_client::LlmEvent::ContentBlockDelta { delta, .. } = event {
+                match delta {
+                    llm_client::ContentDelta::ThinkingDelta { thinking } => {
+                        sink.on_delta(GenerationDeltaKind::Thinking, thinking);
+                    }
+                    llm_client::ContentDelta::TextDelta { text } => {
+                        sink.on_delta(GenerationDeltaKind::Text, text);
+                    }
+                    // `InputJsonDelta` is the tool call's arguments mid-flight:
+                    // half-written JSON, not something to show a user. The
+                    // assembled call is what the caller gets, and the stages
+                    // narrate their own progress around it.
+                    _ => {}
+                }
+            }
+        });
+
+        // Assemble with the SAME accumulator the subagent path uses
+        // (`llm_client::stream_accumulator`, moved there from `agent` so this
+        // call site reuses it rather than growing a second, weaker one). Its
+        // salvaged partial blocks are dropped here: unlike a subagent turn,
+        // half a plan is not a lesser answer, it is an unusable one — and
+        // `extract_single_tool_call` would reject it anyway.
+        let response = accumulate_stream_salvaging(Box::pin(stream))
+            .await
+            .map_err(|(_partial, error)| AppError::LlmUnavailable(format!("{error}")))?;
         extract_single_tool_call(response.content, tool_name, response.stop_reason.as_deref())
     }
 
@@ -220,52 +278,39 @@ impl LocalAppsModel for ApiServiceModel {
 }
 
 impl ApiServiceModel {
-    /// One side query, with whatever `tool_choice` the caller decided on.
+    /// Open one streaming side query, with or without the forced tool.
     ///
     /// Split out so the forced attempt and the unforced retry above are the
     /// SAME request in every other respect — a retry that quietly differed in
     /// system prompt, budget or tool schema would make the fallback's success
     /// mean something other than "the directive was the only problem".
-    #[allow(clippy::too_many_arguments)]
-    async fn send_side_query(
+    ///
+    /// Streaming (rather than `messages_create_side_query`) is what makes the
+    /// live transcript possible: these stages take tens of seconds inside a
+    /// single call, and a non-streaming round-trip has nothing to report until
+    /// it is over. `stream_forced` is the same request shape the subagent's
+    /// structured output uses, and — like the batched side query before it —
+    /// sets no `max_tokens` of its own, so the model's own ceiling applies.
+    async fn open_stream(
         &self,
         model: &str,
         profile: Option<&str>,
         system: &str,
         user: String,
         tool: &serde_json::Value,
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        forced_tool: Option<&str>,
+    ) -> Result<
+        futures_util::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
         self.service
-            .messages_create_side_query(
+            .stream_forced(
                 model,
                 profile,
                 Some(system),
                 vec![ConversationMessage::user(MessageId::new(), user)],
                 vec![tool.clone()],
-                // No ceiling of our own — `build_request` resolves `None` to
-                // `max_output_tokens_for_model` and bounds it against the
-                // context window, exactly as the main turn does.
-                //
-                // These stages used to pass hand-picked figures (author/plan
-                // 4096, write-code 32768), sized by how large the ANSWER should
-                // be. On a reasoning model that is the wrong quantity: thinking
-                // is billed against the same number. Measured on the live
-                // DeepSeek API with this module's own questionnaire prompt, the
-                // thinking pass alone ran 1468–3379 tokens, and `deepseek-v4-pro`
-                // @ 4096 hit `finish_reason: length` at 4098 on a realistic
-                // brief — cutting the tool call mid-JSON, so
-                // `function.arguments` no longer parsed and llm-client rejected
-                // the whole response as `InvalidRequest`, which then surfaced as
-                // `LlmUnavailable` ("the model is unreachable") for a model that
-                // had in fact answered.
-                //
-                // Raising the constants would only move that cliff. The model's
-                // own limit is the one number that cannot be miscalibrated
-                // against a thinking budget nobody here can see.
-                None,
-                tool_choice,
-                vec![],
+                forced_tool,
                 None,
             )
             .await
@@ -467,6 +512,7 @@ impl LocalAppsLlm {
     pub async fn author_questionnaire(
         &self,
         brief: &str,
+        deltas: Option<Arc<dyn GenerationDeltaSink>>,
     ) -> Result<(Option<String>, Vec<AppDesignStep>), AppError> {
         let value = self
             .model
@@ -475,6 +521,7 @@ impl LocalAppsLlm {
                 format!("用户的描述：\n{brief}"),
                 TOOL_QUESTIONNAIRE,
                 questionnaire_schema(),
+                deltas,
             )
             .await?;
         let name = value
@@ -499,6 +546,7 @@ impl LocalAppsLlm {
         brief: &str,
         steps: &[AppDesignStep],
         answers: &BTreeMap<String, DesignValue>,
+        deltas: Option<Arc<dyn GenerationDeltaSink>>,
     ) -> Result<AppPlan, AppError> {
         let user = format!(
             "用户的描述：\n{brief}\n\n问卷：\n{}\n\n用户的回答：\n{}\n\n\
@@ -509,7 +557,7 @@ impl LocalAppsLlm {
         );
         let value = self
             .model
-            .structured(PLAN_PROMPT, user, TOOL_PLAN, plan_schema())
+            .structured(PLAN_PROMPT, user, TOOL_PLAN, plan_schema(), deltas)
             .await?;
         let mut plan: AppPlan = serde_json::from_value(value)
             .map_err(|error| AppError::LlmOutputRejected(format!("plan is malformed: {error}")))?;
@@ -539,6 +587,7 @@ impl LocalAppsLlm {
     pub async fn generate_sources(
         &self,
         request: &SourceRequest,
+        deltas: Option<Arc<dyn GenerationDeltaSink>>,
     ) -> Result<Vec<FileWrite>, AppError> {
         let mut user = format!(
             "用户的描述：\n{}\n\n方案：\n{}\n\n用户的回答：\n{}",
@@ -580,7 +629,7 @@ impl LocalAppsLlm {
         }
         let value = self
             .model
-            .structured(SOURCES_PROMPT, user, TOOL_SOURCES, sources_schema())
+            .structured(SOURCES_PROMPT, user, TOOL_SOURCES, sources_schema(), deltas)
             .await?;
         let files = value.get("files").and_then(serde_json::Value::as_array).ok_or_else(|| {
             AppError::LlmOutputRejected("generator returned no `files` array".into())
@@ -795,7 +844,7 @@ fn sources_schema() -> serde_json::Value {
 /// 复用它，绕开真实 `ApiService` 驱动 [`LocalAppsLlm`]。
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::{AppError, LocalAppsModel};
+    use super::{AppError, GenerationDeltaSink, LocalAppsModel};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -829,6 +878,7 @@ pub(crate) mod test_support {
             user: String,
             _tool_name: &str,
             _schema: serde_json::Value,
+            _deltas: Option<Arc<dyn GenerationDeltaSink>>,
         ) -> Result<serde_json::Value, AppError> {
             self.prompts.lock().expect("lock").push(user);
             let mut responses = self.responses.lock().expect("lock");
@@ -888,6 +938,7 @@ mod tests {
             _user: String,
             _tool_name: &str,
             _schema: serde_json::Value,
+            _deltas: Option<Arc<dyn GenerationDeltaSink>>,
         ) -> Result<serde_json::Value, AppError> {
             unreachable!("not exercised by this test")
         }
@@ -921,7 +972,7 @@ mod tests {
     #[tokio::test]
     async fn author_questionnaire_returns_the_validated_steps_and_name() {
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_questionnaire())]));
-        let (name, steps) = llm.author_questionnaire("一个记事本").await.expect("authoring");
+        let (name, steps) = llm.author_questionnaire("一个记事本", None).await.expect("authoring");
         assert_eq!(name.as_deref(), Some("记事本"));
         assert_eq!(steps.len(), 1);
         assert!(steps[0].fields[0].allows_defer);
@@ -938,7 +989,7 @@ mod tests {
         });
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(over_limit)]));
         let err = llm
-            .author_questionnaire("一个记事本")
+            .author_questionnaire("一个记事本", None)
             .await
             .expect_err("6 steps must be rejected by the validator, not passed through");
         // `validate_questionnaire` itself builds `AppError::InvalidRequest` —
@@ -957,7 +1008,7 @@ mod tests {
     async fn plan_returns_the_validated_plan() {
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_plan())]));
         let plan = llm
-            .plan("一个记事本", &[], &BTreeMap::new())
+            .plan("一个记事本", &[], &BTreeMap::new(), None)
             .await
             .expect("planning");
         assert_eq!(plan.collections.len(), 1);
@@ -972,7 +1023,7 @@ mod tests {
         bad["domains"] = serde_json::json!(["203.0.113.10"]);
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(bad)]));
         let err = llm
-            .plan("一个记事本", &[], &BTreeMap::new())
+            .plan("一个记事本", &[], &BTreeMap::new(), None)
             .await
             .expect_err("an IP-literal domain must be rejected by validate_plan, not passed through");
         assert!(
@@ -991,7 +1042,7 @@ mod tests {
             }))
             .collect::<Vec<_>>());
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(bad)]));
-        llm.plan("一个记事本", &[], &BTreeMap::new())
+        llm.plan("一个记事本", &[], &BTreeMap::new(), None)
             .await
             .expect_err("9 collections must be rejected by validate_plan, not passed through");
     }
@@ -1010,7 +1061,7 @@ mod tests {
         value["domains"] = serde_json::json!(["API.Example.com", "api.example.com"]);
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(value)]));
         let plan = llm
-            .plan("一个记事本", &[], &BTreeMap::new())
+            .plan("一个记事本", &[], &BTreeMap::new(), None)
             .await
             .expect("a case-duplicate domain is normalized, not rejected");
         assert_eq!(plan.domains, vec!["api.example.com".to_string()]);
@@ -1020,7 +1071,7 @@ mod tests {
     async fn the_brief_reaches_the_model_prompt() {
         let model = ScriptedModel::new(vec![Ok(good_questionnaire())]);
         let llm = LocalAppsLlm::new(model.clone());
-        llm.author_questionnaire("一个带标签的记事本").await.expect("authoring");
+        llm.author_questionnaire("一个带标签的记事本", None).await.expect("authoring");
         let prompt = model.prompt_at(0);
         assert!(
             prompt.contains("一个带标签的记事本"),
@@ -1037,7 +1088,7 @@ mod tests {
     #[tokio::test]
     async fn generate_sources_returns_screened_writes() {
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_sources())]));
-        let writes = llm.generate_sources(&initial_request()).await.expect("generation");
+        let writes = llm.generate_sources(&initial_request(), None).await.expect("generation");
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].path, "app/page.jsx");
     }
@@ -1049,7 +1100,7 @@ mod tests {
         });
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(escaping)]));
         let err = llm
-            .generate_sources(&initial_request())
+            .generate_sources(&initial_request(), None)
             .await
             .expect_err("the gate must reject an escaping path before anything is written");
         // `screen_writes` builds `AppError::InvalidRequest` — this seam must
@@ -1067,7 +1118,7 @@ mod tests {
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
         request.revision_prompt = Some("把搜索框挪到顶部".into());
-        llm.generate_sources(&request).await.expect("revision");
+        llm.generate_sources(&request, None).await.expect("revision");
         let prompt = model.prompt_at(0);
         assert!(prompt.contains("把搜索框挪到顶部"), "got {prompt}");
     }
@@ -1078,7 +1129,7 @@ mod tests {
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
         request.validator_feedback = Some("app/page.jsx uses eval()".into());
-        llm.generate_sources(&request).await.expect("repair");
+        llm.generate_sources(&request, None).await.expect("repair");
         let prompt = model.prompt_at(0);
         assert!(prompt.contains("eval()"), "got {prompt}");
     }
@@ -1090,7 +1141,7 @@ mod tests {
         let mut request = initial_request();
         request.existing_note =
             Some("现有源码树超过了读取预算，省略了 3 个文件".into());
-        llm.generate_sources(&request).await.expect("generation");
+        llm.generate_sources(&request, None).await.expect("generation");
         let prompt = model.prompt_at(0);
         assert!(
             prompt.contains("省略了 3 个文件"),
@@ -1206,7 +1257,7 @@ mod tests {
         let llm =
             LocalAppsLlm::new(ScriptedModel::new(vec![Err(AppError::LlmUnavailable("offline".into()))]));
         let err = llm
-            .author_questionnaire("一个记事本")
+            .author_questionnaire("一个记事本", None)
             .await
             .expect_err("there is no template to silently fall back to — fail closed");
         // The model itself was unreachable — this must stay `LlmUnavailable`,

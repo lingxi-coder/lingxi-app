@@ -63,6 +63,7 @@ mod local_apps_host;
 // `ApiService` (for `ApiServiceModel`) and `local-apps`'s validators, both of
 // which are pulled only under this feature.
 #[cfg(feature = "uniffi")]
+mod local_apps_delta;
 mod local_apps_llm;
 #[cfg(feature = "uniffi")]
 mod local_apps_mcp;

@@ -1,30 +1,25 @@
-//! Self-contained SSE accumulator for the streaming subagent path.
+//! Drive a streaming [`LlmEvent`] sequence to a single [`LlmResponse`] — the
+//! exact value the non-streaming round-trip returns — so a caller's downstream
+//! logic is byte-identical regardless of which transport produced the turn.
 //!
-//! This is a deliberate copy of `orchestrator::sse`'s `BlockAccumulator` and
-//! its `event_router` accumulation logic. The agent crate cannot depend on the
-//! orchestrator (that would close a dependency cycle — the orchestrator already
-//! depends on `agent`), so the byte-locked streaming semantics are reproduced
-//! here verbatim. [`accumulate_stream`] drives a [`LlmEvent`] stream to a
-//! single [`llm_client::LlmResponse`] — the exact value the non-streaming
-//! [`crate::api::SubagentApiClient::messages_create`] returns — so the
-//! multi-turn [`crate::runner::run_subagent`] loop is byte-identical regardless
-//! of which transport produced the turn.
+//! Byte-locked against `orchestrator::sse`'s `BlockAccumulator` +
+//! `event_router` (source semantics: `claude.ts:1995-2300`). It lived in the
+//! `agent` crate because that crate cannot depend on the orchestrator without
+//! closing a dependency cycle; it now lives HERE, next to the `LlmEvent` and
+//! `LlmResponse` it is defined in terms of, so every consumer of a stream gets
+//! the same assembly instead of growing a second, weaker one. `agent`
+//! re-exports it and is otherwise unchanged.
 //!
 //! [`response_to_stream_events`] is the inverse: it synthesizes a lossless
-//! [`LlmEvent`] sequence from an `LlmResponse`, which the default
-//! [`crate::api::SubagentApiClient::messages_create_stream`] impl uses so a
-//! client that only implements the non-streaming round-trip still presents a
-//! streaming seam. The two functions round-trip exactly (see the
-//! `round_trip_*` tests).
-//!
-//! Source semantics: `claude.ts:1995-2300`, mirrored through
-//! `orchestrator::sse::accumulator` + `orchestrator::sse::event_router`.
+//! [`LlmEvent`] sequence from an `LlmResponse`, so a client that only
+//! implements the non-streaming round-trip can still present a streaming seam.
+//! The two round-trip exactly (see the `round_trip_*` tests).
 #![forbid(unsafe_code)]
 
-use futures::stream::{BoxStream, StreamExt};
-use llm_client::{
+use crate::{
     ContentBlock, ContentDelta, LlmError, LlmEvent, LlmResponse, MessageDeltaPayload, Usage,
 };
+use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -350,7 +345,7 @@ fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
     let bt_seed = &seed.billable_tokens;
     let bt_delta = &delta.billable_tokens;
     Usage {
-        billable_tokens: llm_client::TokenUsage {
+        billable_tokens: crate::TokenUsage {
             input: if bt_delta.input > 0 {
                 bt_delta.input
             } else {
@@ -410,7 +405,7 @@ fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
 // `Result<_, LlmError>` shape. Production drives `accumulate_stream_salvaging`
 // directly (the runner needs the salvaged partial), so this is `cfg(test)`.
 #[cfg(test)]
-pub(crate) async fn accumulate_stream(
+pub async fn accumulate_stream(
     stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
 ) -> Result<LlmResponse, LlmError> {
     accumulate_stream_salvaging(stream)
@@ -426,7 +421,7 @@ pub(crate) async fn accumulate_stream(
 /// the whole tool call). Only blocks whose `content_block_stop` was already
 /// seen are salvaged — an in-flight (unstopped) block is dropped exactly as CC's
 /// `blocks_yielded` counts only completed blocks.
-pub(crate) async fn accumulate_stream_salvaging(
+pub async fn accumulate_stream_salvaging(
     mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
 ) -> Result<LlmResponse, (Vec<ContentBlock>, LlmError)> {
     let mut acc = BlockAccumulator::new();
@@ -539,7 +534,7 @@ pub(crate) async fn accumulate_stream_salvaging(
 /// empty, exactly as on the wire), `tool_call` input rides one `input_json_delta`
 /// (re-parsed on stop), and the full usage is seeded on `message_start` so the
 /// [`merge_usage`] reconstruction reproduces `resp.usage`.
-pub(crate) fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
+pub fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
     let mut events = Vec::with_capacity(resp.content.len() * 3 + 3);
     // `message_start` carries id/model + a usage seed. On the wire the seed
     // holds input/cache with `output_tokens == 0`; here we seed the FULL usage
@@ -640,7 +635,7 @@ pub(crate) fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
 mod tests {
     use super::*;
     use futures::stream;
-    use llm_client::TokenUsage;
+    use crate::TokenUsage;
 
     fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()

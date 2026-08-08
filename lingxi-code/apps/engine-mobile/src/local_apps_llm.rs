@@ -30,7 +30,7 @@ const SOURCES_PROMPT: &str = include_str!("../assets/prompts/generate_sources.md
 // literals at each call site) so [`ApiServiceModel::max_tokens_for`] cannot
 // silently desync from the names [`LocalAppsLlm`] actually calls with — a
 // rename or a fourth call that only updated one of the two spots would
-// otherwise fall through to the 4096 default and truncate mid-tool-call.
+// otherwise fall through to the smaller default and truncate mid-tool-call.
 const TOOL_QUESTIONNAIRE: &str = "emit_questionnaire";
 const TOOL_PLAN: &str = "emit_plan";
 const TOOL_SOURCES: &str = "emit_sources";
@@ -82,7 +82,7 @@ pub trait LocalAppsModel: Send + Sync {
 ///
 /// `max_tokens` is not part of the [`LocalAppsModel::structured`] signature —
 /// the trait is shared by all three calls, but the brief assigns each a
-/// different budget (author/plan 4096, write-code 32768). `tool_name` is the
+/// different budget (author/plan 16384, write-code 32768). `tool_name` is the
 /// only per-call signal `structured` receives, and [`LocalAppsLlm`] always
 /// calls with one of exactly three names, so `structured` switches its
 /// `max_tokens` on that name rather than growing the trait signature for one
@@ -112,10 +112,33 @@ impl ApiServiceModel {
         }
     }
 
+    /// Per-stage output budget.
+    ///
+    /// The author/plan figure is NOT the brief's original 4096. On a reasoning
+    /// model the thinking tokens are billed against `max_tokens` alongside the
+    /// answer, and 4096 does not cover both. Measured on the live DeepSeek API
+    /// with this module's real `author_questionnaire` prompt and schema, five
+    /// briefs × two models:
+    ///
+    ///   reasoning tokens 1468–3379, total completion 2190–4417
+    ///   deepseek-v4-pro @ 4096, "一个可以记录我每天读了哪些书…"
+    ///     -> finish_reason `length` at 4098 completion tokens
+    ///
+    /// One brief in five already overran, and the survivors cleared the cap by
+    /// as little as ~250 tokens. An overrun is not a soft failure: the tool
+    /// call is cut mid-JSON, so `function.arguments` no longer parses and
+    /// `llm-client` rejects the whole response as `InvalidRequest` — surfacing
+    /// as `LlmUnavailable`, which reads as "the model is unreachable" when the
+    /// model in fact answered and we truncated it.
+    ///
+    /// 16384 leaves ~13k for the answer after the worst measured thinking pass.
+    /// `max_tokens` is a ceiling, not a reservation — raising it costs nothing
+    /// on requests that do not use it, and `build_request` still clamps it to
+    /// the model's context window.
     fn max_tokens_for(tool_name: &str) -> u32 {
         match tool_name {
             TOOL_SOURCES => 32768,
-            _ => 4096,
+            _ => 16384,
         }
     }
 }
@@ -223,7 +246,7 @@ impl LocalAppsModel for ApiServiceModel {
             }
             Err(error) => return Err(AppError::LlmUnavailable(format!("{error}"))),
         };
-        extract_single_tool_call(response.content, tool_name)
+        extract_single_tool_call(response.content, tool_name, response.stop_reason.as_deref())
     }
 
     fn set_model(&self, model: String, profile: Option<String>) {
@@ -294,7 +317,9 @@ fn rejects_tool_choice(error: &llm_client::LlmError) -> bool {
 fn extract_single_tool_call(
     content: Vec<ContentBlock>,
     tool_name: &str,
+    stop_reason: Option<&str>,
 ) -> Result<serde_json::Value, AppError> {
+    let summary = describe_content(&content);
     let mut matches: Vec<serde_json::Value> = content
         .into_iter()
         .filter_map(|block| match block {
@@ -304,12 +329,73 @@ fn extract_single_tool_call(
         .collect();
     match matches.len() {
         1 => Ok(matches.remove(0)),
-        0 => Err(AppError::LlmOutputRejected(
-            "the model did not call the required tool".into(),
-        )),
+        // `max_tokens` means the answer was CUT OFF, not withheld: a reasoning
+        // model can spend the whole budget thinking and never reach the tool
+        // call. That is a budget defect on our side, so it must not read as
+        // "the model refused" — the two have opposite fixes.
+        0 if stop_reason == Some("max_tokens") => Err(AppError::LlmOutputRejected(format!(
+            "the model ran out of output budget before it finished calling `{tool_name}` \
+             (stop_reason=max_tokens, {summary}); a reasoning model can spend the whole \
+             budget thinking"
+        ))),
+        0 => Err(AppError::LlmOutputRejected(format!(
+            "the model did not call the required tool `{tool_name}` \
+             (stop_reason={}, {summary})",
+            stop_reason.unwrap_or("none")
+        ))),
         count => Err(AppError::LlmOutputRejected(format!(
             "the model called `{tool_name}` {count} times; expected exactly one call"
         ))),
+    }
+}
+
+/// A one-line, log-free description of what the model actually returned.
+///
+/// Mobile installs no `tracing` subscriber, so `tracing::warn!` from this
+/// module reaches nobody on a device — the error string IS the only channel a
+/// failure has. A bare "the model did not call the required tool" is therefore
+/// unactionable in exactly the situation that needs action most. Block kinds
+/// plus a short text prefix distinguish "answered in prose", "emitted a
+/// DIFFERENT tool", and "returned nothing" without leaking a whole response
+/// into a user-facing alert.
+fn describe_content(content: &[ContentBlock]) -> String {
+    if content.is_empty() {
+        return "no content blocks".to_string();
+    }
+    let mut kinds: Vec<String> = Vec::new();
+    let mut text_prefix: Option<String> = None;
+    for block in content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                kinds.push("text".to_string());
+                if text_prefix.is_none() && !text.trim().is_empty() {
+                    text_prefix = Some(text.chars().take(160).collect());
+                }
+            }
+            ContentBlock::ToolCall { name, .. } => kinds.push(format!("tool_call:{name}")),
+            ContentBlock::Reasoning { .. } => kinds.push("reasoning".to_string()),
+            other => kinds.push(format!("{}", ContentBlockKind(other))),
+        }
+    }
+    match text_prefix {
+        Some(prefix) => format!("blocks=[{}], text starts: {prefix:?}", kinds.join(", ")),
+        None => format!("blocks=[{}]", kinds.join(", ")),
+    }
+}
+
+/// `Display` for the block kinds [`describe_content`] does not name
+/// explicitly, without matching every variant of a non-exhaustive enum.
+struct ContentBlockKind<'a>(&'a ContentBlock);
+
+impl std::fmt::Display for ContentBlockKind<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The serde tag is the block's wire kind — stable, and it stays correct
+        // when a new variant lands without this match being updated.
+        let tag = serde_json::to_value(self.0)
+            .ok()
+            .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        f.write_str(&tag)
     }
 }
 
@@ -1038,18 +1124,95 @@ mod tests {
                 input: serde_json::json!({"files": []}),
             },
         ];
-        let value = extract_single_tool_call(blocks, TOOL_SOURCES).expect("exactly one match");
+        let value = extract_single_tool_call(blocks, TOOL_SOURCES, Some("tool_use"))
+            .expect("exactly one match");
         assert_eq!(value, serde_json::json!({"files": []}));
     }
 
     #[test]
     fn extract_single_tool_call_rejects_zero_matches() {
         let blocks = vec![ContentBlock::Text { text: "no tool call here".into(), cache_control: None }];
-        let err = extract_single_tool_call(blocks, TOOL_SOURCES)
+        let err = extract_single_tool_call(blocks, TOOL_SOURCES, Some("end_turn"))
             .expect_err("no matching ToolCall block must be rejected");
         assert!(
             matches!(err, AppError::LlmOutputRejected(_)),
             "a missing tool call must surface as LlmOutputRejected: {err:?}"
+        );
+    }
+
+    /// Mobile installs no `tracing` subscriber, so this string is the ONLY
+    /// channel a failure has on a device. A message that does not say what came
+    /// back instead leaves the next failure as unactionable as the last one.
+    #[test]
+    fn a_missing_tool_call_reports_what_the_model_returned_instead() {
+        let blocks = vec![ContentBlock::Text {
+            text: "好的，我来帮你设计这个应用。首先我们需要确定几个关键点……".into(),
+            cache_control: None,
+        }];
+        let AppError::LlmOutputRejected(message) =
+            extract_single_tool_call(blocks, TOOL_QUESTIONNAIRE, Some("end_turn"))
+                .expect_err("prose instead of a tool call must be rejected")
+        else {
+            panic!("prose must be rejected as LlmOutputRejected");
+        };
+        assert!(
+            message.contains(TOOL_QUESTIONNAIRE),
+            "the message must name the tool that was expected: {message}"
+        );
+        assert!(
+            message.contains("blocks=[text]"),
+            "the message must say what block kinds came back: {message}"
+        );
+        assert!(
+            message.contains("好的，我来帮你设计"),
+            "the message must quote the start of the prose so the cause is visible: {message}"
+        );
+    }
+
+    /// A truncated answer and a withheld answer have OPPOSITE fixes: the first
+    /// is our budget, the second is the model. Reporting both as "did not call
+    /// the required tool" sends the reader after the wrong one.
+    #[test]
+    fn a_truncated_answer_is_reported_as_a_budget_overrun_not_a_refusal() {
+        let blocks = vec![ContentBlock::Text { text: String::new(), cache_control: None }];
+        let AppError::LlmOutputRejected(message) =
+            extract_single_tool_call(blocks, TOOL_QUESTIONNAIRE, Some("max_tokens"))
+                .expect_err("a truncated response must still be rejected")
+        else {
+            panic!("a truncated response must be rejected as LlmOutputRejected");
+        };
+        assert!(
+            message.contains("ran out of output budget"),
+            "a max_tokens stop must read as a budget overrun: {message}"
+        );
+        assert!(
+            !message.contains("did not call"),
+            "a truncated answer must NOT read as the model refusing: {message}"
+        );
+    }
+
+    /// Pins the measured budget. On the live DeepSeek API the questionnaire
+    /// stage's own prompt burned 1468–3379 reasoning tokens before emitting a
+    /// single byte of answer, and `deepseek-v4-pro` hit `finish_reason: length`
+    /// at 4098 completion tokens on a realistic brief. A future edit that walks
+    /// this back to a figure a reasoning pass can exhaust reintroduces exactly
+    /// that failure, so assert the floor rather than the literal.
+    #[test]
+    fn the_author_and_plan_budget_clears_a_measured_reasoning_pass() {
+        const WORST_MEASURED_COMPLETION: u32 = 4417;
+        for tool in [TOOL_QUESTIONNAIRE, TOOL_PLAN] {
+            let budget = ApiServiceModel::max_tokens_for(tool);
+            assert!(
+                budget > WORST_MEASURED_COMPLETION * 2,
+                "{tool}'s budget ({budget}) must leave room for a reasoning pass plus the \
+                 answer; the worst measured DeepSeek completion was \
+                 {WORST_MEASURED_COMPLETION} tokens"
+            );
+        }
+        assert!(
+            ApiServiceModel::max_tokens_for(TOOL_SOURCES)
+                > ApiServiceModel::max_tokens_for(TOOL_QUESTIONNAIRE),
+            "write-code emits whole source files and must keep the largest budget"
         );
     }
 
@@ -1071,7 +1234,7 @@ mod tests {
                 input: serde_json::json!({"files": [{"path": "app/b.jsx", "contents": "b"}]}),
             },
         ];
-        let err = extract_single_tool_call(blocks, TOOL_SOURCES)
+        let err = extract_single_tool_call(blocks, TOOL_SOURCES, Some("tool_use"))
             .expect_err("two matching tool calls must be rejected, not silently truncated");
         assert!(
             matches!(err, AppError::LlmOutputRejected(_)),

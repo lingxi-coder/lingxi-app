@@ -417,16 +417,19 @@ pub struct MobileRuntime {
     /// `local_apps` in-process provider; mobile never discovers project/user
     /// MCP configuration.
     pub mcp_registry: Arc<McpRegistry>,
-    /// Provider profile names this connection can route to — what survived
-    /// `apply_mobile_profile_allowlist`.
+    /// Every `(provider, model)` this connection can actually route to — the
+    /// LIVE client config after `apply_mobile_profile_allowlist`.
     ///
-    /// `OrchestratorHandle::list_model_listings` returns the STATIC llm-client
-    /// catalog (every builtin preset, configured or not), so it cannot be used
-    /// as-is to decide what to offer a mobile client. Intersecting against this
-    /// set is what keeps `ModelList` and `SetModel` honest about the providers
-    /// the user actually enabled. Desktop needs no equivalent: its picker gates
-    /// on per-provider availability maps mobile does not have.
-    pub configured_profiles: std::collections::BTreeSet<String>,
+    /// `OrchestratorHandle::list_model_listings` cannot answer this. It returns
+    /// the STATIC llm-client catalog: every builtin preset whether or not the
+    /// user configured it, and — because it is assembled from
+    /// `builtin_presets()` — no user-defined provider at all. Reading it left
+    /// the picker wrong in both directions, advertising providers nobody enabled
+    /// while hiding the custom endpoint someone had just configured.
+    ///
+    /// Desktop needs no equivalent: its picker gates the same static catalog on
+    /// per-provider availability maps that mobile does not have.
+    pub routable_listings: Vec<traits::ModelListing>,
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
@@ -1132,18 +1135,6 @@ async fn build_mobile_inner_with_ask(
             };
             (profile.profile_name.clone(), provider.to_string())
         })
-        .collect();
-    // The profiles that survived `apply_mobile_profile_allowlist`, i.e. the ONLY
-    // ones this connection can actually route to. The static llm-client catalog
-    // that `list_model_listings()` returns knows every preset regardless of
-    // configuration, so every surface that offers a model to the client has to
-    // intersect against this set — otherwise the picker advertises providers the
-    // user never enabled and a pick lands on a profile the config does not hold.
-    let configured_profiles: std::collections::BTreeSet<String> = assembled
-        .client_config
-        .providers
-        .iter()
-        .map(|profile| profile.profile_name.clone())
         .collect();
     let model_provider_profiles: std::collections::BTreeMap<String, String> = assembled
         .client_config
@@ -2125,7 +2116,7 @@ async fn build_mobile_inner_with_ask(
         credentials,
         mobile_linux,
         mcp_registry,
-        configured_profiles,
+        routable_listings: default_listings.clone(),
         local_apps_mcp,
         local_apps_llm,
     })
@@ -4602,26 +4593,22 @@ impl MobileEngineHandle {
 
     /// The catalog rows this connection can actually route to.
     ///
-    /// `OrchestratorHandle::list_model_listings` returns the STATIC llm-client
-    /// catalog — every builtin preset, whether or not the user configured it —
-    /// because desktop's picker filters it afterwards with per-provider
-    /// availability maps. Mobile has no such map; what it has is
-    /// `routing.mobileEnabledProfiles`, already applied to the live client
-    /// config at build time. Intersecting here is what makes the two agree.
+    /// The LIVE client config, not `OrchestratorHandle::list_model_listings` —
+    /// see [`MobileRuntime::routable_listings`] for why the static catalog
+    /// answers a different question than the one a picker is asking.
     ///
-    /// An empty `configured_profiles` cannot happen through `build` (the
-    /// Anthropic profile is always assembled), but were it ever empty the
-    /// filter would be a no-op rather than an engine with no models at all.
+    /// The one exception is an EMPTY routable set. iOS always emits
+    /// `routing.mobileEnabledProfiles`, so a fresh install with nothing
+    /// configured sends `[]`, which `apply_mobile_profile_allowlist` treats as
+    /// fail-closed and strips every profile. Nothing is routable in that state
+    /// whatever we show, so fall back to the static catalog rather than hand the
+    /// client an empty picker it can neither act on nor explain.
     async fn routable_model_listings(&self) -> Vec<traits::ModelListing> {
-        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-        let listings = handle.list_model_listings().await;
-        if self.inner.configured_profiles.is_empty() {
-            return listings;
+        if !self.inner.routable_listings.is_empty() {
+            return self.inner.routable_listings.clone();
         }
-        listings
-            .into_iter()
-            .filter(|listing| self.inner.configured_profiles.contains(&listing.provider_id))
-            .collect()
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        handle.list_model_listings().await
     }
 
     /// Resolve a client-supplied model reference into the `(wire id, profile)`
@@ -6901,6 +6888,75 @@ mod tests {
                 .await
                 .expect("a routable model must be accepted");
             assert_ne!(orch.current_session_id().await, before);
+        });
+    }
+
+    /// A user-defined provider's models must be offered and selectable.
+    ///
+    /// The picker read the STATIC llm-client catalog, which is assembled from
+    /// `builtin_presets()` and therefore contains no user provider at all — so a
+    /// proxy or self-hosted endpoint configured in settings appeared nowhere,
+    /// and its models could not be picked even though the router served them.
+    #[test]
+    fn a_user_defined_provider_is_offered_and_selectable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let providers = std::collections::BTreeMap::from([(
+            "my-proxy".to_string(),
+            serde_json::json!({
+                "type": "openai",
+                "baseUrl": "https://proxy.example/v1",
+                "apiKeyEnv": "PROXY_API_KEY",
+                "models": [{"id": "llama-3.3-70b"}, {"id": "internal-7b"}]
+            }),
+        )]);
+        let cfg = MobileConfig {
+            cwd: tmp.path().to_path_buf(),
+            lingxi_home: tmp.path().join(branding::DOT_DIR),
+            provider_profiles: Some(providers),
+            routing: Some(serde_json::json!({
+                "mobileEnabledProfiles": ["my-proxy"]
+            })),
+            default_model: "my-proxy/llama-3.3-70b".to_string(),
+            ..MobileConfig::default()
+        };
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListModels)
+                .await
+                .expect("submit(ListModels) ok");
+            let events = listener.received.lock().await.clone();
+            let models = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::ModelList { models, .. } => Some(models.clone()),
+                    _ => None,
+                })
+                .expect("ModelList must be emitted");
+
+            // A provider with no curated shortlist keeps its OWN catalog, so both
+            // declared models are offered.
+            assert!(
+                models.iter().any(|m| m == "my-proxy/llama-3.3-70b"),
+                "the custom provider's models must be offered: {models:?}"
+            );
+            assert!(
+                models.iter().any(|m| m == "my-proxy/internal-7b"),
+                "every model a non-curated provider declares is offered: {models:?}"
+            );
+
+            // …and picking one is accepted, with the profile preserved.
+            handle
+                .submit(ClientCommand::SetModel {
+                    model: "my-proxy/internal-7b".into(),
+                })
+                .await
+                .expect("a custom provider's model must be selectable");
+            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let snapshot = orch.get_status_snapshot().await;
+            assert_eq!(snapshot.model, "internal-7b");
+            assert_eq!(snapshot.model_profile.as_deref(), Some("my-proxy"));
         });
     }
 

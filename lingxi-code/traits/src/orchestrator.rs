@@ -1030,7 +1030,7 @@ pub fn curated_model_refs(
         out.push(current_ref);
     }
     for listing in listings {
-        if is_curated_model(&listing.provider_id, &listing.request_model) {
+        if is_offered_model(&listing.provider_id, &listing.request_model) {
             let model_ref = qualified_model_ref(&listing.request_model, Some(&listing.provider_id));
             if seen.insert(model_ref.clone()) {
                 out.push(model_ref);
@@ -1038,6 +1038,24 @@ pub fn curated_model_refs(
         }
     }
     out
+}
+
+/// Whether a listing belongs in a client's model picker.
+///
+/// For a provider the shared catalog curates, that means the "latest few"
+/// shortlist. For one it does NOT curate — a user-defined proxy, a self-hosted
+/// endpoint, any profile invented in settings — there is no shortlist to trim
+/// to, and trimming to one hid every model the provider declared, leaving the
+/// user unable to select the very models they had just configured. Such a
+/// provider keeps its own catalog, which is the rule the TUI's row builder has
+/// always applied and which [`provider_has_curated_list`] exists to express.
+#[must_use]
+fn is_offered_model(provider_id: &str, request_model: &str) -> bool {
+    if provider_has_curated_list(provider_id) {
+        is_curated_model(provider_id, request_model)
+    } else {
+        true
+    }
 }
 
 /// Curate a flat list of display names for legacy text-only listing callers.
@@ -1064,7 +1082,7 @@ pub fn curated_model_names(
         out.push(current.to_string());
     }
     for l in listings {
-        if is_curated_model(&l.provider_id, &l.request_model)
+        if is_offered_model(&l.provider_id, &l.request_model)
             && seen.insert(l.display_model.clone())
         {
             out.push(l.display_model.clone());
@@ -1246,6 +1264,58 @@ mod curated_model_tests {
         assert!(is_curated_model("glm-coding", "glm-5.1"));
         assert!(is_curated_model("glm-coding", "glm-4.7"));
         assert!(!is_curated_model("zhipuai-coding-plan", "glm-5.1"));
+    }
+
+    /// A user-defined provider (a proxy, a self-hosted endpoint, any profile the
+    /// shared catalog has never heard of) has no curated shortlist to trim to,
+    /// so trimming to one hid EVERY model it offers. `provider_has_curated_list`
+    /// exists to name exactly this case; the curation helpers now consult it,
+    /// the way the TUI's row builder always has.
+    #[test]
+    fn a_provider_without_a_curated_shortlist_keeps_its_own_catalog() {
+        let listings = vec![
+            listing("openai", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-4o", "GPT-4o"), // curated provider → trimmed
+            listing("my-proxy", "llama-3.3-70b", "Llama 3.3 70B"),
+            listing("my-proxy", "some-internal-model", "Internal"),
+        ];
+
+        let refs = curated_model_refs(&listings, &[], "", None);
+        assert_eq!(
+            refs,
+            vec![
+                "openai/gpt-5.5".to_string(),
+                "my-proxy/llama-3.3-70b".to_string(),
+                "my-proxy/some-internal-model".to_string(),
+            ],
+            "a provider with no shortlist must keep every model it declares"
+        );
+
+        let names = curated_model_names(&listings, &[], "");
+        assert_eq!(
+            names,
+            vec![
+                "GPT-5.5".to_string(),
+                "Llama 3.3 70B".to_string(),
+                "Internal".to_string(),
+            ]
+        );
+    }
+
+    /// OpenRouter is deliberately IN the curated-provider set even though it is
+    /// an aggregator: its several-hundred-model passthrough catalog would drown
+    /// any picker. Keep that trimming intact.
+    #[test]
+    fn openrouter_stays_trimmed_despite_being_a_passthrough() {
+        let listings = vec![
+            listing("openrouter", "openrouter/auto", "Auto"),
+            listing("openrouter", "meta-llama/llama-3.3-70b-instruct:free", "Llama"),
+        ];
+
+        assert_eq!(
+            curated_model_refs(&listings, &[], "", None),
+            vec!["openrouter/openrouter/auto".to_string()]
+        );
     }
 
     #[test]

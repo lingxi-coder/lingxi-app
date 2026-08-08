@@ -114,7 +114,12 @@ struct SetupWizardView: View {
                         .frame(height: 3)
                 }
             }
-            Color.clear.frame(width: 36)
+            // Symmetric twin of the leading 36×36 slot. Width-only made this
+            // an UNBOUNDED-height Color: the header became a flexible VStack
+            // child, grabbed ~half the leftover vertical space (~300pt), and
+            // the progress bar rendered centered a third of the way down the
+            // screen on every step.
+            Color.clear.frame(width: 36, height: 36)
         }
         .padding(.horizontal, 18)
         .padding(.top, 8)

@@ -472,7 +472,16 @@ enum ConversationSourceFactory {
 
     /// The app's writable container root the engine roots its filesystem +
     /// `~/.claude`-equivalent under. Uses Application Support (created on demand).
-    static func appSandboxRoot() -> String {
+    ///
+    /// `nonisolated` because it reads `FileManager` and nothing else: the
+    /// enclosing enum is `@MainActor` for the source-construction members, and
+    /// inheriting that here would force every caller onto the main actor for a
+    /// pure path computation. The mobile-linux FFI bridges — Settings, the
+    /// terminal, cron — must reach this from synchronous nonisolated code,
+    /// because it is the single authority for the root the ios-ish runtime
+    /// validates local-app mounts against, and a second copy for their benefit
+    /// is exactly the divergence that broke every local-app build.
+    nonisolated static func appSandboxRoot() -> String {
         let fm = FileManager.default
         let base = (try? fm.url(for: .applicationSupportDirectory,
                                 in: .userDomainMask,
@@ -1577,7 +1586,9 @@ final class MockConversationSource: ConversationSource {
                 appSandboxRoot: config.appSandboxRoot,
                 projectCwd: config.projectCwd,
                 providerConfig: providerConfig,
-                mobileLinux: config.mobileLinux.map(makeIosMobileLinuxConfig),
+                mobileLinux: config.mobileLinux.map {
+                    makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
+                },
                 localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
                 localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot
             )

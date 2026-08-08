@@ -146,7 +146,9 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             appSandboxRoot: appSandboxRoot,
             projectCwd: scope.projectCwd,
             providerConfig: provider,
-            mobileLinux: runtime.map(makeIosMobileLinuxConfig),
+            mobileLinux: runtime.map {
+                makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
+            },
             localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
             localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot
         )
@@ -224,7 +226,17 @@ private final class CronPermissionSink: IosPermissionSink, @unchecked Sendable {
     }
 }
 
-func makeIosMobileLinuxConfig(_ config: TerminalRuntimeConfig) -> IosMobileLinuxConfigFfi {
+/// `appSandboxRoot` is a parameter rather than something this function looks
+/// up, so that both callers pass the SAME value they hand the engine in the
+/// launch config beside it. The runtime validates local-app build mounts
+/// against this root; when it disagreed with the engine's by even one
+/// component, every local-app build failed its mount check. Passing one
+/// expression to both fields makes them agree by construction instead of by
+/// two lookups that happen to match.
+func makeIosMobileLinuxConfig(
+    _ config: TerminalRuntimeConfig,
+    appSandboxRoot: String
+) -> IosMobileLinuxConfigFfi {
     IosMobileLinuxConfigFfi(
         mode: config.mode == .legacy ? .legacy : .mobileLinux,
         managedRoot: config.managedRoot,
@@ -233,7 +245,8 @@ func makeIosMobileLinuxConfig(_ config: TerminalRuntimeConfig) -> IosMobileLinux
         abi: config.abi,
         rootfsVersion: config.rootfsVersion,
         archiveSha256: config.archiveSha256,
-        authorizationFile: config.authorizationFile
+        authorizationFile: config.authorizationFile,
+        appSandboxRoot: appSandboxRoot
     )
 }
 

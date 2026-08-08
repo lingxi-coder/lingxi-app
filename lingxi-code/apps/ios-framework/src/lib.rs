@@ -126,6 +126,19 @@ pub struct IosMobileLinuxConfigFfi {
     /// only when its digest matches the build-pinned
     /// `LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256`.
     pub authorization_file: Option<String>,
+    /// The engine's data root — the SAME directory the engine receives as its
+    /// `app_sandbox_root` and hangs `.lingxi`, `apps/`, and `Projects/` off.
+    ///
+    /// It must be supplied, never derived. This field replaced an inference
+    /// that read the root out of `managed_root` by cutting at
+    /// `Library/Application Support`: that yields the iOS *container*, while
+    /// the engine's root is `<AppSupport>/LingxiCode` — three components
+    /// deeper, and not reachable from `mobile-linux/ios-ish` by any rule. The
+    /// runtime therefore expected local-app builds at
+    /// `<container>/apps/<id>/build/<channel>`, a path nothing writes, so every
+    /// build failed its mount check; and `.lingxi` protection guarded
+    /// `<container>/.lingxi`, leaving the real credential directory unguarded.
+    pub app_sandbox_root: String,
 }
 
 /// iOS-provided multi-provider configuration for the mobile engine.
@@ -759,55 +772,31 @@ fn mobile_linux_path_contains_protected_config_subtree(path: &std::path::Path) -
             .any(|pair| pair[0] == "library" && pair[1] == "preferences")
 }
 
+/// The engine data root the runtime enforces its mount rules against.
+///
+/// Taken verbatim from the caller. The previous version DERIVED it from
+/// `managed_root` — see [`IosMobileLinuxConfigFfi::app_sandbox_root`] for what
+/// that cost. No derivation can work here: `managed_root` is
+/// `<AppSupport>/mobile-linux/ios-ish` and the engine root is
+/// `<AppSupport>/LingxiCode`, which share only `<AppSupport>`. The missing
+/// component is the app's own name, known to the caller and to nobody else.
+///
+/// Empty is rejected rather than defaulted. A default here would be a second
+/// authority on the same directory, which is precisely how the runtime and the
+/// engine came to disagree in the first place.
 #[cfg(feature = "uniffi")]
-fn infer_mobile_linux_app_sandbox_root(
+fn resolve_mobile_linux_app_sandbox_root(
     config: &IosMobileLinuxConfigFfi,
 ) -> Result<std::path::PathBuf, MobileLinuxOperationFfiError> {
-    let managed_root = resolve_mobile_linux_security_path(
-        std::path::Path::new(&config.managed_root),
-        "managed_root",
-    )?;
-
-    let managed_components: Vec<_> = managed_root.components().collect();
-    for index in 0..managed_components.len().saturating_sub(1) {
-        let is_application_support = matches!(
-            (managed_components[index], managed_components[index + 1]),
-            (std::path::Component::Normal(first), std::path::Component::Normal(second))
-                if first == "Library" && second == "Application Support"
-        );
-        if is_application_support {
-            let mut app_root = std::path::PathBuf::new();
-            for component in &managed_components[..index] {
-                app_root.push(component.as_os_str());
-            }
-            if app_root.is_absolute() {
-                return Ok(app_root);
-            }
-        }
+    if config.app_sandbox_root.trim().is_empty() {
+        return Err(MobileLinuxOperationFfiError::InvalidRequest {
+            message: "app_sandbox_root is required and must be the engine's data root".to_string(),
+        });
     }
-
-    if config.workspace_host_path.trim().is_empty() {
-        return managed_root
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| MobileLinuxOperationFfiError::InvalidRequest {
-                message: "managed_root does not identify an app sandbox".to_string(),
-            });
-    }
-    let workspace_host_path = resolve_mobile_linux_security_path(
-        std::path::Path::new(&config.workspace_host_path),
-        "workspace_host_path",
-    )?;
-
-    let common_root = managed_root
-        .ancestors()
-        .find(|ancestor| workspace_host_path.starts_with(ancestor))
-        .filter(|ancestor| ancestor.parent().is_some())
-        .ok_or_else(|| MobileLinuxOperationFfiError::InvalidRequest {
-            message: "managed_root and workspace_host_path do not identify an app sandbox"
-                .to_string(),
-        })?;
-    Ok(common_root.to_path_buf())
+    resolve_mobile_linux_security_path(
+        std::path::Path::new(&config.app_sandbox_root),
+        "app_sandbox_root",
+    )
 }
 
 #[cfg(feature = "uniffi")]
@@ -985,7 +974,7 @@ fn ios_mobile_linux_runtime(
 fn linked_ios_mobile_linux_runtime(
     cfg: &IosMobileLinuxConfigFfi,
 ) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
-    let app_sandbox_root = infer_mobile_linux_app_sandbox_root(cfg).ok()?;
+    let app_sandbox_root = resolve_mobile_linux_app_sandbox_root(cfg).ok()?;
     let (workspace_host_path, stable_workspace_id) =
         validate_mobile_linux_workspace_config(app_sandbox_root.to_string_lossy().as_ref(), cfg)
             .ok()?;
@@ -2467,7 +2456,7 @@ pub fn create_ios_mobile_linux_runtime(
             message: "legacy unavailable backend selected".to_string(),
         });
     }
-    let app_sandbox_root = infer_mobile_linux_app_sandbox_root(&config)?;
+    let app_sandbox_root = resolve_mobile_linux_app_sandbox_root(&config)?;
     let _ = validate_mobile_linux_workspace_config(
         app_sandbox_root.to_string_lossy().as_ref(),
         &config,
@@ -3033,6 +3022,63 @@ uniffi::setup_scaffolding!();
 
 #[cfg(all(test, feature = "uniffi"))]
 mod tests {
+    /// The root the ios-ish runtime validates local-app mounts against must be
+    /// the SAME directory the engine writes local apps into.
+    ///
+    /// It was not. The engine's data root is whatever Swift's
+    /// `appSandboxRoot()` returns — `<AppSupport>/LingxiCode`, which reaches
+    /// the engine as `lingxi_home`'s parent — while the runtime INFERRED its
+    /// own root from `managed_root` (`<AppSupport>/mobile-linux/ios-ish`) by
+    /// cutting everything from `Library/Application Support` onward. The two
+    /// answers differ by three components, so `validate_mount` computed an
+    /// expected build path that nothing ever writes to and EVERY local-app
+    /// build failed on device with "mount host_path must be …".
+    ///
+    /// The inference cannot be repaired in place: `LingxiCode` is not
+    /// derivable from `mobile-linux/ios-ish`. It has to be told.
+    #[test]
+    fn the_runtime_sandbox_root_is_the_engine_data_root_not_the_container() {
+        // The literal shapes both sides produce on device, from
+        // `LXISHDefaultWorkspace.managedRootPath()` and
+        // `ConversationSourceFactory.appSandboxRoot()`.
+        let container = "/private/var/mobile/Containers/Data/Application/203ED8B0";
+        let support = format!("{container}/Library/Application Support");
+        let engine_data_root = format!("{support}/LingxiCode");
+
+        let config = super::IosMobileLinuxConfigFfi {
+            mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+            managed_root: format!("{support}/mobile-linux/ios-ish"),
+            workspace_host_path: format!("{engine_data_root}/workspaces/default"),
+            stable_workspace_id: "default".to_string(),
+            abi: "arm64".to_string(),
+            rootfs_version: "3.20".to_string(),
+            archive_sha256: None,
+            authorization_file: None,
+            app_sandbox_root: engine_data_root.clone(),
+        };
+
+        let resolved = super::resolve_mobile_linux_app_sandbox_root(&config)
+            .expect("the shipped device paths must resolve");
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from(&engine_data_root),
+            "the runtime must validate mounts against the engine's data root; \
+             resolving to {container:?} is what broke every local-app build"
+        );
+
+        // The inference this replaced returned exactly `container`. Pinning the
+        // rejection keeps a well-meaning "fall back when it's empty" from
+        // quietly restoring a second authority on this directory.
+        let empty = super::IosMobileLinuxConfigFfi {
+            app_sandbox_root: String::new(),
+            ..config
+        };
+        assert!(
+            super::resolve_mobile_linux_app_sandbox_root(&empty).is_err(),
+            "an absent root must fail loudly, never fall back to a guess"
+        );
+    }
+
     /// A task's non-terminal status changes must NEVER surface as stream
     /// events: `event_to_ffi` used to map EVERY `TaskStatusChanged` to
     /// `kind: Exit`, so the `Running` emitted by PTY task CREATION (task id =
@@ -3232,6 +3278,7 @@ mod tests {
                 rootfs_version: "v1".to_string(),
                 archive_sha256: None,
                 authorization_file: None,
+                app_sandbox_root: "/tmp".to_string(),
             }));
 
         assert!(matches!(
@@ -3253,6 +3300,7 @@ mod tests {
                 rootfs_version: "v1".to_string(),
                 archive_sha256: None,
                 authorization_file: None,
+                app_sandbox_root: "/tmp".to_string(),
             }),
             super::MobileLinuxCommandRequestFfi {
                 command: "/bin/sh".to_string(),
@@ -3284,6 +3332,7 @@ mod tests {
             rootfs_version: "v1".to_string(),
             archive_sha256: None,
             authorization_file: None,
+            app_sandbox_root: "/tmp".to_string(),
         })
         .expect("handle");
 
@@ -3326,6 +3375,7 @@ mod tests {
             rootfs_version: "v1".to_string(),
             archive_sha256: None,
             authorization_file: None,
+            app_sandbox_root: "/tmp".to_string(),
         };
 
         let first = super::compat_handle(Some(config.clone())).expect("first compat handle");
@@ -3345,6 +3395,7 @@ mod tests {
             rootfs_version: "v1".to_string(),
             archive_sha256: None,
             authorization_file: None,
+            app_sandbox_root: "/tmp/lingxi-app".to_string(),
         };
 
         assert!(matches!(
@@ -3376,6 +3427,7 @@ mod tests {
                 rootfs_version: "v1".to_string(),
                 archive_sha256: None,
                 authorization_file: None,
+                app_sandbox_root: app_root.to_string_lossy().into_owned(),
             };
 
             assert!(matches!(
@@ -3417,6 +3469,7 @@ mod tests {
                 rootfs_version: "v1".to_string(),
                 archive_sha256: None,
                 authorization_file: None,
+                app_sandbox_root: app_root.to_string_lossy().into_owned(),
             };
 
             assert!(matches!(
@@ -3448,6 +3501,7 @@ mod tests {
             rootfs_version: "v1".to_string(),
             archive_sha256: None,
             authorization_file: None,
+            app_sandbox_root: app_root.to_string_lossy().into_owned(),
         };
 
         assert!(matches!(

@@ -505,6 +505,21 @@ object EngineModelCatalog {
             .firstOrNull()
 
     /**
+     * The recently-picked models the engine still offers, in RECENCY order (not
+     * catalog order).
+     *
+     * A remembered reference whose provider was removed is silently dropped
+     * rather than rendered as a row that cannot be selected. Callers pass the
+     * already-filtered list, so a recent model that the current search query
+     * excludes disappears from the recents group too.
+     */
+    fun recents(models: List<ModelOption>, recentRefs: List<String>): List<ModelOption> {
+        if (recentRefs.isEmpty()) return emptyList()
+        val byId = models.associateBy { it.id }
+        return recentRefs.mapNotNull { byId[it] }
+    }
+
+    /**
      * Group already-curated picker rows by provider without adding, removing or
      * reordering any model. Provider sections follow first appearance order;
      * models inside each section follow the engine list verbatim.

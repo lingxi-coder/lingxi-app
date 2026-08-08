@@ -29,6 +29,12 @@ struct ChatView: View {
     // A transient affordance status line (permission denied / capture failed).
     @State private var captureStatus: String? = nil
 
+    // The models this user has picked before, pinned to the top of the picker.
+    // Held as view state (not read on every render) so the sheet re-sorts the
+    // moment a pick lands instead of only after the next engine `ModelList`.
+    private let modelRecents = ModelRecents()
+    @State private var recentModels: [String] = []
+
     /// Root-owned state machine shared by ordinary dictation and Flow Mode.
     let voiceInteraction: VoiceInteractionController
     var onOpenVoiceSettings: () -> Void = {}
@@ -91,7 +97,16 @@ struct ChatView: View {
                          // pick, the source submits `SetModel(id)` with a real id.
                          availableModels: convo.availableModels,
                          activeModelId: convo.activeModelId,
-                         onSelectModel: { source.setModel($0) },
+                         onSelectModel: { reference in
+                             source.setModel(reference)
+                             // Only an explicit pick counts. `applyActiveModel`
+                             // also fires on every ModelList/ModelChanged (boot,
+                             // resume, reconnect), and recording those would fill
+                             // the list with models the user never chose.
+                             modelRecents.record(reference)
+                             recentModels = modelRecents.resolved(against: convo.availableModels)
+                         },
+                         recentModels: recentModels,
                          draft: $draft,
                          onSend: send,
                          streaming: convo.streaming,
@@ -133,6 +148,12 @@ struct ChatView: View {
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
+            recentModels = modelRecents.resolved(against: convo.availableModels)
+        }
+        .onChange(of: convo.availableModels) { _, models in
+            // Re-resolve against the new catalog so a remembered model whose
+            // provider was removed stops being offered.
+            recentModels = modelRecents.resolved(against: models)
         }
         .onDisappear {
             voiceInteraction.handleContextChange()

@@ -19,6 +19,10 @@ struct Composer: View {
     var availableModels: [String] = []
     var activeModelId: String = ""
     var onSelectModel: (String) -> Void = { _ in }
+    /// Previously-picked refs, most-recent-first, pinned above the provider
+    /// sections in the picker. Owned by the caller (see ChatView) because it
+    /// outlives any one composer instance.
+    var recentModels: [String] = []
     /// Draft text, HOISTED so the device capabilities can inject into it:
     /// hold-to-talk STT fills it with the recognized utterance (mirrors Android
     /// `onTranscript` → draft). The caller owns it (see ChatView).
@@ -64,6 +68,7 @@ struct Composer: View {
         availableModels: [String] = [],
         activeModelId: String = "",
         onSelectModel: @escaping (String) -> Void = { _ in },
+        recentModels: [String] = [],
         draft: Binding<String>,
         onSend: @escaping (String) -> Void,
         streaming: Bool = false,
@@ -86,6 +91,7 @@ struct Composer: View {
         self.availableModels = availableModels
         self.activeModelId = activeModelId
         self.onSelectModel = onSelectModel
+        self.recentModels = recentModels
         self._draft = draft
         self.onSend = onSend
         self.streaming = streaming
@@ -245,11 +251,20 @@ struct Composer: View {
             .animation(.easeOut(duration: 0.18), value: inputFocused)
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
-        .overlay(alignment: .bottomLeading) {
-            if modelOpen { modelMenu.padding(.leading, 50).padding(.bottom, 50) }
-        }
-        .onChange(of: inputFocused) { _, focused in
-            if focused { modelOpen = false }
+        // A sheet, not a popover anchored to the chip: the picker's search field
+        // raises the keyboard over exactly the space a popover above the
+        // composer would occupy, and the system sizes a sheet against the
+        // keyboard for us.
+        .sheet(isPresented: $modelOpen) {
+            ModelPickerSheet(
+                availableModels: availableModels,
+                activeModelId: activeModelId,
+                recentModels: recentModels,
+                onSelect: { reference in
+                    onSelectModel(reference)
+                    modelOpen = false
+                },
+                onDismiss: { modelOpen = false })
         }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
@@ -319,42 +334,6 @@ struct Composer: View {
         voiceInteractionMode == .dictation && voiceCapturePhase == .listening
     }
 
-    /// One picker row derived from a real engine model reference.
-    private struct ModelRow: Identifiable {
-        let id: String        // the provider-qualified engine ref submitted on pick
-        let name: String      // display label (friendly when known, else the id)
-        let desc: String?     // provider-local model id
-        let color: Color      // dot color
-    }
-
-    private struct ModelSection: Identifiable {
-        let id: String
-        let name: String
-        let rows: [ModelRow]
-    }
-
-    /// Group the exact curated engine input by Provider. No Provider catalog is
-    /// queried or expanded here; the complete qualified reference stays in `id`.
-    private var modelSections: [ModelSection] {
-        ModelDisplay.sections(for: availableModels).map { section in
-            ModelSection(
-                id: section.providerId,
-                name: section.name,
-                rows: section.models.map { item in
-                    ModelRow(
-                        id: item.reference,
-                        name: item.name,
-                        desc: item.modelId,
-                        color: item.color)
-                })
-        }
-    }
-
-    /// The provider-qualified id considered active for the chip + highlight.
-    private var selectedModelId: String {
-        activeModelId
-    }
-
     /// The chip's short label from authoritative engine state.
     private var chipLabel: String {
         availableModels.isEmpty ? String(localized: "composer_loading_model") : ModelDisplay.shortName(for: activeModelId)
@@ -366,7 +345,7 @@ struct Composer: View {
     }
 
     private var modelChip: some View {
-        Button { withAnimation(.easeOut(duration: 0.15)) { modelOpen.toggle() } } label: {
+        Button { modelOpen = true } label: {
             HStack(spacing: 5) {
                 Circle().fill(chipColor).frame(width: 6, height: 6)
                 Text(chipLabel).font(.system(size: 12, weight: .medium))
@@ -383,119 +362,6 @@ struct Composer: View {
         .accessibilityIdentifier("composer.model")
     }
 
-    /// The picker's natural content height, measured from the laid-out rows.
-    ///
-    /// The menu is an `.overlay` on the composer, so SwiftUI proposes the
-    /// COMPOSER's height to it. A `ScrollView` accepts whatever height it is
-    /// proposed, and `frame(maxHeight:)` only caps a proposal — it never asks
-    /// for more — so the menu collapsed to the composer's height minus the
-    /// bottom inset (~50pt: one section header and half a row) no matter how
-    /// many models the engine listed. Measuring the content and requesting an
-    /// exact height makes the menu independent of the overlay's proposal.
-    @State private var modelMenuContentHeight: CGFloat = 0
-
-    /// Padding applied around the scrolling rows. `modelMenuHeight` is the OUTER
-    /// box (the `.frame` sits after the `.padding`), so it has to add this twice
-    /// — hence one constant rather than a literal in the modifier and a
-    /// hand-doubled copy here, which silently mis-sizes the menu the moment they
-    /// disagree.
-    private static let modelMenuPadding: CGFloat = 5
-    private static let modelMenuMaxHeight: CGFloat = 360
-
-    /// `.frame(height:)` asks for an EXACT height, so — unlike the
-    /// `frame(maxHeight:)` cap it replaced — a missing measurement is not a
-    /// degraded menu but an unusable one. `onPreferenceChange` cannot fire until
-    /// the subtree is in the hierarchy, so the first open of every launch would
-    /// otherwise render a 10pt sliver and then pop. Ask for the cap until the
-    /// measurement lands: worst case the menu is briefly too tall, never too
-    /// short to touch.
-    private var modelMenuHeight: CGFloat {
-        guard modelMenuContentHeight > 0 else { return Self.modelMenuMaxHeight }
-        return min(
-            modelMenuContentHeight + Self.modelMenuPadding * 2,
-            Self.modelMenuMaxHeight)
-    }
-
-    private var modelMenu: some View {
-        ScrollView {
-            // A plain VStack, not a Lazy one: the curated catalog is bounded
-            // (tens of rows) and every row must be laid out for the height
-            // measurement below to reflect the whole list.
-            VStack(alignment: .leading, spacing: 0) {
-                if modelSections.isEmpty {
-                    Text("composer_loading_models")
-                        .font(.system(size: 12))
-                        .foregroundStyle(t.text3)
-                        .padding(12)
-                }
-                ForEach(modelSections) { section in
-                    Text(section.name)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(t.text3)
-                        .textCase(.uppercase)
-                        .padding(.horizontal, 10)
-                        .padding(.top, 8)
-                        .padding(.bottom, 3)
-
-                    ForEach(section.rows) { m in
-                        Button {
-                            onSelectModel(m.id)
-                            withAnimation(.easeOut(duration: 0.15)) { modelOpen = false }
-                        } label: {
-                            HStack(spacing: 10) {
-                                Circle().fill(m.color).frame(width: 8, height: 8)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(m.name)
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(t.text)
-                                    if let desc = m.desc {
-                                        Text(desc)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(t.text3)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                Spacer()
-                                if m.id == selectedModelId {
-                                    LXIcon(name: .check, size: 12, color: t.accent, stroke: 2.5)
-                                }
-                            }
-                            .padding(.horizontal, 10).padding(.vertical, 8)
-                            .background(m.id == selectedModelId ? t.accent.tint(0.15) : .clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-                        .accessibilityIdentifier("composer.model.row.\(m.id)")
-                    }
-                }
-            }
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: ModelMenuContentHeightKey.self,
-                        value: proxy.size.height)
-                }
-            )
-        }
-        .scrollIndicators(.hidden)
-        .onPreferenceChange(ModelMenuContentHeightKey.self) { height in
-            modelMenuContentHeight = height
-        }
-        .padding(Self.modelMenuPadding)
-        .frame(width: 240, height: modelMenuHeight)
-        // `.contain` keeps the identifier on the CONTAINER instead of letting
-        // every descendant Text inherit it — otherwise the UI test's
-        // `descendants(matching: .any)["composer.model.menu"]` can resolve to
-        // several elements and `menu.frame` raises "Multiple matching elements
-        // found". Same pairing the repo's other queried containers use
-        // (MessageBubble, ConversationExecutionViews, InlineVoicePanel).
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("composer.model.menu")
-        .background(t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.borderStrong, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 16)
-        .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
-    }
 
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -548,18 +414,3 @@ private struct AttachmentThumb: View {
     }
 }
 
-/// The model picker's natural content height, reported up from the laid-out
-/// rows so the menu can request an exact height instead of inheriting the
-/// composer-sized proposal its `.overlay` hands it.
-private struct ModelMenuContentHeightKey: PreferenceKey {
-    // `PreferenceKey.defaultValue` is a `{ get }` requirement, so `let` satisfies
-    // it. `static var` is nonisolated global mutable state — legal under this
-    // target's Swift 5 language mode, a hard error the moment SWIFT_VERSION
-    // moves to 6, and this is the target's only PreferenceKey, i.e. the pattern
-    // every future one gets copied from.
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}

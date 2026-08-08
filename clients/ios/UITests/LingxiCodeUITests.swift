@@ -282,58 +282,106 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(primaryAction.isHittable)
     }
 
-    /// Regression: the model picker is an `.overlay` on the composer, so SwiftUI
-    /// proposed the COMPOSER's height to it. A `ScrollView` takes whatever it is
-    /// proposed and `frame(maxHeight:)` only caps a proposal, so the menu
-    /// collapsed to ~50pt — one section header and half of the first row — no
-    /// matter how many models the engine listed.
-    func testModelPickerOpensFullHeightAndReachesTheLastProvider() {
+    /// The picker: grouped by provider, searchable, and recently-picked models
+    /// pinned above the provider sections.
+    ///
+    /// Replaces an earlier test that asserted the popover's measured HEIGHT. The
+    /// picker is a sheet now — the system sizes it, so height is no longer a
+    /// property this layer can meaningfully assert; what matters is that every
+    /// provider is reachable, the search box narrows the list, and a pick
+    /// resurfaces at the top next time.
+    func testModelPickerSearchesGroupsAndPinsRecentPicks() {
         let chip = app.buttons["composer.model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(chip, timeout: 5), app.debugDescription)
         chip.tap()
 
-        let menu = app.descendants(matching: .any)["composer.model.menu"]
-        XCTAssertTrue(menu.waitForExistence(timeout: 5), app.debugDescription)
+        let sheet = app.descendants(matching: .any)["composer.model.menu"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
 
-        // The seeded catalog is far taller than the 360pt cap, so a menu that
-        // sizes itself to its content must hit the cap. The old behavior
-        // produced roughly the composer's height minus the 50pt inset.
-        XCTAssertGreaterThan(menu.frame.height, 300, "menu collapsed to \(menu.frame.height)pt")
-        XCTAssertLessThanOrEqual(menu.frame.height, 361)
-        // It grows UPWARD from the composer and stays on screen at BOTH edges —
-        // `minY > 0` alone would still pass for a menu hanging off the bottom.
-        XCTAssertGreaterThan(menu.frame.minY, 0)
-        XCTAssertLessThanOrEqual(menu.frame.maxY, app.frame.maxY)
+        // Grouped by provider: headers for the providers the fixture spans.
+        XCTAssertTrue(app.staticTexts["Anthropic"].waitForExistence(timeout: 3), app.debugDescription)
         let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = "模型选择器展开"
+        shot.name = "模型选择器"
         shot.lifetime = .keepAlways
         add(shot)
 
-        // The first section's rows are visible without scrolling. Assert the row
-        // is WHOLLY inside the menu, not just its top-left corner: the collapsed
-        // menu this test guards against was ~50pt — one section header and half
-        // of the first row — so the row's ORIGIN was inside it either way.
-        let firstRow = app.buttons["composer.model.row.anthropic/claude-sonnet-5"]
-        XCTAssertTrue(firstRow.waitForExistence(timeout: 3), app.debugDescription)
-        XCTAssertTrue(menu.frame.contains(firstRow.frame), app.debugDescription)
+        // Every provider is reachable — the last one in the fixture sits well
+        // below the fold, so scroll in a bounded loop rather than exactly once.
+        XCTAssertTrue(
+            scrollUntilHittable(providerRow("zai/glm-5.1"), in: sheet),
+            app.debugDescription)
 
-        // … and the last provider is reachable by scrolling the menu, i.e. the
-        // whole engine catalog is represented, not just the top of it. Every row
-        // is materialised (plain `VStack`, not `LazyVStack`), so `exists` is
-        // already true and only hittability discriminates — and one swipe is not
-        // guaranteed to carry ~645pt of content far enough in a 350pt viewport,
-        // so scroll in a bounded loop rather than exactly once.
-        let lastRow = app.buttons["composer.model.row.zai/glm-5.1"]
-        XCTAssertTrue(lastRow.waitForExistence(timeout: 3), app.debugDescription)
-        for _ in 0..<5 where !lastRow.isHittable {
-            menu.swipeUp()
+        // Search narrows the list: "sonnet" keeps the Claude row and drops
+        // DeepSeek entirely.
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 3), app.debugDescription)
+        search.tap()
+        search.typeText("sonnet")
+        let sonnet = providerRow("anthropic/claude-sonnet-5")
+        XCTAssertTrue(sonnet.waitForExistence(timeout: 3), app.debugDescription)
+        // `List` is lazy, so an off-screen row was never materialised either —
+        // scroll the filtered list to the bottom and confirm DeepSeek is absent
+        // from it rather than merely undrawn.
+        for _ in 0..<4 { sheet.swipeUp() }
+        XCTAssertFalse(
+            providerRow("deepseek/deepseek-v4-flash").exists,
+            app.debugDescription)
+
+        // A query matching nothing shows the empty state rather than a blank list.
+        search.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["没有匹配的模型"].waitForExistence(timeout: 3), app.debugDescription)
+
+        // Clear with the keyboard rather than the field's clear button: the
+        // button's label is locale- and version-dependent, and the keyboard
+        // covers part of the sheet while it is up.
+        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "sonnetzzzz".count))
+        XCTAssertTrue(
+            providerRow("anthropic/claude-opus-4-8").waitForExistence(timeout: 3),
+            "clearing the query must restore the full list: " + app.debugDescription)
+
+        // Search for a model and pick it straight out of the filtered list —
+        // no scrolling needed, which is the point of having search at all.
+        let flash = providerRow("deepseek/deepseek-v4-flash")
+        search.typeText("flash")
+        XCTAssertTrue(flash.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(flash, timeout: 3), app.debugDescription)
+        flash.tap()
+        XCTAssertTrue(waitUntilGone(sheet, timeout: 5), app.debugDescription)
+        XCTAssertEqual(chip.label, "V4 Flash", app.debugDescription)
+
+        // Reopening pins that pick to the top under 最近使用 — a SECOND row for
+        // the same model, distinct from the one under its provider.
+        chip.tap()
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
+        let recent = app.buttons["composer.model.recent.row.deepseek/deepseek-v4-flash"]
+        XCTAssertTrue(recent.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(recent, timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["最近使用"].exists, app.debugDescription)
+        // It sits ABOVE every provider section.
+        XCTAssertLessThan(recent.frame.minY, app.staticTexts["Anthropic"].frame.minY)
+    }
+
+    /// `List` only materialises visible rows, so a row far down the picker does
+    /// not merely fail `isHittable` — it does not exist yet. Scroll until it
+    /// does, bounded so a genuinely missing row fails instead of spinning.
+    @discardableResult
+    private func scrollUntilHittable(
+        _ element: XCUIElement,
+        in container: XCUIElement,
+        swipes: Int = 8
+    ) -> Bool {
+        for _ in 0..<swipes {
+            if element.exists && element.isHittable { return true }
+            container.swipeUp()
         }
-        XCTAssertTrue(waitUntilHittable(lastRow, timeout: 3), app.debugDescription)
-        lastRow.tap()
+        return element.exists && element.isHittable
+    }
 
-        XCTAssertTrue(waitUntilGone(menu, timeout: 3), app.debugDescription)
-        XCTAssertEqual(chip.label, "GLM-5.1", app.debugDescription)
+    /// A model can appear twice — once under 最近使用 and once under its own
+    /// provider — so rows are addressed by their section.
+    private func providerRow(_ reference: String) -> XCUIElement {
+        app.buttons["composer.model.provider.row.\(reference)"]
     }
 
     private func openDrawer() {

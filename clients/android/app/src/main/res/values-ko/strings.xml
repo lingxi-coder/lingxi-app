@@ -1054,6 +1054,8 @@
     <string name="composer_no_matching_models">일치하는 모델이 없습니다</string>
     <string name="composer_search_models_description">모델 검색</string>
     <string name="composer_search_models_placeholder">모델, Provider 또는 사양 검색</string>
+    <string name="composer_recent_models">최근 사용</string>
+    <string name="composer_select_model">모델 선택</string>
     <string name="chat_tool_result_label">도구 결과</string>
     <string name="chat_tool_calling_label">%1$s 도구 호출 중…</string>
     <string name="chat_tool_running_label">%1$s 도구 실행 중…</string>

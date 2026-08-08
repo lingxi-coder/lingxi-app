@@ -1100,6 +1100,8 @@
   "composer_no_matching_models": "No matching models",
   "composer_search_models_description": "Search models",
   "composer_search_models_placeholder": "Search models, providers, or specs",
+  "composer_recent_models": "Recently used",
+  "composer_select_model": "Select model",
   "chat_tool_result_label": "Tool result",
   "chat_tool_calling_label": "Calling tool %1$s…",
   "chat_tool_running_label": "Tool %1$s running…",

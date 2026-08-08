@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import com.lingxi.code.R
@@ -54,6 +55,7 @@ import com.lingxi.code.components.tint
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.settings.ModelRecentsStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.voiceHold
 
@@ -379,14 +381,26 @@ private fun ModelChip(
     onModelChange: (ModelOption) -> Unit,
 ) {
     val t = LingXiTheme.palette
+    val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     val chipShape = RoundedCornerShape(8.dp)
     val filteredModels = remember(models, query) { EngineModelCatalog.filter(models, query) }
     val groups = remember(filteredModels) { EngineModelCatalog.groups(filteredModels) }
+    val recentsStore = remember(context) { ModelRecentsStore(context) }
+    // Re-read on every open rather than once: a pick made in this composition
+    // must be at the top the next time the menu is shown.
+    var recentRefs by remember { mutableStateOf(recentsStore.references()) }
+    val recents = remember(filteredModels, recentRefs) {
+        EngineModelCatalog.recents(filteredModels, recentRefs)
+    }
 
     LaunchedEffect(open) {
-        if (!open) query = ""
+        if (open) {
+            recentRefs = recentsStore.references()
+        } else {
+            query = ""
+        }
     }
 
     Box {
@@ -440,6 +454,34 @@ private fun ModelChip(
                 query = query,
                 onQueryChange = { query = it },
             )
+            if (recents.isNotEmpty()) {
+                Text(
+                    text = stringResource(R.string.composer_recent_models),
+                    color = t.text3,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .padding(start = 15.dp, end = 15.dp, top = 8.dp, bottom = 4.dp)
+                        .fillMaxWidth(),
+                )
+                recents.forEach { m ->
+                    ModelPickerRow(
+                        model = m,
+                        active = m.id == model.id,
+                        providerStatuses = providerStatuses,
+                        onSelected = {
+                            open = false
+                            recentsStore.record(m.id)
+                            recentRefs = recentsStore.references()
+                            onModelChange(m)
+                        },
+                        onOpenProviderSettings = { settingsId ->
+                            open = false
+                            onOpenProviderSettings(settingsId)
+                        },
+                    )
+                }
+            }
             groups.forEachIndexed { groupIndex, group ->
                 val providerStatus = EngineModelCatalog.providerStatus(group.id, providerStatuses)
                 val providerLabel = providerStatus?.displayLabel ?: stringResource(R.string.settings_provider_unconfigured)
@@ -449,7 +491,10 @@ private fun ModelChip(
                     modifier = Modifier.padding(
                         start = 15.dp,
                         end = 15.dp,
-                        top = if (groupIndex == 0) 8.dp else 12.dp,
+                        // The tighter first-group inset only applies when this
+                        // header really is the first thing under the search
+                        // field — the recents group can now precede it.
+                        top = if (groupIndex == 0 && recents.isEmpty()) 8.dp else 12.dp,
                         bottom = 4.dp,
                     ).fillMaxWidth(),
                 ) {
@@ -470,78 +515,24 @@ private fun ModelChip(
                     )
                 }
                 group.models.forEach { m ->
-                    val active = m.id == model.id
-                    val canSelect = providerStatus?.canSelect == true
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 5.dp, vertical = 2.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (active) t.accent.tint(0.15f) else Color.Transparent)
-                            .clickable {
-                                open = false
-                                if (canSelect) {
-                                    onModelChange(m)
-                                } else {
-                                    onOpenProviderSettings(providerStatus?.settingsId)
-                                }
-                            }
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Dot(color = m.color, size = 8.dp)
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                text = m.name,
-                                color = if (canSelect) t.text else t.text2,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            Text(
-                                text = m.desc,
-                                color = t.text3,
-                                fontSize = 10.5f.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (m.metadata.summaryItems.isNotEmpty()) {
-                                Text(
-                                    text = m.metadata.summaryItems.joinToString(" · "),
-                                    color = t.text3,
-                                    fontSize = 9.5f.sp,
-                                    lineHeight = 13.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                        when {
-                            !canSelect -> Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                Text(stringResource(R.string.composer_configure_button), color = t.accent, fontSize = 10.sp)
-                                LXIcon(
-                                    name = LXIconName.ChevronR,
-                                    size = 10.dp,
-                                    color = t.accent,
-                                    stroke = 2f,
-                                    contentDescription = stringResource(R.string.composer_configure_provider, group.name),
-                                )
-                            }
-                            active -> LXIcon(
-                                name = LXIconName.Check,
-                                size = 13.dp,
-                                color = t.accent,
-                                stroke = 2f,
-                                contentDescription = stringResource(R.string.composer_current_model),
-                            )
-                        }
-                    }
+                    ModelPickerRow(
+                        model = m,
+                        active = m.id == model.id,
+                        providerStatuses = providerStatuses,
+                        onSelected = {
+                            open = false
+                            recentsStore.record(m.id)
+                            recentRefs = recentsStore.references()
+                            onModelChange(m)
+                        },
+                        onOpenProviderSettings = { settingsId ->
+                            open = false
+                            onOpenProviderSettings(settingsId)
+                        },
+                    )
                 }
             }
-            if (groups.isEmpty()) {
+            if (groups.isEmpty() && recents.isEmpty()) {
                 Text(
                     text = stringResource(R.string.composer_no_matching_models),
                     color = t.text3,
@@ -549,6 +540,90 @@ private fun ModelChip(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * One selectable model row. Shared by the "recently used" group and the
+ * per-provider groups so the two cannot drift apart; the provider connection
+ * state is resolved from the model's OWN provider, which the recents group needs
+ * because its rows span several providers.
+ */
+@Composable
+private fun ModelPickerRow(
+    model: ModelOption,
+    active: Boolean,
+    providerStatuses: List<ModelProviderStatus>,
+    onSelected: () -> Unit,
+    onOpenProviderSettings: (String?) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    val providerStatus = EngineModelCatalog.providerStatus(model.providerId, providerStatuses)
+    val canSelect = providerStatus?.canSelect == true
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 5.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) t.accent.tint(0.15f) else Color.Transparent)
+            .clickable {
+                if (canSelect) onSelected() else onOpenProviderSettings(providerStatus?.settingsId)
+            }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Dot(color = model.color, size = 8.dp)
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = model.name,
+                color = if (canSelect) t.text else t.text2,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = model.desc,
+                color = t.text3,
+                fontSize = 10.5f.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (model.metadata.summaryItems.isNotEmpty()) {
+                Text(
+                    text = model.metadata.summaryItems.joinToString(" · "),
+                    color = t.text3,
+                    fontSize = 9.5f.sp,
+                    lineHeight = 13.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        when {
+            !canSelect -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(stringResource(R.string.composer_configure_button), color = t.accent, fontSize = 10.sp)
+                LXIcon(
+                    name = LXIconName.ChevronR,
+                    size = 10.dp,
+                    color = t.accent,
+                    stroke = 2f,
+                    contentDescription = stringResource(
+                        R.string.composer_configure_provider,
+                        model.providerName,
+                    ),
+                )
+            }
+            active -> LXIcon(
+                name = LXIconName.Check,
+                size = 13.dp,
+                color = t.accent,
+                stroke = 2f,
+                contentDescription = stringResource(R.string.composer_current_model),
+            )
         }
     }
 }

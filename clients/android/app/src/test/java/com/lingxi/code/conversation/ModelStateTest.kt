@@ -241,6 +241,56 @@ class ModelStateTest {
     }
 
     @Test
+    fun recents_returnRememberedModelsInRecencyOrder_droppingOnesTheEngineNoLongerOffers() {
+        val options = EngineModelCatalog.options(
+            listOf(
+                "deepseek/deepseek-v4-flash",
+                "anthropic/claude-sonnet-5",
+                "openrouter/openrouter/auto",
+            ),
+        )
+
+        // Recency order wins over catalog order.
+        assertEquals(
+            listOf("anthropic/claude-sonnet-5", "deepseek/deepseek-v4-flash"),
+            EngineModelCatalog.recents(
+                options,
+                listOf("anthropic/claude-sonnet-5", "deepseek/deepseek-v4-flash"),
+            ).map { it.id },
+        )
+        // A remembered model whose provider is gone must not become a row that
+        // cannot be selected.
+        assertEquals(
+            listOf("anthropic/claude-sonnet-5"),
+            EngineModelCatalog.recents(
+                options,
+                listOf("kimi/kimi-k3", "anthropic/claude-sonnet-5"),
+            ).map { it.id },
+        )
+        assertEquals(emptyList<String>(), EngineModelCatalog.recents(options, emptyList()).map { it.id })
+        assertEquals(emptyList<String>(), EngineModelCatalog.recents(emptyList(), listOf("a/b")).map { it.id })
+    }
+
+    /**
+     * The picker filters before it groups, and the recents group is built from
+     * the SAME filtered list — so a search that excludes a model must drop it
+     * from both places, not leave it pinned at the top.
+     */
+    @Test
+    fun recents_areBuiltFromTheFilteredList_soSearchHidesThemToo() {
+        val options = EngineModelCatalog.options(
+            listOf("deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5"),
+        )
+        val remembered = listOf("deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5")
+
+        val filtered = EngineModelCatalog.filter(options, "sonnet")
+        assertEquals(
+            listOf("anthropic/claude-sonnet-5"),
+            EngineModelCatalog.recents(filtered, remembered).map { it.id },
+        )
+    }
+
+    @Test
     fun providerStatus_prefersEnabledProfile_andOnlyConfiguredOrConnectedAreSelectable() {
         val statuses = listOf(
             ModelProviderStatus(

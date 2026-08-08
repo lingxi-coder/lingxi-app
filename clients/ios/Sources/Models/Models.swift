@@ -114,6 +114,31 @@ enum ModelDisplay {
         }
     }
 
+    /// Narrow the engine's references to those matching `query`, preserving the
+    /// engine's order so `sections(for:)` still groups them exactly as before.
+    ///
+    /// The mobile sibling of Android's `EngineModelCatalog.filter`
+    /// (`clients/android/.../model/Models.kt`): a blank query matches
+    /// everything, otherwise it is a case-insensitive substring test against the
+    /// friendly name, the wire id, the provider's display name, and the full
+    /// qualified reference. Android also searches a per-model `desc` and a
+    /// capability blurb; iOS's `ModelCatalogItem` carries neither, and inventing
+    /// a metadata table just to match that list would be a far larger change
+    /// than the search box justifies.
+    static func filter(_ references: [String], matching query: String) -> [String] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return references }
+        return references.filter { reference in
+            let item = item(for: reference)
+            return [
+                item.name,
+                item.modelId,
+                providerName(for: item.providerId),
+                reference,
+            ].contains { $0.lowercased().contains(needle) }
+        }
+    }
+
     /// Parse only the first slash: aggregator model ids may themselves contain
     /// slashes (`openrouter/openai/gpt-5.5`).
     static func item(for reference: String) -> ModelCatalogItem {

@@ -3,7 +3,7 @@
 use crate::local_apps_host::LocalAppsHostBroker;
 #[cfg(test)]
 use crate::local_apps_llm::LocalAppsLlm;
-use crate::local_apps_llm::SourceRequest;
+use crate::local_apps_llm::{SourceFeedback, SourceRequest};
 use crate::local_apps_profile::SharedLlm;
 use crate::local_apps_sources::{FileWrite, MAX_GENERATED_TOTAL_BYTES};
 use async_trait::async_trait;
@@ -381,11 +381,36 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
                 service.clone(),
                 request.key.app_id.clone(),
             );
-            let writes = self
+            let writes = match self
                 .llm
                 .current()
                 .generate_sources(&source_request, Some(deltas))
-                .await?;
+                .await
+            {
+                Ok(writes) => writes,
+                // A malformed answer is a REPAIRABLE answer. It is the same
+                // shape of problem as a validator rejection — "here is what
+                // you got wrong" — and the model fixes it far more often than
+                // a blind human rerun does. Propagating it killed the job on
+                // attempt 1: one `files` entry that arrived without its
+                // `contents` field ended a generation that had already spent
+                // three model calls, and left the user with a dead end whose
+                // only exit was starting over.
+                //
+                // `Discarded`, not `Rejected`: nothing reached disk, so the
+                // next attempt must resend everything.
+                Err(error @ AppError::LlmOutputRejected(_)) => {
+                    source_request.validator_feedback =
+                        Some(SourceFeedback::Discarded(format!("{error}")));
+                    last_error = Some(error);
+                    // No writes landed, so `existing` still describes the
+                    // workspace accurately — skip the refresh below.
+                    continue;
+                }
+                // A transport or availability failure is not something the
+                // model can repair by being told about it.
+                Err(other) => return Err(other),
+            };
             // Overlay write, never a clear-then-write: the model names only
             // the files it wants to create or replace, everything else in the
             // workspace stays untouched. A "move the search box" edit should
@@ -399,7 +424,7 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let message = format!("{error}");
-                    source_request.validator_feedback = Some(message);
+                    source_request.validator_feedback = Some(SourceFeedback::Rejected(message));
                     last_error = Some(error);
                 }
             }
@@ -1195,6 +1220,66 @@ mod tests {
             second.contains("evil.example"),
             "the repair prompt must show the REJECTED bytes actually on disk, not a stale \
              pre-attempt snapshot that contradicts the validator feedback: {second}"
+        );
+    }
+
+    /// A malformed answer must be repaired, not fatal.
+    ///
+    /// A real device run died here: the model returned a `files` entry with a
+    /// `path` and no `contents`, `generate_sources` raised
+    /// `LlmOutputRejected`, and the `?` on that call abandoned the job on
+    /// attempt 1 — no repair round, and nothing on screen but "Generation
+    /// Failed". The validator's own failures had always been repairable; a
+    /// schema slip by the same model was not, for no reason other than which
+    /// call site raised it.
+    #[tokio::test]
+    async fn a_malformed_answer_is_repaired_rather_than_ending_the_job() {
+        let harness = generation_harness(vec![
+            // Attempt 1: exactly the shape the device produced.
+            Ok(serde_json::json!({
+                "files": [{"path": "lib/image-utils.js"}]
+            })),
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            })),
+        ])
+        .await;
+
+        harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect("a missing `contents` must be repairable, not fatal");
+
+        assert_eq!(harness.model_calls(), 2, "exactly one repair round trip");
+        let second = harness.prompt_at(1);
+        assert!(
+            second.contains("image-utils"),
+            "the repair prompt must name what was malformed: {second}"
+        );
+        assert!(
+            second.contains("全部文件"),
+            "and must ask for every file again — nothing reached disk: {second}"
+        );
+    }
+
+    /// The bound applies to malformed answers too: repairable is not infinite.
+    #[tokio::test]
+    async fn three_consecutive_malformed_answers_give_up() {
+        let malformed = || Ok(serde_json::json!({ "files": [{"path": "lib/a.js"}] }));
+        let harness = generation_harness(vec![malformed(), malformed(), malformed()]).await;
+
+        let error = harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect_err("the repair loop stays bounded for malformed answers");
+
+        assert_eq!(harness.model_calls(), 3, "one attempt plus at most two repairs");
+        assert!(
+            format!("{error}").contains("has no contents"),
+            "the surfaced error must be the LAST REAL one, not a generic exhaustion \
+             message that hides what the model kept getting wrong: {error}"
         );
     }
 

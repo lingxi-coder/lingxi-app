@@ -465,10 +465,40 @@ pub struct SourceRequest {
     ///
     /// 用户的自然语言修改要求。
     pub revision_prompt: Option<String>,
-    /// The previous validator failure's raw message, for a repair pass.
+    /// Why the previous attempt failed, for a repair pass.
     ///
-    /// 上一轮 validator 的错误原文，用于修复循环。
-    pub validator_feedback: Option<String>,
+    /// 上一轮失败的原因，用于修复循环。
+    pub validator_feedback: Option<SourceFeedback>,
+}
+
+/// What went wrong last attempt — and, decisively, whether the previous
+/// answer is still on disk.
+///
+/// 上一轮的失败原因，以及关键的一点：上一轮的产出是否还在磁盘上。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceFeedback {
+    /// The files were written and then failed validation. They are in
+    /// `existing`, so the model only needs to resend what the fix touches.
+    ///
+    /// 文件已写入磁盘后才没通过校验，它们就在 `existing` 里，模型只需重发
+    /// 修复涉及的那些。
+    Rejected(String),
+    /// The answer never became files — it was malformed and discarded whole.
+    /// `existing` therefore does NOT contain it, and asking only for "the
+    /// files the fix touches" would silently drop everything else the model
+    /// had written.
+    ///
+    /// 回复没能变成文件——格式不合法，整份被丢弃。`existing` 里因此没有它，
+    /// 此时若只要"修复涉及的文件"，模型写过的其余内容就被悄悄丢掉了。
+    Discarded(String),
+}
+
+impl SourceFeedback {
+    fn message(&self) -> &str {
+        match self {
+            Self::Rejected(message) | Self::Discarded(message) => message,
+        }
+    }
 }
 
 /// `validate_questionnaire`/`validate_plan`/`screen_writes` all build
@@ -607,7 +637,10 @@ impl LocalAppsLlm {
         if let Some(prompt) = &request.revision_prompt {
             user.push_str(&format!("\n\n用户要求的修改：\n{prompt}"));
         }
-        if let Some(feedback) = &request.validator_feedback {
+        match &request.validator_feedback {
+            // The rejected bytes ARE on disk and shown in `existing`, so the
+            // model resends only what the fix touches.
+            //
             // "完整文件" alone reads two ways — "the whole app" (pulls against
             // the overlay-write ruling) or "each file's full contents, not a
             // patch" (the intended meaning). Spelled out so only the second
@@ -617,15 +650,32 @@ impl LocalAppsLlm {
             // actually shown a tree to compare against (`existing` above) —
             // an empty `existing` with that clause still attached would read
             // as "don't resend anything", which is nonsensical advice.
-            let skip_unchanged = if request.existing.is_empty() {
-                ""
-            } else {
-                "，没有改动的文件无需重新发送"
-            };
-            user.push_str(&format!(
-                "\n\n上一次生成没有通过校验，原文如下。请修正问题，只需重新给出改动涉及的\
-                 那些文件——每个文件都给出完整内容（不是补丁片段）{skip_unchanged}：\n{feedback}"
-            ));
+            Some(feedback @ SourceFeedback::Rejected(_)) => {
+                let skip_unchanged = if request.existing.is_empty() {
+                    ""
+                } else {
+                    "，没有改动的文件无需重新发送"
+                };
+                user.push_str(&format!(
+                    "\n\n上一次生成没有通过校验，原文如下。请修正问题，只需重新给出改动涉及的\
+                     那些文件——每个文件都给出完整内容（不是补丁片段）{skip_unchanged}：\n{}",
+                    feedback.message()
+                ));
+            }
+            // Nothing was written, so `existing` does not contain the last
+            // answer. The "unchanged files need not be resent" advice from
+            // the arm above would be actively destructive here — the model
+            // would resend one repaired file and consider the rest delivered,
+            // when in fact none of it ever landed.
+            Some(feedback @ SourceFeedback::Discarded(_)) => {
+                user.push_str(&format!(
+                    "\n\n上一次回复的格式不合法，整份回复已被丢弃，没有任何文件写入。\
+                     问题如下。请重新给出本次需要写入的全部文件——每个文件都要带上\
+                     完整的 `contents` 字段，不能只给路径：\n{}",
+                    feedback.message()
+                ));
+            }
+            None => {}
         }
         let value = self
             .model
@@ -1128,10 +1178,64 @@ mod tests {
         let model = ScriptedModel::new(vec![Ok(good_sources())]);
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
-        request.validator_feedback = Some("app/page.jsx uses eval()".into());
+        request.validator_feedback =
+            Some(SourceFeedback::Rejected("app/page.jsx uses eval()".into()));
         llm.generate_sources(&request, None).await.expect("repair");
         let prompt = model.prompt_at(0);
         assert!(prompt.contains("eval()"), "got {prompt}");
+    }
+
+    /// A discarded answer and a rejected one need OPPOSITE instructions, and
+    /// getting it backwards loses work silently rather than loudly.
+    ///
+    /// `Rejected` means the files are on disk and in `existing`, so "unchanged
+    /// files need not be resent" is safe. `Discarded` means nothing was
+    /// written — repeating that advice would have the model resend one
+    /// repaired file and treat the rest as already delivered, quietly dropping
+    /// every other file it had authored.
+    #[tokio::test]
+    async fn a_discarded_answer_asks_for_every_file_again_not_just_the_fix() {
+        let existing = vec![FileWrite {
+            path: "app/page.jsx".into(),
+            contents: "export default function Page() { return null }".into(),
+        }];
+
+        let model = ScriptedModel::new(vec![Ok(good_sources())]);
+        let llm = LocalAppsLlm::new(model.clone());
+        let mut request = initial_request();
+        request.existing = existing.clone();
+        request.validator_feedback = Some(SourceFeedback::Discarded(
+            "`lib/image-utils.js` has no contents".into(),
+        ));
+        llm.generate_sources(&request, None).await.expect("repair");
+        let discarded = model.prompt_at(0);
+        assert!(
+            discarded.contains("image-utils"),
+            "the reason must reach the model: {discarded}"
+        );
+        assert!(
+            discarded.contains("全部文件"),
+            "a discarded answer must ask for every file again: {discarded}"
+        );
+        assert!(
+            !discarded.contains("无需重新发送"),
+            "and must NOT carry the resend-only-the-fix advice: {discarded}"
+        );
+
+        // The same `existing` under `Rejected` keeps that advice — proving the
+        // assertions above track the feedback kind, not the tree.
+        let model = ScriptedModel::new(vec![Ok(good_sources())]);
+        let llm = LocalAppsLlm::new(model.clone());
+        let mut request = initial_request();
+        request.existing = existing;
+        request.validator_feedback =
+            Some(SourceFeedback::Rejected("app/page.jsx uses eval()".into()));
+        llm.generate_sources(&request, None).await.expect("repair");
+        let rejected = model.prompt_at(0);
+        assert!(
+            rejected.contains("无需重新发送"),
+            "a rejected answer still resends only the fix: {rejected}"
+        );
     }
 
     #[tokio::test]

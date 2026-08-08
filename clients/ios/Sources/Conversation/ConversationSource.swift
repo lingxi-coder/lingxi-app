@@ -2296,6 +2296,7 @@ final class MockConversationSource: ConversationSource {
         /// before the round-trip completes. No-op when the id is already active.
         func setModel(_ id: String) {
             guard !id.isEmpty, id != model.activeModelId else { return }
+            let previous = model.activeModelId
             model.activeModelId = id
             if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
                 model.model = opt
@@ -2306,6 +2307,11 @@ final class MockConversationSource: ConversationSource {
                     let handle = try await self.ensureHandle()
                     try await handle.submit(command: .setModel(model: id))
                 } catch {
+                    // The engine REJECTS a model no configured provider serves,
+                    // so the optimistic update above has to be undone — leaving
+                    // the chip on a model the session did not switch to would
+                    // send the next turn under a label that is simply wrong.
+                    self.model.activeModelId = previous
                     self.fail(.host, String(localized: "chat_switch_model_failed \(error)"))
                 }
             }

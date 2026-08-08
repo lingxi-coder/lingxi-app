@@ -417,6 +417,16 @@ pub struct MobileRuntime {
     /// `local_apps` in-process provider; mobile never discovers project/user
     /// MCP configuration.
     pub mcp_registry: Arc<McpRegistry>,
+    /// Provider profile names this connection can route to — what survived
+    /// `apply_mobile_profile_allowlist`.
+    ///
+    /// `OrchestratorHandle::list_model_listings` returns the STATIC llm-client
+    /// catalog (every builtin preset, configured or not), so it cannot be used
+    /// as-is to decide what to offer a mobile client. Intersecting against this
+    /// set is what keeps `ModelList` and `SetModel` honest about the providers
+    /// the user actually enabled. Desktop needs no equivalent: its picker gates
+    /// on per-provider availability maps mobile does not have.
+    pub configured_profiles: std::collections::BTreeSet<String>,
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
@@ -1122,6 +1132,18 @@ async fn build_mobile_inner_with_ask(
             };
             (profile.profile_name.clone(), provider.to_string())
         })
+        .collect();
+    // The profiles that survived `apply_mobile_profile_allowlist`, i.e. the ONLY
+    // ones this connection can actually route to. The static llm-client catalog
+    // that `list_model_listings()` returns knows every preset regardless of
+    // configuration, so every surface that offers a model to the client has to
+    // intersect against this set — otherwise the picker advertises providers the
+    // user never enabled and a pick lands on a profile the config does not hold.
+    let configured_profiles: std::collections::BTreeSet<String> = assembled
+        .client_config
+        .providers
+        .iter()
+        .map(|profile| profile.profile_name.clone())
         .collect();
     let model_provider_profiles: std::collections::BTreeMap<String, String> = assembled
         .client_config
@@ -2103,6 +2125,7 @@ async fn build_mobile_inner_with_ask(
         credentials,
         mobile_linux,
         mcp_registry,
+        configured_profiles,
         local_apps_mcp,
         local_apps_llm,
     })
@@ -3830,8 +3853,7 @@ impl MobileEngineHandle {
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                let listings = handle.list_model_listings().await;
-                let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                let (model_id, profile) = self.resolve_routable_model(&model).await?;
                 handle
                     .switch_model(&model_id, profile.as_deref())
                     .await
@@ -4037,6 +4059,13 @@ impl MobileEngineHandle {
                         message: "cannot start a new session while a turn is in flight".into(),
                     });
                 }
+                // Resolve the requested model BEFORE anything is mutated: the
+                // switch happens after `clear_session`, so validating late would
+                // reject the command having already destroyed the old session.
+                let requested_model = match &model {
+                    Some(model) => Some(self.resolve_routable_model(model).await?),
+                    None => None,
+                };
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 handle
                     .clear_session()
@@ -4054,9 +4083,7 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Internal {
                         message: format!("new session anchor failed: {error}"),
                     })?;
-                if let Some(model) = model {
-                    let listings = handle.list_model_listings().await;
-                    let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                if let Some((model_id, profile)) = requested_model {
                     handle
                         .switch_model(&model_id, profile.as_deref())
                         .await
@@ -4573,6 +4600,62 @@ impl MobileEngineHandle {
             .await;
     }
 
+    /// The catalog rows this connection can actually route to.
+    ///
+    /// `OrchestratorHandle::list_model_listings` returns the STATIC llm-client
+    /// catalog — every builtin preset, whether or not the user configured it —
+    /// because desktop's picker filters it afterwards with per-provider
+    /// availability maps. Mobile has no such map; what it has is
+    /// `routing.mobileEnabledProfiles`, already applied to the live client
+    /// config at build time. Intersecting here is what makes the two agree.
+    ///
+    /// An empty `configured_profiles` cannot happen through `build` (the
+    /// Anthropic profile is always assembled), but were it ever empty the
+    /// filter would be a no-op rather than an engine with no models at all.
+    async fn routable_model_listings(&self) -> Vec<traits::ModelListing> {
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        let listings = handle.list_model_listings().await;
+        if self.inner.configured_profiles.is_empty() {
+            return listings;
+        }
+        listings
+            .into_iter()
+            .filter(|listing| self.inner.configured_profiles.contains(&listing.provider_id))
+            .collect()
+    }
+
+    /// Resolve a client-supplied model reference into the `(wire id, profile)`
+    /// pair the orchestrator takes, REFUSING one no configured provider serves.
+    ///
+    /// [`traits::parse_model_ref`] falls back to treating an unresolvable
+    /// reference as a bare wire id, so accepting one put `provider/model` —
+    /// which is not a wire id at all — into `session.model`. Every turn of that
+    /// session then 404'd, and because the transcript persists the session
+    /// model, the failure outlived the session.
+    async fn resolve_routable_model(
+        &self,
+        model: &str,
+    ) -> Result<(String, Option<String>), ClientError> {
+        let listings = self.routable_model_listings().await;
+        let (model_id, profile) = traits::parse_model_ref(model, &listings);
+        let routable = listings.iter().any(|listing| {
+            listing.request_model == model_id
+                && profile
+                    .as_deref()
+                    .is_none_or(|wanted| listing.provider_id == wanted)
+        });
+        if routable {
+            Ok((model_id, profile))
+        } else {
+            Err(ClientError::Rejected {
+                message: format!(
+                    "model {model:?} is not served by any configured provider; \
+                     enable its provider in settings or pick another model"
+                ),
+            })
+        }
+    }
+
     /// Pull a single listing kind and emit its listing event through the
     /// connection's event sink, reusing the shared `client_adapter::lowering`
     /// parity fns (decision §0.2). Listing kinds with no engine handle on mobile
@@ -4593,7 +4676,7 @@ impl MobileEngineHandle {
                 // shared `is_curated_model` whitelist (keeping the current model);
                 // `[Connect]` gating + grouping stays a TUI/structured-DTO concern.
                 let available = handle.list_available_models().await;
-                let listings = handle.list_model_listings().await;
+                let listings = self.routable_model_listings().await;
                 let snapshot = handle.get_status_snapshot().await;
                 let models = traits::curated_model_refs(
                     &listings,
@@ -6595,6 +6678,24 @@ mod tests {
         (handle, listener)
     }
 
+    /// `build_submit_handle` with a caller-supplied config, for tests that need
+    /// a specific routing allowlist or default model.
+    fn build_submit_handle_with_config(
+        cfg: MobileConfig,
+        root: &std::path::Path,
+    ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(root.to_path_buf()));
+        let listener = Arc::new(FakeListener::default());
+        let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let handle = build_mobile_engine(cfg, platform, listener_dyn, perm_sink)
+            .expect("build_mobile_engine failed");
+        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
+        (handle, listener)
+    }
+
     fn build_submit_handle_with_secure_store(
         root: &std::path::Path,
     ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
@@ -6674,6 +6775,170 @@ mod tests {
                     ..
                 } if configured_provider_ids.is_empty()
             )));
+        });
+    }
+
+    /// The picker must offer ONLY providers the routing allowlist kept.
+    ///
+    /// `emit_listing` sourced its rows from `list_model_listings()` — the STATIC
+    /// llm-client catalog — while `apply_mobile_profile_allowlist` had already
+    /// stripped the un-listed profiles out of the live client config. A user who
+    /// had configured only DeepSeek was still shown every Anthropic/OpenAI/Kimi
+    /// row, and picking one set a profile the config no longer contained, so the
+    /// turn failed against a provider that was never connected.
+    #[test]
+    fn model_listing_offers_only_allowlisted_providers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = MobileConfig {
+            cwd: tmp.path().to_path_buf(),
+            lingxi_home: tmp.path().join(branding::DOT_DIR),
+            routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["deepseek"] })),
+            default_model: "deepseek/deepseek-v4-flash".to_string(),
+            ..MobileConfig::default()
+        };
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListModels)
+                .await
+                .expect("submit(ListModels) ok");
+            let events = listener.received.lock().await.clone();
+            let models = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::ModelList { models, .. } => Some(models.clone()),
+                    _ => None,
+                })
+                .expect("ModelList must be emitted");
+
+            assert!(
+                models.iter().all(|m| m.starts_with("deepseek/")),
+                "allowlisted-out providers leaked into the picker: {models:?}"
+            );
+            assert!(
+                models.iter().any(|m| m == "deepseek/deepseek-v4-flash"),
+                "the allowlisted provider's curated models must still be offered: {models:?}"
+            );
+        });
+    }
+
+    /// …and must REFUSE to switch to one that was allowlisted out, instead of
+    /// parsing it as a bare id and poisoning `session.model` with a reference no
+    /// provider serves (which the transcript then persists).
+    #[test]
+    fn set_model_rejects_a_provider_the_allowlist_removed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = MobileConfig {
+            cwd: tmp.path().to_path_buf(),
+            lingxi_home: tmp.path().join(branding::DOT_DIR),
+            routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["anthropic"] })),
+            ..MobileConfig::default()
+        };
+        let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            let before: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let before = before.get_status_snapshot().await;
+
+            let result = handle
+                .submit(ClientCommand::SetModel {
+                    model: "deepseek/deepseek-v4-flash".into(),
+                })
+                .await;
+            assert!(
+                result.is_err(),
+                "switching to a non-configured provider must be rejected, got {result:?}"
+            );
+
+            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let after = orch.get_status_snapshot().await;
+            assert_eq!(
+                (after.model, after.model_profile),
+                (before.model, before.model_profile),
+                "a rejected switch must leave the session model untouched"
+            );
+        });
+    }
+
+    /// `NewSession { model }` validates the model BEFORE `clear_session`, so a
+    /// model no configured provider serves is refused with the OLD session still
+    /// intact — rather than destroying it and then failing.
+    #[test]
+    fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = MobileConfig {
+            cwd: tmp.path().to_path_buf(),
+            lingxi_home: tmp.path().join(branding::DOT_DIR),
+            routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["anthropic"] })),
+            ..MobileConfig::default()
+        };
+        let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let before = orch.current_session_id().await;
+
+            let result = handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: Some("deepseek/deepseek-v4-flash".into()),
+                })
+                .await;
+            assert!(result.is_err(), "expected rejection, got {result:?}");
+            assert_eq!(
+                orch.current_session_id().await,
+                before,
+                "the old session must survive a refused NewSession"
+            );
+
+            // A model the allowlist KEPT still starts a new session normally.
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: Some("anthropic/claude-sonnet-5".into()),
+                })
+                .await
+                .expect("a routable model must be accepted");
+            assert_ne!(orch.current_session_id().await, before);
+        });
+    }
+
+    /// A fresh install: iOS ALWAYS emits `mobileEnabledProfiles`, and with no
+    /// provider configured that array is EMPTY — which
+    /// `apply_mobile_profile_allowlist` treats as fail-closed and strips every
+    /// profile. Nothing is routable in that state whatever we show, so the
+    /// picker keeps listing the catalog rather than rendering an empty sheet the
+    /// user cannot act on or explain. Pinned because it is a deliberate
+    /// exception to "only offer what is routable", not an oversight.
+    #[test]
+    fn empty_allowlist_still_lists_the_catalog_so_a_fresh_install_is_not_blank() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = MobileConfig {
+            cwd: tmp.path().to_path_buf(),
+            lingxi_home: tmp.path().join(branding::DOT_DIR),
+            routing: Some(serde_json::json!({ "mobileEnabledProfiles": [] })),
+            ..MobileConfig::default()
+        };
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListModels)
+                .await
+                .expect("submit(ListModels) ok");
+            let events = listener.received.lock().await.clone();
+            let models = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::ModelList { models, .. } => Some(models.clone()),
+                    _ => None,
+                })
+                .expect("ModelList must be emitted");
+            assert!(
+                models.len() > 1,
+                "an unconfigured install must still see a catalog: {models:?}"
+            );
         });
     }
 

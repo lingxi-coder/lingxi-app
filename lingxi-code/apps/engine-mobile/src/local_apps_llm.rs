@@ -125,61 +125,131 @@ impl LocalAppsModel for ApiServiceModel {
             ),
             "input_schema": schema,
         });
-        let message = ConversationMessage::user(MessageId::new(), user);
         // Snapshot the PAIR together under one lock acquisition (never held
         // across the `.await` below) — a concurrent `set_model` must never
         // block, or be blocked by, an in-flight structured call, but a
         // reader must also never see a model id paired with a profile from
         // a DIFFERENT `set_model` call.
         let (model, profile) = self.selection.read().expect("selection lock poisoned").clone();
-        let response = self
-            .service
-            .messages_create_side_query(
+
+        // Ask for a forced tool call first, and fall back to an UNFORCED one if
+        // the provider rejects the directive itself.
+        //
+        // Two shapes were tried on a real device against DeepSeek with
+        // reasoning on, and BOTH 400:
+        //
+        //   ToolChoice::Tool { name }  -> {"type":"function","function":{…}}
+        //   ToolChoice::Required       -> "required"
+        //   both: "Thinking mode does not support this tool_choice"
+        //
+        // So this provider rejects *any* explicit `tool_choice` while thinking,
+        // not merely the named form. It still supports tools — the conversation
+        // loop works there, because it never sends the directive at all.
+        //
+        // Dropping the directive unconditionally would be the wrong trade: on
+        // Anthropic the forced call is what guarantees a structured answer
+        // instead of prose. So: try forced, and retry once without it only when
+        // the provider says the directive is the problem.
+        //
+        // Nothing is weakened by the fallback. `extract_single_tool_call` still
+        // requires exactly one tool call naming THIS tool, so an unforced reply
+        // that answers in prose fails loudly as `LlmOutputRejected` rather than
+        // silently returning junk.
+        //
+        // The principled fix — consulting `Capabilities { reasoning,
+        // structured_output }` per profile and preferring
+        // `ResponseFormat::JsonSchema` where supported — is tracked in
+        // `docs/superpowers/specs/2026-08-07-structured-output-capability-gating.md`.
+        // This stays a narrow, self-correcting workaround until that lands.
+        let forced = self
+            .send_side_query(
                 &model,
                 profile.as_deref(),
-                Some(system),
-                vec![message],
-                vec![tool],
-                Self::max_tokens_for(tool_name),
-                // `Required` ("some tool must be called"), NOT
-                // `Tool { name }` ("this exact function must be called").
-                //
-                // Exactly ONE tool is declared above, so the two are
-                // semantically identical here — but they are NOT equally
-                // portable. `Tool { name }` encodes to the OpenAI-compatible
-                // object form `{"type":"function","function":{"name":…}}`
-                // (`providers/openai.rs:681`), which DeepSeek rejects outright
-                // while reasoning is on:
-                //
-                //   400 "Thinking mode does not support this tool_choice"
-                //
-                // That 400 made local-app creation impossible on DeepSeek —
-                // found on a real device, never by the suite, because every
-                // test here drives a scripted fake model and so never exercises
-                // the real request shape. The conversation loop was unaffected
-                // precisely because it never pins a specific function.
-                //
-                // `extract_single_tool_call` below still enforces that the
-                // response names THIS tool exactly once, so dropping the
-                // name from the request loses no guarantee.
-                //
-                // This is the narrow fix. The general one — consulting
-                // `Capabilities { reasoning, structured_output }` per profile
-                // and preferring `ResponseFormat::JsonSchema` where supported —
-                // is tracked in
-                // `docs/superpowers/specs/2026-08-07-structured-output-capability-gating.md`.
+                system,
+                user.clone(),
+                &tool,
+                tool_name,
                 Some(ToolChoice::Required),
-                vec![],
-                None,
             )
-            .await
-            .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
+            .await;
+        let response = match forced {
+            Ok(response) => response,
+            Err(error) if rejects_tool_choice(&error) => {
+                tracing::warn!(
+                    model = %model,
+                    tool = %tool_name,
+                    error = %error,
+                    "provider rejected an explicit tool_choice; retrying unforced"
+                );
+                self.send_side_query(
+                    &model,
+                    profile.as_deref(),
+                    system,
+                    user,
+                    &tool,
+                    tool_name,
+                    None,
+                )
+                .await
+                .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?
+            }
+            Err(error) => return Err(AppError::LlmUnavailable(format!("{error}"))),
+        };
         extract_single_tool_call(response.content, tool_name)
     }
 
     fn set_model(&self, model: String, profile: Option<String>) {
         *self.selection.write().expect("selection lock poisoned") = (model, profile);
     }
+}
+
+impl ApiServiceModel {
+    /// One side query, with whatever `tool_choice` the caller decided on.
+    ///
+    /// Split out so the forced attempt and the unforced retry above are the
+    /// SAME request in every other respect — a retry that quietly differed in
+    /// system prompt, budget or tool schema would make the fallback's success
+    /// mean something other than "the directive was the only problem".
+    #[allow(clippy::too_many_arguments)]
+    async fn send_side_query(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: &str,
+        user: String,
+        tool: &serde_json::Value,
+        tool_name: &str,
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        self.service
+            .messages_create_side_query(
+                model,
+                profile,
+                Some(system),
+                vec![ConversationMessage::user(MessageId::new(), user)],
+                vec![tool.clone()],
+                Self::max_tokens_for(tool_name),
+                tool_choice,
+                vec![],
+                None,
+            )
+            .await
+    }
+}
+
+/// Whether a provider error is specifically "I don't accept a `tool_choice`
+/// directive", as opposed to any other 4xx.
+///
+/// Matched on the message because the status lives there rather than in a
+/// field. Deliberately narrow: it must not swallow a genuine bad-request (a
+/// malformed schema, an over-long prompt), or the unforced retry would mask a
+/// real defect as a provider quirk. Observed shape, DeepSeek with reasoning on:
+///
+///   400 {"error":{"message":"Thinking mode does not support this tool_choice",
+///        "type":"invalid_request_error", …}}
+fn rejects_tool_choice(error: &llm_client::LlmError) -> bool {
+    let message = error.to_string();
+    message.contains("tool_choice") && message.contains("400")
 }
 
 /// `ToolChoice::Tool { name }` forces the model to call the named tool, but

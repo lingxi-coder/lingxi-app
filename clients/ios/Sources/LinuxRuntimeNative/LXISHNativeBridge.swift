@@ -10,6 +10,19 @@ import Foundation
 import Network
 import ObjectiveC.runtime
 
+@_silgen_name("lx_ish_execution_policy_version")
+private func lxISHExecutionPolicyVersion() -> UInt32
+@_silgen_name("lx_ish_execution_context_next")
+private func lxISHExecutionContextNext() -> UInt64
+@_silgen_name("lx_ish_execution_policy_register")
+private func lxISHExecutionPolicyRegister(_ context: UInt64, _ networkPolicy: Int32) -> Int32
+@_silgen_name("lx_ish_execution_policy_unregister")
+private func lxISHExecutionPolicyUnregister(_ context: UInt64)
+@_silgen_name("lx_ish_execution_resident_bytes")
+private func lxISHExecutionResidentBytes(_ context: UInt64) -> UInt64
+@_silgen_name("lx_ish_execution_context_active")
+private func lxISHExecutionContextActive(_ context: UInt64) -> Int32
+
 /// The ONE pair of coders for this bridge. Rust (serde) is uniformly
 /// snake_case on both directions of the C ABI; the convention is enforced by
 /// per-struct `CodingKeys` plus the round-trip tests that pin them.
@@ -51,6 +64,20 @@ struct LXISHMountSpec: Codable, Hashable {
     }
 }
 
+struct LXISHResourceLimits: Codable {
+    var maxCpuSeconds: UInt32?
+    var maxMemoryMb: UInt32?
+    var maxProcesses: UInt32?
+    var maxOpenFiles: UInt32?
+
+    enum CodingKeys: String, CodingKey {
+        case maxCpuSeconds = "max_cpu_seconds"
+        case maxMemoryMb = "max_memory_mb"
+        case maxProcesses = "max_processes"
+        case maxOpenFiles = "max_open_files"
+    }
+}
+
 struct LXISHRunRequest: Codable {
     var command: String
     var args: [String]
@@ -59,6 +86,7 @@ struct LXISHRunRequest: Codable {
     var stdin: String?
     var timeoutMs: UInt64?
     var network: String
+    var resourceLimits: LXISHResourceLimits?
     var mounts: [LXISHMountSpec]?
 
 
@@ -70,6 +98,7 @@ struct LXISHRunRequest: Codable {
         case stdin
         case timeoutMs = "timeout_ms"
         case network
+        case resourceLimits = "resource_limits"
         case mounts
     }
 }
@@ -173,6 +202,8 @@ private struct LXISHRunResultPayload: Codable {
     var timedOut: Bool
     var cancelled: Bool
     var durationSeconds: Double
+    var networkPolicyEnforced: Bool
+    var memoryLimitEnforced: Bool
 
 
     enum CodingKeys: String, CodingKey {
@@ -182,6 +213,8 @@ private struct LXISHRunResultPayload: Codable {
         case timedOut = "timed_out"
         case cancelled
         case durationSeconds = "duration_seconds"
+        case networkPolicyEnforced = "network_policy_enforced"
+        case memoryLimitEnforced = "memory_limit_enforced"
     }
 }
 
@@ -376,12 +409,18 @@ struct LXISHRuntimeMountPlanner {
 
 private enum LXISHBridgeError: LocalizedError {
     case invalidRequest(String)
+    case networkPolicyUnavailable(String)
     case unavailable(String)
+    case resourceLimitExceeded(String)
     case io(String)
 
     var errorDescription: String? {
         switch self {
-        case let .invalidRequest(message), let .unavailable(message), let .io(message):
+        case let .invalidRequest(message),
+             let .networkPolicyUnavailable(message),
+             let .unavailable(message),
+             let .resourceLimitExceeded(message),
+             let .io(message):
             return message
         }
     }
@@ -389,7 +428,9 @@ private enum LXISHBridgeError: LocalizedError {
     var code: String {
         switch self {
         case .invalidRequest: return "invalid_request"
+        case .networkPolicyUnavailable: return "network_policy_unavailable"
         case .unavailable: return "unavailable"
+        case .resourceLimitExceeded: return "resource_limit_exceeded"
         case .io: return "io"
         }
     }
@@ -611,6 +652,131 @@ private final class LXISHDNSRefreshMonitor {
     }
 }
 
+private final class LXISHExecutionPolicyLease: @unchecked Sendable {
+    private let context: UInt64
+    private let memoryLimitBytes: UInt64?
+    private let lock = NSLock()
+    private var timer: DispatchSourceTimer?
+    private var finished = false
+    private var released = false
+    private var exceeded = false
+
+    init(networkPolicy: Int32, memoryLimitBytes: UInt64?) throws {
+        guard lxISHExecutionPolicyVersion() == 1 else {
+            if networkPolicy != 0 {
+                throw LXISHBridgeError.networkPolicyUnavailable(
+                    "iSH network-policy hook is unavailable or has an unsupported version"
+                )
+            }
+            if memoryLimitBytes != nil {
+                throw LXISHBridgeError.resourceLimitExceeded(
+                    "iSH memory-limit hook is unavailable or has an unsupported version"
+                )
+            }
+            throw LXISHBridgeError.unavailable(
+                "iSH execution-context hook is unavailable or has an unsupported version"
+            )
+        }
+        let context = lxISHExecutionContextNext()
+        guard context != 0,
+              lxISHExecutionPolicyRegister(context, networkPolicy) == 0
+        else {
+            if networkPolicy != 0 {
+                throw LXISHBridgeError.networkPolicyUnavailable(
+                    "iSH execution-policy registry is full"
+                )
+            }
+            if memoryLimitBytes != nil {
+                throw LXISHBridgeError.resourceLimitExceeded(
+                    "iSH execution-policy registry is full"
+                )
+            }
+            throw LXISHBridgeError.unavailable("iSH execution-policy registry is full")
+        }
+        self.context = context
+        self.memoryLimitBytes = memoryLimitBytes
+    }
+
+    var fsContext: UInt64 { context }
+
+    func startWatchdog(onExceeded: @escaping @Sendable () -> Void) {
+        guard let memoryLimitBytes else { return }
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let residentBytes = lxISHExecutionResidentBytes(self.context)
+            self.lock.lock()
+            let shouldTerminate = !self.released && !self.exceeded && residentBytes > memoryLimitBytes
+            if shouldTerminate {
+                self.exceeded = true
+            }
+            self.lock.unlock()
+            if shouldTerminate {
+                onExceeded()
+            }
+        }
+        lock.lock()
+        if finished {
+            lock.unlock()
+            timer.cancel()
+            return
+        }
+        self.timer = timer
+        lock.unlock()
+        timer.resume()
+    }
+
+    @discardableResult
+    func finish() -> Bool {
+        lock.lock()
+        if finished {
+            let result = exceeded
+            lock.unlock()
+            return result
+        }
+        finished = true
+        let result = exceeded
+        lock.unlock()
+        releaseWhenInactive()
+        return result
+    }
+
+    private func releaseWhenInactive() {
+        if lxISHExecutionContextActive(context) != 0 {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(250)) { [self] in
+                releaseWhenInactive()
+            }
+            return
+        }
+        lock.lock()
+        if released {
+            lock.unlock()
+            return
+        }
+        released = true
+        let timer = self.timer
+        self.timer = nil
+        lock.unlock()
+        timer?.cancel()
+        lxISHExecutionPolicyUnregister(context)
+    }
+
+    func finishAfterTerminationGrace() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(3)) { [self] in
+            _ = finish()
+        }
+    }
+
+    deinit {
+        if !released {
+            lxISHExecutionPolicyUnregister(context)
+        }
+    }
+}
+
 private final class LXISHShellExecutorRuntimeBridge {
     static func isDeviceBridgeAvailable() -> Bool {
         #if targetEnvironment(simulator)
@@ -634,17 +800,37 @@ private final class LXISHShellExecutorRuntimeBridge {
         environment: [String: String],
         stdin: String?,
         cwd: String?,
-        timeout: Double
+        timeout: Double,
+        networkPolicy: Int32,
+        memoryLimitBytes: UInt64?
     ) throws -> LXISHShellExecutionResultBox {
         guard let executorClass = NSClassFromString("ISHShellExecutor") else {
             throw LXISHBridgeError.unavailable(Self.availabilityReason())
         }
-        let selector = NSSelectorFromString("executeExecutable:arguments:environment:stdinData:lineCallback:completion:")
+        let selector = NSSelectorFromString(
+            "executeExecutable:arguments:environment:stdinData:fsContext:lineCallback:completion:"
+        )
         guard let method = class_getClassMethod(executorClass, selector) else {
-            throw LXISHBridgeError.unavailable(
-                "ISHShellExecutor is missing executeExecutable:arguments:environment:stdinData:lineCallback:completion:"
+            let message = "ISHShellExecutor is missing its fsContext execution entry point"
+            if networkPolicy != 0 {
+                throw LXISHBridgeError.networkPolicyUnavailable(message)
+            }
+            if memoryLimitBytes != nil {
+                throw LXISHBridgeError.resourceLimitExceeded(message)
+            }
+            throw LXISHBridgeError.unavailable(message)
+        }
+        if memoryLimitBytes != nil,
+           class_getClassMethod(executorClass, NSSelectorFromString("killProcessGroup:")) == nil
+        {
+            throw LXISHBridgeError.resourceLimitExceeded(
+                "ISHShellExecutor cannot terminate an over-limit guest process group"
             )
         }
+        let policyLease = try LXISHExecutionPolicyLease(
+            networkPolicy: networkPolicy,
+            memoryLimitBytes: memoryLimitBytes
+        )
 
         let launch: (String, [String])
         if let cwd, !cwd.isEmpty {
@@ -673,6 +859,7 @@ private final class LXISHShellExecutorRuntimeBridge {
             NSArray,
             NSDictionary,
             NSData?,
+            UInt64,
             AnyObject?,
             AnyObject
         ) -> Int32
@@ -685,11 +872,16 @@ private final class LXISHShellExecutorRuntimeBridge {
             launch.1 as NSArray,
             environment as NSDictionary,
             stdinData,
+            policyLease.fsContext,
             nil,
             completion as AnyObject
         )
         guard pid >= 0 else {
+            policyLease.finish()
             throw LXISHBridgeError.unavailable("ISHShellExecutor failed to launch process: \(pid)")
+        }
+        policyLease.startWatchdog { [weak self] in
+            self?.killProcessGroup(pid, executorClass: executorClass)
         }
 
         let waitResult: DispatchTimeoutResult
@@ -701,6 +893,10 @@ private final class LXISHShellExecutorRuntimeBridge {
         }
         if waitResult == .timedOut {
             killProcessGroup(pid, executorClass: executorClass)
+            // killProcessGroup escalates from TERM to KILL asynchronously.
+            // Keep the registry entry alive until no surviving descendant can
+            // regain unrestricted socket access during that grace period.
+            policyLease.finishAfterTerminationGrace()
             return LXISHShellExecutionResultBox(
                 exitCode: -1,
                 errorCode: -3,
@@ -714,13 +910,17 @@ private final class LXISHShellExecutorRuntimeBridge {
         let resultObject = completedResult
         resultLock.unlock()
         guard let resultObject else {
+            policyLease.finish()
             throw LXISHBridgeError.unavailable("ISHShellExecutor completed without a result")
         }
+        let resourceLimitExceeded = policyLease.finish()
         return LXISHShellExecutionResultBox(
             exitCode: intValue(from: resultObject, selector: "exitCode"),
-            errorCode: intValue(from: resultObject, selector: "error"),
+            errorCode: resourceLimitExceeded ? -5 : intValue(from: resultObject, selector: "error"),
             stdoutText: stringValue(from: resultObject, selector: "output"),
-            stderrText: stringValue(from: resultObject, selector: "errorOutput"),
+            stderrText: resourceLimitExceeded
+                ? "resource_limit_exceeded: guest process group exceeded \(memoryLimitBytes ?? 0) bytes"
+                : stringValue(from: resultObject, selector: "errorOutput"),
             durationSeconds: doubleValue(from: resultObject, selector: "duration")
         )
     }
@@ -731,18 +931,38 @@ private final class LXISHShellExecutorRuntimeBridge {
         environment: [String: String],
         stdin: String?,
         cwd: String?,
+        networkPolicy: Int32,
+        memoryLimitBytes: UInt64?,
         lineSink: @escaping (String, Bool) -> Void,
         completion: @escaping (LXISHShellExecutionResultBox) -> Void
     ) throws -> Int32 {
         guard let executorClass = NSClassFromString("ISHShellExecutor") else {
             throw LXISHBridgeError.unavailable(Self.availabilityReason())
         }
-        let selector = NSSelectorFromString("executeExecutable:arguments:environment:stdinData:lineCallback:completion:")
+        let selector = NSSelectorFromString(
+            "executeExecutable:arguments:environment:stdinData:fsContext:lineCallback:completion:"
+        )
         guard let method = class_getClassMethod(executorClass, selector) else {
-            throw LXISHBridgeError.unavailable(
-                "ISHShellExecutor is missing executeExecutable:arguments:environment:stdinData:lineCallback:completion:"
+            let message = "ISHShellExecutor is missing its fsContext execution entry point"
+            if networkPolicy != 0 {
+                throw LXISHBridgeError.networkPolicyUnavailable(message)
+            }
+            if memoryLimitBytes != nil {
+                throw LXISHBridgeError.resourceLimitExceeded(message)
+            }
+            throw LXISHBridgeError.unavailable(message)
+        }
+        if memoryLimitBytes != nil,
+           class_getClassMethod(executorClass, NSSelectorFromString("killProcessGroup:")) == nil
+        {
+            throw LXISHBridgeError.resourceLimitExceeded(
+                "ISHShellExecutor cannot terminate an over-limit guest process group"
             )
         }
+        let policyLease = try LXISHExecutionPolicyLease(
+            networkPolicy: networkPolicy,
+            memoryLimitBytes: memoryLimitBytes
+        )
 
         let launch: (String, [String])
         if let cwd, !cwd.isEmpty {
@@ -761,12 +981,15 @@ private final class LXISHShellExecutorRuntimeBridge {
         typealias CompletionBlock = @convention(block) (AnyObject) -> Void
         let completionBlock: CompletionBlock = { [weak self] result in
             guard let self else { return }
+            let resourceLimitExceeded = policyLease.finish()
             completion(
                 LXISHShellExecutionResultBox(
                     exitCode: self.intValue(from: result, selector: "exitCode"),
-                    errorCode: self.intValue(from: result, selector: "error"),
+                    errorCode: resourceLimitExceeded ? -5 : self.intValue(from: result, selector: "error"),
                     stdoutText: self.stringValue(from: result, selector: "output"),
-                    stderrText: self.stringValue(from: result, selector: "errorOutput"),
+                    stderrText: resourceLimitExceeded
+                        ? "resource_limit_exceeded: guest process group exceeded \(memoryLimitBytes ?? 0) bytes"
+                        : self.stringValue(from: result, selector: "errorOutput"),
                     durationSeconds: self.doubleValue(from: result, selector: "duration")
                 )
             )
@@ -778,6 +1001,7 @@ private final class LXISHShellExecutorRuntimeBridge {
             NSArray,
             NSDictionary,
             NSData?,
+            UInt64,
             AnyObject?,
             AnyObject
         ) -> Int32
@@ -789,11 +1013,16 @@ private final class LXISHShellExecutorRuntimeBridge {
             launch.1 as NSArray,
             environment as NSDictionary,
             stdin.map { Data($0.utf8) } as NSData?,
+            policyLease.fsContext,
             lineBlock as AnyObject,
             completionBlock as AnyObject
         )
         guard pid >= 0 else {
+            policyLease.finish()
             throw LXISHBridgeError.unavailable("ISHShellExecutor failed to launch background process: \(pid)")
+        }
+        policyLease.startWatchdog { [weak self] in
+            self?.killProcessGroup(pid, executorClass: executorClass)
         }
         return pid
     }
@@ -1039,17 +1268,22 @@ private final class LXISHNativeCoordinator {
 
     func runSync(config: LXISHNativeConfig, request: LXISHRunRequest) -> String {
         execute(config: config) { runtime in
-            guard request.network == "allowed" else {
-                throw LXISHBridgeError.unavailable(
-                    "iSH cannot enforce the requested network isolation policy"
-                )
-            }
+            let executionPolicy = try self.executionPolicy(for: request)
             let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
             _ = try self.rootfsManager.installIfNeeded(for: config)
             runtime.mounts = request.mounts ?? runtime.mounts
             try self.rootfsManager.cacheMounts(runtime.mounts, for: config)
-            guard LXISHKernelRuntimeBridge.isDeviceBridgeAvailable(), LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable() else {
-                throw LXISHBridgeError.unavailable(LXISHShellExecutorRuntimeBridge.availabilityReason())
+            guard LXISHKernelRuntimeBridge.isDeviceBridgeAvailable(),
+                  LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable()
+            else {
+                let message = LXISHShellExecutorRuntimeBridge.availabilityReason()
+                if executionPolicy.networkPolicy != 0 {
+                    throw LXISHBridgeError.networkPolicyUnavailable(message)
+                }
+                if executionPolicy.memoryLimitBytes != nil {
+                    throw LXISHBridgeError.resourceLimitExceeded(message)
+                }
+                throw LXISHBridgeError.unavailable(message)
             }
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
@@ -1061,8 +1295,13 @@ private final class LXISHNativeCoordinator {
                 environment: environment,
                 stdin: request.stdin,
                 cwd: request.cwd,
-                timeout: self.timeoutSeconds(from: request)
+                timeout: self.timeoutSeconds(from: request),
+                networkPolicy: executionPolicy.networkPolicy,
+                memoryLimitBytes: executionPolicy.memoryLimitBytes
             )
+            if result.errorCode == -5 {
+                throw LXISHBridgeError.resourceLimitExceeded(result.stderrText)
+            }
             return [
                 "result": LXISHRunResultPayload(
                     stdout: result.stdoutText,
@@ -1070,7 +1309,9 @@ private final class LXISHNativeCoordinator {
                     exitCode: result.exitCode,
                     timedOut: result.errorCode == -3,
                     cancelled: result.errorCode == -4,
-                    durationSeconds: result.durationSeconds
+                    durationSeconds: result.durationSeconds,
+                    networkPolicyEnforced: executionPolicy.networkPolicy != 0,
+                    memoryLimitEnforced: executionPolicy.memoryLimitBytes != nil
                 )
             ]
         }
@@ -1078,11 +1319,7 @@ private final class LXISHNativeCoordinator {
 
     func spawnBackground(config: LXISHNativeConfig, request: LXISHRunRequest) -> String {
         execute(config: config) { runtime in
-            guard request.network == "allowed" else {
-                throw LXISHBridgeError.unavailable(
-                    "iSH cannot enforce the requested network isolation policy"
-                )
-            }
+            let executionPolicy = try self.executionPolicy(for: request)
             let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
             _ = try self.rootfsManager.installIfNeeded(for: config)
             runtime.mounts = request.mounts ?? runtime.mounts
@@ -1090,7 +1327,14 @@ private final class LXISHNativeCoordinator {
             guard LXISHKernelRuntimeBridge.isDeviceBridgeAvailable(),
                   LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable()
             else {
-                throw LXISHBridgeError.unavailable(LXISHShellExecutorRuntimeBridge.availabilityReason())
+                let message = LXISHShellExecutorRuntimeBridge.availabilityReason()
+                if executionPolicy.networkPolicy != 0 {
+                    throw LXISHBridgeError.networkPolicyUnavailable(message)
+                }
+                if executionPolicy.memoryLimitBytes != nil {
+                    throw LXISHBridgeError.resourceLimitExceeded(message)
+                }
+                throw LXISHBridgeError.unavailable(message)
             }
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
@@ -1105,6 +1349,8 @@ private final class LXISHNativeCoordinator {
                 environment: environment,
                 stdin: request.stdin,
                 cwd: request.cwd,
+                networkPolicy: executionPolicy.networkPolicy,
+                memoryLimitBytes: executionPolicy.memoryLimitBytes,
                 lineSink: { [weak self] line, isStdErr in
                     self?.recordBackgroundLine(
                         runtimeKey: runtimeKey,
@@ -1125,7 +1371,12 @@ private final class LXISHNativeCoordinator {
                 processId: processId,
                 guestPid: pid
             )
-            return ["process_id": processId, "guest_pid": Int(pid)]
+            return [
+                "process_id": processId,
+                "guest_pid": Int(pid),
+                "network_policy_enforced": executionPolicy.networkPolicy != 0,
+                "memory_limit_enforced": executionPolicy.memoryLimitBytes != nil,
+            ]
         }
     }
 
@@ -1383,6 +1634,7 @@ private final class LXISHNativeCoordinator {
             switch result.errorCode {
             case -3: detail = "background process timed out"
             case -4: detail = "background process cancelled"
+            case -5: detail = "resource_limit_exceeded"
             case 0: detail = nil
             default: detail = "background process failed with executor error \(result.errorCode)"
             }
@@ -1528,11 +1780,45 @@ private final class LXISHNativeCoordinator {
             environment: ["PATH": "/bin:/usr/bin:/sbin:/usr/sbin"],
             stdin: nil,
             cwd: "/",
-            timeout: 30
+            timeout: 30,
+            networkPolicy: 0,
+            memoryLimitBytes: nil
         )
         return result.stdoutText
     }
 
+
+    private func executionPolicy(
+        for request: LXISHRunRequest
+    ) throws -> (networkPolicy: Int32, memoryLimitBytes: UInt64?) {
+        let networkPolicy: Int32
+        switch request.network {
+        case "allowed": networkPolicy = 0
+        case "disabled": networkPolicy = 1
+        case "loopback-only": networkPolicy = 2
+        default:
+            throw LXISHBridgeError.invalidRequest(
+                "unsupported iSH network policy: \(request.network)"
+            )
+        }
+
+        let limits = request.resourceLimits
+        if limits?.maxCpuSeconds != nil || limits?.maxProcesses != nil || limits?.maxOpenFiles != nil {
+            throw LXISHBridgeError.resourceLimitExceeded(
+                "iSH supports only the per-execution memory limit"
+            )
+        }
+        let memoryLimitBytes: UInt64?
+        if let megabytes = limits?.maxMemoryMb {
+            guard megabytes > 0 else {
+                throw LXISHBridgeError.invalidRequest("max_memory_mb must be greater than zero")
+            }
+            memoryLimitBytes = UInt64(megabytes) * 1024 * 1024
+        } else {
+            memoryLimitBytes = nil
+        }
+        return (networkPolicy, memoryLimitBytes)
+    }
 
     private func timeoutSeconds(from request: LXISHRunRequest) -> Double {
         guard let timeoutMs = request.timeoutMs else { return 0 }

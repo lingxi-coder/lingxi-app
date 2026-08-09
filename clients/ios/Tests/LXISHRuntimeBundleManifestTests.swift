@@ -4,6 +4,15 @@ import XCTest
 
 @testable import LingxiCode
 
+@_silgen_name("lx_ish_execution_context_next")
+private func testLXISHExecutionContextNext() -> UInt64
+@_silgen_name("lx_ish_execution_policy_register")
+private func testLXISHExecutionPolicyRegister(_ context: UInt64, _ networkPolicy: Int32) -> Int32
+@_silgen_name("lx_ish_execution_policy_unregister")
+private func testLXISHExecutionPolicyUnregister(_ context: UInt64)
+@_silgen_name("lx_ish_network_policy_for_context")
+private func testLXISHNetworkPolicyForContext(_ context: UInt64) -> Int32
+
 final class LXISHRuntimeBundleManifestTests: XCTestCase {
     private var temporaryRoot: URL!
 
@@ -37,6 +46,22 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
 
         XCTAssertEqual(manifest.rootfsVersion, "3.24.1")
         XCTAssertEqual(manifest.archiveSha256, "abc123")
+    }
+
+    func testExecutionPolicyRegistryFailsClosedWhenOwnershipIsLost() {
+        let context = testLXISHExecutionContextNext()
+        XCTAssertNotEqual(context, 0)
+        XCTAssertEqual(testLXISHNetworkPolicyForContext(0), 0)
+        XCTAssertEqual(testLXISHExecutionPolicyRegister(context, 2), 0)
+        XCTAssertEqual(testLXISHNetworkPolicyForContext(context), 2)
+
+        testLXISHExecutionPolicyUnregister(context)
+
+        XCTAssertEqual(
+            testLXISHNetworkPolicyForContext(context),
+            1,
+            "an orphaned non-zero execution context must fall back to Disabled"
+        )
     }
 
     /// Byte-for-byte the JSON serde writes for Rust's `NativeConfigPayload`
@@ -112,6 +137,12 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
           "stdin": null,
           "timeout_ms": 1000,
           "network": "allowed",
+          "resource_limits": {
+            "max_cpu_seconds": null,
+            "max_memory_mb": 800,
+            "max_processes": null,
+            "max_open_files": null
+          },
           "mounts": null
         }
         """.utf8)
@@ -121,6 +152,7 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         XCTAssertEqual(request.env["npm_config_userAgent"], "npm/10")
         XCTAssertEqual(request.env["TERM"], "xterm-256color")
         XCTAssertEqual(request.timeoutMs, 1000, "struct fields still decode their snake keys")
+        XCTAssertEqual(request.resourceLimits?.maxMemoryMb, 800)
 
         let encoded = try LXISHBridgeJSON.encoder().encode(request)
         let json = String(decoding: encoded, as: UTF8.self)
@@ -128,6 +160,8 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
             XCTAssertTrue(json.contains("\"\(key)\""), "env key must survive encode verbatim: \(key)")
         }
         XCTAssertTrue(json.contains("\"timeout_ms\""), "struct keys stay snake_case: \(json)")
+        XCTAssertTrue(json.contains("\"resource_limits\""), "resource limits stay snake_case: \(json)")
+        XCTAssertTrue(json.contains("\"max_memory_mb\":800"), "memory limit stays snake_case: \(json)")
     }
 
     /// iSH's `exit_hook` receives the kernel's wait-status encoding

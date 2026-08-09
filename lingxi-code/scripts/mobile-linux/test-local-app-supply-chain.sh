@@ -27,6 +27,16 @@ assert commands["store_build"]["network_policy"] == "disabled"
 assert commands["full_build"]["network_policy"] == "disabled"
 assert commands["full_start"]["network_policy"] == "loopback_only"
 assert all(command["memory_limit_bytes"] == 838860800 for command in commands.values())
+launcher = policy["android_network_policy_launcher"]
+assert launcher["supported_network_policies"] == ["disabled", "loopback_only"]
+assert launcher["loopback_only_ready"] is True
+ish_policy = policy["ios_ish_execution_policy"]
+assert ish_policy["supported_network_policies"] == ["disabled", "loopback_only"]
+assert ish_policy["loopback_only_ready"] is True
+assert ish_policy["hook_version"] == 1
+assert ish_policy["memory_limit_bytes"] == 838860800
+assert ish_policy["watchdog_interval_ms"] == 250
+assert ish_policy["memory_accounting"] == "guest_backed_pages_by_execution_context"
 PY
 
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \

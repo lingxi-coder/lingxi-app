@@ -34,9 +34,9 @@ Local-app runtime pins:
 
 `docs/mobile-linux/local-app-runtime-pins.json` records the exact APK and npm
 pins. The structural verifier accepts an explicitly recorded upstream gap, but
-the `--release` gate fails until both ABIs have a complete hashed APK closure.
-This distinction prevents development checks from inventing a digest while
-ensuring a release can never ship an unverified substitute.
+the `--release` gate remains closed until x86_64's fully hashed closure has also
+passed an offline install on a native x86_64 or qemu-backed host. This prevents
+development checks from treating artifact hashes alone as executable evidence.
 
 `docs/mobile-linux/local-app-runtime-policy.json` is the executable contract:
 the host invokes Next through `/usr/bin/node` directly, mounts the committed
@@ -53,11 +53,15 @@ Policy decisions:
   package installation and external-mount writes remain controlled by the host
   permission gate; local-app builds enter through the seccomp policy launcher
   and are accepted only when its enforcement receipt proves `Disabled`.
-- The packaged Android policy launcher currently proves the fully-disabled
-  build policy only. Direct/Full runtime remains fail-closed with
-  `network_policy_unavailable` until loopback-only enforcement is implemented;
-  this is a release blocker, not an automatic downgrade to unrestricted
-  networking.
+- Android builds use an inherited seccomp filter for `Disabled`. Direct/Full
+  starts PRoot's pinned sockaddr-aware extension for `LoopbackOnly`; it permits
+  only AF_UNIX, `127.0.0.0/8`, and `::1`. Both paths publish policy-specific
+  receipts, and launch fails with `network_policy_unavailable` if the expected
+  receipt is absent or invalid.
+- iOS builds apply and then restore a pinned iSH syscall patch during archive
+  construction. The patch enforces the same `Disabled`/`LoopbackOnly` socket
+  contract per inherited execution context; a 250 ms watchdog terminates an
+  execution context whose guest-backed process-tree memory exceeds 800 MiB.
 - The source archive format is Alpine's official `tar.gz`; its digest is a
   source pin. The deterministic package-augmented release archive has a
   separate manifest digest and Gradle stores it without recompression.

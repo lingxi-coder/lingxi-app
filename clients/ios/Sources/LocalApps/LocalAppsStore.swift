@@ -176,8 +176,8 @@ final class LocalAppsStore {
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
     #endif
 
-    init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry = .shared) {
-        self.websiteDataStoreRegistry = websiteDataStoreRegistry
+    init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry? = nil) {
+        self.websiteDataStoreRegistry = websiteDataStoreRegistry ?? .shared
     }
 
     var filteredApps: [LocalAppSummary] {

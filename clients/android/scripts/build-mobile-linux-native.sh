@@ -66,10 +66,16 @@ build_proot() {
   local proot_work="${work}/source"
   local talloc_work="${work}/talloc"
   local cc="${TOOLCHAIN_BIN}/${triple}${ANDROID_API}-clang"
+  local network_policy_source="${ANDROID_DIR}/app/src/main/cpp/proot_lingxi_network_policy.c"
 
   "${CMAKE}" -E remove_directory "${work}"
   mkdir -p "${proot_work}" "${talloc_work}"
   git -C "${PROOT}" archive --format=tar HEAD | tar -xf - -C "${proot_work}"
+  # Keep the pinned PRoot submodule pristine. The archived build tree receives
+  # LingXi's auditable sockaddr policy in place of the otherwise unused legacy
+  # port-switch extension that the existing `-p` option initializes.
+  cp "${network_policy_source}" \
+    "${proot_work}/src/extension/port_switch/port_switch.c"
   git -C "${OPENMINIS}" show HEAD:deps/talloc/talloc.c > "${talloc_work}/talloc.c"
   git -C "${OPENMINIS}" show HEAD:deps/talloc/talloc.h > "${talloc_work}/talloc.h"
   git -C "${OPENMINIS}" show HEAD:deps/talloc/replace.h > "${talloc_work}/replace.h"

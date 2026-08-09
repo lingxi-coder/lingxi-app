@@ -432,7 +432,7 @@ impl IosIshRuntime {
         &self,
         request: &LinuxCommandRequest,
         mounts: &[MountSpec],
-    ) -> Result<String, MobileLinuxError> {
+    ) -> Result<NativeProcessStart, MobileLinuxError> {
         let config_json = self.native_config_json()?;
         let payload = RunRequestPayload::from_request(request, mounts);
         let request_json = serde_json::to_string(&payload).map_err(|error| {
@@ -1140,8 +1140,8 @@ impl MobileLinuxRuntime for IosIshRuntime {
             display_command(&request.command, &request.args),
             MobileLinuxTaskStatus::Backgrounded,
         );
-        let native_process_id = match self.native_spawn_background(&request, &mounts).await {
-            Ok(process_id) if !process_id.trim().is_empty() => process_id,
+        let native_start = match self.native_spawn_background(&request, &mounts).await {
+            Ok(start) if !start.process_id.trim().is_empty() => start,
             Ok(_) => {
                 let error = MobileLinuxError::Io(
                     "native background spawn returned an empty process id".to_string(),
@@ -1169,11 +1169,11 @@ impl MobileLinuxRuntime for IosIshRuntime {
         *task
             .native_handle
             .lock()
-            .expect("ios-ish native handle mutex") = Some(native_process_id.clone());
-        self.spawn_background_reader(task_id.clone(), native_process_id, task);
+            .expect("ios-ish native handle mutex") = Some(native_start.process_id.clone());
+        self.spawn_background_reader(task_id.clone(), native_start.process_id, task);
         Ok(LinuxProcessHandle {
             id: task_id,
-            enforcement: LinuxEnforcementReceipt::default(),
+            enforcement: native_start.enforcement,
         })
     }
 
@@ -1490,6 +1490,7 @@ struct RunRequestPayload {
     stdin: Option<String>,
     timeout_ms: Option<u64>,
     network: &'static str,
+    resource_limits: traits::ResourceLimits,
     mounts: Vec<MountPayload>,
 }
 
@@ -1507,6 +1508,7 @@ impl RunRequestPayload {
                 traits::NetworkPolicy::LoopbackOnly => "loopback-only",
                 traits::NetworkPolicy::Allowed => "allowed",
             },
+            resource_limits: request.resource_limits,
             mounts: mounts.iter().map(MountPayload::from_mount).collect(),
         }
     }
@@ -1615,6 +1617,10 @@ struct RunResponsePayload {
     timed_out: bool,
     #[serde(default)]
     cancelled: bool,
+    #[serde(default)]
+    network_policy_enforced: bool,
+    #[serde(default)]
+    memory_limit_enforced: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1657,6 +1663,16 @@ struct NativeProcessEnvelope {
     ok: bool,
     error: Option<NativeErrorPayload>,
     process_id: Option<String>,
+    #[serde(default)]
+    network_policy_enforced: bool,
+    #[serde(default)]
+    memory_limit_enforced: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeProcessStart {
+    process_id: String,
+    enforcement: LinuxEnforcementReceipt,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1754,7 +1770,10 @@ fn parse_run_response(json: &str) -> Result<LinuxCommandResult, MobileLinuxError
         exit_code: payload.exit_code,
         timed_out: payload.timed_out,
         cancelled: payload.cancelled,
-        enforcement: LinuxEnforcementReceipt::default(),
+        enforcement: LinuxEnforcementReceipt {
+            network_policy_enforced: payload.network_policy_enforced,
+            memory_limit_enforced: payload.memory_limit_enforced,
+        },
     })
 }
 
@@ -1789,7 +1808,7 @@ fn parse_session_id_response(json: &str) -> Result<String, MobileLinuxError> {
         .ok_or_else(|| MobileLinuxError::Io("native PTY response omitted session_id".to_string()))
 }
 
-fn parse_process_id_response(json: &str) -> Result<String, MobileLinuxError> {
+fn parse_process_id_response(json: &str) -> Result<NativeProcessStart, MobileLinuxError> {
     let envelope = serde_json::from_str::<NativeProcessEnvelope>(json)
         .map_err(|error| MobileLinuxError::Io(format!("parse background response: {error}")))?;
     if !envelope.ok {
@@ -1800,8 +1819,15 @@ fn parse_process_id_response(json: &str) -> Result<String, MobileLinuxError> {
             },
         )));
     }
-    envelope.process_id.ok_or_else(|| {
+    let process_id = envelope.process_id.ok_or_else(|| {
         MobileLinuxError::Io("native background response omitted process_id".to_string())
+    })?;
+    Ok(NativeProcessStart {
+        process_id,
+        enforcement: LinuxEnforcementReceipt {
+            network_policy_enforced: envelope.network_policy_enforced,
+            memory_limit_enforced: envelope.memory_limit_enforced,
+        },
     })
 }
 
@@ -1901,6 +1927,8 @@ fn native_error_to_mobile(error: NativeErrorPayload) -> MobileLinuxError {
     match error.code.as_str() {
         "invalid_request" => MobileLinuxError::InvalidRequest(error.message),
         "unavailable" => MobileLinuxError::Unavailable(error.message),
+        "network_policy_unavailable" => MobileLinuxError::NetworkPolicyUnavailable(error.message),
+        "resource_limit_exceeded" => MobileLinuxError::ResourceLimitExceeded(error.message),
         "io" => MobileLinuxError::Io(error.message),
         _ => MobileLinuxError::Io(error.message),
     }
@@ -1922,23 +1950,18 @@ fn validate_request(request: &LinuxCommandRequest) -> Result<(), MobileLinuxErro
     if let Some(stdin) = &request.stdin {
         validate_no_nul(stdin, "stdin")?;
     }
-    if matches!(
-        request.network,
-        traits::NetworkPolicy::Disabled | traits::NetworkPolicy::LoopbackOnly
-    ) {
-        return Err(MobileLinuxError::NetworkPolicyUnavailable(
-            "ios-ish runtime cannot enforce Disabled or LoopbackOnly without a guest syscall policy hook"
-                .to_string(),
-        ));
-    }
     let limits = request.resource_limits;
     if limits.max_cpu_seconds.is_some()
-        || limits.max_memory_mb.is_some()
         || limits.max_processes.is_some()
         || limits.max_open_files.is_some()
     {
         return Err(MobileLinuxError::ResourceLimitExceeded(
-            "ios-ish runtime cannot prove per-process-group resource enforcement".to_string(),
+            "ios-ish runtime supports only the per-execution memory limit".to_string(),
+        ));
+    }
+    if matches!(limits.max_memory_mb, Some(0)) {
+        return Err(MobileLinuxError::InvalidRequest(
+            "max_memory_mb must be greater than zero".to_string(),
         ));
     }
     if matches!(request.timeout_ms, Some(0)) {
@@ -2778,11 +2801,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_rejects_unenforced_memory_limit() {
+    fn validate_request_accepts_guest_group_memory_limit() {
         let mut request = command_request();
         request.resource_limits.max_memory_mb = Some(800);
-        let error = validate_request(&request).expect_err("memory limit must fail closed");
-        assert!(matches!(error, MobileLinuxError::ResourceLimitExceeded(_)));
+        validate_request(&request).expect("memory watchdog is supported");
+
+        request.resource_limits.max_memory_mb = Some(0);
+        assert!(matches!(
+            validate_request(&request),
+            Err(MobileLinuxError::InvalidRequest(_))
+        ));
     }
 
     #[test]
@@ -2917,13 +2945,20 @@ mod tests {
     #[test]
     fn native_run_envelope_maps_to_command_result() {
         let result = parse_run_response(
-            r#"{"ok":true,"result":{"stdout":"Linux\n","stderr":"","exit_code":0,"timed_out":false,"cancelled":false}}"#,
+            r#"{"ok":true,"result":{"stdout":"Linux\n","stderr":"","exit_code":0,"timed_out":false,"cancelled":false,"network_policy_enforced":true,"memory_limit_enforced":true}}"#,
         )
         .expect("parse native result");
 
         assert_eq!(result.stdout, "Linux\n");
         assert_eq!(result.exit_code, 0);
         assert!(!result.timed_out);
+        assert_eq!(
+            result.enforcement,
+            LinuxEnforcementReceipt {
+                network_policy_enforced: true,
+                memory_limit_enforced: true,
+            }
+        );
     }
 
     #[test]
@@ -2957,21 +2992,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_rejects_unenforced_network_policies() {
+    fn validate_request_accepts_enforceable_network_policies() {
         let mut request = command_request();
         request.network = NetworkPolicy::Disabled;
-        let error = validate_request(&request).expect_err("disabled network must fail");
-        assert!(matches!(
-            error,
-            MobileLinuxError::NetworkPolicyUnavailable(_)
-        ));
+        validate_request(&request).expect("Disabled is supported");
 
         request.network = NetworkPolicy::LoopbackOnly;
-        let error = validate_request(&request).expect_err("loopback-only network must fail");
-        assert!(matches!(
-            error,
-            MobileLinuxError::NetworkPolicyUnavailable(_)
-        ));
+        validate_request(&request).expect("LoopbackOnly is supported");
     }
 
     #[test]
@@ -3071,10 +3098,18 @@ mod tests {
 
     #[test]
     fn native_background_envelopes_preserve_stream_and_terminal_state() {
-        let process_id =
-            parse_process_id_response(r#"{"ok":true,"process_id":"process-42","guest_pid":42}"#)
-                .expect("parse process id");
-        assert_eq!(process_id, "process-42");
+        let process = parse_process_id_response(
+            r#"{"ok":true,"process_id":"process-42","guest_pid":42,"network_policy_enforced":true,"memory_limit_enforced":true}"#,
+        )
+        .expect("parse process id");
+        assert_eq!(process.process_id, "process-42");
+        assert_eq!(
+            process.enforcement,
+            LinuxEnforcementReceipt {
+                network_policy_enforced: true,
+                memory_limit_enforced: true,
+            }
+        );
         assert!(parse_background_kill_response(
             r#"{"ok":true,"process_id":"process-42","termination_requested":true}"#
         )

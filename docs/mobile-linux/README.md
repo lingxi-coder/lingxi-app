@@ -10,9 +10,9 @@ The source baseline is immutable and machine-readable in
 - OpenMinis `9cf3a855fecd27bb5735b84cacbd56852a3ab8dd`
 - OpenMinis PRoot fork `8cf13e997cdc9472997aae19df8050c073c9a86c`
 - talloc 2.4.2
-- Alpine 3.21.3 for `arm64-v8a` and `x86_64`
-- Local apps: Node `22.23.0-r0`, Git `2.47.3-r0`, Next `16.2.11`, and
-  React/ReactDOM `19.2.8`
+- Base MobileLinux rootfs: Alpine 3.21.3 for `arm64-v8a` and `x86_64`
+- Local-app rootfs: Alpine 3.24.1, Node `24.18.1-r0`, Git `2.54.0-r0`,
+  npm `11.12.1-r0`, Next `16.2.11`, and React/ReactDOM `19.2.8`
 
 Android keeps one distribution dimension:
 
@@ -50,12 +50,11 @@ clients/android/scripts/stage-local-app-runtime.sh --variant <play|direct> --nod
 clients/ios/scripts/stage-local-app-runtime.sh --variant <store|full> --node-modules <dir>
 ```
 
-The local-app release check is fail-closed. At present the pin manifest records
-that Alpine's v3.21 aarch64 repository no longer serves the requested
-`nodejs-22.23.0-r0` artifact. Structural verification succeeds only because the
-missing digest is explicitly represented as unavailable; release verification
-continues to fail until the exact signed artifact and full transitive APK
-closure are supplied or the product pin is deliberately revised.
+The local-app release check is fail-closed. The arm64 APK closure is complete;
+the x86_64 closure has all 60 artifacts resolved and hashed, but its offline
+install is not verified because Rosetta cannot execute Alpine post-install
+scripts through `/proc/self/exe`. `release_ready` remains false until the same
+closure is installed and checked on an x86_64 or qemu-backed host.
 
 The staging scripts accept only a host-prepared `node_modules` tree containing
 the exact Linux musl SWC bindings for ARM64 and x86_64. They reject package
@@ -88,11 +87,11 @@ such pin rather than trust the hash the evidence directory issues for itself.
 
 `mobile-linux-pins.json` carries **no `rootfs.release_archives` key**, for
 either ABI. Minting one requires a reproducible package-augmented rootfs, and
-`local-app-runtime-pins.json` records `release_ready: false` with
-`closure_status: "blocked"` for both ABIs — `arm64-v8a` because Alpine v3.21 no
-longer serves the pinned `nodejs-22.23.0-r0`, `x86_64` because no signed
-recursive APK closure has been captured. The pinned versions are a product
-decision and must not be revised to route around this.
+`local-app-runtime-pins.json` records `release_ready: false`: arm64 is complete,
+while x86_64 remains blocked only on native offline-install verification. The
+generic MobileLinux release archive also still needs its reproducible packaging
+run and reviewed repository digest. These pins must not be invented from a
+single local build or revised merely to route around the remaining gate.
 
 So the shipped rootfs bytes have **no repository-committed anchor at all**. The
 only guarantee today is a refusal: `stage-mobile-linux-assets.sh` aborts on its

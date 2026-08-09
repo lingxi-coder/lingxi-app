@@ -329,6 +329,12 @@ impl AndroidProotRuntime {
             "-w".to_string(),
             cwd.unwrap_or("/root").to_string(),
         ];
+        if matches!(request.network, NetworkPolicy::LoopbackOnly) {
+            // This enables LingXi's sockaddr-aware extension in the pinned
+            // PRoot build. The extension, not the outer launcher, publishes
+            // the LoopbackOnly enforcement receipt after initialization.
+            proot_args.push("-p".to_string());
+        }
         for mount in mounts {
             proot_args.push("-b".to_string());
             proot_args.push(format!(
@@ -340,19 +346,13 @@ impl AndroidProotRuntime {
         proot_args.push(request.command.clone());
         proot_args.extend(request.args.iter().cloned());
 
-        let mut command = match request.network {
-            NetworkPolicy::Allowed => Command::new(&proot),
-            NetworkPolicy::Disabled => {
+        let mut command = match enforced_network_policy_name(request.network) {
+            None => Command::new(&proot),
+            Some(policy) => {
                 let launcher = self.policy_launcher()?;
                 let mut command = Command::new(launcher);
-                command.arg("disabled").arg(&proot);
+                command.arg(policy).arg(&proot);
                 command
-            }
-            NetworkPolicy::LoopbackOnly => {
-                return Err(MobileLinuxError::NetworkPolicyUnavailable(
-                    "Android PRoot cannot enforce LoopbackOnly without sockaddr-aware syscall filtering"
-                        .to_string(),
-                ));
             }
         };
         command
@@ -519,7 +519,8 @@ impl AndroidProotRuntime {
             ensure_process_group_rss_available()?;
         }
         let mounts = self.combined_mounts(&request.mounts)?;
-        let receipt_path = if matches!(request.network, NetworkPolicy::Disabled) {
+        let receipt_policy = enforced_network_policy_name(request.network);
+        let receipt_path = if receipt_policy.is_some() {
             let path = self.state.config.managed_root.join("tmp").join(format!(
                 "network-policy-receipt-{}",
                 self.state.next_id.fetch_add(1, Ordering::Relaxed)
@@ -563,7 +564,13 @@ impl AndroidProotRuntime {
             }
         };
         let network_policy_enforced = if let Some(path) = receipt_path.as_deref() {
-            match wait_for_network_policy_receipt(&mut child, path).await {
+            match wait_for_network_policy_receipt(
+                &mut child,
+                path,
+                receipt_policy.expect("restricted policy has receipt name"),
+            )
+            .await
+            {
                 Ok(()) => true,
                 Err(error) => {
                     if let Some(pid) = child.id() {
@@ -1356,12 +1363,6 @@ fn validate_request(request: &LinuxCommandRequest) -> Result<(), MobileLinuxErro
             "timeout must be greater than zero".to_string(),
         ));
     }
-    if matches!(request.network, NetworkPolicy::LoopbackOnly) {
-        return Err(MobileLinuxError::NetworkPolicyUnavailable(
-            "Android PRoot cannot enforce LoopbackOnly without sockaddr-aware syscall filtering"
-                .to_string(),
-        ));
-    }
     let _ = requested_memory_limit_bytes(request)?;
     validate_guest_path(request.cwd.as_deref().unwrap_or("/root"))?;
     for value in &request.args {
@@ -1525,11 +1526,13 @@ enum ChildWaitOutcome {
 async fn wait_for_network_policy_receipt(
     child: &mut Child,
     path: &Path,
+    expected_policy: &str,
 ) -> Result<(), MobileLinuxError> {
+    let expected = format!("{expected_policy}\n");
     let deadline = tokio::time::Instant::now() + ENFORCEMENT_RECEIPT_TIMEOUT;
     loop {
         match fs::read_to_string(path) {
-            Ok(value) if value == "disabled\n" => return Ok(()),
+            Ok(value) if value == expected => return Ok(()),
             Ok(value) if !value.is_empty() => {
                 return Err(MobileLinuxError::NetworkPolicyUnavailable(format!(
                     "Android policy launcher returned an invalid enforcement receipt: {value:?}"
@@ -1557,6 +1560,14 @@ async fn wait_for_network_policy_receipt(
             ));
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn enforced_network_policy_name(policy: NetworkPolicy) -> Option<&'static str> {
+    match policy {
+        NetworkPolicy::Disabled => Some("disabled"),
+        NetworkPolicy::LoopbackOnly => Some("loopback_only"),
+        NetworkPolicy::Allowed => None,
     }
 }
 
@@ -1984,14 +1995,33 @@ mod tests {
         assert_eq!(tasks[0].status, MobileLinuxTaskStatus::Failed);
     }
 
-    #[test]
-    fn loopback_only_is_rejected_instead_of_claiming_enforcement() {
+    #[tokio::test]
+    async fn loopback_network_fails_before_guest_spawn_without_policy_launcher() {
+        let (_temp, runtime) = runtime();
         let mut request = request();
         request.network = NetworkPolicy::LoopbackOnly;
+        let error = runtime
+            .run(request)
+            .await
+            .expect_err("launcher and PRoot extension are required");
         assert!(matches!(
-            validate_request(&request),
-            Err(MobileLinuxError::NetworkPolicyUnavailable(_))
+            error,
+            MobileLinuxError::NetworkPolicyUnavailable(_)
         ));
+        let tasks = runtime.list_tasks().await.expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, MobileLinuxTaskStatus::Failed);
+    }
+
+    #[test]
+    fn loopback_only_is_admitted_for_sockaddr_aware_proot_enforcement() {
+        let mut request = request();
+        request.network = NetworkPolicy::LoopbackOnly;
+        validate_request(&request).expect("LoopbackOnly is supported");
+        assert_eq!(
+            enforced_network_policy_name(request.network),
+            Some("loopback_only")
+        );
     }
 
     #[tokio::test]

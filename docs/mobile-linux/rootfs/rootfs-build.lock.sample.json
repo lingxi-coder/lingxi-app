@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "alpine": {
-    "version": "3.21.3",
-    "branch": "v3.21",
+    "version": "3.24.1",
+    "branch": "v3.24",
     "repositories": [
-      "https://dl-cdn.alpinelinux.org/alpine/v3.21/main",
-      "https://dl-cdn.alpinelinux.org/alpine/v3.21/community"
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/main",
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
     ]
   },
   "policy": {
@@ -14,10 +14,6 @@
     "apk_disabled": false,
     "interactive_package_install_allowed": true,
     "forbidden_package_manager_paths": [
-      "/usr/bin/pip",
-      "/usr/bin/pip3",
-      "/usr/bin/npm",
-      "/usr/bin/npx",
       "/usr/bin/corepack",
       "/usr/bin/pnpm",
       "/usr/bin/yarn"
@@ -25,15 +21,24 @@
     "fixed_primary_packages": [
       "apk-tools",
       "busybox",
+      "ca-certificates",
       "git",
       "nodejs",
-      "openssh-client",
-      "python3",
-      "ca-certificates"
+      "npm",
+      "openssh-client-default",
+      "py3-pip",
+      "py3-virtualenv",
+      "python3"
     ],
     "fixed_package_versions": {
-      "git": "2.47.3-r0",
-      "nodejs": "22.23.0-r0"
+      "ca-certificates": "20260611-r0",
+      "git": "2.54.0-r0",
+      "nodejs": "24.18.1-r0",
+      "npm": "11.12.1-r0",
+      "openssh-client-default": "10.3_p1-r0",
+      "py3-pip": "26.1.2-r0",
+      "py3-virtualenv": "21.3.3-r0",
+      "python3": "3.14.5-r0"
     }
   },
   "resolved_packages": [
@@ -41,49 +46,70 @@
       "name": "apk-tools",
       "version": "REPLACE_WITH_REAL_VERSION",
       "license": "REPLACE_WITH_REAL_LICENSE",
-      "architecture": "arm64",
+      "architecture": "aarch64",
       "origin": "apk-tools"
     },
     {
       "name": "busybox",
       "version": "REPLACE_WITH_REAL_VERSION",
       "license": "REPLACE_WITH_REAL_LICENSE",
-      "architecture": "arm64",
+      "architecture": "aarch64",
       "origin": "busybox"
     },
     {
       "name": "git",
-      "version": "2.47.3-r0",
+      "version": "2.54.0-r0",
       "license": "REPLACE_WITH_REAL_LICENSE",
-      "architecture": "arm64",
+      "architecture": "aarch64",
       "origin": "git"
     },
     {
       "name": "nodejs",
-      "version": "22.23.0-r0",
+      "version": "24.18.1-r0",
       "license": "MIT",
-      "architecture": "arm64",
+      "architecture": "aarch64",
       "origin": "nodejs"
     },
     {
-      "name": "openssh-client",
-      "version": "REPLACE_WITH_REAL_VERSION",
+      "name": "npm",
+      "version": "11.12.1-r0",
+      "license": "Artistic-2.0",
+      "architecture": "aarch64",
+      "origin": "npm"
+    },
+    {
+      "name": "openssh-client-default",
+      "version": "10.3_p1-r0",
       "license": "REPLACE_WITH_REAL_LICENSE",
-      "architecture": "arm64",
+      "architecture": "aarch64",
       "origin": "openssh"
     },
     {
-      "name": "python3",
-      "version": "REPLACE_WITH_REAL_VERSION",
+      "name": "py3-pip",
+      "version": "26.1.2-r0",
       "license": "REPLACE_WITH_REAL_LICENSE",
-      "architecture": "arm64",
+      "architecture": "aarch64",
+      "origin": "py3-pip"
+    },
+    {
+      "name": "py3-virtualenv",
+      "version": "21.3.3-r0",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "py3-virtualenv"
+    },
+    {
+      "name": "python3",
+      "version": "3.14.5-r0",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
       "origin": "python3"
     },
     {
       "name": "ca-certificates",
-      "version": "REPLACE_WITH_REAL_VERSION",
+      "version": "20260611-r0",
       "license": "REPLACE_WITH_REAL_LICENSE",
-      "architecture": "arm64",
+      "architecture": "aarch64",
       "origin": "ca-certificates"
     }
   ]

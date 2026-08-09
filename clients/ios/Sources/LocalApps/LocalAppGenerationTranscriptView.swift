@@ -29,6 +29,11 @@ struct LocalAppGenerationTranscriptView: View {
     /// Whether the composer accepts input right now. Owned by the caller
     /// because "may I revise this app" is a workflow question, not a view one.
     let acceptsInput: Bool
+    /// What the user's message means in THIS state — a revision while the
+    /// generation runs, a retry carrying their words once it has failed.
+    /// Owned by the caller for the same reason `acceptsInput` is: the view
+    /// renders a conversation, it does not decide what talking does.
+    let onSubmit: (String) async -> Bool
 
     @State private var draft = ""
     @State private var isSubmitting = false
@@ -128,7 +133,7 @@ struct LocalAppGenerationTranscriptView: View {
         let feedback = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !feedback.isEmpty else { return }
         isSubmitting = true
-        let succeeded = await store.requestRevision(appID: appID, feedback: feedback)
+        let succeeded = await onSubmit(feedback)
         isSubmitting = false
         if succeeded {
             // A new run's output must not read as a continuation of the last

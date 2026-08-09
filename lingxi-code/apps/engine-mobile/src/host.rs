@@ -3506,11 +3506,11 @@ impl MobileEngineHandle {
         .await;
     }
 
-    async fn handle_retry_app_generation(&self, app_id: String) {
+    async fn handle_retry_app_generation(&self, app_id: String, prompt: Option<String>) {
         let Some(_service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        if let Err(error) = self.app_generation.retry_app(&app_id).await {
+        if let Err(error) = self.app_generation.retry_app(&app_id, prompt).await {
             self.emit_app_failure(Some(app_id), &error).await;
         }
     }
@@ -4232,8 +4232,8 @@ impl MobileEngineHandle {
                 self.handle_request_app_revision(app_id, &prompt).await;
                 Ok(())
             }
-            ClientCommand::RetryAppGeneration { app_id } => {
-                self.handle_retry_app_generation(app_id).await;
+            ClientCommand::RetryAppGeneration { app_id, prompt } => {
+                self.handle_retry_app_generation(app_id, prompt).await;
                 Ok(())
             }
             ClientCommand::ExecuteAppBridgeRequest { request } => {

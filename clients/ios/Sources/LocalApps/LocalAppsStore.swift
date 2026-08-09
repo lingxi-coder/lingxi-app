@@ -792,9 +792,18 @@ final class LocalAppsStore {
         #endif
     }
 
-    func retryGeneration(appID: String) async {
+    /// Retry a failed generation, optionally carrying the user's own words.
+    ///
+    /// `prompt` reaches the generator as the revision prompt, which is what
+    /// lets a failure be talked out of rather than only re-run. `nil` replays
+    /// the job unchanged and, deliberately, leaves any prompt the job already
+    /// carried in place.
+    @discardableResult
+    func retryGeneration(appID: String, prompt: String? = nil) async -> Bool {
         #if canImport(engine_mobileFFI)
-            _ = await send(.retryAppGeneration(appId: appID))
+            return await send(.retryAppGeneration(appId: appID, prompt: prompt))
+        #else
+            return false
         #endif
     }
 

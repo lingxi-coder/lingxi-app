@@ -717,7 +717,10 @@ class LocalAppsViewModel(
         draftEditInFlight == null && draftEditQueue.none { it.appId == appId }
 
     private fun retryGeneration(appId: String) {
-        submit(ClientCommand.RetryAppGeneration(appId))
+        // `prompt = null` replays the job unchanged. Android has no failure
+        // composer yet (iOS grew one so a failed generation can be talked out
+        // of rather than only re-run); when it does, the user's words go here.
+        submit(ClientCommand.RetryAppGeneration(appId, null))
         _uiState.update { it.copy(destination = LocalAppsDestination.Preview(appId)) }
     }
 

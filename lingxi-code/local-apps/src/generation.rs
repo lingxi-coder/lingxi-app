@@ -387,7 +387,19 @@ impl AppGenerationCoordinator {
     }
 
     /// Explicitly retry the newest failed/interrupted job for an app.
-    pub async fn retry_app(&self, app_id: &str) -> Result<GenerationJob, AppError> {
+    /// Re-queue an app's failed generation job.
+    ///
+    /// `prompt` is the user's own words, sent from the failure screen. It
+    /// replaces the job's prompt so the next attempt is a CONVERSATION rather
+    /// than a blind replay: it reaches the model as
+    /// `SourceRequest::revision_prompt`, the same channel a revision uses.
+    /// `None` retries unchanged — a plain "try again" must not erase the
+    /// prompt a revision job already carried.
+    pub async fn retry_app(
+        &self,
+        app_id: &str,
+        prompt: Option<String>,
+    ) -> Result<GenerationJob, AppError> {
         let service = self.attached_service()?;
         let candidate = self
             .jobs_for_app(app_id)
@@ -420,6 +432,9 @@ impl AppGenerationCoordinator {
                 job.attempt = job.attempt.saturating_add(1);
                 job.last_error = None;
                 job.preview_url = None;
+                if let Some(prompt) = prompt.clone() {
+                    job.prompt = Some(prompt);
+                }
                 job.updated_at_ms = now;
             })
             .await?;
@@ -1197,6 +1212,124 @@ mod tests {
     /// Ready app and no job in the census, holding the guard must still refuse
     /// — before `AppCheckpointStore::restore` can hard-reset the tree (a bogus
     /// checkpoint id would otherwise fail with NotFound, not this error).
+    /// Everything a `RecordingExecutor` does, except source generation, which
+    /// fails the way a model that will not produce usable files does.
+    struct FailsSourceGeneration(RecordingExecutor);
+
+    #[async_trait]
+    impl AppGenerationExecutor for FailsSourceGeneration {
+        async fn prepare_scaffold(
+            &self,
+            request: &GenerationRequest,
+            layout: &AppLayout,
+        ) -> Result<(), AppError> {
+            self.0.prepare_scaffold(request, layout).await
+        }
+
+        async fn generate_source(
+            &self,
+            _: &GenerationRequest,
+            _: &AppLayout,
+        ) -> Result<(), AppError> {
+            Err(AppError::LlmOutputRejected(
+                "`lib/image-utils.js` has no contents".into(),
+            ))
+        }
+
+        async fn source_policy(
+            &self,
+            request: &GenerationRequest,
+            layout: &AppLayout,
+        ) -> Result<WorkspaceSourcePolicy, AppError> {
+            self.0.source_policy(request, layout).await
+        }
+
+        async fn validate_source(
+            &self,
+            request: &GenerationRequest,
+            layout: &AppLayout,
+        ) -> Result<(), AppError> {
+            self.0.validate_source(request, layout).await
+        }
+
+        async fn build(
+            &self,
+            request: &GenerationRequest,
+            layout: &AppLayout,
+        ) -> Result<(), AppError> {
+            self.0.build(request, layout).await
+        }
+
+        async fn start_preview(
+            &self,
+            request: &GenerationRequest,
+            layout: &AppLayout,
+        ) -> Result<Option<String>, AppError> {
+            self.0.start_preview(request, layout).await
+        }
+    }
+
+    /// A retry carries the user's own words into the next attempt.
+    ///
+    /// This is what makes a failed generation a conversation rather than a
+    /// dead end: the words land on the job as `prompt`, which the worker hands
+    /// the generator as `SourceRequest::revision_prompt` — the same channel a
+    /// revision uses. A retry with no words must leave any prompt the job
+    /// already carried alone, or a plain "try again" on a revision job would
+    /// silently discard what the user asked for the first time.
+    #[tokio::test]
+    async fn a_retry_carries_the_users_words_and_a_wordless_one_preserves_them() {
+        let root = tempfile::tempdir().unwrap();
+        let clock = Arc::new(FixedClock::new(1_000));
+        let executor = Arc::new(FailsSourceGeneration(RecordingExecutor::default()));
+        let coordinator =
+            AppGenerationCoordinator::new(root.path(), clock.clone(), executor.clone());
+        let service = Arc::new(
+            AppService::load(
+                root.path(),
+                clock,
+                coordinator.clone(),
+                Arc::new(NoopAppEventObserver),
+            )
+            .await
+            .unwrap(),
+        );
+        coordinator.attach_service(service.clone()).await.unwrap();
+        let app = service
+            .create_app(Some("Tasks"), "a test app", None)
+            .await
+            .unwrap();
+        let app = advance_to_collecting_spec(&service, &app.id).await;
+        let gate = service.open_designer(&app.id).await.unwrap();
+        stamp_fresh_plan(&service, &app.id).await;
+        service
+            .confirm_design(&app.id, &gate.interaction_id, 0)
+            .await
+            .unwrap();
+        wait_for_status(&coordinator, &app.id, GenerationJobStatus::Failed).await;
+
+        let retried = coordinator
+            .retry_app(&app.id, Some("配色再淡一点".into()))
+            .await
+            .expect("a failed job is retryable");
+        assert_eq!(
+            retried.prompt.as_deref(),
+            Some("配色再淡一点"),
+            "the user's words must reach the job the worker will run"
+        );
+
+        wait_for_status(&coordinator, &app.id, GenerationJobStatus::Failed).await;
+        let wordless = coordinator
+            .retry_app(&app.id, None)
+            .await
+            .expect("a wordless retry is still a retry");
+        assert_eq!(
+            wordless.prompt.as_deref(),
+            Some("配色再淡一点"),
+            "a retry with no words must not erase the words already on the job"
+        );
+    }
+
     #[tokio::test]
     async fn restore_is_refused_while_the_workspace_guard_is_held() {
         let root = tempfile::tempdir().unwrap();

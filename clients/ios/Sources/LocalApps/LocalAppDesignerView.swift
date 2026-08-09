@@ -288,7 +288,24 @@ struct LocalAppDesignerView: View {
                 store: store,
                 appID: appID,
                 workflowLabel: workflow.label,
-                acceptsInput: LocalAppDetailView.showsRevisionInput(for: workflow)
+                acceptsInput: LocalAppDetailView.showsRevisionInput(for: workflow),
+                onSubmit: { await store.requestRevision(appID: appID, feedback: $0) }
+            )
+        case .generationFailed, .validationFailed:
+            // A failure is not a dead end. The same conversation view stays on
+            // screen — the model's last words are still in the transcript, and
+            // the composer is live — but a message now means "retry, and here
+            // is what to do differently" rather than a revision: from a failed
+            // state the engine accepts `retry_app_generation`, and it carries
+            // the user's words through to the generator as the revision
+            // prompt. Before this the only recourse was a wordless retry that
+            // replayed the identical request and failed the identical way.
+            LocalAppGenerationTranscriptView(
+                store: store,
+                appID: appID,
+                workflowLabel: workflow.label,
+                acceptsInput: true,
+                onSubmit: { await store.retryGeneration(appID: appID, prompt: $0) }
             )
         case .awaitingPreviewConfirmation:
             // The preview confirmation gate just armed (`appPreviewReady`,

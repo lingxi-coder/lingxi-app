@@ -503,6 +503,14 @@ pub enum ClientCommand {
     RetryAppGeneration {
         /// App whose persisted failed job should be retried.
         app_id: String,
+        /// The user's own words for this retry, from the failure screen.
+        ///
+        /// `None` replays the job unchanged. `Some` reaches the generator as
+        /// the revision prompt, which is what makes a failed generation
+        /// something the user can talk their way out of rather than only
+        /// re-run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
 
     /// Execute one data-only request from the versioned local-app bridge.

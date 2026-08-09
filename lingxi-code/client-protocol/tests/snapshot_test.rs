@@ -951,6 +951,10 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/retry_app_generation.json",
             ClientCommand::RetryAppGeneration {
                 app_id: "habits-1a2b".to_string(),
+                // `None` on purpose: `skip_serializing_if` means the golden
+                // bytes are unchanged by this field's addition, which is the
+                // compatibility claim this snapshot exists to hold.
+                prompt: None,
             },
         ),
         (

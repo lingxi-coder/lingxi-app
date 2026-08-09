@@ -487,6 +487,9 @@ fn extended_local_app_commands_round_trip() {
         },
         ClientCommand::RetryAppGeneration {
             app_id: "habits-1a2b".to_string(),
+            // Carried so the round trip proves the user's retry words survive
+            // the wire, not merely that the command still parses without them.
+            prompt: Some("配色再淡一点".to_string()),
         },
         ClientCommand::ExecuteAppBridgeRequest {
             request: AppBridgeRequestDto {

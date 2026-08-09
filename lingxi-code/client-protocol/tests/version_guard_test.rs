@@ -728,6 +728,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::RetryAppGeneration", "retry_app_generation");
     put("ClientCommand::RetryAppGeneration.app_id", "String");
+    put("ClientCommand::RetryAppGeneration.prompt", "Option<String>");
 
     put(
         "ClientCommand::ExecuteAppBridgeRequest",

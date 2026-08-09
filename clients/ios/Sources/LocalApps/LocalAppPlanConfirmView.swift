@@ -144,6 +144,13 @@ struct LocalAppPlanConfirmView: View {
         case .uiControl: String(localized: "local_apps_plan_confirm_capability_ui_control")
         case .networkDomain: String(localized: "local_apps_plan_confirm_capability_network_domain")
         case .restoreCheckpoint: String(localized: "local_apps_plan_confirm_capability_restore_checkpoint")
+        case .camera: String(localized: "local_apps_plan_confirm_capability_camera")
+        case .photoLibrary: String(localized: "local_apps_plan_confirm_capability_photo_library")
+        case .microphone: String(localized: "local_apps_plan_confirm_capability_microphone")
+        case .location: String(localized: "local_apps_plan_confirm_capability_location")
+        case .notifications: String(localized: "local_apps_plan_confirm_capability_notifications")
+        case .llm: String(localized: "local_apps_plan_confirm_capability_llm")
+        case .agentNotify: String(localized: "local_apps_plan_confirm_capability_agent_notify")
         }
     }
 

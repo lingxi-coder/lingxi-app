@@ -229,7 +229,13 @@ data class LocalAppCollectionSchema(
  * (once/session/always/deny), which is the user's ANSWER to a capability
  * prompt, not the capability itself.
  */
-enum class LocalAppCapabilityKind { DataMutation, UiControl, NetworkDomain, RestoreCheckpoint }
+enum class LocalAppCapabilityKind {
+    DataMutation, UiControl, NetworkDomain, RestoreCheckpoint,
+    // iOS-first: the engine gates these, and Android keeps compiling and
+    // rendering them, but its page bridge exposes no device/llm/agent
+    // namespace yet — an app calling one there gets "bridge unavailable".
+    Camera, PhotoLibrary, Microphone, Location, Notifications, Llm, AgentNotify,
+}
 
 /**
  * The LLM-derived plan awaiting confirmation (local-apps#questionnaire, Task
@@ -442,4 +448,11 @@ internal fun LocalAppCapabilityKind.readable(strings: LocalAppsStrings = Default
         strings.resolve(R.string.local_apps_plan_confirm_capability_network_domain, "网络访问")
     LocalAppCapabilityKind.RestoreCheckpoint ->
         strings.resolve(R.string.local_apps_plan_confirm_capability_restore_checkpoint, "恢复检查点")
+    LocalAppCapabilityKind.Camera -> "相机"
+    LocalAppCapabilityKind.PhotoLibrary -> "相册"
+    LocalAppCapabilityKind.Microphone -> "麦克风"
+    LocalAppCapabilityKind.Location -> "位置"
+    LocalAppCapabilityKind.Notifications -> "通知"
+    LocalAppCapabilityKind.Llm -> "AI 模型"
+    LocalAppCapabilityKind.AgentNotify -> "发送事件给助手"
 }

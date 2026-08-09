@@ -197,6 +197,13 @@ enum LocalAppCapabilityKind: Hashable, Sendable {
     case uiControl
     case networkDomain
     case restoreCheckpoint
+    case camera
+    case photoLibrary
+    case microphone
+    case location
+    case notifications
+    case llm
+    case agentNotify
 }
 
 /// The LLM-derived plan awaiting confirmation (local-apps#questionnaire, Task
@@ -341,6 +348,13 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case uiControl
         case networkDomain
         case restoreCheckpoint
+        case camera
+        case photoLibrary
+        case microphone
+        case location
+        case notifications
+        case llm
+        case agentNotify
         case uiAction(String)
     }
 
@@ -356,6 +370,13 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case .uiControl: String(localized: "local_apps_permission_ui_control")
         case .networkDomain: String(localized: "local_apps_permission_network")
         case .restoreCheckpoint: String(localized: "local_apps_permission_restore")
+        case .camera: String(localized: "local_apps_permission_camera")
+        case .photoLibrary: String(localized: "local_apps_permission_photo_library")
+        case .microphone: String(localized: "local_apps_permission_microphone")
+        case .location: String(localized: "local_apps_permission_location")
+        case .notifications: String(localized: "local_apps_permission_notifications")
+        case .llm: String(localized: "local_apps_permission_llm")
+        case .agentNotify: String(localized: "local_apps_permission_agent_notify")
         case let .uiAction(action): String(localized: "local_apps_permission_ui_action \(action)")
         }
     }

@@ -27,7 +27,7 @@ use traits::{LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, N
 const BUILD_TIMEOUT_MS: u64 = 180_000;
 const LOCAL_APP_BUILD_GUEST_ROOT: &str = "/var/lingxi/local-app-build";
 
-const LOCKED_FILES: &[(&str, &[u8])] = &[
+pub(crate) const LOCKED_FILES: &[(&str, &[u8])] = &[
     (
         "package.json",
         include_bytes!(concat!(
@@ -47,6 +47,19 @@ const LOCKED_FILES: &[(&str, &[u8])] = &[
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../local-apps/templates/next-static-v1/next.config.mjs"
+        )),
+    ),
+    // LOCKED rather than a one-time scaffold file: this is the app's only
+    // door to every host capability, so a revision must be able to pick up
+    // new helpers. `prepare_scaffold` overwrites LOCKED files on every job
+    // kind, which is exactly the upgrade path an existing app needs — and
+    // its hash is then enforced, so a model cannot quietly redefine the
+    // bridge under the app's own feet.
+    (
+        "lib/lingxi-bridge.js",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../local-apps/templates/next-static-v1/lib/lingxi-bridge.js"
         )),
     ),
 ];
@@ -78,13 +91,6 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../local-apps/templates/next-static-v1/components/AppShell.jsx"
-        )),
-    ),
-    (
-        "lib/lingxi-bridge.js",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/lib/lingxi-bridge.js"
         )),
     ),
     ("public/.gitkeep", b""),

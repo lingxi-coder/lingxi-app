@@ -87,6 +87,54 @@ Alpine/PRoot 沙箱里运行——没有人会在落盘前手工改你的输出�
   这个应用访问外部服务的唯一合法方式（不是 `fetch`）。
 - `requestRuntimeStatus(request)`——查询宿主运行时状态。
 
+设备能力（每个都需要方案里声明过对应 capability，第一次调用时用户会看
+到一次授权弹窗）：
+
+- `capturePhoto({ maxDimension, quality })` / `pickImage(...)`——拍照 /
+  选图。返回 `{ mimeType, base64, mediaId, width, height }`。
+- `startRecording({ maxDurationMs })` / `stopRecording()`——录音，必须
+  成对使用。`stopRecording()` 返回 `{ mimeType, base64, mediaId,
+  durationMs }`。如果拿到 `error.code === "audio_session_busy"`，说明
+  设备的语音功能正被占用，提示用户稍后再试即可。
+- `getCurrentLocation()`——一次性定位，返回 `{ latitude, longitude,
+  accuracyM, timestampMs }`。
+- `transcribeSpeech({ language })`——听一句话并转成文字，返回
+  `{ text }`。**这是把语音送进模型的唯一方式**：音频本身不能发给模型。
+- `postNotification({ title, body, tag })`——发一条本地通知。
+- `mediaObjectURL(media)`——把上面任何一个返回的 `{ base64, mimeType }`
+  变成可直接放进 `<img src>` / `<audio src>` 的地址。元素销毁时记得
+  `URL.revokeObjectURL`。
+
+AI 与助手：
+
+- `requestLlmChat({ system, messages, maxTokens, temperature })`——调用
+  用户配置的 AI 模型，需要 `llm` 能力。返回 `{ text, stopReason,
+  truncated }`。
+  - **模型由用户选，应用不能指定**；请求里不要试图传模型名。
+  - **这花的是用户自己的钱**：由用户的动作触发，不要轮询、不要在页面
+    加载时自动调用。
+  - 回答是一次性返回的（没有流式），所以必须渲染等待状态。
+  - 要让模型看图，用刚才那张图的 `mediaId`，不要把 base64 塞进请求：
+    ```js
+    const shot = await capturePhoto();
+    const { text } = await requestLlmChat({
+      messages: [{ role: "user", content: [
+        { type: "text", text: "这张图里是什么？" },
+        { type: "image", mediaId: shot.mediaId },
+      ] }],
+    });
+    ```
+  - **节制**：需要基于应用数据回答时，先用 `queryCollection` 取出真正
+    相关的那几条再摘要，绝不要把整个集合塞进 prompt。
+  - 同一时刻只允许一个调用在飞，重复发会拿到 `error.code === "llm_busy"`。
+- `postAgentEvent({ topic, body })`——把事件告诉用户的对话助手，需要
+  `agent_notify` 能力。不是实时的，助手下次查看时才会读到；只发结构化
+  的小事实（如 `{ topic: "timer.done", body: { minutes: 25 } }`），不要
+  发大段数据。
+
+`lib/lingxi-bridge.js` 由宿主提供并锁定，**不要写入或改写它**——对它的
+写入会导致整批代码被拒收。
+
 如果 `window.lingxi.v1` 还不可用（例如宿主尚未连接),要在界面上给出
 明确、友好的等待状态,不要让界面看起来像卡死或报错。
 

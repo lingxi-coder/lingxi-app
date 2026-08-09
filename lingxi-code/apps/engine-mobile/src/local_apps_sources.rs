@@ -57,9 +57,20 @@ pub fn screen_writes(writes: &[FileWrite]) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Template files the generator owns outright. They are LOCKED (rewritten and
+/// hash-checked on every job), so a model write here is refused BEFORE it
+/// lands: letting it through would burn a repair attempt on a validator
+/// rejection the screen can see coming.
+pub(crate) const LOCKED_TEMPLATE_PATHS: &[&str] = &["lib/lingxi-bridge.js"];
+
 fn screen_path(path: &str) -> Result<(), AppError> {
     if path.is_empty() {
         return Err(reject("empty write path"));
+    }
+    if LOCKED_TEMPLATE_PATHS.contains(&path) {
+        return Err(reject(format!(
+            "`{path}` is provided by the host and cannot be written by the app"
+        )));
     }
     // 反斜杠检查独立于下面的 `/` 分段判断，且不依赖顺序：`contains('\\')`
     // 扫描的是完整原始字符串，不受 `split('/')` 影响。它存在的理由不是
@@ -115,6 +126,38 @@ fn screen_path(path: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_to_the_host_owned_bridge_helper_is_refused() {
+        let error = screen_writes(&[write("lib/lingxi-bridge.js")])
+            .expect_err("the host owns this file");
+        assert!(
+            error.to_string().contains("provided by the host"),
+            "{error}"
+        );
+        // A sibling under the same root stays writable — the guard is one
+        // path, not a ban on `lib/`.
+        screen_writes(&[write("lib/format.js")]).expect("other lib files are the app's own");
+    }
+
+    /// The screen and the scaffold must agree on which files the host owns.
+    /// If a path is added to one list and not the other, either the model
+    /// burns a repair attempt on a hash mismatch (screened too late) or a
+    /// host file is silently unwritable for no reason (screened too early).
+    #[test]
+    fn the_screened_paths_are_exactly_the_locked_template_files_under_a_writable_root() {
+        let locked: Vec<&str> = crate::local_apps_generation::LOCKED_FILES
+            .iter()
+            .map(|(path, _)| *path)
+            .filter(|path| path.contains('/'))
+            .collect();
+        assert_eq!(
+            LOCKED_TEMPLATE_PATHS, locked,
+            "LOCKED_TEMPLATE_PATHS must track LOCKED_FILES' entries that live under a \
+             writable root (root-level files like package.json are already rejected by \
+             the writable-root check)"
+        );
+    }
 
     fn write(path: &str) -> FileWrite {
         FileWrite { path: path.into(), contents: "export default function P(){return null}".into() }

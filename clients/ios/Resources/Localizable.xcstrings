@@ -19178,6 +19178,74 @@
         }
       }
     },
+    "local_apps_permission_agent_notify": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用向对话助手发送事件？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用向對話助手發送事件？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to send events to your assistant?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがアシスタントにイベントを送ることを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 어시스턴트에 이벤트를 보내도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_camera": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用使用相机拍照？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用使用相機拍照？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to take a photo?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがカメラで撮影することを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 카메라로 촬영하도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
     "local_apps_permission_data_mutation": {
       "localizations": {
         "zh-Hans": {
@@ -19242,6 +19310,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱 데이터 수정을 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_llm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用调用 AI 模型？（会消耗你的模型用量）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用呼叫 AI 模型？（會消耗你的模型用量）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to call the AI model? (uses your model quota)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが AI モデルを呼び出すことを許可しますか？（あなたの利用量を消費します）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 AI 모델을 호출하도록 허용하시겠습니까? (사용량이 소모됩니다)"
+          }
+        }
+      }
+    },
+    "local_apps_permission_location": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用获取一次当前位置？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用取得一次目前位置？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to read your current location once?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが現在地を 1 回取得することを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 현재 위치를 한 번 가져오도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_microphone": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用使用麦克风录音？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用使用麥克風錄音？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to record with the microphone?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがマイクで録音することを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 마이크로 녹음하도록 허용하시겠습니까?"
           }
         }
       }
@@ -19412,6 +19582,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱의 네트워크 연결을 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_notifications": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用发送本地通知？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用發送本機通知？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to post local notifications?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがローカル通知を送ることを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 로컬 알림을 보내도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_photo_library": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用从相册选择图片？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用從相簿選擇圖片？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to pick an image from your photo library?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが写真ライブラリから画像を選ぶことを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 사진 보관함에서 이미지를 선택하도록 허용하시겠습니까?"
           }
         }
       }
@@ -19824,6 +20062,74 @@
         }
       }
     },
+    "local_apps_plan_confirm_capability_agent_notify": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "向对话助手发送事件"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "向對話助手發送事件"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send events to your assistant"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アシスタントにイベントを送信"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "어시스턴트에 이벤트 보내기"
+          }
+        }
+      }
+    },
+    "local_apps_plan_confirm_capability_camera": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用相机拍照"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用相機拍照"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Take photos with the camera"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "カメラで撮影"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "카메라로 촬영"
+          }
+        }
+      }
+    },
     "local_apps_plan_confirm_capability_data_mutation": {
       "localizations": {
         "zh-Hans": {
@@ -19858,6 +20164,108 @@
         }
       }
     },
+    "local_apps_plan_confirm_capability_llm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "调用 AI 模型（消耗你的模型用量）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "呼叫 AI 模型（消耗你的模型用量）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Call the AI model (uses your model quota)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI モデルを呼び出す（利用量を消費）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 모델 호출 (사용량 소모)"
+          }
+        }
+      }
+    },
+    "local_apps_plan_confirm_capability_location": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "获取当前位置"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取得目前位置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read your current location"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在地を取得"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 위치 가져오기"
+          }
+        }
+      }
+    },
+    "local_apps_plan_confirm_capability_microphone": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用麦克风录音或语音输入"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用麥克風錄音或語音輸入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Record audio or take voice input"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "マイクで録音・音声入力"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "마이크로 녹음 또는 음성 입력"
+          }
+        }
+      }
+    },
     "local_apps_plan_confirm_capability_network_domain": {
       "localizations": {
         "zh-Hans": {
@@ -19888,6 +20296,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "네트워크 접근"
+          }
+        }
+      }
+    },
+    "local_apps_plan_confirm_capability_notifications": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送本地通知"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "發送本機通知"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Post local notifications"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカル通知を送信"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로컬 알림 보내기"
+          }
+        }
+      }
+    },
+    "local_apps_plan_confirm_capability_photo_library": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从相册选择图片"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "從相簿選擇圖片"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pick images from the photo library"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写真ライブラリから画像を選択"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사진 보관함에서 이미지 선택"
           }
         }
       }

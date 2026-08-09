@@ -454,6 +454,9 @@ pub fn build_mobile_engine(
             notifications: None,
             clipboard: None,
             secure_storage: impls.secure_storage,
+            // This lower-level entry point takes no location impl, like the
+            // stt/tts/notification/clipboard slots above it.
+            location: None,
             mobile_linux: ios_mobile_linux_runtime(impls.mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
             stable_workspace_id: Some(stable_workspace_id),

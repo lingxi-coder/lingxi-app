@@ -47,7 +47,8 @@ final class LocalAppWebViewRegistry {
         appID: String,
         requestID: String,
         resultJSON: String?,
-        error: String?
+        error: String?,
+        code: String? = nil
     ) {
         guard let controller = controllers[appID]?.value else { return }
         let result = resultJSON.flatMap(Self.decodeJSON)
@@ -55,7 +56,8 @@ final class LocalAppWebViewRegistry {
         controller.broker.resolve(
             requestID: requestID,
             result: result,
-            error: invalidResult ? String(localized: "local_apps_error_bridge_invalid_json") : error
+            error: invalidResult ? String(localized: "local_apps_error_bridge_invalid_json") : error,
+            code: code
         )
     }
 
@@ -118,12 +120,13 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
         )
     }
 
-    func resolve(requestID: String, result: Any?, error: String?) {
+    func resolve(requestID: String, result: Any?, error: String?, code: String? = nil) {
         guard let webView else { return }
         let envelope: [String: Any] = [
             "requestId": requestID,
             "result": result ?? NSNull(),
             "error": error ?? NSNull(),
+            "code": code ?? NSNull(),
         ]
         guard JSONSerialization.isValidJSONObject(envelope),
               let data = try? JSONSerialization.data(withJSONObject: envelope),
@@ -514,7 +517,9 @@ private struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }
     }
 
-    private static let messageHandlerNames = ["lingxiData", "lingxiNetwork", "lingxiRuntime"]
+    private static let messageHandlerNames = [
+        "lingxiData", "lingxiNetwork", "lingxiRuntime", "lingxiDevice", "lingxiLlm", "lingxiAgent",
+    ]
 
     private static let bridgeSource = #"""
     (() => {
@@ -524,7 +529,7 @@ private struct LocalAppWebViewRepresentable: UIViewRepresentable {
         const meta = document.createElement('meta');
         meta.httpEquiv = 'Content-Security-Policy';
         meta.dataset.lingxiCsp = 'v1';
-        meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+        meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
         document.head.prepend(meta);
         return true;
       };
@@ -569,12 +574,36 @@ private struct LocalAppWebViewRepresentable: UIViewRepresentable {
         runtime: Object.freeze({
           info: () => request('Runtime', 'info', {}),
         }),
+        device: Object.freeze({
+          capturePhoto: (payload = {}) => request('Device', 'capturePhoto', payload),
+          pickImage: (payload = {}) => request('Device', 'pickImage', payload),
+          recordAudioStart: (payload = {}) => request('Device', 'recordAudioStart', payload),
+          recordAudioStop: () => request('Device', 'recordAudioStop', {}),
+          getLocation: () => request('Device', 'getLocation', {}),
+          transcribeSpeech: (payload = {}) => request('Device', 'transcribeSpeech', payload),
+          postNotification: payload => request('Device', 'postNotification', payload),
+        }),
+        llm: Object.freeze({
+          chat: payload => request('Llm', 'chat', payload),
+        }),
+        agent: Object.freeze({
+          post: payload => request('Agent', 'post', payload),
+        }),
       });
       const resolveNative = envelope => {
         const entry = pending.get(envelope.requestId);
         if (!entry) return;
         pending.delete(envelope.requestId);
-        envelope.error ? entry.reject(new Error(envelope.error)) : entry.resolve(envelope.result);
+        if (envelope.error) {
+          const error = new Error(envelope.error);
+          // Stable machine-readable reason (capability_not_declared,
+          // audio_session_busy, llm_busy, …) so page code can branch
+          // without matching on prose.
+          if (envelope.code) error.code = envelope.code;
+          entry.reject(error);
+        } else {
+          entry.resolve(envelope.result);
+        }
       };
       Object.defineProperty(window, 'lingxi', {
         value: Object.freeze({ v1: api, __resolve: resolveNative }),

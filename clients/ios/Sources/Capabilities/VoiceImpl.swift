@@ -26,6 +26,12 @@ import Foundation
             let lease: VoiceAudioSessionCoordinator.Lease
             do {
                 lease = try await VoiceAudioSessionCoordinator.shared.acquire(.recording)
+            } catch is VoiceAudioSessionCoordinator.CoordinationError {
+                // Contention, not failure: FlowMode (or a hold-to-talk
+                // capture) owns the session. Typed so a local app can say
+                // "try again in a moment" rather than surfacing an opaque
+                // error the user cannot act on.
+                throw VoiceFfiError.Busy
             } catch {
                 throw VoiceFfiError.Other(message: "audio session: \(error.localizedDescription)")
             }

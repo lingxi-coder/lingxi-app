@@ -1099,6 +1099,11 @@ class LocalAppsViewModel(
                     ),
                 )
             }
+            // iOS-first: Android renders neither the "calling AI" indicator
+            // nor the mailbox badge yet, but the wire enum is exhaustive here
+            // and silence would be a compile error, not a no-op.
+            is AppEventDto.AppLlmActivityChanged -> Unit
+            is AppEventDto.AppAgentEventPosted -> Unit
         }
     }
 
@@ -1567,6 +1572,13 @@ private fun AppCapabilityKindDto.toUiCapabilityKind(): LocalAppCapabilityKind = 
     AppCapabilityKindDto.UI_CONTROL -> LocalAppCapabilityKind.UiControl
     AppCapabilityKindDto.NETWORK_DOMAIN -> LocalAppCapabilityKind.NetworkDomain
     AppCapabilityKindDto.RESTORE_CHECKPOINT -> LocalAppCapabilityKind.RestoreCheckpoint
+    AppCapabilityKindDto.CAMERA -> LocalAppCapabilityKind.Camera
+    AppCapabilityKindDto.PHOTO_LIBRARY -> LocalAppCapabilityKind.PhotoLibrary
+    AppCapabilityKindDto.MICROPHONE -> LocalAppCapabilityKind.Microphone
+    AppCapabilityKindDto.LOCATION -> LocalAppCapabilityKind.Location
+    AppCapabilityKindDto.NOTIFICATIONS -> LocalAppCapabilityKind.Notifications
+    AppCapabilityKindDto.LLM -> LocalAppCapabilityKind.Llm
+    AppCapabilityKindDto.AGENT_NOTIFY -> LocalAppCapabilityKind.AgentNotify
 }
 
 private fun AppDesignFieldTypeDto.toUiFieldKind(): LocalAppFieldKind = when (this) {
@@ -1610,6 +1622,13 @@ private fun AppCapabilityKindDto.authorizationTitle(strings: LocalAppsStrings): 
         strings.resolve(R.string.local_apps_permission_network_short, "允许应用联网？")
     AppCapabilityKindDto.RESTORE_CHECKPOINT ->
         strings.resolve(R.string.local_apps_permission_restore, "允许恢复代码检查点？")
+    AppCapabilityKindDto.CAMERA -> "允许应用使用相机拍照？"
+    AppCapabilityKindDto.PHOTO_LIBRARY -> "允许应用从相册选择图片？"
+    AppCapabilityKindDto.MICROPHONE -> "允许应用使用麦克风录音？"
+    AppCapabilityKindDto.LOCATION -> "允许应用获取当前位置？"
+    AppCapabilityKindDto.NOTIFICATIONS -> "允许应用发送本地通知？"
+    AppCapabilityKindDto.LLM -> "允许应用调用 AI 模型？（会消耗你的模型用量）"
+    AppCapabilityKindDto.AGENT_NOTIFY -> "允许应用向对话助手发送事件？"
 }
 
 private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationDecisionDto = when (this) {

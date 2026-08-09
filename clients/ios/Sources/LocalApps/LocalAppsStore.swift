@@ -64,6 +64,12 @@ final class LocalAppsStore {
     /// model said"). Folding the live chunks into `generationProgress` would
     /// have each chunk erase the stage the UI needs to keep showing.
     private(set) var generationTranscript: [String: [LocalAppTranscriptBlock]] = [:]
+    /// Apps with an in-flight `llm.chat`. Drives the "calling AI" indicator;
+    /// the engine emits this in on/off pairs.
+    private(set) var llmActiveAppIDs: Set<String> = []
+    /// Unread mailbox events per app, for a badge. The event carries no body
+    /// on purpose — the payload is read by the assistant through MCP.
+    private(set) var unreadAgentEvents: [String: Int] = [:]
 
     /// Append one live chunk, growing the trailing block when the kind is
     /// unchanged so the transcript reads as prose rather than as packets.
@@ -816,6 +822,15 @@ final class LocalAppsStore {
             case ("data", "mutate"): operation = .mutateData
             case ("network", "fetch"): operation = .networkRequest
             case ("runtime", "info"): operation = .runtimeStatus
+            case ("device", "capturePhoto"): operation = .capturePhoto
+            case ("device", "pickImage"): operation = .pickImage
+            case ("device", "recordAudioStart"): operation = .recordAudioStart
+            case ("device", "recordAudioStop"): operation = .recordAudioStop
+            case ("device", "getLocation"): operation = .getLocation
+            case ("device", "transcribeSpeech"): operation = .transcribeSpeech
+            case ("device", "postNotification"): operation = .postNotification
+            case ("llm", "chat"): operation = .llmChat
+            case ("agent", "post"): operation = .agentPost
             default: operation = nil
             }
             guard let operation else {
@@ -1039,7 +1054,8 @@ final class LocalAppsStore {
                     appID: response.appId,
                     requestID: response.requestId,
                     resultJSON: response.resultJson,
-                    error: response.ok ? nil : (response.error ?? String(localized: "local_apps_error_bridge_failed"))
+                    error: response.ok ? nil : (response.error ?? String(localized: "local_apps_error_bridge_failed")),
+                    code: response.errorCode
                 )
 
             case let .appUiRequest(request):
@@ -1081,6 +1097,16 @@ final class LocalAppsStore {
 
             case let .appCheckpointsChanged(appId, checkpoints):
                 replaceCheckpoints(checkpoints, appID: appId)
+
+            case let .appLlmActivityChanged(appId, active):
+                if active {
+                    llmActiveAppIDs.insert(appId)
+                } else {
+                    llmActiveAppIDs.remove(appId)
+                }
+
+            case let .appAgentEventPosted(appId, _, _, _):
+                unreadAgentEvents[appId, default: 0] += 1
             }
         }
 

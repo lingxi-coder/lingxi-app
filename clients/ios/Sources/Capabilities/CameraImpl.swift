@@ -18,6 +18,10 @@ import Foundation
     final class CameraImpl: NSObject, IosCamera, @unchecked Sendable {
         private var continuation: CheckedContinuation<CapturedImageFfi, Error>?
         private var picker: UIImagePickerController?
+        /// Downscale applied to the NEXT delivered image, when the caller
+        /// asked for one. Full-size delivery (the engine's camera tool) leaves
+        /// it nil.
+        private var pendingScaling: (maxDimension: UInt32, quality: Float)?
 
         func capturePhoto(front: Bool, allowEditing: Bool) async throws -> CapturedImageFfi {
             guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
@@ -34,17 +38,56 @@ import Foundation
             return try await present(sourceType: .photoLibrary, front: false, allowEditing: false)
         }
 
+        /// Capture, downscaled and re-encoded natively.
+        ///
+        /// A local app's bridge response and a provider's vision endpoint
+        /// both need far less than a 12 MP original, and Rust has no image
+        /// codec on this build to shrink it after the fact — so the scaling
+        /// lives here, where UIKit already has the decoded image.
+        func capturePhotoSized(
+            front: Bool,
+            allowEditing: Bool,
+            maxDimension: UInt32,
+            jpegQuality: Float
+        ) async throws -> CapturedImageFfi {
+            guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                throw CameraFfiError.DeviceUnavailable
+            }
+            try await requestCameraAuthorization()
+            return try await present(
+                sourceType: .camera,
+                front: front,
+                allowEditing: allowEditing,
+                scaling: (maxDimension, jpegQuality))
+        }
+
+        func pickFromLibrarySized(
+            maxDimension: UInt32,
+            jpegQuality: Float
+        ) async throws -> CapturedImageFfi {
+            guard UIImagePickerController.isSourceTypeAvailable(.photoLibrary) else {
+                throw CameraFfiError.DeviceUnavailable
+            }
+            return try await present(
+                sourceType: .photoLibrary,
+                front: false,
+                allowEditing: false,
+                scaling: (maxDimension, jpegQuality))
+        }
+
         @MainActor
         private func present(
             sourceType: UIImagePickerController.SourceType,
             front: Bool,
-            allowEditing: Bool
+            allowEditing: Bool,
+            scaling: (maxDimension: UInt32, quality: Float)? = nil
         ) async throws -> CapturedImageFfi {
             guard let host = Presenter.topViewController() else {
                 throw CameraFfiError.Other(message: "no active scene to present from")
             }
             return try await withCheckedThrowingContinuation { cont in
                 self.continuation = cont
+                self.pendingScaling = scaling
                 let picker = UIImagePickerController()
                 picker.sourceType = sourceType
                 picker.allowsEditing = allowEditing
@@ -76,6 +119,7 @@ import Foundation
             guard let cont = continuation else { return }
             continuation = nil
             picker = nil
+            pendingScaling = nil
             switch result {
             case let .success(img): cont.resume(returning: img)
             case let .failure(err): cont.resume(throwing: err)
@@ -88,9 +132,16 @@ import Foundation
             _ picker: UIImagePickerController,
             didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
         ) {
-            let image = (info[.editedImage] as? UIImage) ?? (info[.originalImage] as? UIImage)
+            let original = (info[.editedImage] as? UIImage) ?? (info[.originalImage] as? UIImage)
             picker.dismiss(animated: true)
-            guard let image, let jpeg = image.jpegData(compressionQuality: 0.9) else {
+            let scaling = pendingScaling
+            guard let original else {
+                finish(.failure(CameraFfiError.Other(message: "could not encode captured image")))
+                return
+            }
+            let image = scaling.map { CameraImpl.downscaled(original, maxDimension: CGFloat($0.maxDimension)) } ?? original
+            let quality = scaling.map { CGFloat($0.quality) } ?? 0.9
+            guard let jpeg = image.jpegData(compressionQuality: quality) else {
                 finish(.failure(CameraFfiError.Other(message: "could not encode captured image")))
                 return
             }
@@ -104,6 +155,25 @@ import Foundation
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             picker.dismiss(animated: true)
             finish(.failure(CameraFfiError.Cancelled))
+        }
+
+        /// Fit `image` inside `maxDimension` on its longer side, preserving
+        /// aspect ratio. Already-small images are returned untouched — no
+        /// upscaling, which would only add bytes.
+        static func downscaled(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+            let pixelWidth = image.size.width * image.scale
+            let pixelHeight = image.size.height * image.scale
+            let longest = max(pixelWidth, pixelHeight)
+            guard longest > maxDimension, longest > 0 else { return image }
+            let ratio = maxDimension / longest
+            let target = CGSize(width: (pixelWidth * ratio).rounded(), height: (pixelHeight * ratio).rounded())
+            let format = UIGraphicsImageRendererFormat.default()
+            // Draw in PIXELS: the default format would re-apply the device
+            // scale and hand back an image `scale`× larger than asked for.
+            format.scale = 1
+            return UIGraphicsImageRenderer(size: target, format: format).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: target))
+            }
         }
     }
 #endif

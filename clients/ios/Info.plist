@@ -53,6 +53,8 @@
 	<string>灵犀使用麦克风进行语音心流输入。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>灵犀访问相册以选择图片供模型分析。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>灵犀在你使用本地应用时获取一次当前位置，供你授权过的应用使用。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>灵犀使用语音识别将你的语音转写为文本。</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

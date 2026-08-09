@@ -1641,7 +1641,12 @@ final class MockConversationSource: ConversationSource {
                 clipboard: ClipboardImpl(),
                 permissions: permissions,
                 // Native Keychain secure store enables OAuth token persistence.
-                secureStorage: SecureStorageImpl()
+                secureStorage: SecureStorageImpl(),
+                // One-shot location for local apps that declared it. The cron
+                // bridge passes nothing here (the FFI defaults it to nil):
+                // a background wake has no user present to answer an
+                // authorization sheet.
+                location: LocationImpl()
             )
         }
 

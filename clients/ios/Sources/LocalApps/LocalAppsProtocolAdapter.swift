@@ -84,6 +84,13 @@ enum LocalAppsProtocolAdapter {
         case .uiControl: .uiControl
         case .networkDomain: .networkDomain
         case .restoreCheckpoint: .restoreCheckpoint
+        case .camera: .camera
+        case .photoLibrary: .photoLibrary
+        case .microphone: .microphone
+        case .location: .location
+        case .notifications: .notifications
+        case .llm: .llm
+        case .agentNotify: .agentNotify
         }
     }
 
@@ -291,6 +298,13 @@ enum LocalAppsProtocolAdapter {
         case .uiControl: .uiControl
         case .networkDomain: .networkDomain
         case .restoreCheckpoint: .restoreCheckpoint
+        case .camera: .camera
+        case .photoLibrary: .photoLibrary
+        case .microphone: .microphone
+        case .location: .location
+        case .notifications: .notifications
+        case .llm: .llm
+        case .agentNotify: .agentNotify
         }
     }
 

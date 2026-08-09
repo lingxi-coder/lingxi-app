@@ -211,6 +211,11 @@ final class VoiceCapture {
                 return .failed(message)
             case .Unavailable:
                 return .failed("speech recognizer unavailable")
+            case .Busy:
+                // Someone else holds the shared `AVAudioSession` — recording,
+                // playback, a call. Distinct from `Unavailable` (no recognizer
+                // exists at all) because this one clears on its own.
+                return .failed("audio session is busy")
             }
         }
     #else

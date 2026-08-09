@@ -248,6 +248,23 @@ final class LocalAppsStoreTests: XCTestCase {
             }
         }
 
+        /// An oversized payload must fail as a SIZE problem, not be stripped
+        /// to nil and forwarded — the engine reads a missing payload as `{}`,
+        /// so the app's author was told their `messages` field was malformed
+        /// when the real problem was that their image did not fit.
+        ///
+        /// Asserted against the CAP the broker enforces rather than by
+        /// driving a `WKScriptMessage`: that type has no constructible
+        /// stand-in (subclassing it crashed the test process on launch), so
+        /// the reachable contract here is the boundary itself.
+        func testTheBridgePayloadCapMatchesTheDocumentedContract() {
+            XCTAssertEqual(
+                LocalAppBridgeBroker.maxPayloadBytes, 64 * 1024,
+                "the generator prompt tells apps to pass large media by mediaId because one "
+                    + "request payload is capped here; moving the cap without moving that "
+                    + "guidance leaves the prompt lying")
+        }
+
         /// A namespace the page can call but whose message handler is never
         /// registered fails as "bridge unavailable" the first time an app
         /// touches it — with nothing on the engine side to notice.

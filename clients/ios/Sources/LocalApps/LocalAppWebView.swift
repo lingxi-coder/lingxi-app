@@ -35,11 +35,19 @@ final class LocalAppWebViewRegistry {
     private init() {}
 
     func register(_ controller: LocalAppWebViewController, appID: String) {
+        // A rebuild re-registers under the same id. The OUTGOING controller
+        // is the only one that can still reach its page, so it has to reject
+        // its own outstanding requests before it stops being routable —
+        // afterwards `resolveBridge` would just drop their answers.
+        if let replaced = controllers[appID]?.value, replaced !== controller {
+            replaced.broker.failAllInFlight()
+        }
         controllers[appID] = WeakController(controller)
     }
 
     func unregister(_ controller: LocalAppWebViewController, appID: String) {
         guard controllers[appID]?.value === controller else { return }
+        controller.broker.failAllInFlight()
         controllers[appID] = nil
     }
 
@@ -80,10 +88,26 @@ final class LocalAppWebViewRegistry {
 }
 
 final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
+    /// Cap on ONE request payload. Attachments travel by `mediaId` precisely
+    /// because a capture does not fit here (see `local_apps_host_llm`).
+    static let maxPayloadBytes = 64 * 1_024
+
     let appID: String
     var onRequest: ((LocalAppBridgeRequest) -> Void)?
 
     weak var webView: WKWebView?
+
+    /// Requests handed to the engine that have not been answered yet.
+    ///
+    /// The page holds a promise per entry and has no timeout of its own —
+    /// deliberately, because a capture waits on a user browsing their photo
+    /// library and `llm.chat` may take two minutes, so a blanket deadline
+    /// would reject legitimate work. Instead the ONE case where an answer
+    /// can never arrive — this controller stops being the one the registry
+    /// routes to — rejects them explicitly. Without that the page sits on an
+    /// `await` that never settles and no `finally` ever runs: a disabled
+    /// button stays disabled, a Blob URL is never revoked.
+    private var inFlight: Set<String> = []
 
     init(appID: String, onRequest: ((LocalAppBridgeRequest) -> Void)? = nil) {
         self.appID = appID
@@ -101,14 +125,33 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
 
         let namespace = message.name.replacingOccurrences(of: "lingxi", with: "").lowercased()
         let rawPayload = body["payload"] as? [String: Any] ?? [:]
-        let payloadJSON: String?
-        if JSONSerialization.isValidJSONObject(rawPayload),
-           let data = try? JSONSerialization.data(withJSONObject: rawPayload),
-           data.count <= 64 * 1_024 {
-            payloadJSON = String(data: data, encoding: .utf8)
-        } else {
-            payloadJSON = nil
+        // A payload that is too large or not serializable used to be replaced
+        // by `nil` and forwarded anyway — and the engine reads a missing
+        // payload as `{}`, so a SIZE failure came back as a SCHEMA failure
+        // ("messages must be an array") pointing the app's author at the
+        // wrong field entirely. Refuse it here, with its own code.
+        guard JSONSerialization.isValidJSONObject(rawPayload),
+              let data = try? JSONSerialization.data(withJSONObject: rawPayload)
+        else {
+            resolve(
+                requestID: requestID,
+                result: nil,
+                error: String(localized: "local_apps_error_bridge_payload_invalid"),
+                code: "payload_invalid")
+            return
         }
+        guard data.count <= Self.maxPayloadBytes else {
+            resolve(
+                requestID: requestID,
+                result: nil,
+                error: String(
+                    localized:
+                        "local_apps_error_bridge_payload_too_large \(data.count) \(Self.maxPayloadBytes)"),
+                code: "payload_too_large")
+            return
+        }
+        let payloadJSON = String(data: data, encoding: .utf8)
+        inFlight.insert(requestID)
         onRequest?(
             LocalAppBridgeRequest(
                 id: requestID,
@@ -121,6 +164,7 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
     }
 
     func resolve(requestID: String, result: Any?, error: String?, code: String? = nil) {
+        inFlight.remove(requestID)
         guard let webView else { return }
         let envelope: [String: Any] = [
             "requestId": requestID,
@@ -133,6 +177,20 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
               let json = String(data: data, encoding: .utf8)
         else { return }
         webView.evaluateJavaScript("window.lingxi?.__resolve(\(json));")
+    }
+
+    /// Reject everything still awaiting an answer this broker can no longer
+    /// deliver. Called when the registry stops routing to this controller.
+    func failAllInFlight() {
+        let outstanding = inFlight
+        inFlight.removeAll()
+        for requestID in outstanding {
+            resolve(
+                requestID: requestID,
+                result: nil,
+                error: String(localized: "local_apps_error_bridge_detached"),
+                code: "bridge_detached")
+        }
     }
 }
 

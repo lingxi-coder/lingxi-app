@@ -2302,6 +2302,12 @@ impl traits::TextToSpeech for IosTtsBridge {
                     traits::TtsError::Other("permission denied".to_string())
                 }
                 SpeechFfiError::NoSpeech => traits::TtsError::Other("no speech".to_string()),
+                // Audio-session contention is real for playback too, but
+                // `TtsError` has no busy variant; keep it recognizable in
+                // the message rather than folding it into a bare "other".
+                SpeechFfiError::Busy => {
+                    traits::TtsError::Other("audio session busy".to_string())
+                }
             }),
         }
     }

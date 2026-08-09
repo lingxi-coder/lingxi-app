@@ -16968,6 +16968,40 @@
         }
       }
     },
+    "local_apps_error_bridge_detached": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用视图已关闭，这次请求不会有结果了。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用檢視已關閉，這次請求不會有結果了。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app view closed; this request will not be answered."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ画面が閉じたため、このリクエストは応答されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 화면이 닫혀 이 요청은 응답되지 않습니다."
+          }
+        }
+      }
+    },
     "local_apps_error_bridge_failed": {
       "localizations": {
         "zh-Hans": {
@@ -17032,6 +17066,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "Bridge가 잘못된 JSON을 반환했습니다."
+          }
+        }
+      }
+    },
+    "local_apps_error_bridge_payload_invalid": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求内容无法序列化。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請求內容無法序列化。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request payload could not be serialized."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リクエスト内容をシリアライズできません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청 내용을 직렬화할 수 없습니다."
+          }
+        }
+      }
+    },
+    "local_apps_error_bridge_payload_too_large %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求内容为 %1$lld 字节，超过上限 %2$lld；大文件请用 mediaId 传递。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請求內容為 %1$lld 位元組，超過上限 %2$lld；大檔案請用 mediaId 傳遞。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request payload is %1$lld bytes (limit %2$lld); pass large media by mediaId."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リクエスト内容は %1$lld バイトで上限 %2$lld を超えています。大きなメディアは mediaId で渡してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청 내용이 %1$lld바이트로 한도 %2$lld를 초과합니다. 큰 미디어는 mediaId로 전달하세요."
           }
         }
       }

@@ -25,6 +25,18 @@ import Foundation
         /// authorization callback knows whether to start a request or ignore.
         private var awaitingAuthorization = false
         private let lock = NSLock()
+        /// Fires if neither a fix nor a denial arrives.
+        ///
+        /// `withCheckedThrowingContinuation` does not observe Task
+        /// cancellation, so when the engine's own 30s budget expires it
+        /// simply stops awaiting — leaving `continuation` non-nil forever and
+        /// every later request refused as "already in flight". Location was
+        /// then dead for the life of the process. Deliberately SHORTER than
+        /// the engine's budget so this side finishes first and reports a
+        /// real `Timeout` instead of being abandoned mid-call.
+        private var timeout: Task<Void, Never>?
+        /// Must stay under `LOCATION_TIMEOUT` in `local_apps_host_device`.
+        private static let timeoutSeconds: UInt64 = 20
 
         override init() {
             super.init()
@@ -45,6 +57,11 @@ import Foundation
                     return
                 }
                 continuation = cont
+                timeout = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: Self.timeoutSeconds * 1_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self?.finish(.failure(LocationFfiError.Timeout))
+                }
                 lock.unlock()
 
                 DispatchQueue.main.async { [weak self] in
@@ -103,7 +120,13 @@ import Foundation
             let cont = continuation
             continuation = nil
             awaitingAuthorization = false
+            let pending = timeout
+            timeout = nil
             lock.unlock()
+            // Cancel AFTER clearing state: a timeout that fires concurrently
+            // finds `continuation` nil and becomes a no-op, so a late real
+            // fix and the deadline can never both resume.
+            pending?.cancel()
             guard let cont else { return }
             switch result {
             case let .success(fix): cont.resume(returning: fix)

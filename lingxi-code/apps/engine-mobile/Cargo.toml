@@ -65,6 +65,9 @@ uniffi = [
     # `SendPrompt` and fires on `Cancel` (the orchestrator's
     # `run_turn_streaming_with_cancel` takes it). Optional + uniffi-gated.
     "dep:tokio-util",
+    # Device bridge (`local_apps_host_device`): media crosses the WebView
+    # boundary as base64 inside the JSON envelope. Optional + uniffi-gated.
+    "dep:base64",
     "dep:tracing",
     "dep:thiserror",
     "dep:serde_json",
@@ -179,6 +182,7 @@ session = { path = "../../session", optional = true }
 uuid = { version = "1.10", optional = true }
 
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
+base64 = { version = "0.22", optional = true }
 # F3-05: `CancellationToken` for the cancelable streaming turn the async `submit`
 # spawns. Optional + pulled ONLY under the `uniffi` feature (engine-tier).
 tokio-util = { workspace = true, optional = true }
@@ -223,6 +227,7 @@ platform-ios = { path = "../../platforms/ios" }
 platform-android = { path = "../../platforms/android" }
 
 [dev-dependencies]
+base64 = "0.22"
 async-trait.workspace = true
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 insta = { version = "1.40", features = ["yaml"] }
@@ -236,7 +241,7 @@ tempfile = "3"
 # scripted `MockStreamingApiClient` + `client_protocol` DTOs come from here.
 orchestrator = { path = "../../orchestrator" }
 client-protocol = { path = "../../client-protocol" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true

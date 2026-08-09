@@ -269,6 +269,13 @@ impl Drop for PortLease {
     }
 }
 
+// The `device.*` operations of the bridge — capture / pick / record / locate
+// / notify. A CHILD module (not a sibling) so it reaches the broker's private
+// fields and `authorize_declared_capability` without widening their
+// visibility; split out purely for size. The dispatch match stays here.
+#[path = "local_apps_host_device.rs"]
+mod device_ops;
+
 /// A bridge failure: human-readable message plus an optional stable machine
 /// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
 /// legacy `Result<_, String>` site lowers through `From<String>` into a
@@ -322,6 +329,10 @@ pub(crate) struct LocalAppsHostBroker {
     /// Set at the same profile-load site as `llm` — live per-connection
     /// device handles behind a swap cell (see `local_apps_device`).
     device: OnceLock<Arc<crate::local_apps_device::SharedDeviceCapabilities>>,
+    /// The single active `device.recordAudio*` session (one per broker — the
+    /// platform has ONE audio session). Arc'd like `runtimes` so the duration
+    /// watchdog task can reach it. See `device_ops`.
+    recording: Arc<Mutex<Option<device_ops::ActiveRecording>>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
@@ -383,6 +394,7 @@ impl LocalAppsHostBroker {
             generation: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
+            recording: Arc::new(Mutex::new(None)),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
@@ -832,6 +844,22 @@ impl LocalAppsHostBroker {
                 .network_request(&request.app_id, Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::CapturePhoto => {
+                self.capture_photo_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::PickImage => {
+                self.pick_image_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::RecordAudioStart => {
+                self.record_audio_start_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::RecordAudioStop => {
+                self.record_audio_stop_value(&request.app_id).await
+            }
+            AppBridgeOperationDto::GetLocation => self.get_location_value(&request.app_id).await,
+            AppBridgeOperationDto::PostNotification => {
+                self.post_notification_value(&request.app_id, &payload).await
+            }
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }
@@ -1365,6 +1393,9 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
+        // A stopping page must not keep the microphone hot — release any
+        // recording it left behind before the runtime goes away.
+        self.force_stop_recording(app_id).await;
         // Classify and remove under ONE acquisition: a start woken in the gap
         // between a `remove` and its rollback `insert` finds no entry, kills the
         // runtime it just spawned and returns without resolving the gate,

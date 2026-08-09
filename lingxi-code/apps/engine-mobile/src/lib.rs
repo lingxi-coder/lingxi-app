@@ -64,6 +64,11 @@ mod local_apps_host;
 // which are pulled only under this feature.
 #[cfg(feature = "uniffi")]
 mod local_apps_delta;
+// Live per-connection device handles (camera / voice / location /
+// notifications) behind a SharedLlm-style swap cell — see the module doc for
+// why a bare OnceLock would pin a torn-down engine's Swift objects.
+#[cfg(feature = "uniffi")]
+mod local_apps_device;
 mod local_apps_llm;
 #[cfg(feature = "uniffi")]
 mod local_apps_mcp;

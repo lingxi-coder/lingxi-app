@@ -319,6 +319,9 @@ pub(crate) struct LocalAppsHostBroker {
     /// `host.rs`'s wire-client path does — see
     /// [`LocalAppsMcpHost::trigger_authoring`].
     llm: OnceLock<Arc<crate::local_apps_profile::SharedLlm>>,
+    /// Set at the same profile-load site as `llm` — live per-connection
+    /// device handles behind a swap cell (see `local_apps_device`).
+    device: OnceLock<Arc<crate::local_apps_device::SharedDeviceCapabilities>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
@@ -379,6 +382,7 @@ impl LocalAppsHostBroker {
             service: OnceLock::new(),
             generation: OnceLock::new(),
             llm: OnceLock::new(),
+            device: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
@@ -405,6 +409,13 @@ impl LocalAppsHostBroker {
         llm: Arc<crate::local_apps_profile::SharedLlm>,
     ) -> Result<(), Arc<crate::local_apps_profile::SharedLlm>> {
         self.llm.set(llm)
+    }
+
+    pub(crate) fn attach_device(
+        &self,
+        device: Arc<crate::local_apps_device::SharedDeviceCapabilities>,
+    ) -> Result<(), Arc<crate::local_apps_device::SharedDeviceCapabilities>> {
+        self.device.set(device)
     }
 
     pub(crate) fn full_runtime_enabled(&self) -> bool {

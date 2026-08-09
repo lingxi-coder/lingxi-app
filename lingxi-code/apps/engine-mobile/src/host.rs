@@ -5891,6 +5891,12 @@ pub fn build_mobile_engine_inner(
         firer_cfg.local_apps_full_runtime,
         firer_cfg.local_apps_runtime_root.clone(),
         inner.local_apps_llm.clone(),
+        crate::local_apps_device::DeviceCapabilities {
+            camera: firer_platform.camera(),
+            voice: firer_platform.voice(),
+            location: firer_platform.location(),
+            notifications: firer_platform.notifications(),
+        },
     ));
     let (
         local_apps,

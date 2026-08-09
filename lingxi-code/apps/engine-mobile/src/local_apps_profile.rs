@@ -393,6 +393,9 @@ pub(crate) struct ProfileApps {
     pub(crate) domain_events: Arc<AppEventFanout>,
     pub(crate) client_events: Arc<ClientEventFanout>,
     pub(crate) llm: Arc<SharedLlm>,
+    /// Refreshed on every [`profile_apps`] call for the same reason as
+    /// `llm`: the handles are one connection's Swift/Kotlin objects.
+    pub(crate) device: Arc<crate::local_apps_device::SharedDeviceCapabilities>,
 }
 
 impl ProfileApps {
@@ -403,8 +406,12 @@ impl ProfileApps {
         full_runtime: bool,
         runtime_root: Option<PathBuf>,
         llm: Arc<LocalAppsLlm>,
+        devices: crate::local_apps_device::DeviceCapabilities,
     ) -> Result<Arc<Self>, AppError> {
         let llm = Arc::new(SharedLlm::new(llm));
+        let device = Arc::new(crate::local_apps_device::SharedDeviceCapabilities::new(
+            devices,
+        ));
         let client_events = Arc::new(ClientEventFanout::new());
         let host = LocalAppsHostBroker::new(
             root.clone(),
@@ -434,6 +441,8 @@ impl ProfileApps {
             .map_err(|_| AppError::Io("local-app host was already attached".into()))?;
         host.attach_llm(llm.clone())
             .map_err(|_| AppError::Io("local-app host llm was already attached".into()))?;
+        host.attach_device(device.clone())
+            .map_err(|_| AppError::Io("local-app host device was already attached".into()))?;
         Ok(Arc::new(Self {
             service,
             generation,
@@ -441,6 +450,7 @@ impl ProfileApps {
             domain_events,
             client_events,
             llm,
+            device,
         }))
     }
 }
@@ -452,6 +462,7 @@ pub(crate) async fn profile_apps(
     full_runtime: bool,
     runtime_root: Option<PathBuf>,
     llm: Arc<LocalAppsLlm>,
+    devices: crate::local_apps_device::DeviceCapabilities,
 ) -> Result<Arc<ProfileApps>, AppError> {
     let cell = {
         let mut profiles = registry()
@@ -462,9 +473,12 @@ pub(crate) async fn profile_apps(
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone()
     };
-    // Cloned BEFORE `llm` moves into the (maybe-never-run) init closure below,
-    // so it survives to refresh a CACHED profile too — see `SharedLlm`'s doc.
+    // Cloned BEFORE `llm`/`devices` move into the (maybe-never-run) init
+    // closure below, so they survive to refresh a CACHED profile too — see
+    // `SharedLlm`'s doc; the device handles carry the same stale-connection
+    // hazard.
     let refresh_llm = llm.clone();
+    let refresh_devices = devices.clone();
     let profile = cell
         .get_or_try_init(|| async move {
             worker_runtime()
@@ -475,6 +489,7 @@ pub(crate) async fn profile_apps(
                     full_runtime,
                     runtime_root,
                     llm,
+                    devices,
                 ))
                 .await
                 .map_err(|error| AppError::Io(format!("local-app profile load failed: {error}")))?
@@ -482,6 +497,7 @@ pub(crate) async fn profile_apps(
         .await
         .cloned()?;
     profile.llm.replace(refresh_llm);
+    profile.device.replace(refresh_devices);
     Ok(profile)
 }
 
@@ -511,6 +527,7 @@ mod tests {
             false,
             None,
             no_op_llm(),
+            crate::local_apps_device::DeviceCapabilities::default(),
         )
         .await
         .expect("first profile");
@@ -521,6 +538,7 @@ mod tests {
             false,
             None,
             no_op_llm(),
+            crate::local_apps_device::DeviceCapabilities::default(),
         )
         .await
         .expect("second profile");
@@ -547,6 +565,7 @@ mod tests {
                 false,
                 None,
                 no_op_llm(),
+                crate::local_apps_device::DeviceCapabilities::default(),
             )
             .await
             .expect("profile");

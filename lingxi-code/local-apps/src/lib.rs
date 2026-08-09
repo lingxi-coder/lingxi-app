@@ -32,6 +32,7 @@ pub mod error;
 pub mod events;
 pub mod generation;
 pub mod ids;
+pub mod mailbox;
 pub mod manifest;
 pub mod permissions;
 pub mod questionnaire;

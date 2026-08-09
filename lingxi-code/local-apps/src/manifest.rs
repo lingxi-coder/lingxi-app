@@ -35,6 +35,8 @@ pub const RUNTIME_STATE_FILE: &str = "runtime.json";
 pub const PERMISSIONS_FILE: &str = "permissions.json";
 /// Durable generation queue filename.
 pub const GENERATION_JOBS_FILE: &str = "generation-jobs.json";
+/// App-to-conversation mailbox filename.
+pub const MAILBOX_FILE: &str = "mailbox.json";
 
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -357,6 +359,12 @@ impl AppLayout {
     #[must_use]
     pub fn generation_jobs_rel(&self) -> PathBuf {
         self.app_dir_rel().join(GENERATION_JOBS_FILE)
+    }
+
+    /// Root-relative app-to-conversation mailbox path.
+    #[must_use]
+    pub fn mailbox_rel(&self) -> PathBuf {
+        self.app_dir_rel().join(MAILBOX_FILE)
     }
 
     /// Create the complete app directory skeleton with private permissions.

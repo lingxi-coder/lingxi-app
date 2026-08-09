@@ -281,6 +281,10 @@ mod device_ops;
 #[path = "local_apps_host_llm.rs"]
 mod llm_ops;
 
+// `agent.post` — the app-to-conversation mailbox write.
+#[path = "local_apps_host_agent.rs"]
+mod agent_ops;
+
 /// A bridge failure: human-readable message plus an optional stable machine
 /// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
 /// legacy `Result<_, String>` site lowers through `From<String>` into a
@@ -345,6 +349,9 @@ pub(crate) struct LocalAppsHostBroker {
     /// Apps with an `llm.chat` call in flight. One per app: an app-initiated
     /// call spends the user's quota, so a page cannot fan out.
     llm_inflight: Mutex<std::collections::HashSet<String>>,
+    /// Serializes mailbox read-modify-writes. Held across the file update
+    /// and NOTHING else — never across an emit, never across a client call.
+    mailbox_writes: Mutex<()>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
@@ -409,6 +416,7 @@ impl LocalAppsHostBroker {
             recording: Arc::new(Mutex::new(None)),
             media: crate::local_apps_device::MediaCache::default(),
             llm_inflight: Mutex::new(std::collections::HashSet::new()),
+            mailbox_writes: Mutex::new(()),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
@@ -880,6 +888,9 @@ impl LocalAppsHostBroker {
             }
             AppBridgeOperationDto::LlmChat => {
                 self.llm_chat_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::AgentPost => {
+                self.agent_post_value(&request.app_id, &payload).await
             }
             _ => Err("unsupported bridge operation for this engine version".into()),
         }

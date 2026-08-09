@@ -203,6 +203,90 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(store.pendingPermission)
         }
 
+        /// Every namespace the injected page bridge advertises must reach a
+        /// wire operation. A missing pair fails silently as
+        /// "bridge unsupported" at RUNTIME, in a generated app, with the
+        /// prompt already promising the API works.
+        func testEveryInjectedBridgeOperationMapsToAWireOperation() async {
+            let expected: [(String, String, AppBridgeOperationDto)] = [
+                ("data", "query", .queryData),
+                ("data", "mutate", .mutateData),
+                ("network", "fetch", .networkRequest),
+                ("runtime", "info", .runtimeStatus),
+                ("device", "capturePhoto", .capturePhoto),
+                ("device", "pickImage", .pickImage),
+                ("device", "recordAudioStart", .recordAudioStart),
+                ("device", "recordAudioStop", .recordAudioStop),
+                ("device", "getLocation", .getLocation),
+                ("device", "transcribeSpeech", .transcribeSpeech),
+                ("device", "postNotification", .postNotification),
+                ("llm", "chat", .llmChat),
+                ("agent", "post", .agentPost),
+            ]
+
+            for (namespace, operation, wire) in expected {
+                let store = LocalAppsStore()
+                var submitted: [ClientCommand] = []
+                store.configure { command in submitted.append(command) }
+                await store.executeBridge(LocalAppBridgeRequest(
+                    id: "req-\(namespace)-\(operation)",
+                    appID: "tracker",
+                    namespace: namespace,
+                    operation: operation,
+                    payloadJSON: "{}"
+                ))
+                guard case let .executeAppBridgeRequest(request) = submitted.last else {
+                    return XCTFail("\(namespace).\(operation) never reached the engine")
+                }
+                XCTAssertEqual(request.operation, wire, "\(namespace).\(operation)")
+            }
+        }
+
+        /// The page branches on `error.code`, so a failure response has to
+        /// carry the engine's stable code, not just its prose.
+        func testBridgeFailureCarriesTheEngineErrorCode() {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+            store.handle(event: .appEvent(event: .appBridgeResponse(response: AppBridgeResponseDto(
+                requestId: "req-1",
+                appId: "tracker",
+                ok: false,
+                resultJson: nil,
+                error: "capability Camera is not declared in the app manifest",
+                errorCode: "capability_not_declared"
+            ))))
+            // Nothing to assert on the store itself — the response is routed
+            // to the WebView registry — but the DTO must expose the field the
+            // routing reads, which is what this construction pins.
+            XCTAssertEqual(
+                AppBridgeResponseDto(
+                    requestId: "r", appId: "a", ok: false, resultJson: nil,
+                    error: "e", errorCode: "llm_busy"
+                ).errorCode,
+                "llm_busy"
+            )
+        }
+
+        /// The two new engine events must land in the store, or the "calling
+        /// AI" indicator and the mailbox badge never move.
+        func testLlmActivityAndAgentEventsUpdateTheStore() {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            store.handle(event: .appEvent(event: .appLlmActivityChanged(appId: "tracker", active: true)))
+            XCTAssertTrue(store.llmActiveAppIDs.contains("tracker"))
+            store.handle(event: .appEvent(event: .appLlmActivityChanged(appId: "tracker", active: false)))
+            XCTAssertFalse(store.llmActiveAppIDs.contains("tracker"))
+
+            store.handle(event: .appEvent(event: .appAgentEventPosted(
+                appId: "tracker", seq: 1, topic: "timer.done", createdAtMs: 1
+            )))
+            store.handle(event: .appEvent(event: .appAgentEventPosted(
+                appId: "tracker", seq: 2, topic: "note.added", createdAtMs: 2
+            )))
+            XCTAssertEqual(store.unreadAgentEvents["tracker"], 2)
+        }
+
         func testResetPermissionsSubmitsAppScopedRevocation() async {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []

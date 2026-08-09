@@ -274,6 +274,7 @@ impl Drop for PortLease {
 /// legacy `Result<_, String>` site lowers through `From<String>` into a
 /// code-less failure; only paths that deliberately publish a contract code
 /// construct one with [`BridgeFailure::coded`].
+#[derive(Debug)]
 pub(crate) struct BridgeFailure {
     code: Option<&'static str>,
     message: String,
@@ -546,7 +547,7 @@ impl LocalAppsHostBroker {
             .request_capability(app_id, wire_capability, None, reason)
             .await?;
         match raise_decision(decision) {
-            PermissionDecision::Deny => Err("user denied the local app capability".into()),
+            PermissionDecision::Deny => Err(Self::DENIED_CAPABILITY_MESSAGE.into()),
             PermissionDecision::AllowOnce => Ok(()),
             PermissionDecision::AllowSession => {
                 self.session_permissions
@@ -561,6 +562,45 @@ impl LocalAppsHostBroker {
                 save_permissions(&layout, &permissions).map_err(|error| error.to_string())
             }
         }
+    }
+
+    /// Message [`Self::authorize_capability`] returns for an explicit user
+    /// denial. [`Self::authorize_declared_capability`] compares against it to
+    /// attach the `permission_denied` code — same-file constant, never prose
+    /// matching.
+    const DENIED_CAPABILITY_MESSAGE: &'static str = "user denied the local app capability";
+
+    /// Declared-then-prompt gate shared by every plan-declared capability
+    /// (device, llm, agent_notify): an app may only ever be ASKED about a
+    /// capability its confirmed plan declared. An undeclared capability fails
+    /// typed (`capability_not_declared`) WITHOUT raising a prompt — the same
+    /// manifest-first contract [`Self::authorize_domain`] applies to network
+    /// hosts. Declared capabilities then ride the existing persisted →
+    /// session → prompt ladder unchanged.
+    async fn authorize_declared_capability(
+        &self,
+        app_id: &str,
+        capability: AppCapability,
+        wire_capability: AppCapabilityKindDto,
+        reason: &str,
+    ) -> Result<(), BridgeFailure> {
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        if !manifest.capabilities.contains(&capability) {
+            return Err(BridgeFailure::coded(
+                "capability_not_declared",
+                format!("capability {capability:?} is not declared in the app manifest"),
+            ));
+        }
+        self.authorize_capability(app_id, capability, wire_capability, reason)
+            .await
+            .map_err(|message| {
+                if message == Self::DENIED_CAPABILITY_MESSAGE {
+                    BridgeFailure::coded("permission_denied", message)
+                } else {
+                    BridgeFailure::from(message)
+                }
+            })
     }
 
     async fn authorize_domain(&self, app_id: &str, domain: &str) -> Result<(), String> {
@@ -4065,6 +4105,128 @@ mod tests {
             sink.is_empty().await,
             "no capability prompt is raised for a restore that will be refused"
         );
+    }
+
+    /// Declare `capability` in the app's persisted manifest, the way a
+    /// confirmed plan reaches it through `reconcile_manifest`.
+    fn declare_capability(root: &TempDir, app_id: &str, capability: AppCapability) {
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id).expect("layout");
+        let mut manifest = load_manifest(&layout).expect("fixture manifest");
+        manifest.capabilities.push(capability);
+        local_apps::save_manifest(&layout, &manifest).expect("declare capability");
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_capability_is_refused_without_prompting() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let app_id = create_app_fixture(&root, &service, "Undeclared").await;
+
+        let failure = timeout(
+            Duration::from_secs(2),
+            broker.authorize_declared_capability(
+                &app_id,
+                AppCapability::Camera,
+                AppCapabilityKindDto::Camera,
+                "test reason",
+            ),
+        )
+        .await
+        .expect("the refusal must not wait on any approval")
+        .expect_err("an undeclared capability must be refused");
+        assert_eq!(failure.code, Some("capability_not_declared"));
+        assert!(
+            sink.is_empty().await,
+            "an undeclared capability must never raise a user prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_capability_with_a_persisted_grant_passes_silently() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let app_id = create_app_fixture(&root, &service, "Granted").await;
+        declare_capability(&root, &app_id, AppCapability::Microphone);
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+        let mut permissions = load_permissions(&layout).expect("permissions");
+        permissions.grant(AppCapability::Microphone);
+        save_permissions(&layout, &permissions).expect("persist grant");
+
+        broker
+            .authorize_declared_capability(
+                &app_id,
+                AppCapability::Microphone,
+                AppCapabilityKindDto::Microphone,
+                "test reason",
+            )
+            .await
+            .expect("a persisted grant authorizes silently");
+        assert!(
+            sink.is_empty().await,
+            "a persisted grant must not re-prompt the user"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_capability_denial_carries_the_permission_denied_code() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let app_id = create_app_fixture(&root, &service, "Denied").await;
+        declare_capability(&root, &app_id, AppCapability::Camera);
+
+        let resolver = {
+            let sink = sink.clone();
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                loop {
+                    for event in sink.events().await {
+                        if let ClientEvent::AppEvent {
+                            event: AppEventDto::AppCapabilityRequested { request },
+                        } = event
+                        {
+                            assert_eq!(request.capability, AppCapabilityKindDto::Camera);
+                            assert!(
+                                broker
+                                    .resolve_capability(
+                                        &request.request_id,
+                                        AppAuthorizationDecisionDto::Deny,
+                                    )
+                                    .await
+                            );
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+
+        let failure = timeout(
+            Duration::from_secs(5),
+            broker.authorize_declared_capability(
+                &app_id,
+                AppCapability::Camera,
+                AppCapabilityKindDto::Camera,
+                "test reason",
+            ),
+        )
+        .await
+        .expect("the denial resolves promptly")
+        .expect_err("a denied capability must fail");
+        assert_eq!(failure.code, Some("permission_denied"));
+        resolver.await.expect("resolver completes");
     }
 
     #[test]

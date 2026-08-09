@@ -837,7 +837,17 @@ fn plan_schema() -> serde_json::Value {
             },
             "capabilities": {
                 "type": "array",
-                "items": { "type": "string", "enum": ["data_mutation", "ui_control"] }
+                "items": { "type": "string", "enum": [
+                    "data_mutation",
+                    "ui_control",
+                    "camera",
+                    "photo_library",
+                    "microphone",
+                    "location",
+                    "notifications",
+                    "llm",
+                    "agent_notify"
+                ] }
             },
             "domains": {
                 "type": "array",
@@ -1051,6 +1061,52 @@ mod tests {
         assert!(
             matches!(err, AppError::LlmOutputRejected(_)),
             "a validator rejection must surface as LlmOutputRejected, not InvalidRequest: {err:?}"
+        );
+    }
+
+    /// The forced-tool schema is what the REAL provider sees — a fake model
+    /// bypasses it entirely, so this pins the enum directly: a capability the
+    /// schema omits is one the planning model can never declare.
+    #[test]
+    fn plan_schema_offers_every_declarable_capability() {
+        let schema = plan_schema();
+        let offered: Vec<&str> = schema["properties"]["capabilities"]["items"]["enum"]
+            .as_array()
+            .expect("capabilities enum")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(
+            offered,
+            [
+                "data_mutation",
+                "ui_control",
+                "camera",
+                "photo_library",
+                "microphone",
+                "location",
+                "notifications",
+                "llm",
+                "agent_notify",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_accepts_a_device_and_llm_capability_declaration() {
+        let mut value = good_plan();
+        value["capabilities"] = serde_json::json!(["camera", "llm"]);
+        let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(value)]));
+        let plan = llm
+            .plan("一个穿搭记录", &[], &BTreeMap::new(), None)
+            .await
+            .expect("device/llm capabilities are legal plan declarations");
+        assert_eq!(
+            plan.capabilities,
+            vec![
+                local_apps::AppCapability::Camera,
+                local_apps::AppCapability::Llm
+            ]
         );
     }
 

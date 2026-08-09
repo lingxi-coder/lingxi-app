@@ -150,6 +150,7 @@ impl MobileAppGenerationExecutor {
         manifest.revision = request.key.revision;
         manifest.collections = plan.collections;
         manifest.allowed_domains = plan.domains;
+        manifest.capabilities = plan.capabilities;
         manifest.validate()?;
         migrate_manifest_with_approval(&self.host, layout, &manifest).await?;
         save_manifest(layout, &manifest)
@@ -1493,7 +1494,7 @@ mod tests {
             .open_designer(&h.app_id)
             .await
             .expect("open designer");
-        let plan = plan_with(
+        let mut plan = plan_with(
             vec![plan_collection(
                 "notes",
                 vec![
@@ -1503,6 +1504,10 @@ mod tests {
             )],
             vec!["api.example.com".into()],
         );
+        plan.capabilities = vec![
+            local_apps::AppCapability::Camera,
+            local_apps::AppCapability::Llm,
+        ];
         local_apps::test_support::stamp_plan(&h.service, &h.app_id, plan.clone()).await;
         h.service
             .confirm_design(&h.app_id, &interaction.interaction_id, 0)
@@ -1524,6 +1529,11 @@ mod tests {
             manifest.allowed_domains, plan.domains,
             "the confirmed plan's domains must reach the manifest — otherwise every \
              requestNetwork call is rejected"
+        );
+        assert_eq!(
+            manifest.capabilities, plan.capabilities,
+            "the confirmed plan's capabilities must reach the manifest — otherwise the \
+             declared-then-prompt gate rejects every device/llm bridge call as undeclared"
         );
     }
 

@@ -346,30 +346,54 @@ impl LocalAppsHostBroker {
         }
         .clamp(RECORD_MIN_DURATION_MS, RECORD_MAX_DURATION_MS);
 
-        let mut guard = self.recording.lock().await;
-        if let Some(active) = guard.as_ref() {
-            // A foreign session blocks a start while it is still running AND
-            // while it is parked but still collectable: the reclaim below
-            // discards the orphan's bytes outright, so exempting a parked
-            // recording here would let one app silently destroy audio another
-            // app is still entitled to fetch — with no error on either side.
-            let collectable = active
-                .finished
-                .as_ref()
-                .is_some_and(|finished| finished.at.elapsed() <= FINISHED_RECORDING_TTL);
-            if active.app_id != app_id && (active.finished.is_none() || collectable) {
+        // Serializes STARTS only, and never blocks: a start crosses into
+        // Swift, and the first mic use of an app's life begins with an OS
+        // permission alert whose think time is the user's. Holding the state
+        // lock across that would block `force_stop_recording` — awaited by a
+        // runtime stop — and every other app's `recordAudioStop` until the
+        // user answered. `try_lock` keeps the fast `audio_session_busy`
+        // answer instead of converting it into a second hang.
+        let _start_gate = match self.recording_start.try_lock() {
+            Ok(gate) => gate,
+            Err(_) => {
                 return Err(BridgeFailure::coded(
                     "audio_session_busy",
-                    "another app currently holds the recorder",
-                ));
+                    "another recording is already starting",
+                ))
             }
-        }
+        };
+
+        // Short critical section: decide, and take the orphan OUT. The
+        // native calls below run with no state lock held.
+        let orphan = {
+            let mut guard = self.recording.lock().await;
+            if let Some(active) = guard.as_ref() {
+                // A foreign session blocks a start while it is still running
+                // AND while it is parked but still collectable: the reclaim
+                // below discards the orphan's bytes outright, so exempting a
+                // parked recording here would let one app silently destroy
+                // audio another app is still entitled to fetch — with no
+                // error on either side.
+                let collectable = active
+                    .finished
+                    .as_ref()
+                    .is_some_and(|finished| finished.at.elapsed() <= FINISHED_RECORDING_TTL);
+                if active.app_id != app_id && (active.finished.is_none() || collectable) {
+                    return Err(BridgeFailure::coded(
+                        "audio_session_busy",
+                        "another app currently holds the recorder",
+                    ));
+                }
+            }
+            guard.take()
+        };
+
         // A same-app restart (a reloaded page) or an expired parked recording
         // is reclaimed rather than fatal — the orphan's bytes are discarded
         // and, crucially, the native audio-session lease is released on the
         // recorder the orphan actually started on.
         let mut replaced_active = false;
-        if let Some(orphan) = guard.take() {
+        if let Some(orphan) = orphan {
             orphan.watchdog.abort();
             if orphan.finished.is_none() {
                 replaced_active = true;
@@ -411,7 +435,7 @@ impl LocalAppsHostBroker {
                 }
             })
         };
-        *guard = Some(ActiveRecording {
+        *self.recording.lock().await = Some(ActiveRecording {
             app_id: app_id.to_string(),
             started: Instant::now(),
             watchdog,
@@ -764,11 +788,17 @@ mod tests {
     struct FakeVoice {
         recording: AtomicBool,
         stopped: AtomicBool,
+        /// Held closed to stand in for the OS microphone permission alert:
+        /// `start_recording` does not return until the test opens it.
+        start_gate: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait]
     impl VoiceRecorder for FakeVoice {
         async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
+            if let Some(gate) = self.start_gate.clone() {
+                gate.notified().await;
+            }
             self.recording.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -1110,6 +1140,58 @@ mod tests {
             .expect("decodes");
         assert_eq!(bytes, vec![7, 7, 7]);
         assert!(voice.stopped.load(Ordering::SeqCst));
+    }
+
+    /// The first mic use of an app's life begins with an OS permission
+    /// alert, and the user may leave it on screen indefinitely. Nothing that
+    /// RECLAIMS the recorder may sit behind that: a runtime stop awaits
+    /// `force_stop_recording`, so holding the state lock across the native
+    /// start would hang an app teardown on an unanswered system dialog.
+    #[tokio::test]
+    async fn a_start_waiting_on_the_os_permission_alert_does_not_block_a_reclaim() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let voice = Arc::new(FakeVoice {
+            start_gate: Some(gate.clone()),
+            ..FakeVoice::default()
+        });
+        let h = harness(DeviceCapabilities {
+            voice: Some(voice.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+
+        let starting = {
+            let broker = h.broker.clone();
+            let app_id = h.app_id.clone();
+            tokio::spawn(async move {
+                broker
+                    .execute_bridge(AppBridgeRequestDto {
+                        request_id: "start-1".into(),
+                        app_id,
+                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        payload_json: Some("{}".into()),
+                    })
+                    .await;
+            })
+        };
+        // Let the start reach the (blocked) native call.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!starting.is_finished(), "the fixture start must still be pending");
+
+        // The reclaim path must answer while that alert is still up.
+        timeout(
+            Duration::from_millis(500),
+            h.broker.force_stop_recording(&h.app_id),
+        )
+        .await
+        .expect(
+            "force_stop_recording blocked behind an in-flight start — a runtime stop would \
+             hang on an unanswered OS permission alert",
+        );
+
+        gate.notify_one();
+        starting.await.expect("the start completes");
     }
 
     #[tokio::test]

@@ -356,6 +356,14 @@ pub(crate) struct LocalAppsHostBroker {
     /// Serializes mailbox read-modify-writes. Held across the file update
     /// and NOTHING else — never across an emit, never across a client call.
     mailbox_writes: Mutex<()>,
+    /// Serializes `device.recordAudioStart` — and ONLY starts.
+    ///
+    /// Separate from `recording` because a start crosses into Swift and the
+    /// first mic use shows an OS permission alert with unbounded think time.
+    /// Stops and reclaims take `recording` alone, so they can never be
+    /// blocked behind that alert. Taken with `try_lock`: a second start
+    /// answers `audio_session_busy` rather than queueing behind it.
+    recording_start: Mutex<()>,
     /// Weak self-reference handed to the runtime-exit watchers, which are
     /// spawned onto the profile worker and outlive the call that started
     /// them. Weak so a watcher can never be what keeps the broker alive.
@@ -425,6 +433,7 @@ impl LocalAppsHostBroker {
             media: crate::local_apps_device::MediaCache::default(),
             llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
+            recording_start: Mutex::new(()),
             self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),

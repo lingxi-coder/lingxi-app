@@ -557,6 +557,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         ok: true,
                         result_json: Some("[]".to_string()),
                         error: None,
+                        error_code: None,
                     },
                 },
             },
@@ -1428,6 +1429,9 @@ fn canonical_app_manifest() -> AppManifestDto {
             enabled_by_default: true,
         }],
         allowed_domains: vec!["api.example.com".to_string()],
+        // One representative device capability so the golden pins the
+        // manifest-context wire spelling of the new enum family.
+        capabilities: vec![AppCapabilityKindDto::Camera],
     }
 }
 

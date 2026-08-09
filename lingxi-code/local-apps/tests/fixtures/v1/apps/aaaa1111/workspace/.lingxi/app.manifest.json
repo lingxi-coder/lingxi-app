@@ -4,5 +4,6 @@
   "revision": 0,
   "name": "Fixture Maximal",
   "collections": [],
-  "allowedDomains": []
+  "allowedDomains": [],
+  "capabilities": []
 }

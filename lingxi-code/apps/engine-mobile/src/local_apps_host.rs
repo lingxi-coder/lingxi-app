@@ -269,6 +269,40 @@ impl Drop for PortLease {
     }
 }
 
+/// A bridge failure: human-readable message plus an optional stable machine
+/// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
+/// legacy `Result<_, String>` site lowers through `From<String>` into a
+/// code-less failure; only paths that deliberately publish a contract code
+/// construct one with [`BridgeFailure::coded`].
+pub(crate) struct BridgeFailure {
+    code: Option<&'static str>,
+    message: String,
+}
+
+impl BridgeFailure {
+    pub(crate) fn coded(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code: Some(code),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for BridgeFailure {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for BridgeFailure {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_string())
+    }
+}
+
 /// Profile-scoped broker.  The service is attached after its durable load has
 /// completed, while command/capability resolution can be wired immediately.
 pub(crate) struct LocalAppsHostBroker {
@@ -693,13 +727,15 @@ impl LocalAppsHostBroker {
                 ok: true,
                 result_json: Some(value.to_string()),
                 error: None,
+                error_code: None,
             },
-            Err(error) => AppBridgeResponseDto {
+            Err(failure) => AppBridgeResponseDto {
                 request_id: request.request_id,
                 app_id: request.app_id,
                 ok: false,
                 result_json: None,
-                error: Some(error),
+                error: Some(failure.message),
+                error_code: failure.code.map(str::to_string),
             },
         };
         self.event_sink
@@ -709,7 +745,10 @@ impl LocalAppsHostBroker {
             .await;
     }
 
-    async fn execute_bridge_inner(&self, request: &AppBridgeRequestDto) -> Result<Value, String> {
+    async fn execute_bridge_inner(
+        &self,
+        request: &AppBridgeRequestDto,
+    ) -> Result<Value, BridgeFailure> {
         let payload: Value = request
             .payload_json
             .as_deref()
@@ -720,12 +759,16 @@ impl LocalAppsHostBroker {
         let mut input = payload.as_object().cloned().unwrap_or_default();
         input.insert("app_id".into(), Value::String(request.app_id.clone()));
         match request.operation {
-            AppBridgeOperationDto::QueryData => self.query_data_value(Value::Object(input)).await,
+            AppBridgeOperationDto::QueryData => self
+                .query_data_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
             // The page is acting for the foreground user, not an agent.  Its
             // app id is host-bound and the manifest still constrains writes.
-            AppBridgeOperationDto::MutateData => {
-                self.mutate_data_value(Value::Object(input), false).await
-            }
+            AppBridgeOperationDto::MutateData => self
+                .mutate_data_value(Value::Object(input), false)
+                .await
+                .map_err(BridgeFailure::from),
             AppBridgeOperationDto::RuntimeStatus => {
                 let runtime = self
                     .service()?
@@ -734,10 +777,10 @@ impl LocalAppsHostBroker {
                     .map_err(|error| error.to_string())?;
                 Ok(json!(runtime))
             }
-            AppBridgeOperationDto::NetworkRequest => {
-                self.network_request(&request.app_id, Value::Object(input))
-                    .await
-            }
+            AppBridgeOperationDto::NetworkRequest => self
+                .network_request(&request.app_id, Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }

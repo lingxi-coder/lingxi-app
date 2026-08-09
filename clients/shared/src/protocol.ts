@@ -750,7 +750,15 @@ export type AppBridgeOperationDto =
   | 'query_data'
   | 'mutate_data'
   | 'network_request'
-  | 'runtime_status';
+  | 'runtime_status'
+  | 'capture_photo'
+  | 'pick_image'
+  | 'record_audio_start'
+  | 'record_audio_stop'
+  | 'get_location'
+  | 'post_notification'
+  | 'llm_chat'
+  | 'agent_post';
 
 /** One host-bound, data-only bridge request (local_apps.rs `AppBridgeRequestDto`). */
 export interface AppBridgeRequestDto {
@@ -767,6 +775,8 @@ export interface AppBridgeResponseDto {
   ok: boolean;
   result_json?: string;
   error?: string;
+  /** Stable machine-readable failure code (`capability_not_declared`, …). */
+  error_code?: string;
 }
 
 /** Allow-listed UI operations; arbitrary script is absent (local_apps.rs `AppUiActionKindDto`). */
@@ -802,7 +812,14 @@ export type AppCapabilityKindDto =
   | 'data_mutation'
   | 'ui_control'
   | 'network_domain'
-  | 'restore_checkpoint';
+  | 'restore_checkpoint'
+  | 'camera'
+  | 'photo_library'
+  | 'microphone'
+  | 'location'
+  | 'notifications'
+  | 'llm'
+  | 'agent_notify';
 
 /** A capability approval request surfaced by the host (local_apps.rs `AppCapabilityRequestDto`). */
 export interface AppCapabilityRequestDto {
@@ -835,7 +852,11 @@ export type AppEventDto =
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
   | { type: 'app_ui_request'; request: AppUiRequestDto }
   | { type: 'app_capability_requested'; request: AppCapabilityRequestDto }
-  | { type: 'app_checkpoints_changed'; app_id: string; checkpoints: AppCheckpointDto[] };
+  | { type: 'app_checkpoints_changed'; app_id: string; checkpoints: AppCheckpointDto[] }
+  /** An app-initiated `llm.chat` started/finished; drives the "calling AI" indicator. */
+  | { type: 'app_llm_activity_changed'; app_id: string; active: boolean }
+  /** An app posted a mailbox event via `agent.post`; carries no body — badge only. */
+  | { type: 'app_agent_event_posted'; app_id: string; seq: number; topic: string; created_at_ms: number };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // events.rs

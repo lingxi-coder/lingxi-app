@@ -19,6 +19,7 @@ use crate::clock::Clock;
 use crate::computer_control::ComputerControl;
 use crate::filesystem::FileSystem;
 use crate::http::HttpTransport;
+use crate::location::LocationProvider;
 use crate::mobile_linux::MobileLinuxRuntime;
 use crate::notification::NotificationService;
 use crate::process::ProcessRunner;
@@ -54,6 +55,10 @@ pub trait Platform: Send + Sync {
     }
     /// Native microphone recorder, if the platform has one.
     fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
+        None
+    }
+    /// Native one-shot location provider, if the platform has one.
+    fn location(&self) -> Option<Arc<dyn LocationProvider>> {
         None
     }
     /// Native speech-to-text (live mic → transcript), if available.

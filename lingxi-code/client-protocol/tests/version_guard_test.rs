@@ -1241,6 +1241,7 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.design_revision", "u64");
     put("AppManifestDto.collections", "Vec<AppDataCollectionDto>");
     put("AppManifestDto.allowed_domains", "Vec<String>");
+    put("AppManifestDto.capabilities", "Vec<AppCapabilityKindDto>");
 
     put("AppRuntimeDetailsDto.state", "AppRuntimeStateDto");
     put("AppRuntimeDetailsDto.mode", "Option<AppRuntimeModeDto>");
@@ -1275,6 +1276,14 @@ fn current_contract_index() -> ContractIndex {
     put("AppBridgeOperationDto::MutateData", "mutate_data");
     put("AppBridgeOperationDto::NetworkRequest", "network_request");
     put("AppBridgeOperationDto::RuntimeStatus", "runtime_status");
+    put("AppBridgeOperationDto::CapturePhoto", "capture_photo");
+    put("AppBridgeOperationDto::PickImage", "pick_image");
+    put("AppBridgeOperationDto::RecordAudioStart", "record_audio_start");
+    put("AppBridgeOperationDto::RecordAudioStop", "record_audio_stop");
+    put("AppBridgeOperationDto::GetLocation", "get_location");
+    put("AppBridgeOperationDto::PostNotification", "post_notification");
+    put("AppBridgeOperationDto::LlmChat", "llm_chat");
+    put("AppBridgeOperationDto::AgentPost", "agent_post");
 
     put("AppBridgeRequestDto.request_id", "String");
     put("AppBridgeRequestDto.app_id", "String");
@@ -1286,6 +1295,7 @@ fn current_contract_index() -> ContractIndex {
     put("AppBridgeResponseDto.ok", "bool");
     put("AppBridgeResponseDto.result_json", "Option<String>");
     put("AppBridgeResponseDto.error", "Option<String>");
+    put("AppBridgeResponseDto.error_code", "Option<String>");
 
     put("AppUiActionKindDto::Inspect", "inspect");
     put("AppUiActionKindDto::Click", "click");
@@ -1314,6 +1324,13 @@ fn current_contract_index() -> ContractIndex {
         "AppCapabilityKindDto::RestoreCheckpoint",
         "restore_checkpoint",
     );
+    put("AppCapabilityKindDto::Camera", "camera");
+    put("AppCapabilityKindDto::PhotoLibrary", "photo_library");
+    put("AppCapabilityKindDto::Microphone", "microphone");
+    put("AppCapabilityKindDto::Location", "location");
+    put("AppCapabilityKindDto::Notifications", "notifications");
+    put("AppCapabilityKindDto::Llm", "llm");
+    put("AppCapabilityKindDto::AgentNotify", "agent_notify");
 
     put("AppCapabilityRequestDto.request_id", "String");
     put("AppCapabilityRequestDto.app_id", "String");
@@ -1374,6 +1391,20 @@ fn current_contract_index() -> ContractIndex {
         "AppEventDto::AppCheckpointsChanged.checkpoints",
         "Vec<AppCheckpointDto>",
     );
+    put(
+        "AppEventDto::AppLlmActivityChanged",
+        "app_llm_activity_changed",
+    );
+    put("AppEventDto::AppLlmActivityChanged.app_id", "String");
+    put("AppEventDto::AppLlmActivityChanged.active", "bool");
+    put(
+        "AppEventDto::AppAgentEventPosted",
+        "app_agent_event_posted",
+    );
+    put("AppEventDto::AppAgentEventPosted.app_id", "String");
+    put("AppEventDto::AppAgentEventPosted.seq", "u64");
+    put("AppEventDto::AppAgentEventPosted.topic", "String");
+    put("AppEventDto::AppAgentEventPosted.created_at_ms", "u64");
 
     ix
 }
@@ -1946,6 +1977,7 @@ fn contract_index_covers_every_dto() {
         design_revision: 0,
         collections: Vec::new(),
         allowed_domains: Vec::new(),
+        capabilities: Vec::new(),
     };
     let _app_runtime_details = AppRuntimeDetailsDto {
         state: AppRuntimeStateDto::Stopped,
@@ -1998,6 +2030,7 @@ fn contract_index_covers_every_dto() {
         ok: false,
         result_json: None,
         error: None,
+        error_code: None,
     };
     let _app_ui_target = AppUiTargetDto {
         element_id: None,
@@ -2020,7 +2053,7 @@ fn contract_index_covers_every_dto() {
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
     // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these eight tags to
+    // `ClientEvent::AppEvent`, so nothing else forces these ten tags to
     // exist.
     let _app_events: Vec<AppEventDto> = vec![
         AppEventDto::AppDetailsChanged {
@@ -2051,6 +2084,16 @@ fn contract_index_covers_every_dto() {
         AppEventDto::AppCheckpointsChanged {
             app_id: String::new(),
             checkpoints: Vec::new(),
+        },
+        AppEventDto::AppLlmActivityChanged {
+            app_id: String::new(),
+            active: false,
+        },
+        AppEventDto::AppAgentEventPosted {
+            app_id: String::new(),
+            seq: 0,
+            topic: String::new(),
+            created_at_ms: 0,
         },
     ];
 

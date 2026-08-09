@@ -4,5 +4,6 @@
   "revision": 0,
   "name": "Fixture Minimal",
   "collections": [],
-  "allowedDomains": []
+  "allowedDomains": [],
+  "capabilities": []
 }

@@ -542,6 +542,7 @@ fn extended_local_app_events_round_trip() {
                     ok: true,
                     result_json: Some("[]".to_string()),
                     error: None,
+                    error_code: None,
                 },
             },
         },

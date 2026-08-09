@@ -535,6 +535,13 @@ fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
     match capability {
         AppCapability::DataMutation => AppCapabilityKindDto::DataMutation,
         AppCapability::UiControl => AppCapabilityKindDto::UiControl,
+        AppCapability::Camera => AppCapabilityKindDto::Camera,
+        AppCapability::PhotoLibrary => AppCapabilityKindDto::PhotoLibrary,
+        AppCapability::Microphone => AppCapabilityKindDto::Microphone,
+        AppCapability::Location => AppCapabilityKindDto::Location,
+        AppCapability::Notifications => AppCapabilityKindDto::Notifications,
+        AppCapability::Llm => AppCapabilityKindDto::Llm,
+        AppCapability::AgentNotify => AppCapabilityKindDto::AgentNotify,
     }
 }
 
@@ -595,6 +602,12 @@ pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
             .map(|collection| lower_collection(collection, true))
             .collect(),
         allowed_domains: manifest.allowed_domains,
+        capabilities: manifest
+            .capabilities
+            .iter()
+            .copied()
+            .map(lower_capability)
+            .collect(),
     }
 }
 
@@ -884,6 +897,13 @@ fn raise_capability(dto: AppCapabilityKindDto) -> Result<AppCapability, AppError
     Ok(match dto {
         AppCapabilityKindDto::DataMutation => AppCapability::DataMutation,
         AppCapabilityKindDto::UiControl => AppCapability::UiControl,
+        AppCapabilityKindDto::Camera => AppCapability::Camera,
+        AppCapabilityKindDto::PhotoLibrary => AppCapability::PhotoLibrary,
+        AppCapabilityKindDto::Microphone => AppCapability::Microphone,
+        AppCapabilityKindDto::Location => AppCapability::Location,
+        AppCapabilityKindDto::Notifications => AppCapability::Notifications,
+        AppCapabilityKindDto::Llm => AppCapability::Llm,
+        AppCapabilityKindDto::AgentNotify => AppCapability::AgentNotify,
         other => {
             return Err(AppError::InvalidRequest(format!(
                 "unsupported capability: {other:?}"

@@ -33,9 +33,23 @@ pub enum VoiceError {
     /// `stop_recording` was called with no active session.
     #[error("not currently recording")]
     NotRecording,
+    /// The platform audio session is held by another consumer (e.g. the
+    /// FlowMode voice orb) — retry after it releases.
+    #[error("audio session busy")]
+    Busy,
     /// Any other native failure.
     #[error("voice error: {0}")]
     Other(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_display_names_the_audio_session() {
+        assert_eq!(VoiceError::Busy.to_string(), "audio session busy");
+    }
 }
 
 /// Native microphone recording.

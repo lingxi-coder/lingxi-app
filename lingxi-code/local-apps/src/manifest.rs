@@ -6,6 +6,7 @@
 
 use crate::error::AppError;
 use crate::ids;
+use crate::permissions::AppCapability;
 use crate::types::APPS_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -107,6 +108,11 @@ pub struct AppManifest {
     /// HTTPS hostnames the app may ask the native network bridge to access.
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+    /// Host capabilities the app may request at runtime. Declared by the
+    /// confirmed plan; a pre-capability manifest deserializes as empty,
+    /// meaning "no device/LLM capability was ever declared".
+    #[serde(default)]
+    pub capabilities: Vec<AppCapability>,
 }
 
 impl AppManifest {
@@ -122,6 +128,7 @@ impl AppManifest {
             name: name.into(),
             collections: Vec::new(),
             allowed_domains: Vec::new(),
+            capabilities: Vec::new(),
         }
     }
 
@@ -224,6 +231,15 @@ impl AppManifest {
             if !domains.insert(domain.as_str()) {
                 return Err(AppError::InvalidRequest(format!(
                     "duplicate allowed domain {domain:?}"
+                )));
+            }
+        }
+
+        let mut capabilities = BTreeSet::new();
+        for capability in &self.capabilities {
+            if !capabilities.insert(capability) {
+                return Err(AppError::InvalidRequest(format!(
+                    "duplicate capability {capability:?}"
                 )));
             }
         }
@@ -546,6 +562,7 @@ mod tests {
                 }],
             }],
             allowed_domains: vec!["api.example.com".into()],
+            capabilities: Vec::new(),
         }
     }
 
@@ -577,6 +594,48 @@ mod tests {
 
         let mut candidate = manifest();
         candidate.allowed_domains = vec!["https://example.com/path".into()];
+        assert!(candidate.validate().is_err());
+    }
+
+    #[test]
+    fn an_old_manifest_json_without_capabilities_loads_as_empty() {
+        // The exact on-disk shape every pre-capability app already has. It
+        // must keep loading (as "no device capabilities declared") without
+        // any migration step.
+        let json = r#"{
+  "schemaVersion": 1,
+  "appId": "abcd1234",
+  "revision": 3,
+  "name": "Tasks",
+  "collections": [],
+  "allowedDomains": ["api.example.com"]
+}"#;
+        let loaded: AppManifest = serde_json::from_str(json).unwrap();
+        loaded.validate().unwrap();
+        assert!(loaded.capabilities.is_empty());
+    }
+
+    #[test]
+    fn capabilities_round_trip_through_save_and_load() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
+        let mut expected = manifest();
+        expected.capabilities = vec![
+            crate::permissions::AppCapability::Camera,
+            crate::permissions::AppCapability::Microphone,
+            crate::permissions::AppCapability::Llm,
+        ];
+        save_manifest(&layout, &expected).unwrap();
+        assert_eq!(load_manifest(&layout).unwrap(), expected);
+    }
+
+    #[test]
+    fn rejects_a_duplicate_capability() {
+        let mut candidate = manifest();
+        candidate.capabilities = vec![
+            crate::permissions::AppCapability::Camera,
+            crate::permissions::AppCapability::Camera,
+        ];
         assert!(candidate.validate().is_err());
     }
 

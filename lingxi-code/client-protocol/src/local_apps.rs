@@ -519,6 +519,10 @@ pub struct AppManifestDto {
     pub design_revision: u64,
     pub collections: Vec<AppDataCollectionDto>,
     pub allowed_domains: Vec<String>,
+    /// Capabilities the confirmed plan declared. Absent on the wire (and
+    /// empty) for pre-capability manifests.
+    #[serde(default)]
+    pub capabilities: Vec<AppCapabilityKindDto>,
 }
 
 /// Runtime snapshot included in an app detail response.
@@ -578,6 +582,22 @@ pub enum AppBridgeOperationDto {
     MutateData,
     NetworkRequest,
     RuntimeStatus,
+    /// Capture one photo with the device camera (`device.capturePhoto`).
+    CapturePhoto,
+    /// Pick one image from the photo library (`device.pickImage`).
+    PickImage,
+    /// Start a microphone recording (`device.recordAudioStart`).
+    RecordAudioStart,
+    /// Stop the recording and return its bytes (`device.recordAudioStop`).
+    RecordAudioStop,
+    /// One-shot current location (`device.getLocation`).
+    GetLocation,
+    /// Post a local notification (`device.postNotification`).
+    PostNotification,
+    /// One side-query chat completion against the user's model (`llm.chat`).
+    LlmChat,
+    /// Post one event into the app's conversation mailbox (`agent.post`).
+    AgentPost,
 }
 
 /// One host-bound bridge request. Payloads are data, never executable script.
@@ -602,6 +622,11 @@ pub struct AppBridgeResponseDto {
     pub result_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Stable machine-readable failure code (`capability_not_declared`,
+    /// `permission_denied`, `audio_session_busy`, `media_too_large`,
+    /// `llm_busy`, …) so page code can branch without parsing `error` prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// Allow-list of UI operations; arbitrary JavaScript is intentionally absent.
@@ -656,6 +681,13 @@ pub enum AppCapabilityKindDto {
     UiControl,
     NetworkDomain,
     RestoreCheckpoint,
+    Camera,
+    PhotoLibrary,
+    Microphone,
+    Location,
+    Notifications,
+    Llm,
+    AgentNotify,
 }
 
 /// A capability approval request surfaced by the host.
@@ -723,5 +755,21 @@ pub enum AppEventDto {
     AppCheckpointsChanged {
         app_id: String,
         checkpoints: Vec<AppCheckpointDto>,
+    },
+    /// An app-initiated `llm.chat` side query started (`active: true`) or
+    /// finished/failed (`active: false`). Drives the client's "app is
+    /// calling AI" indicator; always emitted in pairs.
+    AppLlmActivityChanged {
+        app_id: String,
+        active: bool,
+    },
+    /// An app posted one event into its conversation mailbox via
+    /// `agent.post`. Deliberately carries NO body — clients badge on it;
+    /// the payload is read only through the MCP `read_app_events` tool.
+    AppAgentEventPosted {
+        app_id: String,
+        seq: u64,
+        topic: String,
+        created_at_ms: u64,
     },
 }

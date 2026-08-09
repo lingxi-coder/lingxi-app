@@ -355,17 +355,27 @@ function validateAppDesignStep(v: unknown): void {
   for (const f of s['fields'] as unknown[]) validateAppDesignField(f);
 }
 
+const APP_CAPABILITY_KINDS = [
+  'data_mutation',
+  'ui_control',
+  'network_domain',
+  'restore_checkpoint',
+  'camera',
+  'photo_library',
+  'microphone',
+  'location',
+  'notifications',
+  'llm',
+  'agent_notify',
+];
+
 function validateAppPlan(v: unknown): void {
   const o = rec(v);
   assert.ok(Array.isArray(o['collections']));
   for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
   assert.ok(Array.isArray(o['capabilities']));
   for (const cap of o['capabilities'] as unknown[]) {
-    assert.ok(
-      ['data_mutation', 'ui_control', 'network_domain', 'restore_checkpoint'].includes(
-        cap as string,
-      ),
-    );
+    assert.ok(APP_CAPABILITY_KINDS.includes(cap as string));
   }
   assert.ok(Array.isArray(o['domains']));
   for (const d of o['domains'] as unknown[]) assert.ok(isString(d));
@@ -436,15 +446,30 @@ function validateAppManifest(v: unknown): void {
   for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
   assert.ok(Array.isArray(o['allowed_domains']));
   for (const d of o['allowed_domains'] as unknown[]) assert.ok(isString(d));
+  assert.ok(Array.isArray(o['capabilities']));
+  for (const cap of o['capabilities'] as unknown[]) {
+    assert.ok(APP_CAPABILITY_KINDS.includes(cap as string));
+  }
 }
 
 function validateAppBridgeRequest(v: unknown): void {
   const o = rec(v);
   assert.ok(isString(o['request_id']) && isString(o['app_id']));
   assert.ok(
-    ['query_data', 'mutate_data', 'network_request', 'runtime_status'].includes(
-      o['operation'] as string,
-    ),
+    [
+      'query_data',
+      'mutate_data',
+      'network_request',
+      'runtime_status',
+      'capture_photo',
+      'pick_image',
+      'record_audio_start',
+      'record_audio_stop',
+      'get_location',
+      'post_notification',
+      'llm_chat',
+      'agent_post',
+    ].includes(o['operation'] as string),
   );
   if ('payload_json' in o) assert.ok(isString(o['payload_json']));
 }
@@ -454,6 +479,7 @@ function validateAppBridgeResponse(v: unknown): void {
   assert.ok(isString(o['request_id']) && isString(o['app_id']) && isBool(o['ok']));
   if ('result_json' in o) assert.ok(isString(o['result_json']));
   if ('error' in o) assert.ok(isString(o['error']));
+  if ('error_code' in o) assert.ok(isString(o['error_code']));
 }
 
 function validateAppUiRequest(v: unknown): void {
@@ -484,11 +510,7 @@ function validateAppUiRequest(v: unknown): void {
 function validateAppCapabilityRequest(v: unknown): void {
   const o = rec(v);
   assert.ok(isString(o['request_id']) && isString(o['app_id']) && isString(o['reason']));
-  assert.ok(
-    ['data_mutation', 'ui_control', 'network_domain', 'restore_checkpoint'].includes(
-      o['capability'] as string,
-    ),
-  );
+  assert.ok(APP_CAPABILITY_KINDS.includes(o['capability'] as string));
   if ('domain' in o) assert.ok(isString(o['domain']));
 }
 
@@ -566,6 +588,17 @@ function validateAppEvent(v: unknown): void {
     case 'app_checkpoints_changed':
       assert.ok(isString(o['app_id']) && Array.isArray(o['checkpoints']));
       for (const c of o['checkpoints'] as unknown[]) validateAppCheckpoint(c);
+      break;
+    case 'app_llm_activity_changed':
+      assert.ok(isString(o['app_id']) && isBool(o['active']));
+      break;
+    case 'app_agent_event_posted':
+      assert.ok(
+        isString(o['app_id']) &&
+          isNumber(o['seq']) &&
+          isString(o['topic']) &&
+          isNumber(o['created_at_ms']),
+      );
       break;
     default:
       assert.fail(`unknown AppEventDto type: ${String(o['type'])}`);

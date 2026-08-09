@@ -419,6 +419,12 @@ pub fn validate_plan(plan: &AppPlan) -> Result<(), AppError> {
             return Err(reject(format!("duplicate domain `{domain}`")));
         }
     }
+    let mut seen_capabilities = BTreeSet::new();
+    for capability in &plan.capabilities {
+        if !seen_capabilities.insert(capability) {
+            return Err(reject(format!("duplicate capability {capability:?}")));
+        }
+    }
     Ok(())
 }
 
@@ -495,6 +501,38 @@ fn validate_domain(domain: &str) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn plan_rejects_a_duplicate_capability() {
+        let plan = AppPlan {
+            collections: Vec::new(),
+            capabilities: vec![AppCapability::Camera, AppCapability::Camera],
+            domains: Vec::new(),
+            summary: "一个应用".into(),
+        };
+        assert!(validate_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn plan_accepts_every_declared_capability_once() {
+        let plan = AppPlan {
+            collections: Vec::new(),
+            capabilities: vec![
+                AppCapability::DataMutation,
+                AppCapability::UiControl,
+                AppCapability::Camera,
+                AppCapability::PhotoLibrary,
+                AppCapability::Microphone,
+                AppCapability::Location,
+                AppCapability::Notifications,
+                AppCapability::Llm,
+                AppCapability::AgentNotify,
+            ],
+            domains: Vec::new(),
+            summary: "一个应用".into(),
+        };
+        validate_plan(&plan).unwrap();
+    }
 
     fn field(id: &str, field_type: AppDesignFieldType) -> AppDesignField {
         AppDesignField {

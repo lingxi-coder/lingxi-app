@@ -1812,6 +1812,7 @@ mod tests {
                 ],
             }],
             allowed_domains: vec![],
+            capabilities: vec![],
         }
     }
 

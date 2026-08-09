@@ -23,6 +23,20 @@ pub enum AppCapability {
     DataMutation,
     /// Click, fill, navigate, or otherwise control the app `WebView`.
     UiControl,
+    /// Capture a photo with the device camera.
+    Camera,
+    /// Pick an image from the device photo library.
+    PhotoLibrary,
+    /// Record audio with the device microphone.
+    Microphone,
+    /// Read the device's current location, once per call.
+    Location,
+    /// Post local notifications on the app's behalf.
+    Notifications,
+    /// Send side-query requests to the user's configured LLM.
+    Llm,
+    /// Post events into the conversation-facing app mailbox.
+    AgentNotify,
 }
 
 /// User decision returned by a capability prompt.
@@ -226,6 +240,45 @@ mod tests {
         permissions.revoke_domain("api.example.com");
         assert!(!permissions.allows(AppCapability::DataMutation));
         assert!(!permissions.allows_domain("api.example.com"));
+    }
+
+    #[test]
+    fn device_and_llm_capability_wire_spellings_are_snake_case() {
+        // These strings are the wire contract shared by plan JSON, the
+        // persisted manifest, and permissions.json — pin them.
+        for (capability, wire) in [
+            (AppCapability::Camera, "\"camera\""),
+            (AppCapability::PhotoLibrary, "\"photo_library\""),
+            (AppCapability::Microphone, "\"microphone\""),
+            (AppCapability::Location, "\"location\""),
+            (AppCapability::Notifications, "\"notifications\""),
+            (AppCapability::Llm, "\"llm\""),
+            (AppCapability::AgentNotify, "\"agent_notify\""),
+        ] {
+            assert_eq!(serde_json::to_string(&capability).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn device_capability_grants_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
+        let mut permissions = AppPermissions::default();
+        permissions.grant(AppCapability::Camera);
+        permissions.grant(AppCapability::Llm);
+        save_permissions(&layout, &permissions).unwrap();
+        assert_eq!(load_permissions(&layout).unwrap(), permissions);
+        permissions.revoke(AppCapability::Camera);
+        assert!(!permissions.allows(AppCapability::Camera));
+        assert!(permissions.allows(AppCapability::Llm));
+    }
+
+    #[test]
+    fn session_grants_for_device_capabilities_are_app_scoped() {
+        let mut session = SessionPermissions::default();
+        session.grant("abcd1234", AppCapability::Microphone);
+        assert!(session.allows("abcd1234", AppCapability::Microphone));
+        assert!(!session.allows("other123", AppCapability::Microphone));
     }
 
     #[test]

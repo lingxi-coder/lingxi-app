@@ -93,6 +93,9 @@
         ],
         "allowed_domains": [
           "api.example.com"
+        ],
+        "capabilities": [
+          "camera"
         ]
       },
       "runtime": {

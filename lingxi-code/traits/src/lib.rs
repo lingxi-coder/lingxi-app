@@ -41,6 +41,7 @@ pub mod filesystem;
 pub mod fork_resume_gate;
 pub mod fork_subagent;
 pub mod http;
+pub mod location;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
@@ -109,6 +110,7 @@ pub use lsp::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
     NewDiagnosticsSource,
 };
+pub use location::{LocationError, LocationFix, LocationProvider};
 pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };

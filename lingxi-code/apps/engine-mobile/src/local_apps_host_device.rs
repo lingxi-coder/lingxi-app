@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use traits::{
     CameraError, CameraPosition, CapturePhotoOpts, LocationError, NotificationError,
-    NotificationRequest, VoiceError, VoiceRecording, VoiceRecordingOpts,
+    NotificationRequest, SttError, SttOpts, VoiceError, VoiceRecording, VoiceRecordingOpts,
 };
 
 /// Cap on the base64 body of one media response. A default-preset photo is
@@ -52,6 +52,7 @@ const REASON_PHOTO_LIBRARY: &str = "应用请求从相册选择一张图片。";
 const REASON_MICROPHONE: &str = "应用请求使用麦克风录音。";
 const REASON_LOCATION: &str = "应用请求获取一次当前位置。";
 const REASON_NOTIFICATIONS: &str = "应用请求发送本地通知。";
+const REASON_TRANSCRIBE: &str = "应用请求使用麦克风把你说的话转写成文字。";
 
 /// The single in-flight `device.recordAudio*` session.
 pub(super) struct ActiveRecording {
@@ -156,14 +157,17 @@ fn photo_scaling(payload: &Value) -> Result<(u32, f32), BridgeFailure> {
     Ok((max_dimension, quality))
 }
 
-fn image_envelope(image: traits::CapturedImage) -> Result<Value, BridgeFailure> {
-    let base64_body = encode_media(&image.jpeg_bytes)?;
-    Ok(json!({
-        "mimeType": "image/jpeg",
-        "base64": base64_body,
-        "width": image.width,
-        "height": image.height,
-    }))
+fn map_stt_error(error: SttError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        SttError::PermissionDenied => BridgeFailure::coded("permission_denied", message),
+        SttError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        // Distinct from an error the app should surface as a failure: the
+        // mic simply heard nothing, which a UI usually retries silently.
+        SttError::NoSpeech => BridgeFailure::coded("no_speech", message),
+        SttError::Retriable(_) => BridgeFailure::coded("retriable", message),
+        SttError::Other(_) => BridgeFailure::from(message),
+    }
 }
 
 fn valid_notification_tag(tag: &str) -> bool {
@@ -182,6 +186,53 @@ impl LocalAppsHostBroker {
             .get()
             .map(|cell| cell.current())
             .ok_or_else(|| unavailable("the device capability set"))
+    }
+
+    /// Retain one capture and build the JSON envelope for it.
+    ///
+    /// The envelope carries BOTH the base64 (so the page can render it right
+    /// away as a Blob URL) and a `mediaId` handle (so `llm.chat` can attach
+    /// it without pushing megabytes back through a 64 KiB request payload).
+    fn media_envelope(
+        &self,
+        app_id: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        extra: Value,
+    ) -> Result<Value, BridgeFailure> {
+        let base64_body = encode_media(&bytes)?;
+        let handle = self.media.put(
+            app_id,
+            self.request_id("media"),
+            crate::local_apps_device::MediaEntry {
+                media_type: media_type.to_string(),
+                bytes: std::sync::Arc::new(bytes),
+            },
+        );
+        let mut envelope = json!({
+            "mimeType": media_type,
+            "base64": base64_body,
+            "mediaId": handle,
+        });
+        if let (Some(target), Some(extra)) = (envelope.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        Ok(envelope)
+    }
+
+    /// Look up a retained capture for `llm.chat`.
+    pub(super) fn media_entry(
+        &self,
+        app_id: &str,
+        handle: &str,
+    ) -> Option<crate::local_apps_device::MediaEntry> {
+        self.media.get(app_id, handle)
+    }
+
+    pub(super) fn clear_media(&self, app_id: &str) {
+        self.media.clear_app(app_id);
     }
 
     pub(super) async fn capture_photo_value(
@@ -223,7 +274,12 @@ impl LocalAppsHostBroker {
             )
             .await
             .map_err(map_camera_error)?;
-        image_envelope(image)
+        self.media_envelope(
+            app_id,
+            "image/jpeg",
+            image.jpeg_bytes,
+            json!({ "width": image.width, "height": image.height }),
+        )
     }
 
     pub(super) async fn pick_image_value(
@@ -247,7 +303,12 @@ impl LocalAppsHostBroker {
             .pick_from_library_sized(max_dimension, quality)
             .await
             .map_err(map_camera_error)?;
-        image_envelope(image)
+        self.media_envelope(
+            app_id,
+            "image/jpeg",
+            image.jpeg_bytes,
+            json!({ "width": image.width, "height": image.height }),
+        )
     }
 
     pub(super) async fn record_audio_start_value(
@@ -391,13 +452,16 @@ impl LocalAppsHostBroker {
                         }
                     }
                 };
-                let base64_body = encode_media(&finished.recording.audio_bytes)?;
-                Ok(json!({
-                    "mimeType": finished.recording.mime_type,
-                    "base64": base64_body,
-                    "durationMs": finished.duration_ms,
-                    "autoStopped": finished.auto_stopped,
-                }))
+                let mime_type = finished.recording.mime_type.clone();
+                self.media_envelope(
+                    app_id,
+                    &mime_type,
+                    finished.recording.audio_bytes,
+                    json!({
+                        "durationMs": finished.duration_ms,
+                        "autoStopped": finished.auto_stopped,
+                    }),
+                )
             }
         }
     }
@@ -419,6 +483,54 @@ impl LocalAppsHostBroker {
                 let _ = voice.stop_recording().await;
             }
         }
+    }
+
+    /// Listen once and return what was said.
+    ///
+    /// This is the audio story on this stack, and it is not an accident:
+    /// the conversation protocol has no audio content block, and
+    /// `SpeechToText::transcribe` opens the microphone for one utterance
+    /// rather than transcribing a file — so a recorded m4a cannot be sent to
+    /// a model no matter how it is packaged. An app that wants voice input
+    /// transcribes here and sends the text.
+    ///
+    /// Rides `Microphone`: it is the same hardware and the same user-visible
+    /// risk, so a second capability would be a distinction without a
+    /// difference.
+    pub(super) async fn transcribe_speech_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Microphone,
+            AppCapabilityKindDto::Microphone,
+            REASON_TRANSCRIBE,
+        )
+        .await?;
+        let stt = self
+            .devices()?
+            .stt
+            .ok_or_else(|| unavailable("speech recognition"))?;
+        let language = match payload.get("language") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid("language must be a BCP-47 string"))?
+                    .to_string(),
+            ),
+        };
+        let transcript = stt
+            .transcribe(SttOpts { language })
+            .await
+            .map_err(map_stt_error)?;
+        Ok(json!({
+            "text": transcript.text,
+            "language": transcript.language,
+            "confidence": transcript.confidence,
+        }))
     }
 
     pub(super) async fn get_location_value(&self, app_id: &str) -> Result<Value, BridgeFailure> {
@@ -1124,6 +1236,95 @@ mod tests {
     }
 
     // ---- location / notifications -----------------------------------------
+
+    struct FakeStt(String);
+
+    #[async_trait]
+    impl traits::SpeechToText for FakeStt {
+        async fn transcribe(
+            &self,
+            _opts: traits::SttOpts,
+        ) -> Result<traits::SttTranscript, traits::SttError> {
+            Ok(traits::SttTranscript {
+                text: self.0.clone(),
+                language: Some("zh-CN".into()),
+                confidence: Some(0.9),
+            })
+        }
+    }
+
+    /// The audio path that actually exists on this stack: listen, transcribe,
+    /// hand back text the app can send to the model.
+    #[tokio::test]
+    async fn transcribe_speech_returns_text_under_the_microphone_capability() {
+        let h = harness(DeviceCapabilities {
+            stt: Some(Arc::new(FakeStt("明天下午三点开会".into()))),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+
+        let (ok, result, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::TranscribeSpeech,
+            json!({"language": "zh-CN"}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result["text"], "明天下午三点开会");
+        assert_eq!(result["language"], "zh-CN");
+    }
+
+    #[tokio::test]
+    async fn transcribe_speech_is_refused_when_the_microphone_is_undeclared() {
+        let h = harness(DeviceCapabilities {
+            stt: Some(Arc::new(FakeStt("不该到这里".into()))),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+
+        let (ok, _, _, code) =
+            execute(&h, AppBridgeOperationDto::TranscribeSpeech, json!({})).await;
+        assert!(!ok);
+        assert_eq!(code.as_deref(), Some("capability_not_declared"));
+    }
+
+    /// A capture is addressable right after it is taken, and dies with the
+    /// page that took it.
+    #[tokio::test]
+    async fn a_capture_publishes_a_media_handle_that_a_runtime_stop_clears() {
+        let camera = FakeCamera::with_bytes(vec![4, 5, 6]);
+        let h = harness(DeviceCapabilities {
+            camera: Some(camera),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Camera);
+
+        let (ok, result, _, _) =
+            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        assert!(ok);
+        let media_id = result["mediaId"].as_str().expect("mediaId").to_string();
+        let entry = h
+            .broker
+            .media_entry(&h.app_id, &media_id)
+            .expect("the capture is addressable");
+        assert_eq!(*entry.bytes, vec![4, 5, 6]);
+        assert_eq!(entry.media_type, "image/jpeg");
+
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "start"}))
+            .await
+            .expect("start");
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("stop");
+        assert!(
+            h.broker.media_entry(&h.app_id, &media_id).is_none(),
+            "handles are a live page's hand-off buffer, not storage"
+        );
+    }
 
     #[tokio::test]
     async fn get_location_returns_the_fix() {

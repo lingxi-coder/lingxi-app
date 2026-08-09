@@ -21,6 +21,7 @@
   "AppBridgeOperationDto::RecordAudioStart": "record_audio_start",
   "AppBridgeOperationDto::RecordAudioStop": "record_audio_stop",
   "AppBridgeOperationDto::RuntimeStatus": "runtime_status",
+  "AppBridgeOperationDto::TranscribeSpeech": "transcribe_speech",
   "AppBridgeRequestDto.app_id": "String",
   "AppBridgeRequestDto.operation": "AppBridgeOperationDto",
   "AppBridgeRequestDto.payload_json": "Option<String>",

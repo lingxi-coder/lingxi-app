@@ -592,6 +592,10 @@ pub enum AppBridgeOperationDto {
     RecordAudioStop,
     /// One-shot current location (`device.getLocation`).
     GetLocation,
+    /// Listen once and return the transcript (`device.transcribeSpeech`).
+    /// This is how speech reaches the model: no provider on this stack
+    /// accepts raw audio in a messages call.
+    TranscribeSpeech,
     /// Post a local notification (`device.postNotification`).
     PostNotification,
     /// One side-query chat completion against the user's model (`llm.chat`).

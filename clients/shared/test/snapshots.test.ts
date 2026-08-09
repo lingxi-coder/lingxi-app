@@ -466,6 +466,7 @@ function validateAppBridgeRequest(v: unknown): void {
       'record_audio_start',
       'record_audio_stop',
       'get_location',
+      'transcribe_speech',
       'post_notification',
       'llm_chat',
       'agent_post',

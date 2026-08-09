@@ -5896,6 +5896,7 @@ pub fn build_mobile_engine_inner(
             voice: firer_platform.voice(),
             location: firer_platform.location(),
             notifications: firer_platform.notifications(),
+            stt: firer_platform.stt(),
         },
     ));
     let (

@@ -1281,6 +1281,7 @@ fn current_contract_index() -> ContractIndex {
     put("AppBridgeOperationDto::RecordAudioStart", "record_audio_start");
     put("AppBridgeOperationDto::RecordAudioStop", "record_audio_stop");
     put("AppBridgeOperationDto::GetLocation", "get_location");
+    put("AppBridgeOperationDto::TranscribeSpeech", "transcribe_speech");
     put("AppBridgeOperationDto::PostNotification", "post_notification");
     put("AppBridgeOperationDto::LlmChat", "llm_chat");
     put("AppBridgeOperationDto::AgentPost", "agent_post");

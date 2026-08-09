@@ -276,6 +276,11 @@ impl Drop for PortLease {
 #[path = "local_apps_host_device.rs"]
 mod device_ops;
 
+// `llm.chat` — the app-initiated model call. A child module for the same
+// reason as `device_ops`.
+#[path = "local_apps_host_llm.rs"]
+mod llm_ops;
+
 /// A bridge failure: human-readable message plus an optional stable machine
 /// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
 /// legacy `Result<_, String>` site lowers through `From<String>` into a
@@ -333,6 +338,13 @@ pub(crate) struct LocalAppsHostBroker {
     /// platform has ONE audio session). Arc'd like `runtimes` so the duration
     /// watchdog task can reach it. See `device_ops`.
     recording: Arc<Mutex<Option<device_ops::ActiveRecording>>>,
+    /// Captures the device ops retained so `llm.chat` can attach them by
+    /// handle — the bridge caps one request payload at 64 KiB, far below a
+    /// single photo. See [`crate::local_apps_device::MediaCache`].
+    media: crate::local_apps_device::MediaCache,
+    /// Apps with an `llm.chat` call in flight. One per app: an app-initiated
+    /// call spends the user's quota, so a page cannot fan out.
+    llm_inflight: Mutex<std::collections::HashSet<String>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
@@ -395,6 +407,8 @@ impl LocalAppsHostBroker {
             llm: OnceLock::new(),
             device: OnceLock::new(),
             recording: Arc::new(Mutex::new(None)),
+            media: crate::local_apps_device::MediaCache::default(),
+            llm_inflight: Mutex::new(std::collections::HashSet::new()),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
@@ -859,6 +873,13 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::GetLocation => self.get_location_value(&request.app_id).await,
             AppBridgeOperationDto::PostNotification => {
                 self.post_notification_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::TranscribeSpeech => {
+                self.transcribe_speech_value(&request.app_id, &payload)
+                    .await
+            }
+            AppBridgeOperationDto::LlmChat => {
+                self.llm_chat_value(&request.app_id, &payload).await
             }
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
@@ -1394,8 +1415,11 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         // A stopping page must not keep the microphone hot — release any
-        // recording it left behind before the runtime goes away.
+        // recording it left behind before the runtime goes away. Its media
+        // handles die with it too: they are a hand-off buffer between two
+        // bridge calls of a LIVE page, not storage.
         self.force_stop_recording(app_id).await;
+        self.clear_media(app_id);
         // Classify and remove under ONE acquisition: a start woken in the gap
         // between a `remove` and its rollback `insert` finds no entry, kills the
         // runtime it just spawned and returns without resolving the gate,

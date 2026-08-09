@@ -65,6 +65,85 @@ pub trait GenerationDeltaSink: Send + Sync {
     fn on_delta(&self, kind: GenerationDeltaKind, chunk: &str);
 }
 
+/// Who wrote one turn of an app-initiated chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRole {
+    /// The app's own user-side prompt.
+    User,
+    /// A previous answer the app is replaying for context.
+    Assistant,
+}
+
+/// One piece of a chat turn. Media arrives already decoded and
+/// size-checked by the bridge; this layer only shapes it for the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatPart {
+    /// Plain text.
+    Text(String),
+    /// An image the model should look at (vision).
+    Image {
+        /// MIME type, e.g. `image/jpeg`.
+        media_type: String,
+        /// Base64-encoded bytes, no `data:` prefix.
+        base64: String,
+    },
+    /// A document (PDF) the model should read.
+    Document {
+        /// MIME type, e.g. `application/pdf`.
+        media_type: String,
+        /// Base64-encoded bytes, no `data:` prefix.
+        base64: String,
+    },
+}
+
+/// One turn of an app-initiated chat.
+///
+/// Multi-part so a photo the app just captured can be asked about directly.
+/// There is deliberately no audio part: the conversation protocol has no
+/// audio content block and no provider on this stack accepts raw audio in a
+/// messages call, so an app that wants speech input transcribes it first
+/// (`device.transcribeSpeech`) and sends text — a silently dropped audio
+/// attachment would be far worse than a typed refusal.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    /// Who wrote it.
+    pub role: ChatRole,
+    /// Ordered parts. Apps send no tool results.
+    pub content: Vec<ChatPart>,
+}
+
+/// A free-text model call a RUNNING app asked for (`window.lingxi.v1.llm`).
+///
+/// Deliberately smaller than the provider surface: the model and profile are
+/// NOT part of it — an app always rides whatever the user currently has
+/// selected (`ApiServiceModel`'s live selection), so an app can neither pin
+/// an expensive model nor route around the user's `/model` choice. Tools are
+/// absent for the same reason a running app cannot reach the orchestrator: a
+/// page's prompt is untrusted input, and giving it tool calls would hand
+/// prompt-injected text an execution surface.
+#[derive(Debug, Clone)]
+pub struct ChatRequest {
+    /// Optional system prompt written by the app's own code.
+    pub system: Option<String>,
+    /// Conversation so far, oldest first.
+    pub messages: Vec<ChatMessage>,
+    /// Output budget. Unlike the three authoring stages (which take the
+    /// model's own ceiling), an app-initiated call spends the USER's quota
+    /// on the app's behalf, so it always carries an explicit cap.
+    pub max_tokens: u32,
+    /// Optional sampling temperature.
+    pub temperature: Option<f32>,
+}
+
+/// What a [`ChatRequest`] produced.
+#[derive(Debug, Clone)]
+pub struct ChatOutcome {
+    /// The answer's text blocks, concatenated (thinking excluded).
+    pub text: String,
+    /// Provider stop reason, when reported.
+    pub stop_reason: Option<String>,
+}
+
 /// A single structured model call. The implementation owns auth, routing,
 /// retry and timeout — the three call sites below only see a proposal in,
 /// a validated JSON value or an error out.
@@ -88,6 +167,14 @@ pub trait LocalAppsModel: Send + Sync {
         deltas: Option<Arc<dyn GenerationDeltaSink>>,
     ) -> Result<serde_json::Value, AppError>;
 
+    /// One free-text call on behalf of a RUNNING app. No tool, no schema —
+    /// see [`ChatRequest`] for what an app may and may not control.
+    ///
+    /// Required rather than defaulted: a double that silently answered with
+    /// canned text would make a broken wiring look green, so every
+    /// implementation states its behaviour.
+    async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError>;
+
     /// Update the default model/profile future `structured` calls route
     /// through — `ClientCommand::SetModel` calls this so the three local-app
     /// LLM stages follow a `/model` switch instead of staying pinned to
@@ -95,6 +182,39 @@ pub trait LocalAppsModel: Send + Sync {
     /// [`ApiServiceModel`] (the production implementation) has a live
     /// selection to update; test doubles ignore it.
     fn set_model(&self, _model: String, _profile: Option<String>) {}
+}
+
+/// Concatenate the answer's text, dropping thinking/redacted-thinking and
+/// any non-text block. A free function so the "a reasoning model's private
+/// trace must never reach the app" rule is testable against hand-built
+/// blocks, with no `ApiService` involved.
+/// Lower one app-supplied part to the conversation vocabulary.
+fn chat_part_block(part: ChatPart) -> protocol::ContentBlock {
+    match part {
+        ChatPart::Text(text) => protocol::ContentBlock::Text { text },
+        ChatPart::Image { media_type, base64 } => protocol::ContentBlock::Image {
+            source: protocol::ImageSource::Base64 {
+                media_type,
+                data: base64,
+            },
+        },
+        ChatPart::Document { media_type, base64 } => protocol::ContentBlock::Document {
+            source: protocol::DocumentSource::Base64 {
+                media_type,
+                data: base64,
+            },
+        },
+    }
+}
+
+fn extract_chat_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Real [`LocalAppsModel`] over the shared `ApiService` — a tool call via
@@ -270,6 +390,70 @@ impl LocalAppsModel for ApiServiceModel {
             .await
             .map_err(|(_partial, error)| AppError::LlmUnavailable(format!("{error}")))?;
         extract_single_tool_call(response.content, tool_name, response.stop_reason.as_deref())
+    }
+
+    /// An app-initiated free-text call.
+    ///
+    /// Non-streaming on purpose, and NOT the `stream_forced` path the three
+    /// authoring stages take: `messages_create_side_query` is the only
+    /// free-text entry point on `ApiService` that accepts `max_tokens` and
+    /// `temperature`, and an app-initiated call spending the user's quota
+    /// must carry an explicit budget. There is also nothing to stream INTO —
+    /// the bridge is strictly request/response, so a token stream would have
+    /// no channel to the page (see the module docs on the push channel that
+    /// would be needed first).
+    ///
+    /// No tools and no `tool_choice`, so the DeepSeek thinking-mode 400 that
+    /// `structured` works around cannot arise here: that response is
+    /// triggered by `tool_choice` alone.
+    async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
+        // One acquisition for the pair, never held across the await — same
+        // reasoning as `structured`.
+        let (model, profile) = self.selection.read().expect("selection lock poisoned").clone();
+        let messages = request
+            .messages
+            .into_iter()
+            .map(|message| {
+                // `protocol::ContentBlock`, NOT the `llm_client` one this
+                // module otherwise names: `ConversationMessage` is the
+                // conversation vocabulary, and the two types are distinct.
+                let content: Vec<protocol::ContentBlock> =
+                    message.content.into_iter().map(chat_part_block).collect();
+                match message.role {
+                    ChatRole::User => ConversationMessage::User {
+                        id: MessageId::new(),
+                        content,
+                        is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
+                    },
+                    ChatRole::Assistant => ConversationMessage::Assistant {
+                        id: MessageId::new(),
+                        content,
+                        stop_reason: None,
+                    },
+                }
+            })
+            .collect();
+        let response = self
+            .service
+            .messages_create_side_query(
+                &model,
+                profile.as_deref(),
+                request.system.as_deref(),
+                messages,
+                vec![],
+                Some(request.max_tokens),
+                None,
+                vec![],
+                request.temperature,
+            )
+            .await
+            .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
+        Ok(ChatOutcome {
+            text: extract_chat_text(&response.content),
+            stop_reason: response.stop_reason,
+        })
     }
 
     fn set_model(&self, model: String, profile: Option<String>) {
@@ -534,6 +718,17 @@ impl LocalAppsLlm {
     /// Follow a live `/model` switch: see [`LocalAppsModel::set_model`].
     pub fn set_model(&self, model: String, profile: Option<String>) {
         self.model.set_model(model, profile);
+    }
+
+    /// One free-text call on behalf of a running app — see [`ChatRequest`].
+    ///
+    /// A passthrough, unlike the three authoring stages: there is no prompt
+    /// to compose and no validator to run, because the answer is prose the
+    /// app renders itself. Everything policy-shaped (declared capability,
+    /// budget clamp, concurrency, truncation) lives at the bridge, where the
+    /// app id is known.
+    pub async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
+        self.model.chat(request).await
     }
 
     /// Author a questionnaire for this brief. Returns `(suggested name, questionnaire)`.
@@ -904,7 +1099,7 @@ fn sources_schema() -> serde_json::Value {
 /// 复用它，绕开真实 `ApiService` 驱动 [`LocalAppsLlm`]。
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::{AppError, GenerationDeltaSink, LocalAppsModel};
+    use super::{AppError, ChatOutcome, ChatRequest, GenerationDeltaSink, LocalAppsModel};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -912,11 +1107,38 @@ pub(crate) mod test_support {
     pub(crate) struct ScriptedModel {
         responses: Mutex<Vec<Result<serde_json::Value, AppError>>>,
         prompts: Mutex<Vec<String>>,
+        chat_responses: Mutex<Vec<Result<ChatOutcome, AppError>>>,
+        chat_requests: Mutex<Vec<ChatRequest>>,
     }
 
     impl ScriptedModel {
         pub(crate) fn new(responses: Vec<Result<serde_json::Value, AppError>>) -> Arc<Self> {
-            Arc::new(Self { responses: Mutex::new(responses), prompts: Mutex::new(Vec::new()) })
+            Arc::new(Self {
+                responses: Mutex::new(responses),
+                prompts: Mutex::new(Vec::new()),
+                chat_responses: Mutex::new(Vec::new()),
+                chat_requests: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// The same double scripted for [`LocalAppsModel::chat`] instead.
+        pub(crate) fn with_chat(responses: Vec<Result<ChatOutcome, AppError>>) -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(Vec::new()),
+                prompts: Mutex::new(Vec::new()),
+                chat_responses: Mutex::new(responses),
+                chat_requests: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// The `index`-th `chat` call's request (0-based, call order).
+        pub(crate) fn chat_request_at(&self, index: usize) -> ChatRequest {
+            self.chat_requests.lock().expect("lock")[index].clone()
+        }
+
+        /// How many times `chat` has been called so far.
+        pub(crate) fn chat_call_count(&self) -> usize {
+            self.chat_requests.lock().expect("lock").len()
         }
 
         /// How many times `structured` has been called so far.
@@ -944,6 +1166,17 @@ pub(crate) mod test_support {
             let mut responses = self.responses.lock().expect("lock");
             if responses.is_empty() {
                 return Err(AppError::Io("the scripted model ran out of responses".into()));
+            }
+            responses.remove(0)
+        }
+
+        async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
+            self.chat_requests.lock().expect("lock").push(request);
+            let mut responses = self.chat_responses.lock().expect("lock");
+            if responses.is_empty() {
+                return Err(AppError::Io(
+                    "the scripted model ran out of chat responses".into(),
+                ));
             }
             responses.remove(0)
         }
@@ -982,6 +1215,121 @@ mod tests {
         })
     }
 
+    /// The free-text seam is a DIFFERENT contract from `structured`: no tool,
+    /// no schema, and the answer is whatever prose the model wrote. Pinning
+    /// the extraction against hand-built blocks keeps a reasoning model's
+    /// thinking out of the app's answer with no `ApiService` involved.
+    #[test]
+    fn chat_text_concatenates_text_blocks_and_drops_thinking() {
+        let content = vec![
+            ContentBlock::Reasoning {
+                text: "先想一下".into(),
+                signature: None,
+            },
+            ContentBlock::Text {
+                text: "答案第一段".into(),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: "，第二段".into(),
+                cache_control: None,
+            },
+        ];
+        assert_eq!(extract_chat_text(&content), "答案第一段，第二段");
+    }
+
+    #[tokio::test]
+    async fn chat_hands_the_whole_request_to_the_model_and_returns_its_answer() {
+        let model = ScriptedModel::with_chat(vec![Ok(ChatOutcome {
+            text: "好的".into(),
+            stop_reason: Some("end_turn".into()),
+        })]);
+        let llm = LocalAppsLlm::new(model.clone());
+
+        let outcome = llm
+            .chat(ChatRequest {
+                system: Some("你是这个应用的助手".into()),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: vec![ChatPart::Text("第一句".into())],
+                    },
+                    ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: vec![ChatPart::Text("上一轮回答".into())],
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: vec![ChatPart::Text("第二句".into())],
+                    },
+                ],
+                max_tokens: 512,
+                temperature: Some(0.3),
+            })
+            .await
+            .expect("chat");
+
+        assert_eq!(outcome.text, "好的");
+        assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
+        let seen = model.chat_request_at(0);
+        assert_eq!(seen.max_tokens, 512);
+        assert_eq!(seen.temperature, Some(0.3));
+        assert_eq!(seen.system.as_deref(), Some("你是这个应用的助手"));
+        assert_eq!(
+            seen.messages.len(),
+            3,
+            "multi-turn context must reach the model verbatim, not be flattened"
+        );
+    }
+
+    /// A photo the app just captured has to reach the provider as a real
+    /// vision block — not as a base64 string glued into the prompt text,
+    /// which is what an app would be forced into if this mapping were
+    /// missing (and which no provider can actually look at).
+    #[test]
+    fn an_image_part_lowers_to_a_provider_vision_block() {
+        let block = chat_part_block(ChatPart::Image {
+            media_type: "image/jpeg".into(),
+            base64: "AQID".into(),
+        });
+        assert!(matches!(
+            block,
+            protocol::ContentBlock::Image {
+                source: protocol::ImageSource::Base64 { media_type, data }
+            } if media_type == "image/jpeg" && data == "AQID"
+        ));
+
+        let block = chat_part_block(ChatPart::Document {
+            media_type: "application/pdf".into(),
+            base64: "JVBER".into(),
+        });
+        assert!(matches!(
+            block,
+            protocol::ContentBlock::Document {
+                source: protocol::DocumentSource::Base64 { media_type, .. }
+            } if media_type == "application/pdf"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_surfaces_an_unreachable_model_as_llm_unavailable() {
+        let model = ScriptedModel::with_chat(vec![Err(AppError::LlmUnavailable("offline".into()))]);
+        let llm = LocalAppsLlm::new(model);
+        let error = llm
+            .chat(ChatRequest {
+                system: None,
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ChatPart::Text("你好".into())],
+                }],
+                max_tokens: 128,
+                temperature: None,
+            })
+            .await
+            .expect_err("an unreachable model must not read as a refusal");
+        assert!(matches!(error, AppError::LlmUnavailable(_)), "{error:?}");
+    }
+
     /// A [`LocalAppsModel`] double that only records `set_model` calls —
     /// proves [`LocalAppsLlm::set_model`] actually delegates to the
     /// underlying model instead of silently no-op'ing (the DEFAULT trait
@@ -1000,6 +1348,10 @@ mod tests {
             _schema: serde_json::Value,
             _deltas: Option<Arc<dyn GenerationDeltaSink>>,
         ) -> Result<serde_json::Value, AppError> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatOutcome, AppError> {
             unreachable!("not exercised by this test")
         }
 

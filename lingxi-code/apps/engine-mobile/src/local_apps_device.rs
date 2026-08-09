@@ -9,8 +9,81 @@
 //! here would dispatch a fresh connection's capture into a torn-down engine's
 //! Swift object.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use traits::{CameraControl, LocationProvider, NotificationService, VoiceRecorder};
+use traits::{CameraControl, LocationProvider, NotificationService, SpeechToText, VoiceRecorder};
+
+/// Per-app cap on retained media. Two default-preset photos plus a long
+/// recording fit; past that the oldest handle is evicted.
+const MAX_MEDIA_ENTRIES_PER_APP: usize = 8;
+/// Per-app byte cap, checked after the entry count.
+const MAX_MEDIA_BYTES_PER_APP: usize = 16 * 1024 * 1024;
+
+/// One retained device capture, addressable by handle.
+#[derive(Clone)]
+pub(crate) struct MediaEntry {
+    /// MIME type, e.g. `image/jpeg` or `audio/m4a`.
+    pub(crate) media_type: String,
+    /// Raw (already decoded) bytes.
+    pub(crate) bytes: Arc<Vec<u8>>,
+}
+
+/// Engine-side, per-app store of what the device ops just captured.
+///
+/// It exists because the WebView bridge caps ONE request payload at 64 KiB
+/// while a single default-preset photo is 400-700 KB base64: an app
+/// physically cannot hand a photo back to `llm.chat` inline. The bytes are
+/// already engine-side (the engine produced them), so a handle both fits the
+/// cap and skips a multi-megabyte round trip out to JS and back.
+///
+/// Deliberately in memory only and bounded per app: this is a hand-off
+/// buffer between two bridge calls, not storage. An app that wants to KEEP a
+/// photo writes it to its own collection.
+#[derive(Default)]
+pub(crate) struct MediaCache {
+    /// `app_id` -> insertion-ordered `(handle, entry)` pairs.
+    entries: RwLock<HashMap<String, Vec<(String, MediaEntry)>>>,
+}
+
+impl MediaCache {
+    /// Retain `entry` for `app_id` and return its handle.
+    pub(crate) fn put(&self, app_id: &str, handle: String, entry: MediaEntry) -> String {
+        let mut entries = self.entries.write().expect("media cache poisoned");
+        let per_app = entries.entry(app_id.to_string()).or_default();
+        per_app.push((handle.clone(), entry));
+        while per_app.len() > MAX_MEDIA_ENTRIES_PER_APP
+            || per_app
+                .iter()
+                .map(|(_, entry)| entry.bytes.len())
+                .sum::<usize>()
+                > MAX_MEDIA_BYTES_PER_APP
+        {
+            per_app.remove(0);
+        }
+        handle
+    }
+
+    /// Look one up. Handles stay valid until evicted — a chat that attaches
+    /// the same photo twice works.
+    pub(crate) fn get(&self, app_id: &str, handle: &str) -> Option<MediaEntry> {
+        self.entries
+            .read()
+            .expect("media cache poisoned")
+            .get(app_id)?
+            .iter()
+            .find(|(id, _)| id == handle)
+            .map(|(_, entry)| entry.clone())
+    }
+
+    /// Drop everything an app retained (its runtime stopped, or it was
+    /// deleted).
+    pub(crate) fn clear_app(&self, app_id: &str) {
+        self.entries
+            .write()
+            .expect("media cache poisoned")
+            .remove(app_id);
+    }
+}
 
 /// One connection's device handles, as read from its `Platform`. Every slot
 /// is optional — a Store build without a runtime, a stub platform, or a
@@ -21,6 +94,11 @@ pub(crate) struct DeviceCapabilities {
     pub(crate) voice: Option<Arc<dyn VoiceRecorder>>,
     pub(crate) location: Option<Arc<dyn LocationProvider>>,
     pub(crate) notifications: Option<Arc<dyn NotificationService>>,
+    /// Live microphone transcription. This — not an audio attachment — is
+    /// how speech reaches the model: the conversation protocol has no audio
+    /// content block, and `SpeechToText::transcribe` opens the mic for one
+    /// utterance rather than transcribing a file.
+    pub(crate) stt: Option<Arc<dyn SpeechToText>>,
 }
 
 /// Mirror of `SharedLlm` for device handles: read fresh on every use,
@@ -69,6 +147,42 @@ mod tests {
         async fn pick_from_library(&self) -> Result<CapturedImage, CameraError> {
             Err(CameraError::DeviceUnavailable)
         }
+    }
+
+    fn entry(size: usize) -> MediaEntry {
+        MediaEntry {
+            media_type: "image/jpeg".into(),
+            bytes: Arc::new(vec![0u8; size]),
+        }
+    }
+
+    #[test]
+    fn a_handle_round_trips_and_is_scoped_to_its_app() {
+        let cache = MediaCache::default();
+        cache.put("app-a", "m-1".into(), entry(3));
+        assert!(cache.get("app-a", "m-1").is_some());
+        assert!(
+            cache.get("app-b", "m-1").is_none(),
+            "one app must never be able to attach another app's capture"
+        );
+        cache.clear_app("app-a");
+        assert!(cache.get("app-a", "m-1").is_none());
+    }
+
+    #[test]
+    fn the_cache_evicts_oldest_first_by_count_and_by_bytes() {
+        let cache = MediaCache::default();
+        for i in 0..12 {
+            cache.put("app-a", format!("m-{i}"), entry(1));
+        }
+        assert!(cache.get("app-a", "m-0").is_none(), "count cap evicts");
+        assert!(cache.get("app-a", "m-11").is_some());
+
+        let cache = MediaCache::default();
+        cache.put("app-a", "big-1".into(), entry(10 * 1024 * 1024));
+        cache.put("app-a", "big-2".into(), entry(10 * 1024 * 1024));
+        assert!(cache.get("app-a", "big-1").is_none(), "byte cap evicts");
+        assert!(cache.get("app-a", "big-2").is_some());
     }
 
     /// The stale-handle fix in one assertion: after `replace`, `current`

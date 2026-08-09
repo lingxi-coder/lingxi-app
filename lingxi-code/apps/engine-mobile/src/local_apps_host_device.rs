@@ -1361,6 +1361,53 @@ mod tests {
         );
     }
 
+    /// "Allow for this session" must not outlive the session. The grant
+    /// lives only in memory, so a stale one behaves as "always allow" while
+    /// staying invisible to permissions.json and unrevokable short of a full
+    /// reset — the opposite of what the user was asked.
+    #[tokio::test]
+    async fn a_session_grant_does_not_survive_the_runtime_it_was_given_in() {
+        let camera = FakeCamera::with_bytes(vec![1]);
+        let h = harness(DeviceCapabilities {
+            camera: Some(camera),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare(&h, AppCapability::Camera);
+        h.broker
+            .session_permissions
+            .lock()
+            .await
+            .grant(&h.app_id, AppCapability::Camera);
+
+        // The grant is live: no prompt, straight through.
+        let (ok, _, error, code) = timeout(
+            Duration::from_secs(2),
+            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})),
+        )
+        .await
+        .expect("a session grant answers without a prompt");
+        assert!(ok, "{error:?} {code:?}");
+
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "start"}))
+            .await
+            .expect("start");
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("stop");
+
+        assert!(
+            !h.broker
+                .session_permissions
+                .lock()
+                .await
+                .allows(&h.app_id, AppCapability::Camera),
+            "the session grant must lapse with the runtime it was given in"
+        );
+    }
+
     #[tokio::test]
     async fn get_location_returns_the_fix() {
         let h = harness(DeviceCapabilities {

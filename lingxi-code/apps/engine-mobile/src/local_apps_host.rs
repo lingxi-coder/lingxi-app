@@ -356,6 +356,10 @@ pub(crate) struct LocalAppsHostBroker {
     /// Serializes mailbox read-modify-writes. Held across the file update
     /// and NOTHING else — never across an emit, never across a client call.
     mailbox_writes: Mutex<()>,
+    /// Weak self-reference handed to the runtime-exit watchers, which are
+    /// spawned onto the profile worker and outlive the call that started
+    /// them. Weak so a watcher can never be what keeps the broker alive.
+    self_ref: OnceLock<std::sync::Weak<LocalAppsHostBroker>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
@@ -407,7 +411,7 @@ impl LocalAppsHostBroker {
         full_runtime: bool,
         runtime_root: Option<PathBuf>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let broker = Arc::new(Self {
             root,
             event_sink,
             mobile_linux,
@@ -421,6 +425,7 @@ impl LocalAppsHostBroker {
             media: crate::local_apps_device::MediaCache::default(),
             llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
+            self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
@@ -428,7 +433,16 @@ impl LocalAppsHostBroker {
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
             next_request_id: AtomicU64::new(1),
-        })
+        });
+        // The one place an `Arc<Self>` exists; the exit watchers downgrade
+        // from it rather than being handed a strong clone.
+        let _ = broker.self_ref.set(Arc::downgrade(&broker));
+        broker
+    }
+
+    /// Weak handle for tasks that outlive the call that spawned them.
+    fn weak_self(&self) -> std::sync::Weak<LocalAppsHostBroker> {
+        self.self_ref.get().cloned().unwrap_or_default()
     }
 
     pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
@@ -1429,12 +1443,7 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
-        // A stopping page must not keep the microphone hot — release any
-        // recording it left behind before the runtime goes away. Its media
-        // handles die with it too: they are a hand-off buffer between two
-        // bridge calls of a LIVE page, not storage.
-        self.force_stop_recording(app_id).await;
-        self.clear_media(app_id);
+        self.release_app_runtime_state(app_id).await;
         // Classify and remove under ONE acquisition: a start woken in the gap
         // between a `remove` and its rollback `insert` finds no entry, kills the
         // runtime it just spawned and returns without resolving the gate,
@@ -1588,6 +1597,25 @@ impl LocalAppsHostBroker {
         }
     }
 
+    /// Everything an app's runtime owned that must not outlive it.
+    ///
+    /// Called from EVERY way a runtime can end — the explicit stop, the Full
+    /// handle's exit watch, and the static listener's reconciliation — not
+    /// just the one the user drives. A crashed app used to keep the iOS
+    /// audio-session lease open with nothing left able to release it, which
+    /// takes FlowMode, hold-to-talk and transcribeSpeech down with it for the
+    /// life of the process.
+    ///
+    /// Session grants go too: the user answered "allow for this session"
+    /// while USING the app, and a grant that quietly survives the app's death
+    /// behaves as "always allow" while staying invisible to permissions.json
+    /// and unrevokable short of a full reset.
+    pub(crate) async fn release_app_runtime_state(&self, app_id: &str) {
+        self.force_stop_recording(app_id).await;
+        self.clear_media(app_id);
+        self.session_permissions.lock().await.revoke_app(app_id);
+    }
+
     async fn reconcile_full_runtime_exit(
         &self,
         app_id: &str,
@@ -1647,10 +1675,17 @@ impl LocalAppsHostBroker {
             return;
         };
         let runtimes = Arc::clone(&self.runtimes);
+        // WEAK on purpose: the watcher must be able to reclaim this app's
+        // recording/media/session grants when the process dies on its own,
+        // but it must not be what keeps the broker alive.
+        let broker = self.weak_self();
         // Same lifetime rule as the static server: the watcher must outlive the
         // engine runtime that happened to issue this start.
         crate::local_apps_profile::worker_runtime().spawn(async move {
-            watch_full_runtime_exit(runtimes, service, runtime, app_id, generation, process).await;
+            watch_full_runtime_exit(
+                runtimes, service, runtime, app_id, generation, process, broker,
+            )
+            .await;
         });
     }
 
@@ -1673,11 +1708,13 @@ impl LocalAppsHostBroker {
         shutdown: oneshot::Receiver<()>,
     ) {
         let runtimes = Arc::clone(&self.runtimes);
+        let broker = self.weak_self();
         crate::local_apps_profile::worker_runtime().spawn(async move {
             let Some(detail) = run_static_server(listener, root, shutdown).await else {
                 return;
             };
-            reconcile_static_runtime_exit(runtimes, service, app_id, generation, detail).await;
+            reconcile_static_runtime_exit(runtimes, service, app_id, generation, detail, broker)
+                .await;
         });
     }
 
@@ -2381,6 +2418,7 @@ async fn watch_full_runtime_exit(
     app_id: String,
     generation: u64,
     process: LinuxProcessHandle,
+    broker: std::sync::Weak<LocalAppsHostBroker>,
 ) {
     loop {
         sleep(FULL_RUNTIME_WATCH_POLL).await;
@@ -2429,6 +2467,15 @@ async fn watch_full_runtime_exit(
                 false
             }
         };
+        if removed {
+            // The app's process died on its own (OOM, crash, guest exit).
+            // Nothing else runs on this path, so without this the recording
+            // it left behind keeps the iOS audio session leased with no
+            // handle able to release it.
+            if let Some(broker) = broker.upgrade() {
+                broker.release_app_runtime_state(&app_id).await;
+            }
+        }
         if !removed {
             return;
         }
@@ -2522,6 +2569,7 @@ async fn reconcile_static_runtime_exit(
     app_id: String,
     generation: u64,
     detail: String,
+    broker: std::sync::Weak<LocalAppsHostBroker>,
 ) {
     let removed = {
         let mut runtimes = runtimes.lock().await;
@@ -2541,6 +2589,12 @@ async fn reconcile_static_runtime_exit(
     };
     if !removed {
         return;
+    }
+    // The listener retired on its own: reclaim what the runtime owned before
+    // recording the stop, so a page that was mid-recording does not leave the
+    // audio session held by nothing.
+    if let Some(broker) = broker.upgrade() {
+        broker.release_app_runtime_state(&app_id).await;
     }
     if let Ok(record) = service.runtime_record(&app_id).await {
         let _ = service

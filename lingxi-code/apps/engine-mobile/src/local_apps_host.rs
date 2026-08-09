@@ -1813,6 +1813,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.restore_checkpoint_value(input).await
     }
 
+    async fn read_app_events(&self, input: Value) -> Result<Value, String> {
+        self.read_app_events_value(input).await
+    }
+
     async fn trigger_authoring(&self, app_id: String, epoch: u64) {
         let (Ok(service), Some(llm)) = (self.service(), self.llm.get()) else {
             // `service`/`llm` are attached together with `generation` at

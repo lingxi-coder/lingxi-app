@@ -1460,6 +1460,10 @@ pub enum SpeechFfiError {
     /// No usable recognizer / synthesizer on the device.
     #[error("speech service unavailable")]
     Unavailable,
+    /// The shared `AVAudioSession` is held by another consumer, exactly as
+    /// [`VoiceFfiError::Busy`] reports for recording.
+    #[error("audio session busy")]
+    Busy,
     /// A transient failure — safe to retry.
     #[error("transient speech error: {message}")]
     Retriable {
@@ -2258,6 +2262,7 @@ impl traits::SpeechToText for IosSttBridge {
                 SpeechFfiError::PermissionDenied => traits::SttError::PermissionDenied,
                 SpeechFfiError::NoSpeech => traits::SttError::NoSpeech,
                 SpeechFfiError::Unavailable => traits::SttError::Unavailable,
+                SpeechFfiError::Busy => traits::SttError::Busy,
                 SpeechFfiError::Retriable { message } => traits::SttError::Retriable(message),
                 SpeechFfiError::Other { message } => traits::SttError::Other(message),
             }),

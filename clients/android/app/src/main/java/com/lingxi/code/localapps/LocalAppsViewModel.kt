@@ -1622,13 +1622,20 @@ private fun AppCapabilityKindDto.authorizationTitle(strings: LocalAppsStrings): 
         strings.resolve(R.string.local_apps_permission_network_short, "允许应用联网？")
     AppCapabilityKindDto.RESTORE_CHECKPOINT ->
         strings.resolve(R.string.local_apps_permission_restore, "允许恢复代码检查点？")
-    AppCapabilityKindDto.CAMERA -> "允许应用使用相机拍照？"
-    AppCapabilityKindDto.PHOTO_LIBRARY -> "允许应用从相册选择图片？"
-    AppCapabilityKindDto.MICROPHONE -> "允许应用使用麦克风录音？"
-    AppCapabilityKindDto.LOCATION -> "允许应用获取当前位置？"
-    AppCapabilityKindDto.NOTIFICATIONS -> "允许应用发送本地通知？"
-    AppCapabilityKindDto.LLM -> "允许应用调用 AI 模型？（会消耗你的模型用量）"
-    AppCapabilityKindDto.AGENT_NOTIFY -> "允许应用向对话助手发送事件？"
+    AppCapabilityKindDto.CAMERA ->
+        strings.resolve(R.string.local_apps_permission_camera, "允许应用使用相机拍照？")
+    AppCapabilityKindDto.PHOTO_LIBRARY ->
+        strings.resolve(R.string.local_apps_permission_photo_library, "允许应用从相册选择图片？")
+    AppCapabilityKindDto.MICROPHONE ->
+        strings.resolve(R.string.local_apps_permission_microphone, "允许应用使用麦克风录音？")
+    AppCapabilityKindDto.LOCATION ->
+        strings.resolve(R.string.local_apps_permission_location, "允许应用获取当前位置？")
+    AppCapabilityKindDto.NOTIFICATIONS ->
+        strings.resolve(R.string.local_apps_permission_notifications, "允许应用发送本地通知？")
+    AppCapabilityKindDto.LLM ->
+        strings.resolve(R.string.local_apps_permission_llm, "允许应用调用 AI 模型？（会消耗你的模型用量）")
+    AppCapabilityKindDto.AGENT_NOTIFY ->
+        strings.resolve(R.string.local_apps_permission_agent_notify, "允许应用向对话助手发送事件？")
 }
 
 private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationDecisionDto = when (this) {

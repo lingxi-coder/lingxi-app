@@ -448,11 +448,18 @@ internal fun LocalAppCapabilityKind.readable(strings: LocalAppsStrings = Default
         strings.resolve(R.string.local_apps_plan_confirm_capability_network_domain, "网络访问")
     LocalAppCapabilityKind.RestoreCheckpoint ->
         strings.resolve(R.string.local_apps_plan_confirm_capability_restore_checkpoint, "恢复检查点")
-    LocalAppCapabilityKind.Camera -> "相机"
-    LocalAppCapabilityKind.PhotoLibrary -> "相册"
-    LocalAppCapabilityKind.Microphone -> "麦克风"
-    LocalAppCapabilityKind.Location -> "位置"
-    LocalAppCapabilityKind.Notifications -> "通知"
-    LocalAppCapabilityKind.Llm -> "AI 模型"
-    LocalAppCapabilityKind.AgentNotify -> "发送事件给助手"
+    LocalAppCapabilityKind.Camera ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_camera, "相机")
+    LocalAppCapabilityKind.PhotoLibrary ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_photo_library, "相册")
+    LocalAppCapabilityKind.Microphone ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_microphone, "麦克风")
+    LocalAppCapabilityKind.Location ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_location, "位置")
+    LocalAppCapabilityKind.Notifications ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_notifications, "通知")
+    LocalAppCapabilityKind.Llm ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_llm, "AI 模型")
+    LocalAppCapabilityKind.AgentNotify ->
+        strings.resolve(R.string.local_apps_plan_confirm_capability_agent_notify, "发送事件给助手")
 }

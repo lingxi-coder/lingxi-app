@@ -67,7 +67,15 @@ fn screen_path(path: &str) -> Result<(), AppError> {
     if path.is_empty() {
         return Err(reject("empty write path"));
     }
-    if LOCKED_TEMPLATE_PATHS.contains(&path) {
+    // Case-INSENSITIVE: iOS and macOS resolve `lib/LingXi-Bridge.js` to the
+    // same file as `lib/lingxi-bridge.js`, so a case-sensitive screen would
+    // let a differently-cased write through to overwrite the host's own
+    // helper — and then die at the hash check a repair attempt later, which
+    // is exactly what screening early exists to avoid.
+    if LOCKED_TEMPLATE_PATHS
+        .iter()
+        .any(|locked| locked.eq_ignore_ascii_case(path))
+    {
         return Err(reject(format!(
             "`{path}` is provided by the host and cannot be written by the app"
         )));

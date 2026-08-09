@@ -118,17 +118,24 @@ impl LocalAppsHostBroker {
         let (events, dropped, unread) = {
             let _guard = self.mailbox_writes.lock().await;
             let mut mailbox = load_mailbox(&layout).map_err(|error| error.to_string())?;
-            let events = if peek {
-                mailbox.peek(after_seq, limit).into_iter().cloned().collect()
+            let (events, dropped) = if peek {
+                (
+                    mailbox.peek(after_seq, limit).into_iter().cloned().collect(),
+                    mailbox.dropped_count,
+                )
             } else {
                 let drained = mailbox.drain(limit);
-                if !drained.is_empty() {
+                // Clearing the loss counter is itself a state change, so it
+                // must be saved even when there was nothing to drain —
+                // otherwise the same loss is reported on every later read.
+                let dropped = mailbox.take_dropped_count();
+                if !drained.is_empty() || dropped > 0 {
                     save_mailbox(&layout, &mailbox).map_err(|error| error.to_string())?;
                 }
-                drained
+                (drained, dropped)
             };
             let unread = mailbox.peek(None, usize::MAX).len();
-            (events, mailbox.dropped_count, unread)
+            (events, dropped, unread)
         };
 
         Ok(json!({

@@ -59,6 +59,42 @@ struct LocalAppDetailView: View {
             }
     }
 
+    /// The one place the engine's app-activity signals are visible.
+    ///
+    /// `llm.chat` bills the USER's model quota, so an app calling it while
+    /// the user is looking at something else must not be silent; and an app
+    /// that posted an event has told the assistant something the user may
+    /// want to ask about. Both are engine state the store already tracks —
+    /// without this they were computed and never shown.
+    @ViewBuilder
+    private var activityBar: some View {
+        let callingAI = store.llmActiveAppIDs.contains(appID)
+        let unread = store.unreadAgentEvents[appID] ?? 0
+        if callingAI || unread > 0 {
+            HStack(spacing: 8) {
+                if callingAI {
+                    ProgressView().controlSize(.small)
+                    Text("local_apps_activity_calling_ai")
+                        .accessibilityIdentifier("local-apps.activity.calling-ai")
+                }
+                if callingAI, unread > 0 {
+                    Text("·").foregroundStyle(.secondary)
+                }
+                if unread > 0 {
+                    Image(systemName: "tray.full")
+                    Text("local_apps_activity_unread_events \(unread)")
+                        .accessibilityIdentifier("local-apps.activity.unread-events")
+                }
+                Spacer()
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+            .background(.bar)
+        }
+    }
+
     @ViewBuilder
     private var content: some View {
         Group {
@@ -66,6 +102,7 @@ struct LocalAppDetailView: View {
                 VStack(spacing: 0) {
                     LocalAppDetailSectionPicker(selection: $section)
                     Divider()
+                    activityBar
                     sectionContent(app)
                 }
                 .background(theme.windowBg)

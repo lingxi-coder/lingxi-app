@@ -173,6 +173,10 @@ fn map_stt_error(error: SttError) -> BridgeFailure {
     match error {
         SttError::PermissionDenied => BridgeFailure::coded("permission_denied", message),
         SttError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        // The SAME code recording reports for the same cause: an app told to
+        // branch on `audio_session_busy` must not have to learn a second
+        // name for "the mic is in use".
+        SttError::Busy => BridgeFailure::coded("audio_session_busy", message),
         // Distinct from an error the app should surface as a failure: the
         // mic simply heard nothing, which a UI usually retries silently.
         SttError::NoSpeech => BridgeFailure::coded("no_speech", message),

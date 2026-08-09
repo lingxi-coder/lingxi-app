@@ -42,6 +42,12 @@ pub enum SttError {
     /// The device has no speech-recognition service installed/available.
     #[error("speech recognition unavailable")]
     Unavailable,
+    /// The platform audio session is held by another consumer (a local
+    /// app's recording, FlowMode's voice orb) — the same contention
+    /// [`crate::VoiceError::Busy`] reports, and a caller branching on one
+    /// should not have to also recognize the other.
+    #[error("audio session busy")]
+    Busy,
     /// A transient failure (network ASR, recognizer busy) — safe to retry.
     #[error("transient speech error: {0}")]
     Retriable(String),

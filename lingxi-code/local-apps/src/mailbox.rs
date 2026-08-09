@@ -169,6 +169,17 @@ impl AppMailbox {
             .collect()
     }
 
+    /// Report how many events were lost since the last report, and reset.
+    ///
+    /// Report-ONCE, not a running total: a reader that keeps being told "3
+    /// were dropped" long after it acknowledged them cannot tell a fresh
+    /// loss from an old one, so the number stops meaning anything. Only the
+    /// consuming path calls this — a peek must not clear a loss the next
+    /// real read still has to learn about.
+    pub fn take_dropped_count(&mut self) -> u64 {
+        std::mem::take(&mut self.dropped_count)
+    }
+
     /// Read and advance the cursor past what was returned.
     pub fn drain(&mut self, limit: usize) -> Vec<AppMailboxEvent> {
         let taken: Vec<AppMailboxEvent> = self
@@ -347,6 +358,24 @@ mod tests {
         let remaining = mailbox.drain(10);
         assert_eq!(remaining.len(), 1, "a drain resumes after the cursor");
         assert!(mailbox.drain(10).is_empty(), "nothing is left to drain");
+    }
+
+    #[test]
+    fn a_drop_is_reported_once_and_then_cleared() {
+        let mut mailbox = AppMailbox::default();
+        for i in 0..(MAX_MAILBOX_EVENTS + 2) {
+            mailbox
+                .append("tick", body(&format!("{i}")), 1_000 + i as u64)
+                .expect("append");
+        }
+        assert_eq!(mailbox.dropped_count, 2);
+        assert_eq!(mailbox.take_dropped_count(), 2);
+        assert_eq!(
+            mailbox.take_dropped_count(),
+            0,
+            "a loss already reported must not be re-reported forever — a reader could \
+             never tell a fresh drop from an acknowledged one"
+        );
     }
 
     #[test]

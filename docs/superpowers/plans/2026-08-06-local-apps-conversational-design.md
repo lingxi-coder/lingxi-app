@@ -1,5 +1,7 @@
 # 本地应用对话式设计 Implementation Plan
 
+> **归档说明（非现行规范）**：本文是固定模板系统删除及动态问卷方案落地时的历史实施记录。当前生产契约不包含 `AppTemplate*`、`ListAppTemplates`、`AppTemplatesChanged` 或模板选择页面；后续修改必须以“brief → questionnaire → answers → plan → generation/preview”流程和当前代码/协议快照为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把本地应用的创建流程从「四选一模版 + 固定表单向导」改成「一句话描述 → LLM 现场出问卷 → 出方案 → LLM 写源码 → 自然语言持续迭代」。

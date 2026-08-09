@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+use traits::mobile_linux::LinuxEnforcementReceipt;
 use traits::{
     LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
@@ -32,6 +33,8 @@ const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 const MAX_STDOUT_FRAGMENT_BYTES: usize = 16 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const REAP_BUDGET: Duration = Duration::from_secs(2);
+const ENFORCEMENT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(3);
+const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 /// Paths and immutable identity expected by one managed Android PRoot runtime.
@@ -86,6 +89,12 @@ impl TaskControl {
 struct PtyControl {
     task: Arc<TaskControl>,
     process: Arc<platform_pty::ProcessHandle>,
+}
+
+struct SpawnedChild {
+    child: Child,
+    enforcement: LinuxEnforcementReceipt,
+    memory_limit_bytes: Option<u64>,
 }
 
 struct RuntimeState {
@@ -170,6 +179,30 @@ impl AndroidProotRuntime {
                     "PRoot executable is missing under {}",
                     root.display()
                 ))
+            })
+    }
+
+    fn policy_launcher(&self) -> Result<PathBuf, MobileLinuxError> {
+        let mut candidates = vec![
+            self.state
+                .config
+                .managed_root
+                .join("bin/libmobile_linux_policy_launcher.so"),
+            self.state
+                .config
+                .managed_root
+                .join("libmobile_linux_policy_launcher.so"),
+        ];
+        if let Some(native_lib_dir) = android_native_library_dir() {
+            candidates.insert(0, native_lib_dir.join("libmobile_linux_policy_launcher.so"));
+        }
+        candidates
+            .into_iter()
+            .find(|candidate| executable_regular_file(candidate))
+            .ok_or_else(|| {
+                MobileLinuxError::NetworkPolicyUnavailable(
+                    "Android network policy launcher is not packaged or executable".to_string(),
+                )
             })
     }
 
@@ -274,38 +307,56 @@ impl AndroidProotRuntime {
 
     fn build_command(
         &self,
-        executable: &str,
-        args: &[String],
+        request: &LinuxCommandRequest,
         cwd: Option<&str>,
         env: &BTreeMap<String, String>,
         mounts: &[MountSpec],
+        receipt_path: Option<&Path>,
     ) -> Result<Command, MobileLinuxError> {
         let (proot, rootfs) = self.readiness()?;
         let native_lib_dir = proot.parent().map(Path::to_path_buf);
-        let mut command = Command::new(proot);
-        command
-            .arg("-0")
-            .arg("--link2symlink")
-            .arg("-r")
-            .arg(rootfs)
-            .arg("-b")
-            .arg("/dev")
-            .arg("-b")
-            .arg("/proc")
-            .arg("-b")
-            .arg("/sys")
-            .arg("-w")
-            .arg(cwd.unwrap_or("/root"));
+        let mut proot_args = vec![
+            "-0".to_string(),
+            "--link2symlink".to_string(),
+            "-r".to_string(),
+            rootfs.display().to_string(),
+            "-b".to_string(),
+            "/dev".to_string(),
+            "-b".to_string(),
+            "/proc".to_string(),
+            "-b".to_string(),
+            "/sys".to_string(),
+            "-w".to_string(),
+            cwd.unwrap_or("/root").to_string(),
+        ];
         for mount in mounts {
-            command.arg("-b").arg(format!(
+            proot_args.push("-b".to_string());
+            proot_args.push(format!(
                 "{}:{}",
                 mount.host_path.display(),
                 mount.guest_path
             ));
         }
+        proot_args.push(request.command.clone());
+        proot_args.extend(request.args.iter().cloned());
+
+        let mut command = match request.network {
+            NetworkPolicy::Allowed => Command::new(&proot),
+            NetworkPolicy::Disabled => {
+                let launcher = self.policy_launcher()?;
+                let mut command = Command::new(launcher);
+                command.arg("disabled").arg(&proot);
+                command
+            }
+            NetworkPolicy::LoopbackOnly => {
+                return Err(MobileLinuxError::NetworkPolicyUnavailable(
+                    "Android PRoot cannot enforce LoopbackOnly without sockaddr-aware syscall filtering"
+                        .to_string(),
+                ));
+            }
+        };
         command
-            .arg(executable)
-            .args(args)
+            .args(proot_args)
             .env_clear()
             .env("PROOT_TMP_DIR", self.state.config.managed_root.join("tmp"))
             .env(
@@ -314,6 +365,9 @@ impl AndroidProotRuntime {
             )
             .env("HOME", "/root")
             .envs(env);
+        if let Some(receipt_path) = receipt_path {
+            command.env("LINGXI_ENFORCEMENT_RECEIPT_PATH", receipt_path);
+        }
         if let Some(native_lib_dir) = native_lib_dir {
             command.env("LD_LIBRARY_PATH", &native_lib_dir);
             let loader = native_lib_dir.join("libproot-loader.so");
@@ -455,19 +509,77 @@ impl AndroidProotRuntime {
         );
     }
 
-    async fn spawn_child(&self, request: &LinuxCommandRequest) -> Result<Child, MobileLinuxError> {
+    async fn spawn_child(
+        &self,
+        request: &LinuxCommandRequest,
+    ) -> Result<SpawnedChild, MobileLinuxError> {
         validate_request(request)?;
+        let memory_limit_bytes = requested_memory_limit_bytes(request)?;
+        if memory_limit_bytes.is_some() {
+            ensure_process_group_rss_available()?;
+        }
         let mounts = self.combined_mounts(&request.mounts)?;
-        let mut command = self.build_command(
-            &request.command,
-            &request.args,
+        let receipt_path = if matches!(request.network, NetworkPolicy::Disabled) {
+            let path = self.state.config.managed_root.join("tmp").join(format!(
+                "network-policy-receipt-{}",
+                self.state.next_id.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    MobileLinuxError::Io(format!(
+                        "create network enforcement receipt {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            Some(path)
+        } else {
+            None
+        };
+        let mut command = match self.build_command(
+            request,
             request.cwd.as_deref(),
             &request.env,
             &mounts,
-        )?;
-        let mut child = command
-            .spawn()
-            .map_err(|error| MobileLinuxError::Io(format!("spawn PRoot: {error}")))?;
+            receipt_path.as_deref(),
+        ) {
+            Ok(command) => command,
+            Err(error) => {
+                if let Some(path) = receipt_path.as_deref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = receipt_path.as_deref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(MobileLinuxError::Io(format!("spawn PRoot: {error}")));
+            }
+        };
+        let network_policy_enforced = if let Some(path) = receipt_path.as_deref() {
+            match wait_for_network_policy_receipt(&mut child, path).await {
+                Ok(()) => true,
+                Err(error) => {
+                    if let Some(pid) = child.id() {
+                        terminate_group(pid, Signal::SIGKILL);
+                    }
+                    let _ = child.wait().await;
+                    let _ = fs::remove_file(path);
+                    return Err(error);
+                }
+            }
+        } else {
+            false
+        };
+        if let Some(path) = receipt_path {
+            let _ = fs::remove_file(path);
+        }
         if let Some(input) = &request.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -476,7 +588,14 @@ impl AndroidProotRuntime {
                     .map_err(|error| MobileLinuxError::Io(format!("write stdin: {error}")))?;
             }
         }
-        Ok(child)
+        Ok(SpawnedChild {
+            child,
+            enforcement: LinuxEnforcementReceipt {
+                network_policy_enforced,
+                memory_limit_enforced: memory_limit_bytes.is_some(),
+            },
+            memory_limit_bytes,
+        })
     }
 
     async fn run_inner(
@@ -490,8 +609,8 @@ impl AndroidProotRuntime {
             display_command(&request.command, &request.args),
             MobileLinuxTaskStatus::Running,
         );
-        let mut child = match self.spawn_child(&request).await {
-            Ok(child) => child,
+        let spawned = match self.spawn_child(&request).await {
+            Ok(spawned) => spawned,
             Err(error) => {
                 self.finish_task(
                     &id,
@@ -503,6 +622,11 @@ impl AndroidProotRuntime {
                 return Err(error);
             }
         };
+        let SpawnedChild {
+            mut child,
+            enforcement,
+            memory_limit_bytes,
+        } = spawned;
         let pid = child
             .id()
             .ok_or_else(|| MobileLinuxError::Io("PRoot child has no pid".to_string()))?;
@@ -559,10 +683,12 @@ impl AndroidProotRuntime {
             .await
         });
         let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-        let waited = tokio::time::timeout(timeout, child.wait()).await;
-        let (exit_code, timed_out) = match waited {
-            Ok(Ok(status)) => (status.code().unwrap_or(-1), false),
-            Ok(Err(error)) => {
+        let waited = wait_for_child(&mut child, pid, Some(timeout), memory_limit_bytes).await;
+        let (exit_code, timed_out, resource_limit_exceeded) = match waited {
+            Ok(ChildWaitOutcome::Exited(status)) => (status.code().unwrap_or(-1), false, false),
+            Ok(ChildWaitOutcome::TimedOut) => (-1, true, false),
+            Ok(ChildWaitOutcome::MemoryLimitExceeded) => (-1, false, true),
+            Err(error) => {
                 terminate_group(pid, Signal::SIGKILL);
                 let _ = child.wait().await;
                 self.finish_task(
@@ -572,18 +698,15 @@ impl AndroidProotRuntime {
                     None,
                     Some(error.to_string()),
                 );
-                return Err(MobileLinuxError::Io(format!("wait for PRoot: {error}")));
-            }
-            Err(_) => {
-                terminate_group(pid, Signal::SIGKILL);
-                let _ = child.wait().await;
-                (-1, true)
+                return Err(error);
             }
         };
         let stdout = join_reader(stdout_task, "stdout").await?;
         let stderr = join_reader(stderr_task, "stderr").await?;
         let cancelled = task.cancel_requested.load(Ordering::Acquire);
-        let status = if cancelled {
+        let status = if resource_limit_exceeded {
+            MobileLinuxTaskStatus::Failed
+        } else if cancelled {
             MobileLinuxTaskStatus::Cancelled
         } else if timed_out {
             MobileLinuxTaskStatus::TimedOut
@@ -597,18 +720,26 @@ impl AndroidProotRuntime {
             &task,
             status,
             (!timed_out && !cancelled).then_some(exit_code),
-            if cancelled {
+            if resource_limit_exceeded {
+                Some("resource_limit_exceeded: resident-memory limit exceeded".to_string())
+            } else if cancelled {
                 Some("command cancelled".to_string())
             } else {
                 timed_out.then(|| "command timed out".to_string())
             },
         );
+        if resource_limit_exceeded {
+            return Err(MobileLinuxError::ResourceLimitExceeded(
+                "Android PRoot process group exceeded resident-memory limit".to_string(),
+            ));
+        }
         Ok(LinuxCommandResult {
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             exit_code,
             timed_out,
             cancelled,
+            enforcement,
         })
     }
 
@@ -711,7 +842,13 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
             }
         }
         for id in task_ids {
-            if let Err(error) = self.kill(&LinuxProcessHandle { id }).await {
+            if let Err(error) = self
+                .kill(&LinuxProcessHandle {
+                    id,
+                    enforcement: LinuxEnforcementReceipt::default(),
+                })
+                .await
+            {
                 errors.push(error.to_string());
             }
         }
@@ -751,8 +888,8 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
             display_command(&request.command, &request.args),
             MobileLinuxTaskStatus::Backgrounded,
         );
-        let mut child = match self.spawn_child(&request).await {
-            Ok(child) => child,
+        let spawned = match self.spawn_child(&request).await {
+            Ok(spawned) => spawned,
             Err(error) => {
                 self.finish_task(
                     &id,
@@ -764,6 +901,11 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
                 return Err(error);
             }
         };
+        let SpawnedChild {
+            mut child,
+            enforcement,
+            memory_limit_bytes,
+        } = spawned;
         let pid = child
             .id()
             .ok_or_else(|| MobileLinuxError::Io("PRoot child has no pid".to_string()))?;
@@ -801,7 +943,13 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
                     .await
                 })
             });
-            let result = child.wait().await;
+            let result = wait_for_child(
+                &mut child,
+                pid,
+                request.timeout_ms.map(Duration::from_millis),
+                memory_limit_bytes,
+            )
+            .await;
             let stdout_result = match stdout_task {
                 Some(task) => join_reader(task, "stdout").await,
                 None => Ok(Vec::new()),
@@ -820,7 +968,7 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
                     None,
                     Some(error.to_string()),
                 ),
-                (Ok(status), None) => {
+                (Ok(ChildWaitOutcome::Exited(status)), None) => {
                     let code = status.code().unwrap_or(-1);
                     runtime.finish_task(
                         &reaper_id,
@@ -836,6 +984,22 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
                         cancelled.then(|| "task cancelled".to_string()),
                     );
                 }
+                (Ok(ChildWaitOutcome::TimedOut), None) => runtime.finish_task(
+                    &reaper_id,
+                    &task,
+                    MobileLinuxTaskStatus::TimedOut,
+                    None,
+                    Some("command timed out".to_string()),
+                ),
+                (Ok(ChildWaitOutcome::MemoryLimitExceeded), None) => {
+                    runtime.finish_task(
+                        &reaper_id,
+                        &task,
+                        MobileLinuxTaskStatus::Failed,
+                        None,
+                        Some("resource_limit_exceeded: resident-memory limit exceeded".to_string()),
+                    );
+                }
                 (Err(error), None) => runtime.finish_task(
                     &reaper_id,
                     &task,
@@ -845,7 +1009,7 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
                 ),
             }
         });
-        Ok(LinuxProcessHandle { id })
+        Ok(LinuxProcessHandle { id, enforcement })
     }
 
     async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
@@ -1192,12 +1356,13 @@ fn validate_request(request: &LinuxCommandRequest) -> Result<(), MobileLinuxErro
             "timeout must be greater than zero".to_string(),
         ));
     }
-    if !matches!(request.network, NetworkPolicy::Allowed) {
-        return Err(MobileLinuxError::Unavailable(
-            "Android PRoot cannot enforce a network-denied policy without the host Minijail filter"
+    if matches!(request.network, NetworkPolicy::LoopbackOnly) {
+        return Err(MobileLinuxError::NetworkPolicyUnavailable(
+            "Android PRoot cannot enforce LoopbackOnly without sockaddr-aware syscall filtering"
                 .to_string(),
         ));
     }
+    let _ = requested_memory_limit_bytes(request)?;
     validate_guest_path(request.cwd.as_deref().unwrap_or("/root"))?;
     for value in &request.args {
         if value.as_bytes().contains(&0) {
@@ -1348,6 +1513,180 @@ fn terminate_group(pid: u32, signal: Signal) {
         if killpg(pid, signal).is_err() {
             let _ = kill(pid, signal);
         }
+    }
+}
+
+enum ChildWaitOutcome {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    MemoryLimitExceeded,
+}
+
+async fn wait_for_network_policy_receipt(
+    child: &mut Child,
+    path: &Path,
+) -> Result<(), MobileLinuxError> {
+    let deadline = tokio::time::Instant::now() + ENFORCEMENT_RECEIPT_TIMEOUT;
+    loop {
+        match fs::read_to_string(path) {
+            Ok(value) if value == "disabled\n" => return Ok(()),
+            Ok(value) if !value.is_empty() => {
+                return Err(MobileLinuxError::NetworkPolicyUnavailable(format!(
+                    "Android policy launcher returned an invalid enforcement receipt: {value:?}"
+                )));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(MobileLinuxError::NetworkPolicyUnavailable(format!(
+                    "Android policy launcher receipt became unreadable: {error}"
+                )));
+            }
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| MobileLinuxError::Io(format!("poll policy launcher: {error}")))?
+        {
+            return Err(MobileLinuxError::NetworkPolicyUnavailable(format!(
+                "Android policy launcher exited before enforcement (status {status})"
+            )));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MobileLinuxError::NetworkPolicyUnavailable(
+                "Android policy launcher did not prove enforcement before spawn timeout"
+                    .to_string(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_child(
+    child: &mut Child,
+    pid: u32,
+    timeout: Option<Duration>,
+    memory_limit_bytes: Option<u64>,
+) -> Result<ChildWaitOutcome, MobileLinuxError> {
+    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    let mut memory_poll = tokio::time::interval(MEMORY_POLL_INTERVAL);
+    memory_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = child.wait() => {
+                return result
+                    .map(ChildWaitOutcome::Exited)
+                    .map_err(|error| MobileLinuxError::Io(format!("wait for PRoot: {error}")));
+            }
+            _ = memory_poll.tick(), if memory_limit_bytes.is_some() => {
+                let resident = match process_group_rss_bytes(pid) {
+                    Ok(resident) => resident,
+                    Err(error) => {
+                        terminate_group(pid, Signal::SIGKILL);
+                        let _ = child.wait().await;
+                        return Err(error);
+                    }
+                };
+                if resident > memory_limit_bytes.expect("guarded memory limit") {
+                    terminate_group(pid, Signal::SIGKILL);
+                    let _ = child.wait().await;
+                    return Ok(ChildWaitOutcome::MemoryLimitExceeded);
+                }
+            }
+            () = async {
+                if let Some(deadline) = deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                terminate_group(pid, Signal::SIGKILL);
+                let _ = child.wait().await;
+                return Ok(ChildWaitOutcome::TimedOut);
+            }
+        }
+    }
+}
+
+fn ensure_process_group_rss_available() -> Result<(), MobileLinuxError> {
+    if Path::new("/proc/self/stat").is_file() && Path::new("/proc/self/status").is_file() {
+        Ok(())
+    } else {
+        Err(MobileLinuxError::ResourceLimitExceeded(
+            "Android process-group RSS accounting is unavailable".to_string(),
+        ))
+    }
+}
+
+fn process_group_rss_bytes(process_group: u32) -> Result<u64, MobileLinuxError> {
+    let entries = fs::read_dir("/proc").map_err(|error| {
+        MobileLinuxError::ResourceLimitExceeded(format!(
+            "read Android process table for memory watchdog: {error}"
+        ))
+    })?;
+    let mut resident_bytes = 0_u64;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let process_dir = entry.path();
+        let Ok(stat) = fs::read_to_string(process_dir.join("stat")) else {
+            continue;
+        };
+        let Some(after_name) = stat.rsplit_once(')').map(|(_, tail)| tail.trim()) else {
+            continue;
+        };
+        let mut fields = after_name.split_whitespace();
+        let _state = fields.next();
+        let _parent_pid = fields.next();
+        let Some(group) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        if group != process_group {
+            continue;
+        }
+        let Ok(status) = fs::read_to_string(process_dir.join("status")) else {
+            continue;
+        };
+        let resident_kib = status.lines().find_map(|line| {
+            line.strip_prefix("VmRSS:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        });
+        if let Some(resident_kib) = resident_kib {
+            resident_bytes = resident_bytes.saturating_add(resident_kib.saturating_mul(1024));
+        } else if pid == process_group {
+            return Err(MobileLinuxError::ResourceLimitExceeded(
+                "Android memory watchdog could not read root process RSS".to_string(),
+            ));
+        }
+    }
+    Ok(resident_bytes)
+}
+
+fn requested_memory_limit_bytes(
+    request: &LinuxCommandRequest,
+) -> Result<Option<u64>, MobileLinuxError> {
+    let limits = request.resource_limits;
+    if limits.max_cpu_seconds.is_some()
+        || limits.max_processes.is_some()
+        || limits.max_open_files.is_some()
+    {
+        return Err(MobileLinuxError::ResourceLimitExceeded(
+            "Android PRoot currently enforces only max_memory_mb for local-app commands"
+                .to_string(),
+        ));
+    }
+    match limits.max_memory_mb {
+        Some(0) => Err(MobileLinuxError::InvalidRequest(
+            "max_memory_mb must be greater than zero".to_string(),
+        )),
+        Some(megabytes) => Ok(Some(u64::from(megabytes).saturating_mul(1024 * 1024))),
+        None => Ok(None),
     }
 }
 
@@ -1532,6 +1871,7 @@ mod tests {
             // weakens no assertion.
             timeout_ms: Some(30_000),
             network: NetworkPolicy::Allowed,
+            resource_limits: Default::default(),
             mounts: vec![],
         }
     }
@@ -1601,6 +1941,7 @@ mod tests {
         assert_eq!(result.stdout, "out");
         assert_eq!(result.stderr, "err");
         assert_eq!(result.exit_code, 7);
+        assert_eq!(result.enforcement, LinuxEnforcementReceipt::default());
         let tasks = runtime.list_tasks().await.expect("tasks");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, MobileLinuxTaskStatus::Failed);
@@ -1623,6 +1964,34 @@ mod tests {
             })
             .count();
         assert_eq!(terminal_events, 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_network_fails_before_guest_spawn_without_policy_launcher() {
+        let (_temp, runtime) = runtime();
+        let mut request = request();
+        request.network = NetworkPolicy::Disabled;
+        let error = runtime
+            .run(request)
+            .await
+            .expect_err("launcher is required");
+        assert!(matches!(
+            error,
+            MobileLinuxError::NetworkPolicyUnavailable(_)
+        ));
+        let tasks = runtime.list_tasks().await.expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, MobileLinuxTaskStatus::Failed);
+    }
+
+    #[test]
+    fn loopback_only_is_rejected_instead_of_claiming_enforcement() {
+        let mut request = request();
+        request.network = NetworkPolicy::LoopbackOnly;
+        assert!(matches!(
+            validate_request(&request),
+            Err(MobileLinuxError::NetworkPolicyUnavailable(_))
+        ));
     }
 
     #[tokio::test]

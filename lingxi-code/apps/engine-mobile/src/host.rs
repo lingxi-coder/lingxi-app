@@ -240,6 +240,9 @@ pub struct MobileConfig {
     /// bundle. Its `node_modules` child is mounted at the canonical read-only
     /// `/opt/lingxi/local-app-runtime/node_modules` path for build/run only.
     pub local_apps_runtime_root: Option<std::path::PathBuf>,
+    /// Physical memory reported by the native host. Local-app runtime quotas
+    /// are derived from this value; zero is the conservative fallback.
+    pub physical_memory_bytes: u64,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -271,6 +274,7 @@ impl std::fmt::Debug for MobileConfig {
             )
             .field("local_apps_full_runtime", &self.local_apps_full_runtime)
             .field("local_apps_runtime_root", &self.local_apps_runtime_root)
+            .field("physical_memory_bytes", &self.physical_memory_bytes)
             .finish()
     }
 }
@@ -294,6 +298,7 @@ impl Default for MobileConfig {
             memory_provider: None,
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
+            physical_memory_bytes: 0,
         }
     }
 }
@@ -3377,12 +3382,8 @@ impl MobileEngineHandle {
         _expected_revision: u64,
         _prompt: Option<String>,
     ) {
-        // TODO(local-apps#questionnaire, Task 8): this used to build a
-        // suggested patch (`build_design_suggestion`, deleted here) by
-        // looking up the app's `AppTemplateKind` in the static built-in
-        // template catalog — the core no longer has a per-app template at
-        // all (Task 2), so that lookup has no input anymore. Task 8 replaces
-        // it with a real LLM-driven suggestion call. No existing test
+        // TODO(local-apps#questionnaire, Task 8): replace this retired static
+        // suggestion path with a real LLM-driven suggestion call. No existing test
         // exercises this command (`RequestAppDesignSuggestion` is dispatched
         // only from here; the design-suggestion tests in this file drive
         // `AppService::store_suggestion` directly, bypassing this handler
@@ -5890,6 +5891,7 @@ pub fn build_mobile_engine_inner(
         inner.mobile_linux.clone(),
         firer_cfg.local_apps_full_runtime,
         firer_cfg.local_apps_runtime_root.clone(),
+        firer_cfg.physical_memory_bytes,
         inner.local_apps_llm.clone(),
         crate::local_apps_device::DeviceCapabilities {
             camera: firer_platform.camera(),
@@ -5934,12 +5936,13 @@ pub fn build_mobile_engine_inner(
             // not brick the conversation engine; every app command returns the
             // typed load error. These unattached fallbacks can only report that
             // same unavailable state and never mutate data.
-            let host = LocalAppsHostBroker::new(
+            let host = LocalAppsHostBroker::new_with_physical_memory(
                 mobile_apps_data_root(&firer_cfg),
                 event_sink.clone(),
                 inner.mobile_linux.clone(),
                 firer_cfg.local_apps_full_runtime,
                 firer_cfg.local_apps_runtime_root.clone(),
+                firer_cfg.physical_memory_bytes,
             );
             let executor = MobileAppGenerationExecutor::new(
                 inner.mobile_linux.clone(),
@@ -8193,12 +8196,8 @@ mod tests {
         local_apps::test_support::advance_to_collecting_spec(service, app_id).await
     }
 
-    /// (local-apps#questionnaire, Task 5, coordinator ruling: total removal of
-    /// the static template catalog): this test used to also cover
-    /// `ListAppTemplates` → `AppTemplatesChanged` before the FIRST assertion
-    /// below; that command/event pair is deleted along with the catalog, so
-    /// the test is renamed to describe what it still covers — `CreateApp` →
-    /// `AppsChanged` and `GetAppDetails` → `AppDetailsChanged`.
+    /// This round trip covers the dynamic application list/details protocol;
+    /// the retired static-catalog exchange is intentionally absent.
     #[test]
     fn local_apps_create_and_details_round_trip_through_submit() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -8423,7 +8422,11 @@ mod tests {
 
             let service = handle.local_apps().expect("local-apps service");
             assert_eq!(
-                service.record(&app_id).await.expect("record").workflow_state,
+                service
+                    .record(&app_id)
+                    .await
+                    .expect("record")
+                    .workflow_state,
                 local_apps::AppWorkflowState::QuestionnaireFailed
             );
 
@@ -8435,7 +8438,11 @@ mod tests {
                 .expect("submit(RetryAppQuestionnaire)");
             handle.settle_local_apps().await;
             assert_eq!(
-                service.record(&app_id).await.expect("record").workflow_state,
+                service
+                    .record(&app_id)
+                    .await
+                    .expect("record")
+                    .workflow_state,
                 local_apps::AppWorkflowState::CollectingSpec
             );
         });
@@ -10294,7 +10301,10 @@ mod anthropic_model_registry_tests {
                 traits::is_curated_model("anthropic", curated),
                 "{curated} is no longer curated; update this test with the shortlist"
             );
-            assert!(ids.iter().any(|id| id == curated), "missing {curated}: {ids:?}");
+            assert!(
+                ids.iter().any(|id| id == curated),
+                "missing {curated}: {ids:?}"
+            );
         }
     }
 
@@ -10305,7 +10315,9 @@ mod anthropic_model_registry_tests {
             .iter()
             .any(|id| id == "claude-opus-4-5-20251101"));
         // An unqualified custom id still routes to anthropic (legacy behavior).
-        assert!(ids("my-proxy-model").iter().any(|id| id == "my-proxy-model"));
+        assert!(ids("my-proxy-model")
+            .iter()
+            .any(|id| id == "my-proxy-model"));
     }
 
     /// Regression (iOS "DeepSeek V4 Flash under ANTHROPIC"): a default qualified

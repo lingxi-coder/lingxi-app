@@ -1,6 +1,7 @@
 package com.lingxi.code.voice
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
@@ -25,6 +26,7 @@ import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
 import com.lingxi.code.localapps.LocalAppRuntimeAssets
+import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.voice.audio.AndroidSttAdapter
 import com.lingxi.code.voice.audio.AndroidTtsAdapter
@@ -156,6 +158,9 @@ fun buildVoiceEngine(
     // bridges this onto `traits::Clipboard`, lighting up `tool-clipboard`
     // on-device (engine-driven; no UI affordance).
     val clipboard = AndroidClipboardAdapter()
+    // Device-location: the local-app capability gate authorizes the operation
+    // before this adapter requests Android's fine/coarse runtime permission.
+    val location = AndroidLocationAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
             // Single sink: forward every inbound engine event to the caller's
@@ -210,6 +215,12 @@ fun buildVoiceEngine(
                 ),
                 localAppsFullRuntime = BuildConfig.MOBILE_LINUX_FULL,
                 localAppsRuntimeRoot = LocalAppRuntimeAssets.prepare(appContext),
+                physicalMemoryBytes = runCatching {
+                    val memoryInfo = ActivityManager.MemoryInfo()
+                    val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                    activityManager.getMemoryInfo(memoryInfo)
+                    memoryInfo.totalMem.takeIf { it > 0L }?.toULong() ?: 0uL
+                }.getOrDefault(0uL),
             ),
             listener = listener,
             stt = stt,
@@ -217,6 +228,7 @@ fun buildVoiceEngine(
             camera = camera,
             share = share,
             voice = voice,
+            location = location,
             notifications = notifications,
             clipboard = clipboard,
             permissions = permissions,

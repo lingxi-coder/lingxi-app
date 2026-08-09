@@ -18,11 +18,8 @@ enum LocalAppsDistributionMode: String, Sendable {
     }
 }
 
-/// Generic per-app glyph. The static per-template icon catalog
-/// (`LocalAppTemplateKind`) was deleted alongside the static template system
-/// (local-apps#questionnaire, Task 2/5/13) — every app now starts from a
-/// brief, not a template kind, so there is no longer a taxonomy to key an
-/// icon off of.
+/// Generic per-app glyph. Every app starts from a brief, so there is no fixed
+/// category taxonomy to key an icon off of.
 let localAppIconSystemName = "app.badge"
 
 struct LocalAppSummary: Identifiable, Hashable, Sendable {

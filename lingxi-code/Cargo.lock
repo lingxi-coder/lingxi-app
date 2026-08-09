@@ -3347,6 +3347,8 @@ dependencies = [
  "tokio",
  "tracing",
  "traits",
+ "tree-sitter",
+ "tree-sitter-javascript",
 ]
 
 [[package]]

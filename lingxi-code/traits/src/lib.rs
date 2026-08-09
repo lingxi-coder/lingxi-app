@@ -116,11 +116,11 @@ pub use mailbox::{
 };
 pub use mcp::*;
 pub use mobile_linux::{
-    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
-    MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
-    MountPurpose, MountSpec, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
-    UnavailableMobileLinuxRuntime,
+    LinuxCommandRequest, LinuxCommandResult, LinuxEnforcementReceipt, LinuxProcessHandle,
+    MobileLinuxCapability, MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind,
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskSnapshot,
+    MobileLinuxTaskStatus, MountPurpose, MountSpec, PtyOpenRequest, PtySessionHandle, PtySize,
+    RootfsState, RootfsStatus, UnavailableMobileLinuxRuntime,
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{

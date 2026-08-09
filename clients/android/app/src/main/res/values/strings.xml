@@ -1144,6 +1144,11 @@
     <string name="local_apps_design_conflict_reloaded">设计已在其他位置更新到版本 %1$s，已重新加载，请检查后继续。</string>
     <string name="local_apps_design_unsaved_retry">设计尚未保存完成，请重试</string>
     <string name="local_apps_error_bridge_unsupported_op">应用请求了不支持的 Bridge 操作：%1$s</string>
+    <string name="local_apps_webview_upgrade_required">当前 Android System WebView 不支持安全的本地应用 Bridge，请先更新 System WebView。</string>
+    <string name="local_apps_webview_untrusted_origin">本地应用只能从受信任的回环地址打开。</string>
+    <string name="local_apps_webview_storage_cleanup_waiting">正在安全清理此应用地址的旧浏览数据…</string>
+    <string name="local_apps_webview_storage_cleanup_failed">无法安全准备应用浏览数据，应用未加载。</string>
+    <string name="local_apps_error_web_storage_cleanup_queue">无法安全记录应用浏览数据清理任务，应用尚未删除。</string>
     <string name="local_apps_error_load_apps">无法加载应用：%1$s</string>
     <string name="local_apps_field_enabled">已启用</string>
     <string name="local_apps_filter_all">全部</string>

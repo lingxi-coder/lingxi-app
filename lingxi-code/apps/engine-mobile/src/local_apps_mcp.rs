@@ -21,7 +21,6 @@ use traits::{
 pub const LOCAL_APPS_REGISTRY_KEY: &str = "local_apps";
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 
-
 /// Host operations that are deliberately outside the catalog state machine.
 ///
 /// Data mutations, UI control, runtime process changes and Git restoration all
@@ -143,6 +142,88 @@ impl LocalAppsMcpTransport {
             .ok_or_else(|| McpError::Internal(format!("missing non-empty {field:?}")))
     }
 
+    fn validate_query_data_input(input: &Value) -> Result<(), String> {
+        const FIELDS: &[&str] = &[
+            "app_id",
+            "collection",
+            "limit",
+            "offset",
+            "filter",
+            "filters",
+            "sort",
+            "sort_key",
+            "sort_direction",
+        ];
+        let object = input
+            .as_object()
+            .ok_or_else(|| "query_data input must be an object".to_string())?;
+        if let Some(field) = object
+            .keys()
+            .find(|field| !FIELDS.contains(&field.as_str()))
+        {
+            return Err(format!("unknown query_data argument {field:?}"));
+        }
+        for field in ["app_id", "collection"] {
+            let value = object
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("{field} must be a non-empty string"))?;
+            let maximum = if field == "app_id" { 64 } else { 100 };
+            if value.len() > maximum {
+                return Err(format!("{field} exceeds {maximum} bytes"));
+            }
+        }
+        if let Some(limit) = object.get("limit") {
+            let limit = limit
+                .as_u64()
+                .ok_or_else(|| "limit must be an integer from 1 through 100".to_string())?;
+            if !(1..=100).contains(&limit) {
+                return Err("limit must be an integer from 1 through 100".into());
+            }
+        }
+        if object
+            .get("offset")
+            .is_some_and(|offset| offset.as_u64().is_none())
+        {
+            return Err("offset must be a non-negative integer".into());
+        }
+        Self::validate_query_sort_object(
+            object.get("sort"),
+            "sort",
+            &["key", "kind", "field_id", "direction"],
+        )?;
+        Self::validate_query_sort_object(
+            object.get("sort_key"),
+            "sort_key",
+            &["kind", "field_id"],
+        )?;
+        Ok(())
+    }
+
+    fn validate_query_sort_object(
+        value: Option<&Value>,
+        field: &str,
+        allowed: &[&str],
+    ) -> Result<(), String> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if value.is_string() {
+            return Ok(());
+        }
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{field} must be a string or object"))?;
+        if let Some(unknown) = object
+            .keys()
+            .find(|candidate| !allowed.contains(&candidate.as_str()))
+        {
+            return Err(format!("unknown {field} argument {unknown:?}"));
+        }
+        Ok(())
+    }
+
     fn result(value: Value) -> McpToolResultDto {
         let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
         McpToolResultDto {
@@ -151,6 +232,15 @@ impl LocalAppsMcpTransport {
             structured_content: Some(value),
             ..Default::default()
         }
+    }
+
+    fn query_result(mut value: Value) -> McpToolResultDto {
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("nextOffset".to_string())
+                .or_insert(Value::Null);
+        }
+        Self::result(value)
     }
 
     fn tool_error(message: impl Into<String>) -> McpToolResultDto {
@@ -227,14 +317,14 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "query_data",
-                "Query one declared app collection with bounded pagination, sorting and structured filters. Raw SQL is never accepted.",
+                "Query one declared app collection with bounded pagination, sorting and structured filters. Pass a returned numeric `nextOffset` as the next request's `offset`. Raw SQL and string cursors are never accepted.",
                 json!({
                     "type":"object",
                     "properties":{
                         "app_id":app_id.clone(),
                         "collection":{"type":"string","minLength":1,"maxLength":100},
                         "limit":{"type":"integer","minimum":1,"maximum":100},
-                        "cursor":{"type":"string"},
+                        "offset":{"type":"integer","minimum":0},
                         "filter":{"type":"object"},
                         "filters":{"type":"array","maxItems":16},
                         "sort":{
@@ -248,7 +338,7 @@ impl LocalAppsMcpTransport {
                                         "field_id":{"type":"string","minLength":1,"maxLength":100},
                                         "direction":{"enum":["ascending","descending","asc","desc"]}
                                     },
-                                    "additionalProperties":true
+                                    "additionalProperties":false
                                 }
                             ]
                         },
@@ -261,7 +351,7 @@ impl LocalAppsMcpTransport {
                                         "kind":{"enum":["record_id","created_at","updated_at","revision","field"]},
                                         "field_id":{"type":"string","minLength":1,"maxLength":100}
                                     },
-                                    "additionalProperties":true
+                                    "additionalProperties":false
                                 }
                             ]
                         },
@@ -415,7 +505,8 @@ impl LocalAppsMcpTransport {
                 // load-time sweep both still recover the app if this is
                 // dropped.
                 if let Ok(host) = self.host() {
-                    host.trigger_authoring(record.id.clone(), record.llm_round).await;
+                    host.trigger_authoring(record.id.clone(), record.llm_round)
+                        .await;
                 } else {
                     tracing::warn!(
                         app_id = %record.id,
@@ -463,10 +554,16 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
-            "query_data" => match self.host()?.query_data(input).await {
-                Ok(value) => Self::result(value),
-                Err(message) => Self::tool_error(message),
-            },
+            "query_data" => {
+                if let Err(message) = Self::validate_query_data_input(&input) {
+                    Self::tool_error(format!("invalid_argument: {message}"))
+                } else {
+                    match self.host()?.query_data(input).await {
+                        Ok(value) => Self::query_result(value),
+                        Err(message) => Self::tool_error(message),
+                    }
+                }
+            }
             "mutate_data" => match self.host()?.mutate_data(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -687,7 +784,10 @@ mod tests {
         save_mailbox(&layout, &mailbox).expect("seed mailbox");
 
         let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
-        transport.attach_service(service.clone());
+        assert!(
+            transport.attach_service(service.clone()).is_ok(),
+            "attach service once"
+        );
         // The REAL broker, not a stub: mailbox reads go through it now
         // precisely so they take the same lock `agent.post` does, and a stub
         // here would test the delegation away again.
@@ -720,7 +820,13 @@ mod tests {
             .await
             .expect("read");
         assert!(!first.is_error);
-        assert_eq!(structured(&first)["events"].as_array().expect("events").len(), 3);
+        assert_eq!(
+            structured(&first)["events"]
+                .as_array()
+                .expect("events")
+                .len(),
+            3
+        );
         assert_eq!(structured(&first)["unread_remaining"], 0);
         assert_eq!(
             load_mailbox(&layout).expect("mailbox").last_read_seq,
@@ -755,7 +861,10 @@ mod tests {
             .await
             .expect("drain");
         let replayed = transport
-            .call("read_app_events", json!({ "app_id": app_id, "after_seq": 0 }))
+            .call(
+                "read_app_events",
+                json!({ "app_id": app_id, "after_seq": 0 }),
+            )
             .await
             .expect("replay");
         assert_eq!(
@@ -855,6 +964,75 @@ mod tests {
         assert!(
             !descriptions.contains("five-step") && !descriptions.contains("five step"),
             "no tool description should promise a removed five-step flow: {descriptions}"
+        );
+        let query = tools
+            .iter()
+            .find(|tool| tool.tool_name == "query_data")
+            .expect("query_data is declared");
+        assert_eq!(
+            query.input_schema["properties"]["offset"]["type"],
+            "integer"
+        );
+        assert_eq!(query.input_schema["properties"]["offset"]["minimum"], 0);
+        assert!(
+            query.input_schema["properties"].get("cursor").is_none(),
+            "the broken string cursor contract must not remain in the catalog"
+        );
+    }
+
+    #[test]
+    fn query_data_input_rejects_cursor_invalid_limits_and_unknown_fields() {
+        let valid = json!({
+            "app_id": "app-test",
+            "collection": "items",
+            "limit": 100,
+            "offset": 7
+        });
+        LocalAppsMcpTransport::validate_query_data_input(&valid).expect("valid query");
+
+        for invalid in [
+            json!({"app_id":"app-test","collection":"items","cursor":"7"}),
+            json!({"app_id":"app-test","collection":"items","offset":"7"}),
+            json!({"app_id":"app-test","collection":"items","offset":-1}),
+            json!({"app_id":"app-test","collection":"items","limit":0}),
+            json!({"app_id":"app-test","collection":"items","limit":101}),
+            json!({"app_id":"app-test","collection":"items","extra":true}),
+            json!({"app_id":"app-test","collection":"items","sort":{"kind":"field","field_id":"score","extra":true}}),
+            json!({"app_id":"app-test","collection":"items","sort_key":{"kind":"updated_at","extra":true}}),
+        ] {
+            assert!(
+                LocalAppsMcpTransport::validate_query_data_input(&invalid).is_err(),
+                "must reject {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_data_result_always_exposes_nullable_next_offset() {
+        let final_page = LocalAppsMcpTransport::query_result(json!({ "records": [] }));
+        assert_eq!(structured(&final_page)["nextOffset"], Value::Null);
+
+        let continued =
+            LocalAppsMcpTransport::query_result(json!({ "records": [], "nextOffset": 12 }));
+        assert_eq!(structured(&continued)["nextOffset"], 12);
+    }
+
+    #[tokio::test]
+    async fn query_data_reports_invalid_argument_before_host_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        let result = transport
+            .call(
+                "query_data",
+                json!({"app_id":"app-test","collection":"items","cursor":"7"}),
+            )
+            .await
+            .expect("invalid input is a tool result, not a transport failure");
+        assert!(result.is_error);
+        assert!(
+            result.content.to_string().contains("invalid_argument"),
+            "stable error code is exposed: {:?}",
+            result.content
         );
     }
 
@@ -1017,7 +1195,11 @@ mod tests {
         let app = &result.structured_content.expect("structured")["app"];
         let app_id = app["id"].as_str().expect("id").to_string();
         assert_eq!(
-            service.record(&app_id).await.expect("record").workflow_state,
+            service
+                .record(&app_id)
+                .await
+                .expect("record")
+                .workflow_state,
             local_apps::AppWorkflowState::AuthoringQuestionnaire
         );
     }
@@ -1104,7 +1286,11 @@ mod tests {
             .expect("revise is callable on a ready app");
         assert!(!result.is_error, "got {result:?}");
         assert_eq!(
-            service.record(&app_id).await.expect("record").workflow_state,
+            service
+                .record(&app_id)
+                .await
+                .expect("record")
+                .workflow_state,
             local_apps::AppWorkflowState::Revising,
             "revise must actually reach AppService::request_revision, not just accept the call"
         );
@@ -1115,7 +1301,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (transport, service) = attached_transport(root.path()).await;
         let created = transport
-            .call("create", json!({"name": "Habits", "brief": "habit tracker"}))
+            .call(
+                "create",
+                json!({"name": "Habits", "brief": "habit tracker"}),
+            )
             .await
             .expect("create");
         let app_id = created.structured_content.expect("structured")["app"]["id"]

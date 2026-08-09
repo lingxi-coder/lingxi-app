@@ -111,8 +111,8 @@ impl LocalAppsHostBroker {
         let after_seq = input.get("after_seq").and_then(Value::as_u64);
         // An explicit `after_seq` is a replay request: it must never move the
         // cursor, or asking to re-read history would skip live events.
-        let peek = input.get("peek").and_then(Value::as_bool).unwrap_or(false)
-            || after_seq.is_some();
+        let peek =
+            input.get("peek").and_then(Value::as_bool).unwrap_or(false) || after_seq.is_some();
         let layout = self.layout(&app_id)?;
 
         let (events, dropped, unread) = {
@@ -120,7 +120,11 @@ impl LocalAppsHostBroker {
             let mut mailbox = load_mailbox(&layout).map_err(|error| error.to_string())?;
             let (events, dropped) = if peek {
                 (
-                    mailbox.peek(after_seq, limit).into_iter().cloned().collect(),
+                    mailbox
+                        .peek(after_seq, limit)
+                        .into_iter()
+                        .cloned()
+                        .collect(),
                     mailbox.dropped_count,
                 )
             } else {
@@ -269,11 +273,8 @@ mod tests {
         let h = harness().await;
         declare_and_grant(&h);
 
-        let (ok, result, error, code) = post(
-            &h,
-            json!({"topic": "timer.done", "body": {"minutes": 25}}),
-        )
-        .await;
+        let (ok, result, error, code) =
+            post(&h, json!({"topic": "timer.done", "body": {"minutes": 25}})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["seq"], 1);
 

@@ -1590,7 +1590,8 @@ final class MockConversationSource: ConversationSource {
                     makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
                 },
                 localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-                localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot
+                localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
+                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
             )
             let handleBuilder = self.handleBuilder
             handleBuildAttemptID &+= 1

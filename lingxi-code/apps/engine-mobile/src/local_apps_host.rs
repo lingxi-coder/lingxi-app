@@ -33,7 +33,7 @@ use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{sleep, timeout, Duration};
 use traits::{
     LinuxCommandRequest, LinuxProcessHandle, MobileLinuxRuntime, MobileLinuxTaskSnapshot,
-    MobileLinuxTaskStatus, MountPurpose, MountSpec, NetworkPolicy,
+    MobileLinuxTaskStatus, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -53,6 +53,10 @@ const STATIC_ACCEPT_ERROR_LIMIT: u32 = 100;
 /// every shipped platform's ephemeral floor.
 const APP_PORT_WINDOW_FIRST: u16 = 20_000;
 const APP_PORT_WINDOW_LEN: u16 = 12_000;
+const LOCAL_APP_MEMORY_LIMIT_MB: u32 = 800;
+const LOCAL_APP_BRIDGE_CONTROL_BYTES: usize = 64 * 1024;
+const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
+const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 #[derive(Debug)]
 struct UiResolution {
@@ -257,7 +261,10 @@ impl PortLease {
         // Only while the entry is STILL ours, mirroring
         // `RuntimeReservation::abandon`'s generation check: a late drop must
         // never hand away a port some other start has since leased.
-        if held.get(&self.port).is_some_and(|owner| owner == &self.app_id) {
+        if held
+            .get(&self.port)
+            .is_some_and(|owner| owner == &self.app_id)
+        {
             held.remove(&self.port);
         }
     }
@@ -326,6 +333,7 @@ pub(crate) struct LocalAppsHostBroker {
     root: PathBuf,
     event_sink: Arc<dyn ClientEventSink>,
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    physical_memory_bytes: u64,
     full_runtime: bool,
     runtime_root: Option<PathBuf>,
     service: OnceLock<Arc<AppService>>,
@@ -342,9 +350,9 @@ pub(crate) struct LocalAppsHostBroker {
     /// platform has ONE audio session). Arc'd like `runtimes` so the duration
     /// watchdog task can reach it. See `device_ops`.
     recording: Arc<Mutex<Option<device_ops::ActiveRecording>>>,
-    /// Captures the device ops retained so `llm.chat` can attach them by
-    /// handle — the bridge caps one request payload at 64 KiB, far below a
-    /// single photo. See [`crate::local_apps_device::MediaCache`].
+    /// Captures retained so `llm.chat` can attach them by handle instead of
+    /// copying base64 through every WebView/FFI layer. See
+    /// [`crate::local_apps_device::MediaCache`].
     media: crate::local_apps_device::MediaCache,
     /// Apps with an `llm.chat` call in flight. One per app: an app-initiated
     /// call spends the user's quota, so a page cannot fan out.
@@ -419,10 +427,29 @@ impl LocalAppsHostBroker {
         full_runtime: bool,
         runtime_root: Option<PathBuf>,
     ) -> Arc<Self> {
+        Self::new_with_physical_memory(
+            root,
+            event_sink,
+            mobile_linux,
+            full_runtime,
+            runtime_root,
+            0,
+        )
+    }
+
+    pub(crate) fn new_with_physical_memory(
+        root: PathBuf,
+        event_sink: Arc<dyn ClientEventSink>,
+        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+        full_runtime: bool,
+        runtime_root: Option<PathBuf>,
+        physical_memory_bytes: u64,
+    ) -> Arc<Self> {
         let broker = Arc::new(Self {
             root,
             event_sink,
             mobile_linux,
+            physical_memory_bytes,
             full_runtime,
             runtime_root,
             service: OnceLock::new(),
@@ -861,14 +888,30 @@ impl LocalAppsHostBroker {
         &self,
         request: &AppBridgeRequestDto,
     ) -> Result<Value, BridgeFailure> {
-        let payload: Value = request
-            .payload_json
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|error| format!("invalid bridge payload JSON: {error}"))?
-            .unwrap_or_else(|| json!({}));
-        let mut input = payload.as_object().cloned().unwrap_or_default();
+        let payload_json = request.payload_json.as_deref().unwrap_or("{}");
+        let payload_limit = if matches!(request.operation, AppBridgeOperationDto::LlmChat) {
+            LOCAL_APP_BRIDGE_LLM_BYTES
+        } else {
+            LOCAL_APP_BRIDGE_CONTROL_BYTES
+        };
+        if payload_json.len() > payload_limit {
+            return Err(BridgeFailure::coded(
+                "payload_too_large",
+                format!(
+                    "bridge payload is {} bytes; the limit for this operation is {payload_limit}",
+                    payload_json.len()
+                ),
+            ));
+        }
+        let payload: Value = serde_json::from_str(payload_json).map_err(|error| {
+            BridgeFailure::coded(
+                "payload_invalid",
+                format!("invalid bridge payload JSON: {error}"),
+            )
+        })?;
+        let mut input = payload.as_object().cloned().ok_or_else(|| {
+            BridgeFailure::coded("payload_invalid", "bridge payload must be a JSON object")
+        })?;
         input.insert("app_id".into(), Value::String(request.app_id.clone()));
         match request.operation {
             AppBridgeOperationDto::QueryData => self
@@ -900,22 +943,22 @@ impl LocalAppsHostBroker {
                 self.pick_image_value(&request.app_id, &payload).await
             }
             AppBridgeOperationDto::RecordAudioStart => {
-                self.record_audio_start_value(&request.app_id, &payload).await
+                self.record_audio_start_value(&request.app_id, &payload)
+                    .await
             }
             AppBridgeOperationDto::RecordAudioStop => {
                 self.record_audio_stop_value(&request.app_id).await
             }
             AppBridgeOperationDto::GetLocation => self.get_location_value(&request.app_id).await,
             AppBridgeOperationDto::PostNotification => {
-                self.post_notification_value(&request.app_id, &payload).await
+                self.post_notification_value(&request.app_id, &payload)
+                    .await
             }
             AppBridgeOperationDto::TranscribeSpeech => {
                 self.transcribe_speech_value(&request.app_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::LlmChat => {
-                self.llm_chat_value(&request.app_id, &payload).await
-            }
+            AppBridgeOperationDto::LlmChat => self.llm_chat_value(&request.app_id, &payload).await,
             AppBridgeOperationDto::AgentPost => {
                 self.agent_post_value(&request.app_id, &payload).await
             }
@@ -1064,7 +1107,9 @@ impl LocalAppsHostBroker {
                             }
                         }
                     }
-                } else if runtimes.len() < runtime_instance_quota() {
+                } else if !self.full_runtime
+                    || runtimes.len() < runtime_instance_quota(self.physical_memory_bytes)
+                {
                     let generation = self.next_request_id.fetch_add(1, Ordering::Relaxed);
                     let (gate, _) = watch::channel(RuntimeStartStatus::Pending);
                     runtimes.insert(
@@ -1127,7 +1172,7 @@ impl LocalAppsHostBroker {
             let Some(generation) = reserved_generation else {
                 return Err(format!(
                     "runtime quota ({}) is temporarily saturated by apps that are still starting; retry shortly",
-                    runtime_instance_quota()
+                    runtime_instance_quota(self.physical_memory_bytes)
                 ));
             };
             return self.start_reserved_runtime(app_id, generation).await;
@@ -1328,8 +1373,7 @@ impl LocalAppsHostBroker {
             })?;
             let layout = self.layout(app_id)?;
             let workspace = layout.root().join(layout.build_rel(true));
-            let workspace_guest =
-                format!("/var/lingxi/local-app-build/{app_id}/full");
+            let workspace_guest = format!("/var/lingxi/local-app-build/{app_id}/full");
             let request = LinuxCommandRequest {
                 command: "/usr/bin/node".into(),
                 args: vec![
@@ -1347,18 +1391,17 @@ impl LocalAppsHostBroker {
                         "NODE_PATH".into(),
                         "/opt/lingxi/local-app-runtime/node_modules".into(),
                     ),
+                    ("NODE_ENV".into(), "production".into()),
                 ]
                 .into_iter()
                 .collect(),
                 stdin: None,
                 timeout_ms: None,
-                // Both shipped mobile runtimes fail CLOSED on anything but
-                // `Allowed` (ios-ish `validate_request`, Android PRoot's
-                // `spawn_child`) because neither native bridge can enforce a
-                // denied policy — `Disabled` was a promise no layer could keep.
-                // The server binds 127.0.0.1 only, and the app's real egress
-                // boundary is `authorize_domain`, not this field.
-                network: NetworkPolicy::Allowed,
+                network: NetworkPolicy::LoopbackOnly,
+                resource_limits: ResourceLimits {
+                    max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
+                    ..ResourceLimits::default()
+                },
                 mounts: vec![
                     MountSpec {
                         host_path: workspace,
@@ -1378,6 +1421,18 @@ impl LocalAppsHostBroker {
                         .await;
                 }
             };
+            if let Err(error) = process.enforcement.ensure_for(
+                NetworkPolicy::LoopbackOnly,
+                ResourceLimits {
+                    max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
+                    ..ResourceLimits::default()
+                },
+            ) {
+                let _ = runtime.kill(&process).await;
+                return self
+                    .fail_reserved_runtime_start(app_id, generation, Some(port), error.to_string())
+                    .await;
+            }
             if let Err(error) = wait_for_loopback(port).await {
                 let _ = runtime.kill(&process).await;
                 return self
@@ -1893,7 +1948,12 @@ struct BrokerFailureNotifier(Arc<dyn ClientEventSink>);
 
 #[async_trait]
 impl crate::local_apps_profile::AppFailureNotifier for BrokerFailureNotifier {
-    async fn notify_failure(&self, service: Option<&AppService>, app_id: Option<String>, error: &local_apps::AppError) {
+    async fn notify_failure(
+        &self,
+        service: Option<&AppService>,
+        app_id: Option<String>,
+        error: &local_apps::AppError,
+    ) {
         if let Some(service) = service {
             service.flush_events().await;
         }
@@ -1926,6 +1986,9 @@ fn raise_decision(decision: AppAuthorizationDecisionDto) -> PermissionDecision {
 }
 
 fn normalize_query(input: &Value) -> Result<DataQuery, String> {
+    if input.get("cursor").is_some() {
+        return Err("query cursor is unsupported; use numeric offset".into());
+    }
     let collection = required_string(input, "collection")?.to_string();
     let filters = input
         .get("filters")
@@ -1942,17 +2005,21 @@ fn normalize_query(input: &Value) -> Result<DataQuery, String> {
         .or_else(|| input.get("sortDirection"))
         .cloned()
         .unwrap_or_else(|| Value::String("ascending".into()));
-    let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(50);
-    let offset = input
-        .get("offset")
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            input
-                .get("cursor")
-                .and_then(Value::as_str)
-                .and_then(|value| value.parse().ok())
-        })
-        .unwrap_or(0);
+    let limit = match input.get("limit") {
+        None => 50,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| "query limit must be an integer".to_string())?,
+    };
+    if !(1..=100).contains(&limit) {
+        return Err("query limit must be between 1 and 100".into());
+    }
+    let offset = match input.get("offset") {
+        None => 0,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| "query offset must be a non-negative integer".to_string())?,
+    };
     let filters = serde_json::from_value(filters)
         .map_err(|error| format!("invalid structured data query: {error}"))?;
     let (sort_key, sort_direction) = normalize_sort(input, sort_key, sort_direction)?;
@@ -2503,28 +2570,13 @@ async fn watch_full_runtime_exit(
     }
 }
 
-fn runtime_instance_quota() -> usize {
-    let bytes = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let value = line.strip_prefix("MemTotal:")?;
-                value
-                    .split_whitespace()
-                    .next()
-                    .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
-                    .map(|kilobytes| kilobytes.saturating_mul(1024))
-            })
-        })
-        .unwrap_or(0);
+fn runtime_instance_quota(bytes: u64) -> usize {
     let gib = 1024_u64.pow(3);
     if bytes >= 8 * gib {
         3
     } else if bytes >= 6 * gib {
         2
     } else {
-        // iOS does not expose /proc.  Fail conservatively to one process; the
-        // native memory-warning hook can still evict it immediately.
         1
     }
 }
@@ -2715,8 +2767,8 @@ async fn write_http(
         _ => "Error",
     };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: {LOCAL_APP_CONTENT_SECURITY_POLICY}\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len(),
     );
     stream.write_all(header.as_bytes()).await?;
     if !head {
@@ -2796,8 +2848,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tempfile::TempDir;
     use traits::{
-        MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode, PtyOpenRequest,
-        PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
+        LinuxEnforcementReceipt, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
+        PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
     };
 
     #[derive(Default)]
@@ -2818,6 +2870,8 @@ mod tests {
         spawn_count: AtomicUsize,
         next_task_id: AtomicU64,
         tasks: Mutex<HashMap<String, Arc<MockTask>>>,
+        last_request: Mutex<Option<LinuxCommandRequest>>,
+        enforcement_receipt: AtomicBool,
         fail_kill: AtomicBool,
     }
 
@@ -2828,6 +2882,8 @@ mod tests {
                 spawn_count: AtomicUsize::new(0),
                 next_task_id: AtomicU64::new(1),
                 tasks: Mutex::new(HashMap::new()),
+                last_request: Mutex::new(None),
+                enforcement_receipt: AtomicBool::new(true),
                 fail_kill: AtomicBool::new(false),
             })
         }
@@ -2836,15 +2892,26 @@ mod tests {
             self.fail_kill.store(fail, Ordering::SeqCst);
         }
 
-        /// Both shipped runtimes reject anything but `NetworkPolicy::Allowed`
-        /// before they boot; a mock that is more permissive than the device
-        /// cannot catch a policy the device refuses.
+        fn set_enforcement_receipt(&self, enforced: bool) {
+            self.enforcement_receipt.store(enforced, Ordering::SeqCst);
+        }
+
+        async fn recorded_request(&self) -> LinuxCommandRequest {
+            self.last_request
+                .lock()
+                .await
+                .clone()
+                .expect("spawn request recorded")
+        }
+
         fn enforce_network_policy(request: &LinuxCommandRequest) -> Result<(), MobileLinuxError> {
-            if matches!(request.network, NetworkPolicy::Allowed) {
+            if matches!(request.network, NetworkPolicy::LoopbackOnly)
+                && request.resource_limits.max_memory_mb == Some(LOCAL_APP_MEMORY_LIMIT_MB)
+            {
                 Ok(())
             } else {
                 Err(MobileLinuxError::InvalidRequest(
-                    "mobile Linux runtimes accept only NetworkPolicy::Allowed".into(),
+                    "full local-app runtime requires loopback-only networking and 800 MiB".into(),
                 ))
             }
         }
@@ -2936,6 +3003,7 @@ mod tests {
             request: LinuxCommandRequest,
         ) -> Result<LinuxProcessHandle, MobileLinuxError> {
             Self::enforce_network_policy(&request)?;
+            *self.last_request.lock().await = Some(request.clone());
             self.spawn_count.fetch_add(1, Ordering::SeqCst);
             if !self.spawn_delay.is_zero() {
                 sleep(self.spawn_delay).await;
@@ -2983,7 +3051,13 @@ mod tests {
                     shutdown: Mutex::new(Some(shutdown)),
                 }),
             );
-            Ok(LinuxProcessHandle { id: task_id })
+            Ok(LinuxProcessHandle {
+                id: task_id,
+                enforcement: LinuxEnforcementReceipt {
+                    network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                    memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                },
+            })
         }
 
         async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
@@ -3255,6 +3329,12 @@ mod tests {
     }
 
     #[test]
+    fn static_csp_allows_native_media_payloads_but_disables_workers() {
+        assert!(LOCAL_APP_CONTENT_SECURITY_POLICY.contains("media-src 'self' data: blob:"));
+        assert!(LOCAL_APP_CONTENT_SECURITY_POLICY.contains("worker-src 'none'"));
+    }
+
+    #[test]
     fn network_bridge_rejects_local_addresses() {
         assert!(!public_ip("127.0.0.1".parse().unwrap()));
         assert!(!public_ip("10.0.0.1".parse().unwrap()));
@@ -3270,7 +3350,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_accepts_public_sort_object_and_legacy_aliases() {
+    fn normalize_query_accepts_numeric_offset_and_sort_aliases() {
         let query = normalize_query(&json!({
             "collection": "items",
             "sort": {
@@ -3278,7 +3358,7 @@ mod tests {
                 "field_id": "score",
                 "direction": "desc"
             },
-            "cursor": "7"
+            "offset": 7
         }))
         .unwrap();
         assert_eq!(query.collection, "items");
@@ -3294,6 +3374,22 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.sort_key, Some(DataSortKey::UpdatedAt));
         assert_eq!(legacy.sort_direction, DataSortDirection::Ascending);
+    }
+
+    #[test]
+    fn normalize_query_rejects_cursor_and_invalid_page_bounds() {
+        assert_eq!(
+            normalize_query(&json!({"collection": "items", "cursor": "7"})).unwrap_err(),
+            "query cursor is unsupported; use numeric offset"
+        );
+        assert_eq!(
+            normalize_query(&json!({"collection": "items", "offset": -1})).unwrap_err(),
+            "query offset must be a non-negative integer"
+        );
+        assert_eq!(
+            normalize_query(&json!({"collection": "items", "limit": 101})).unwrap_err(),
+            "query limit must be between 1 and 100"
+        );
     }
 
     #[test]
@@ -3364,19 +3460,58 @@ mod tests {
         assert!(urls.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!(runtime.spawn_count(), 1);
         assert_eq!(broker.runtimes.lock().await.len(), 1);
+        let request = runtime.recorded_request().await;
+        assert_eq!(request.command, "/usr/bin/node");
+        assert_eq!(
+            request.args,
+            vec![
+                "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+                "start",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                urls[0].rsplit_once(':').expect("runtime URL has a port").1,
+            ]
+        );
+        assert!(matches!(request.network, NetworkPolicy::LoopbackOnly));
+        assert_eq!(request.resource_limits.max_memory_mb, Some(800));
+        assert_eq!(
+            request.env,
+            [
+                ("LINGXI_APP_OUTPUT".to_string(), "server".to_string(),),
+                (
+                    "NODE_PATH".to_string(),
+                    "/opt/lingxi/local-app-runtime/node_modules".to_string(),
+                ),
+                ("NODE_ENV".to_string(), "production".to_string()),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+        );
     }
 
     #[tokio::test]
-    async fn concurrent_starts_keep_runtime_quota_reserved_atomically() {
-        let (root, service, broker) = create_broker(false, None).await;
-        let quota = runtime_instance_quota();
-        for index in 0..quota.saturating_sub(1) {
-            let app_id = create_app_fixture(&root, &service, &format!("Warm {index}")).await;
-            broker
-                .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
-                .await
-                .expect("warm runtime starts");
-        }
+    async fn full_runtime_fails_closed_without_enforcement_receipt() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        runtime.set_enforcement_receipt(false);
+        let (root, service, broker) = create_broker(true, Some(runtime.clone())).await;
+        let app_id = create_app_fixture(&root, &service, "Unenforced").await;
+
+        let error = broker
+            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
+            .await
+            .expect_err("an unverifiable runtime policy must fail closed");
+
+        assert!(error.contains("network_policy_unavailable"), "{error}");
+        assert!(broker.runtimes.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_full_starts_keep_node_quota_reserved_atomically() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::from_millis(40));
+        let (root, service, broker) = create_broker(true, Some(runtime)).await;
+        let quota = runtime_instance_quota(broker.physical_memory_bytes);
+        assert_eq!(quota, 1, "the zero-byte fallback is conservative");
         let app_a = create_app_fixture(&root, &service, "A").await;
         let app_b = create_app_fixture(&root, &service, "B").await;
 
@@ -3385,19 +3520,42 @@ mod tests {
             broker.manage_runtime_value(json!({"app_id": app_b, "action": "start"})),
         );
 
-        if quota == 1 {
-            assert_eq!(
-                [result_a.as_ref(), result_b.as_ref()]
-                    .into_iter()
-                    .filter(|result| result.is_ok())
-                    .count(),
-                1
-            );
-        } else {
-            result_a.expect("first concurrent start succeeds");
-            result_b.expect("second concurrent start succeeds");
-        }
+        assert_eq!(
+            [result_a.as_ref(), result_b.as_ref()]
+                .into_iter()
+                .filter(|result| result.is_ok())
+                .count(),
+            1
+        );
         assert_eq!(broker.runtimes.lock().await.len(), quota);
+    }
+
+    #[tokio::test]
+    async fn static_runtimes_are_not_counted_against_the_node_quota() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let app_a = create_app_fixture(&root, &service, "Static A").await;
+        let app_b = create_app_fixture(&root, &service, "Static B").await;
+
+        broker
+            .manage_runtime_value(json!({"app_id": app_a, "action": "start"}))
+            .await
+            .expect("first static runtime starts");
+        broker
+            .manage_runtime_value(json!({"app_id": app_b, "action": "start"}))
+            .await
+            .expect("second static runtime starts");
+
+        assert_eq!(broker.runtimes.lock().await.len(), 2);
+    }
+
+    #[test]
+    fn runtime_quota_uses_host_physical_memory_thresholds() {
+        let gib = 1024_u64.pow(3);
+        assert_eq!(runtime_instance_quota(0), 1);
+        assert_eq!(runtime_instance_quota(6 * gib - 1), 1);
+        assert_eq!(runtime_instance_quota(6 * gib), 2);
+        assert_eq!(runtime_instance_quota(8 * gib - 1), 2);
+        assert_eq!(runtime_instance_quota(8 * gib), 3);
     }
 
     /// Lowest ephemeral floor across the shipped platforms: Linux/Android

@@ -1130,6 +1130,11 @@
     <string name="local_apps_design_conflict_reloaded">設計已在其他位置更新到版本 %1$s，已重新載入，請檢查後繼續。</string>
     <string name="local_apps_design_unsaved_retry">設計尚未儲存完成，請重試</string>
     <string name="local_apps_error_bridge_unsupported_op">應用請求了不支援的 Bridge 操作：%1$s</string>
+    <string name="local_apps_webview_upgrade_required">目前的 Android System WebView 不支援安全的本機應用 Bridge，請先更新 System WebView。</string>
+    <string name="local_apps_webview_untrusted_origin">本機應用只能從受信任的迴環來源開啟。</string>
+    <string name="local_apps_webview_storage_cleanup_waiting">正在安全清除此應用位址的舊瀏覽資料…</string>
+    <string name="local_apps_webview_storage_cleanup_failed">無法安全準備應用瀏覽資料，因此未載入應用。</string>
+    <string name="local_apps_error_web_storage_cleanup_queue">無法安全記錄應用瀏覽資料清理工作，因此尚未刪除應用。</string>
     <string name="local_apps_error_load_apps">無法載入應用：%1$s</string>
     <string name="local_apps_field_enabled">已啟用</string>
     <string name="local_apps_filter_all">全部</string>

@@ -11,8 +11,7 @@ use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto};
 use local_apps::{
-    load_manifest, save_manifest, validate_declared_capabilities, validate_workspace_source,
-    AppDataStore, AppError,
+    load_manifest, save_manifest, validate_declared_capabilities, AppDataStore, AppError,
     AppGenerationExecutor, AppLayout, AppManifest, AppService, GenerationJob,
     GenerationJobObserver, GenerationJobStatus, GenerationRequest, GenerationRequestKind,
     WorkspaceSourcePolicy, WRITABLE_ROOTS,
@@ -23,9 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
-use traits::{LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy};
+use traits::{
+    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
+};
 
 const BUILD_TIMEOUT_MS: u64 = 180_000;
+const LOCAL_APP_MEMORY_LIMIT_MB: u32 = 800;
 const LOCAL_APP_BUILD_GUEST_ROOT: &str = "/var/lingxi/local-app-build";
 
 pub(crate) const LOCKED_FILES: &[(&str, &[u8])] = &[
@@ -63,9 +65,6 @@ pub(crate) const LOCKED_FILES: &[(&str, &[u8])] = &[
             "/../../local-apps/templates/next-static-v1/lib/lingxi-bridge.js"
         )),
     ),
-];
-
-const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "app/layout.jsx",
         include_bytes!(concat!(
@@ -80,6 +79,9 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
             "/../../local-apps/templates/next-static-v1/app/page.jsx"
         )),
     ),
+];
+
+const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "app/globals.css",
         include_bytes!(concat!(
@@ -188,14 +190,17 @@ impl MobileAppGenerationExecutor {
                     "NODE_PATH".into(),
                     "/opt/lingxi/local-app-runtime/node_modules".into(),
                 ),
+                ("NODE_ENV".into(), "production".into()),
             ]
             .into_iter()
             .collect(),
             stdin: None,
             timeout_ms: Some(BUILD_TIMEOUT_MS),
-            // See local_apps_host.rs: the shipped mobile runtimes accept only
-            // `Allowed` and reject the request outright otherwise.
-            network: NetworkPolicy::Allowed,
+            network: NetworkPolicy::Disabled,
+            resource_limits: ResourceLimits {
+                max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
+                ..ResourceLimits::default()
+            },
             mounts: vec![
                 MountSpec {
                     host_path: build_root,
@@ -212,6 +217,16 @@ impl MobileAppGenerationExecutor {
             .run(request)
             .await
             .map_err(|error| AppError::Io(format!("fixed Next build failed: {error}")))?;
+        result
+            .enforcement
+            .ensure_for(
+                NetworkPolicy::Disabled,
+                ResourceLimits {
+                    max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
+                    ..ResourceLimits::default()
+                },
+            )
+            .map_err(|error| AppError::Io(error.to_string()))?;
         append_build_log(layout, full, &result.stdout, &result.stderr).await?;
         if result.timed_out || result.cancelled || result.exit_code != 0 {
             return Err(AppError::Io(format!(
@@ -690,7 +705,7 @@ fn read_generated_tree(workspace: &Path) -> Result<(Vec<FileWrite>, Option<Strin
 
 /// Recursive `read_dir` walk collecting `(workspace-relative POSIX path,
 /// bytes)` for every regular file under `current`. Mirrors
-/// [`validate_workspace_source`]'s own walk (symlinks skipped, not
+/// [`local_apps::validate_workspace_source`]'s own walk (symlinks skipped, not
 /// followed) rather than trusting arbitrary workspace content.
 fn collect_generated_files(
     workspace: &Path,
@@ -700,8 +715,8 @@ fn collect_generated_files(
     for entry in std::fs::read_dir(current)
         .map_err(|error| AppError::Io(format!("read generated tree: {error}")))?
     {
-        let entry = entry
-            .map_err(|error| AppError::Io(format!("read generated tree entry: {error}")))?;
+        let entry =
+            entry.map_err(|error| AppError::Io(format!("read generated tree entry: {error}")))?;
         let path = entry.path();
         let kind = entry
             .file_type()
@@ -799,16 +814,28 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tokio::time::{sleep, Duration};
     use traits::{
-        LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability, MobileLinuxError,
-        MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MountPurpose, PtyOpenRequest,
-        PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
+        LinuxCommandResult, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
+        MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MountPurpose,
+        PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
     };
 
     /// Captures the one `run` request `run_next_build` issues. Every other
     /// entry point is unreachable from that path and stays `Unsupported`.
-    #[derive(Default)]
     struct RecordingMobileLinuxRuntime {
         request: StdMutex<Option<LinuxCommandRequest>>,
+        enforcement: LinuxEnforcementReceipt,
+    }
+
+    impl Default for RecordingMobileLinuxRuntime {
+        fn default() -> Self {
+            Self {
+                request: StdMutex::new(None),
+                enforcement: LinuxEnforcementReceipt {
+                    network_policy_enforced: true,
+                    memory_limit_enforced: true,
+                },
+            }
+        }
     }
 
     impl RecordingMobileLinuxRuntime {
@@ -884,6 +911,7 @@ mod tests {
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
+                enforcement: self.enforcement,
             })
         }
 
@@ -958,7 +986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_build_request_uses_a_policy_the_mobile_runtimes_accept() {
+    async fn next_build_requires_denied_network_and_memory_enforcement() {
         let root = tempfile::tempdir().unwrap();
         let runtime_root = root.path().join("runtime-root");
         let next_bin = runtime_root.join("node_modules/next/dist/bin/next");
@@ -972,9 +1000,9 @@ mod tests {
             Some(runtime_root),
         );
         let runtime = Arc::new(RecordingMobileLinuxRuntime::default());
-        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(ScriptedModel::new(
-            Vec::new(),
-        )))));
+        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(
+            ScriptedModel::new(Vec::new()),
+        ))));
         let executor = MobileAppGenerationExecutor::new(Some(runtime.clone()), host, llm);
         let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
 
@@ -982,8 +1010,30 @@ mod tests {
 
         assert!(matches!(
             runtime.recorded().network,
-            traits::NetworkPolicy::Allowed
+            traits::NetworkPolicy::Disabled
         ));
+        assert_eq!(runtime.recorded().resource_limits.max_memory_mb, Some(800));
+        assert_eq!(runtime.recorded().command, "/usr/bin/node");
+        assert_eq!(
+            runtime.recorded().args,
+            vec![
+                "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+                "build",
+            ]
+        );
+        assert_eq!(
+            runtime.recorded().env,
+            [
+                ("LINGXI_APP_OUTPUT".to_string(), "export".to_string(),),
+                (
+                    "NODE_PATH".to_string(),
+                    "/opt/lingxi/local-app-runtime/node_modules".to_string(),
+                ),
+                ("NODE_ENV".to_string(), "production".to_string()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+        );
         assert_eq!(
             runtime.recorded().cwd.as_deref(),
             Some("/var/lingxi/local-app-build/abcd1234/store")
@@ -1004,6 +1054,62 @@ mod tests {
                 .map(|mount| mount.guest_path.as_str()),
             Some("/var/lingxi/local-app-build/abcd1234/store")
         );
+
+        executor.run_next_build(&layout, true).await.unwrap();
+        let full_request = runtime.recorded();
+        assert_eq!(
+            full_request
+                .env
+                .get("LINGXI_APP_OUTPUT")
+                .map(String::as_str),
+            Some("server")
+        );
+        assert_eq!(
+            full_request.env.get("NODE_ENV").map(String::as_str),
+            Some("production")
+        );
+        assert_eq!(
+            full_request.cwd.as_deref(),
+            Some("/var/lingxi/local-app-build/abcd1234/full")
+        );
+    }
+
+    #[tokio::test]
+    async fn next_build_fails_closed_without_network_enforcement_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime_root = root.path().join("runtime-root");
+        let next_bin = runtime_root.join("node_modules/next/dist/bin/next");
+        std::fs::create_dir_all(next_bin.parent().unwrap()).unwrap();
+        std::fs::write(&next_bin, b"#!/bin/sh\n").unwrap();
+        let host = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            true,
+            Some(runtime_root),
+        );
+        let runtime = Arc::new(RecordingMobileLinuxRuntime {
+            enforcement: LinuxEnforcementReceipt {
+                network_policy_enforced: false,
+                memory_limit_enforced: true,
+            },
+            ..RecordingMobileLinuxRuntime::default()
+        });
+        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(
+            ScriptedModel::new(Vec::new()),
+        ))));
+        let executor = MobileAppGenerationExecutor::new(Some(runtime), host, llm);
+        let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
+
+        let error = executor
+            .run_next_build(&layout, false)
+            .await
+            .expect_err("build must reject an unverifiable denied-network policy");
+
+        assert!(
+            error.to_string().contains("network_policy_unavailable"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1016,15 +1122,30 @@ mod tests {
         assert!(policy.contains_key(Path::new("package-lock.json")));
     }
 
-    // The five tests that used to live here (`*_does_not_corrupt_the_shell`,
-    // `generated_{dashboard,crud,content,form}_source_uses_*`) exercised
-    // `render_app_shell_source` / `default_collection_fields` directly — the
-    // per-`AppTemplateKind` scaffold renderer deleted in Task 2 (fix-forward
-    // for the engine-mobile build) alongside the core `AppTemplateKind` it
-    // switched on. There is no smaller-scope replacement to assert against.
-    // Task 9 replaced the typed `NotYetAvailable` stub that stood in their
-    // place with the real LLM-driven `generate_source` — the tests below
-    // exercise it via a `GenerationHarness` wrapping a `ScriptedModel`.
+    #[test]
+    fn bundled_next_policy_allows_bridge_media_and_disables_workers() {
+        let config = LOCKED_FILES
+            .iter()
+            .find_map(|(path, bytes)| (*path == "next.config.mjs").then_some(*bytes))
+            .expect("locked Next config");
+        let config = std::str::from_utf8(config).expect("Next config is UTF-8");
+        assert!(config.contains("media-src 'self' data: blob:"));
+        assert!(config.contains("worker-src 'none'"));
+    }
+
+    #[test]
+    fn bundled_root_page_is_a_locked_client_boundary() {
+        let page = LOCKED_FILES
+            .iter()
+            .find_map(|(path, bytes)| (*path == "app/page.jsx").then_some(*bytes))
+            .expect("locked root page");
+        let page = std::str::from_utf8(page).expect("root page is UTF-8");
+        assert!(page.trim_start().starts_with("\"use client\";"));
+    }
+
+    // The old fixed-category renderer tests have no smaller-scope replacement.
+    // The tests below exercise the LLM-driven `generate_source` path through a
+    // `GenerationHarness` wrapping a `ScriptedModel`.
 
     /// Everything one `generate_source` test needs: a loaded `AppService`
     /// with a confirmed plan, a `MobileAppGenerationExecutor` wired to a
@@ -1098,8 +1219,8 @@ mod tests {
             .create_app(Some("Habits"), "a habit tracker", None)
             .await
             .expect("create app");
-        let record = local_apps::test_support::advance_to_collecting_spec(&service, &record.id)
-            .await;
+        let record =
+            local_apps::test_support::advance_to_collecting_spec(&service, &record.id).await;
         let interaction = service
             .open_designer(&record.id)
             .await
@@ -1110,8 +1231,13 @@ mod tests {
             .await
             .expect("confirm design");
 
-        let host =
-            LocalAppsHostBroker::new(root.path().to_path_buf(), MockSink::arc(), None, false, None);
+        let host = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
         let model = ScriptedModel::new(responses);
         let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(model.clone()))));
         let executor = MobileAppGenerationExecutor::new(None, host, llm);
@@ -1147,7 +1273,7 @@ mod tests {
     #[tokio::test]
     async fn generate_source_writes_what_the_model_returned() {
         let harness = generation_harness(vec![Ok(serde_json::json!({
-            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return <div/>}"}]
+            "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return <div/>}"}]
         }))])
         .await;
 
@@ -1157,8 +1283,11 @@ mod tests {
             .await
             .expect("generation succeeds");
 
-        let written = harness.read("app/page.jsx").await.expect("the file landed");
-        assert!(written.contains("export default function P"));
+        let written = harness
+            .read("components/AppShell.jsx")
+            .await
+            .expect("the file landed");
+        assert!(written.contains("export function AppShell"));
     }
 
     #[tokio::test]
@@ -1173,7 +1302,11 @@ mod tests {
             .await
             .expect("restore reuses existing source");
 
-        assert_eq!(harness.model_calls(), 0, "a restore must not spend an LLM round trip");
+        assert_eq!(
+            harness.model_calls(),
+            0,
+            "a restore must not spend an LLM round trip"
+        );
     }
 
     #[tokio::test]
@@ -1181,11 +1314,11 @@ mod tests {
         let harness = generation_harness(vec![
             // First attempt carries `eval` — the validator will reject it.
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export const x = eval('1')"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export const x = eval('1')"}]
             })),
             // Second attempt is clean.
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
             })),
         ])
         .await;
@@ -1217,10 +1350,10 @@ mod tests {
         let harness = generation_harness(vec![
             // Attempt 1: a forbidden `fetch(` call. Rejected, but written first.
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export const marker = fetch('https://evil.example')"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export const marker = fetch('https://evil.example')"}]
             })),
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
             })),
         ])
         .await;
@@ -1250,12 +1383,12 @@ mod tests {
             // Attempt 1: uses the camera, which this app's plan never declared.
             Ok(serde_json::json!({
                 "files": [{
-                    "path": "app/page.jsx",
-                    "contents": "import {capturePhoto} from '../lib/lingxi-bridge';\n                                 export default function P(){capturePhoto();return null}"
+                    "path": "components/AppShell.jsx",
+                    "contents": "'use client'; import {capturePhoto} from '../lib/lingxi-bridge';\n                                 export function AppShell(){capturePhoto();return null}"
                 }]
             })),
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
             })),
         ])
         .await;
@@ -1296,7 +1429,7 @@ mod tests {
                 "files": [{"path": "lib/image-utils.js"}]
             })),
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
             })),
         ])
         .await;
@@ -1331,7 +1464,11 @@ mod tests {
             .await
             .expect_err("the repair loop stays bounded for malformed answers");
 
-        assert_eq!(harness.model_calls(), 3, "one attempt plus at most two repairs");
+        assert_eq!(
+            harness.model_calls(),
+            3,
+            "one attempt plus at most two repairs"
+        );
         assert!(
             format!("{error}").contains("has no contents"),
             "the surfaced error must be the LAST REAL one, not a generic exhaustion \
@@ -1343,7 +1480,7 @@ mod tests {
     async fn three_consecutive_validation_failures_give_up() {
         let dirty = || {
             Ok(serde_json::json!({
-                "files": [{"path": "app/page.jsx", "contents": "export const x = eval('1')"}]
+                "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export const x = eval('1')"}]
             }))
         };
         let harness = generation_harness(vec![dirty(), dirty(), dirty()]).await;
@@ -1369,10 +1506,12 @@ mod tests {
     #[tokio::test]
     async fn a_revision_job_passes_the_prompt_and_the_existing_tree_to_the_model() {
         let harness = generation_harness(vec![Ok(serde_json::json!({
-            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
         }))])
         .await;
-        harness.seed("components/Old.jsx", "export const Old = 1").await;
+        harness
+            .seed("components/Old.jsx", "export const Old = 1")
+            .await;
 
         let mut request = harness.initial_request();
         request.kind = GenerationRequestKind::Revision;
@@ -1385,17 +1524,25 @@ mod tests {
             .expect("revision succeeds");
 
         let prompt = harness.prompt_at(0);
-        assert!(prompt.contains("把搜索框挪到顶部"), "the user's words: {prompt}");
-        assert!(prompt.contains("components/Old.jsx"), "the existing tree: {prompt}");
+        assert!(
+            prompt.contains("把搜索框挪到顶部"),
+            "the user's words: {prompt}"
+        );
+        assert!(
+            prompt.contains("components/Old.jsx"),
+            "the existing tree: {prompt}"
+        );
     }
 
     #[tokio::test]
     async fn a_revision_leaves_files_the_model_did_not_mention_untouched() {
         let harness = generation_harness(vec![Ok(serde_json::json!({
-            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
         }))])
         .await;
-        harness.seed("components/Keep.jsx", "export const Keep = 1").await;
+        harness
+            .seed("components/Keep.jsx", "export const Keep = 1")
+            .await;
 
         let mut request = harness.initial_request();
         request.kind = GenerationRequestKind::Revision;
@@ -1515,9 +1662,9 @@ mod tests {
         let sink = MockSink::arc();
         let host =
             LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
-        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(ScriptedModel::new(
-            Vec::new(),
-        )))));
+        let llm = Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(
+            ScriptedModel::new(Vec::new()),
+        ))));
         let executor = MobileAppGenerationExecutor::new(None, host, llm);
         executor
             .attach_service(service.clone())

@@ -1,5 +1,7 @@
 # 本地应用生成：从模版向导改为对话式设计
 
+> **归档说明（非现行规范）**：本文记录了从固定应用模板迁移到动态设计流程的历史背景。当前产品唯一流程是“应用简述 → LLM 动态问卷 → 用户回答 → LLM 方案 → 用户确认 → 生成 → 预览批准”；文中 `AppTemplate*`、固定模板目录和模板选择 UI 仅描述已删除的旧实现，不得作为生产协议或客户端行为依据。
+
 日期：2026-08-06
 状态：已批准，待实施
 影响范围：`lingxi-code/local-apps`、`lingxi-code/client-protocol`、`lingxi-code/apps/engine-mobile`、`clients/ios`、`skills/create-local-app`

@@ -126,8 +126,9 @@ export function mediaObjectURL(media) {
  * the user's own model quota — call it when the user asked for something, not
  * on a timer.
  *
- * Attach a capture by its `mediaId` rather than its base64: one bridge request
- * is capped well below the size of a photo.
+ * Attach a capture by its `mediaId` rather than its base64. Model input has a
+ * bounded 8 MiB lane, but a handle avoids base64 expansion and repeated IPC
+ * copies. Other bridge control operations remain capped at 64 KiB.
  *
  *   const shot = await capturePhoto();
  *   const { text } = await requestLlmChat({

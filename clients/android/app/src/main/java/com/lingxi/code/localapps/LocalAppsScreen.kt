@@ -1864,8 +1864,14 @@ private fun BoundLocalAppWebView(
     LaunchedEffect(controller, responses) {
         val activeController = controller ?: return@LaunchedEffect
         responses.forEach { result ->
-            activeController.resolveBridgeRequest(result.requestId, result.ok, result.payloadJson)
-            onAction(LocalAppsAction.AcknowledgeBridgeResult(result.requestId))
+            activeController.resolveBridgeRequest(
+                requestId = result.requestId,
+                ok = result.ok,
+                resultJson = result.payloadJson,
+                error = result.error,
+                errorCode = result.errorCode,
+            )
+            onAction(LocalAppsAction.AcknowledgeBridgeResult(result.appId, result.requestId))
         }
     }
     LaunchedEffect(controller, uiRequest) {

@@ -7,13 +7,11 @@
 //! `AppLlmActivityChanged` pair so the client can show "this app is calling
 //! AI" without inspecting the payload.
 //!
-//! Attachments arrive by HANDLE (`mediaId`), not inline: the WebView bridge
-//! caps one request payload at 64 KiB and a single default-preset photo is
-//! 400-700 KB base64, so an app physically cannot pass a photo back inline.
-//! The bytes are already engine-side (a device op produced them), so a
-//! handle both fits the cap and skips a multi-megabyte round trip through
-//! JS. Small app-generated images (a canvas export) may still be sent inline
-//! within the payload budget.
+//! Attachments should arrive by HANDLE (`mediaId`), not inline. `llm.chat`
+//! has an 8 MiB long-context lane, but base64 would still expand and copy a
+//! capture through JS, WebKit, Swift/Kotlin, and Rust. The bytes are already
+//! engine-side (a device op produced them), so a handle skips that round trip.
+//! Small app-generated images (a canvas export) may still be sent inline.
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use crate::local_apps_llm::{ChatMessage, ChatPart, ChatRequest, ChatRole};
@@ -95,7 +93,10 @@ impl Drop for LlmInflightGuard {
             handle.spawn(async move {
                 event_sink
                     .emit(ClientEvent::AppEvent {
-                        event: AppEventDto::AppLlmActivityChanged { app_id, active: false },
+                        event: AppEventDto::AppLlmActivityChanged {
+                            app_id,
+                            active: false,
+                        },
                     })
                     .await;
             });
@@ -124,10 +125,7 @@ fn truncate_on_char_boundary(text: &str, limit: usize) -> (String, bool) {
 
 /// Media kinds an app may attach. Audio is deliberately absent — see
 /// `transcribe_speech_value`.
-fn attachment_part(
-    media_type: &str,
-    base64_body: String,
-) -> Result<ChatPart, BridgeFailure> {
+fn attachment_part(media_type: &str, base64_body: String) -> Result<ChatPart, BridgeFailure> {
     if media_type.starts_with("image/") {
         Ok(ChatPart::Image {
             media_type: media_type.to_string(),
@@ -301,7 +299,7 @@ impl LocalAppsHostBroker {
                     return attachment_part(&entry.media_type, encoded);
                 }
                 // Inline form, for small app-generated images. The bridge's
-                // own 64 KiB payload cap is the real bound here.
+                // bounded LLM lane is the outer encoded-size limit.
                 let media_type = part
                     .get("mimeType")
                     .and_then(Value::as_str)
@@ -388,12 +386,7 @@ impl LocalAppsHostBroker {
         inflight.release().await;
 
         let outcome = match outcome {
-            Err(_) => {
-                return Err(BridgeFailure::coded(
-                    "timeout",
-                    "the model call timed out",
-                ))
-            }
+            Err(_) => return Err(BridgeFailure::coded("timeout", "the model call timed out")),
             Ok(Err(error)) => {
                 return Err(BridgeFailure::coded("llm_unavailable", error.to_string()))
             }
@@ -525,9 +518,7 @@ mod tests {
             })
         }
 
-        async fn pick_from_library(
-            &self,
-        ) -> Result<traits::CapturedImage, traits::CameraError> {
+        async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
             self.capture_photo(traits::CapturePhotoOpts {
                 position: traits::CameraPosition::Back,
                 allow_editing: false,
@@ -537,7 +528,11 @@ mod tests {
     }
 
     async fn harness(model: Arc<ChatModel>) -> Harness {
-        harness_with_devices(model, crate::local_apps_device::DeviceCapabilities::default()).await
+        harness_with_devices(
+            model,
+            crate::local_apps_device::DeviceCapabilities::default(),
+        )
+        .await
     }
 
     async fn harness_with_devices(
@@ -656,6 +651,35 @@ mod tests {
 
     fn one_turn() -> Value {
         json!({"messages": [{"role": "user", "content": "帮我起个标题"}]})
+    }
+
+    #[tokio::test]
+    async fn long_context_has_a_bounded_eight_mebibyte_lane() {
+        let model = ChatModel::answering("ok", Some("end_turn"));
+        let h = harness(model.clone()).await;
+        declare_and_grant(&h);
+
+        let long_but_valid = "x".repeat(70 * 1024);
+        let (ok, _, error, code) = chat(
+            &h,
+            json!({"messages": [{"role": "user", "content": long_but_valid}]}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(
+            model.seen.lock().expect("lock")[0].messages[0].content,
+            vec![ChatPart::Text("x".repeat(70 * 1024))]
+        );
+
+        let too_large = "x".repeat(8 * 1024 * 1024);
+        let (ok, _, _, code) = chat_as(
+            &h,
+            "too-large",
+            json!({"messages": [{"role": "user", "content": too_large}]}),
+        )
+        .await;
+        assert!(!ok);
+        assert_eq!(code.as_deref(), Some("payload_too_large"));
     }
 
     #[tokio::test]
@@ -875,9 +899,8 @@ mod tests {
 
     /// The composition the whole media design exists for: photograph
     /// something, then ask the model about it. The photo must reach the
-    /// provider as a real image part — and it must travel by HANDLE, because
-    /// the bridge caps one request payload at 64 KiB and this photo is
-    /// larger than that.
+    /// provider as a real image part — and it should travel by HANDLE so its
+    /// bytes do not make an unnecessary base64 round trip through the page.
     #[tokio::test]
     async fn a_captured_photo_can_be_attached_to_a_chat_by_handle() {
         let jpeg = vec![7u8; 120 * 1024];
@@ -925,8 +948,8 @@ mod tests {
         let media_id = capture["mediaId"].as_str().expect("mediaId").to_string();
         assert!(
             capture["base64"].as_str().expect("base64").len() > 64 * 1024,
-            "this fixture must be past the bridge's inline payload cap, or the test \
-             would not prove the handle is necessary"
+            "this fixture must be large enough to prove the handle avoids a meaningful \
+             base64 round trip"
         );
 
         let (ok, result, error, code) = chat_as(

@@ -14,7 +14,7 @@ Alpine/PRoot 沙箱里运行——没有人会在落盘前手工改你的输出�
 ```json
 {
   "files": [
-    { "path": "app/page.jsx", "contents": "export default function Page() { … }" }
+    { "path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell() { … }" }
   ]
 }
 ```
@@ -29,8 +29,9 @@ Alpine/PRoot 沙箱里运行——没有人会在落盘前手工改你的输出�
   工作区里已经有你（或者你的上一次尝试）写过的文件，会在提示里以
   `--- <path> ---` 的形式贴给你参考。这一轮**只返回需要新建或者需要整
   篇改写的文件**。举例：用户说"把搜索框挪到顶部"，而搜索框只出现在
-  `components/SearchBar.jsx` 里，你就只回传这一个文件；`app/page.jsx`、
-  `lib/store.js` 等其他文件保持不变，不需要在这次响应里出现。
+  `components/SearchBar.jsx` 里，你就只回传这一个文件；
+  `components/AppShell.jsx`、`lib/store.js` 等其他文件保持不变，不需要在
+  这次响应里出现。
 
 **不要为了"保险"把整个应用重新发一遍。** 覆盖语义存在的理由正是让一次
 小修改只影响它该影响的文件——如果每次修订都强迫你重新生成全部文件，你
@@ -50,6 +51,9 @@ Alpine/PRoot 沙箱里运行——没有人会在落盘前手工改你的输出�
 - `package.json`、`package-lock.json`——这两个文件的内容和哈希被锁定，
   依赖集合是固定的 `next` + `react` + `react-dom`，你不能新增、替换、
   修改依赖。
+- `app/layout.jsx`、根 `app/page.jsx` 和 `lib/lingxi-bridge.js` 由宿主提供
+  并锁定，不能写入或改写。根页面固定渲染 `components/AppShell.jsx`；应用
+  主界面从这个可写组件开始实现。
 
 ## 硬约束（每一条都会被静态扫描,命中即拒收整批）
 
@@ -57,6 +61,9 @@ Alpine/PRoot 沙箱里运行——没有人会在落盘前手工改你的输出�
   文件名叫 `route.js`/`route.jsx`/`route.ts`/`route.tsx` 的文件也禁止。
   这个应用没有自己的后端。
 - **不写 Server Actions**：文件里不能出现 `"use server"`。
+- **只写 JavaScript**：可执行源码扩展名只能是 `.js`、`.jsx`、`.mjs`；
+  不要返回 `.ts`、`.tsx`、`.cjs`。所有可写的 `app/**` 页面、布局及错误/
+  加载入口必须在第一条语句写 `"use client"`。
 - **不用 `eval(`，不用 `Function(...)`/`new Function(...)` 构造函数**。
 - **不直接发起网络请求**：不能出现 `fetch(`、`XMLHttpRequest`、
   `WebSocket(`、`EventSource(`。需要访问外部服务时,必须走
@@ -114,6 +121,8 @@ AI 与助手：
   - **这花的是用户自己的钱**：由用户的动作触发，不要轮询、不要在页面
     加载时自动调用。
   - 回答是一次性返回的（没有流式），所以必须渲染等待状态。
+  - `llm.chat` 的完整请求最多 8 MiB，可承载长文本上下文；其他 Bridge
+    控制请求最多 64 KiB。不要用 base64 浪费这部分上下文空间。
   - 要让模型看图，用刚才那张图的 `mediaId`，不要把 base64 塞进请求：
     ```js
     const shot = await capturePhoto();
@@ -154,7 +163,7 @@ AI 与助手：
 
 ## 代码风格
 
-- 用 `.jsx` 而不是 `.tsx`（模板不带 TypeScript 工具链）。
+- 只用 `.js`、`.jsx`、`.mjs`，不要使用 TypeScript 或 CommonJS。
 - 客户端交互组件顶部写 `"use client"`。
 - 界面文案用平实中文,贴合用户在描述和问卷里用的语气。
 - 优先复用工作区里已经存在的文件（`lib/lingxi-bridge.js`、

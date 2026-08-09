@@ -11,6 +11,24 @@ trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" 2>/dev/null || true; rm -rf
 
 python3 "${TOOL}" --repo-root "${REPO_ROOT}"
 
+python3 - "${REPO_ROOT}/docs/mobile-linux/local-app-runtime-policy.json" <<'PY'
+import json
+import pathlib
+import sys
+
+policy = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+package_policy = policy["package_manager_policy"]
+assert package_policy["npm_family_present"] is True
+assert package_policy["npm_scope"] == "interactive_terminal_only"
+assert package_policy["generation_jobs"] is False
+assert package_policy["mcp"] is False
+commands = policy["commands"]
+assert commands["store_build"]["network_policy"] == "disabled"
+assert commands["full_build"]["network_policy"] == "disabled"
+assert commands["full_start"]["network_policy"] == "loopback_only"
+assert all(command["memory_limit_bytes"] == 838860800 for command in commands.values())
+PY
+
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
   --lock "${TEMPLATE}/package-lock.json" \
   --output "${TEMP_ROOT}/local-app-runtime.spdx.json"

@@ -44,12 +44,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 class LocalAppsViewModel(
     private val sourceFlow: StateFlow<ConversationSource>,
     distributionChannel: String = BuildConfig.DISTRIBUTION_CHANNEL,
     private val strings: LocalAppsStrings = DefaultLocalAppsStrings,
+    private val webStorageCleanup: LocalAppWebStorageCleanup = NoopLocalAppWebStorageCleanup,
 ) : ViewModel() {
     // `internal`, not `private`: several same-module tests seed reducer-only
     // state (e.g. `questionnaires`/`plans`, which only ever change through
@@ -182,6 +182,7 @@ class LocalAppsViewModel(
     )
 
     init {
+        webStorageCleanup.retryConfirmed()
         viewModelScope.launch {
             sourceFlow.collectLatest { bound ->
                 source = bound
@@ -242,7 +243,7 @@ class LocalAppsViewModel(
             }
             is LocalAppsAction.StopRuntime -> submit(ClientCommand.StopApp(action.appId))
             is LocalAppsAction.RetryGeneration -> retryGeneration(action.appId)
-            is LocalAppsAction.DeleteApp -> submit(ClientCommand.DeleteApp(action.appId))
+            is LocalAppsAction.DeleteApp -> deleteApp(action.appId)
             is LocalAppsAction.ResetPermissions -> {
                 uiControlGrants.remove(action.appId)
                 submit(ClientCommand.ResetAppPermissions(action.appId))
@@ -253,7 +254,9 @@ class LocalAppsViewModel(
             is LocalAppsAction.ApprovePreview -> approvePreview(action.appId)
             is LocalAppsAction.BridgeRequest -> executeBridgeRequest(action.message)
             is LocalAppsAction.AcknowledgeBridgeResult -> _uiState.update {
-                it.copy(bridgeResults = it.bridgeResults - action.requestId)
+                it.copy(
+                    bridgeResults = it.bridgeResults - LocalAppBridgeRequestKey(action.appId, action.requestId),
+                )
             }
             is LocalAppsAction.ResolveAuthorization -> resolveAuthorization(action.decision)
             is LocalAppsAction.UiActionHandled -> resolveCompletedUiAction(action)
@@ -280,9 +283,7 @@ class LocalAppsViewModel(
                     ),
                 )
             }
-        // NOTE (local-apps#questionnaire, Task 5): `requestTemplates` /
-        // `ClientCommand.ListAppTemplates` were deleted (human-partner ruling:
-        // total removal of the static template catalog).
+        // The dynamic brief/questionnaire flow has no catalog snapshot to request.
     }
 
     // NOTE (local-apps#questionnaire, Task 18/20): this replaces the deleted
@@ -729,34 +730,93 @@ class LocalAppsViewModel(
         submit(ClientCommand.ConfirmAppPreview(appId, preview.revision, preview.interactionId))
     }
 
+    private fun deleteApp(appId: String) {
+        val runtimeUrl = _uiState.value.apps.firstOrNull { it.id == appId }?.runtime?.url
+            ?: _uiState.value.details[appId]?.runtime?.url
+        if (!webStorageCleanup.prepareDeletion(appId, runtimeUrl)) {
+            error(
+                strings.resolve(
+                    R.string.local_apps_error_web_storage_cleanup_queue,
+                    "无法安全记录应用浏览数据清理任务，应用尚未删除。",
+                ),
+            )
+            return
+        }
+        val bound = source
+        if (bound == null) {
+            webStorageCleanup.cancelDeletion(appId)
+            error("Local-app engine is unavailable")
+            return
+        }
+        viewModelScope.launch {
+            runCatching { bound.submitClientCommand(ClientCommand.DeleteApp(appId)) }
+                .onFailure { failure ->
+                    // Submission did not reach the engine, so the app still
+                    // owns its origin. Release only the unconfirmed journal;
+                    // a confirmed deletion is intentionally irreversible here.
+                    webStorageCleanup.cancelDeletion(appId)
+                    error(failure.message ?: failure::class.simpleName.orEmpty())
+                }
+        }
+    }
+
     private fun executeBridgeRequest(message: LocalAppBridgeMessage) {
         if (message.appId.isBlank() || message.requestId.isBlank()) return
-        val operation = when (message.operation) {
-            "query_data" -> AppBridgeOperationDto.QUERY_DATA
-            "mutate_data" -> AppBridgeOperationDto.MUTATE_DATA
-            "network_request" -> AppBridgeOperationDto.NETWORK_REQUEST
-            "runtime_status" -> AppBridgeOperationDto.RUNTIME_STATUS
-            else -> {
-                error(
-                    strings.resolve(
-                        R.string.local_apps_error_bridge_unsupported_op,
-                        "应用请求了不支持的 Bridge 操作：%1\$s",
-                        message.operation,
+        val operation = bridgeOperationFor(message.operation)
+        if (operation == null) {
+            publishBridgeFailure(
+                message = message,
+                error = strings.resolve(
+                    R.string.local_apps_error_bridge_unsupported_op,
+                    "应用请求了不支持的 Bridge 操作：%1\$s",
+                    message.operation,
+                ),
+                errorCode = "operation_unsupported",
+            )
+            return
+        }
+        val bound = source
+        if (bound == null) {
+            publishBridgeFailure(message, "The local-app engine is unavailable", "engine_unavailable")
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                bound.submitClientCommand(
+                    ClientCommand.ExecuteAppBridgeRequest(
+                        AppBridgeRequestDto(
+                            requestId = message.requestId,
+                            appId = message.appId,
+                            operation = operation,
+                            payloadJson = message.payloadJson,
+                        ),
                     ),
                 )
-                return
+            }.onFailure { failure ->
+                publishBridgeFailure(
+                    message,
+                    failure.message ?: "The local-app engine rejected the Bridge request",
+                    "engine_rejected",
+                )
             }
         }
-        submit(
-            ClientCommand.ExecuteAppBridgeRequest(
-                AppBridgeRequestDto(
-                    requestId = message.requestId,
-                    appId = message.appId,
-                    operation = operation,
-                    payloadJson = message.payloadJson,
+    }
+
+    private fun publishBridgeFailure(message: LocalAppBridgeMessage, error: String, errorCode: String) {
+        _uiState.update { state ->
+            state.copy(
+                bridgeResults = state.bridgeResults + (
+                    LocalAppBridgeRequestKey(message.appId, message.requestId) to LocalAppBridgeResult(
+                        requestId = message.requestId,
+                        appId = message.appId,
+                        ok = false,
+                        payloadJson = null,
+                        error = error,
+                        errorCode = errorCode,
+                    )
                 ),
-            ),
-        )
+            )
+        }
     }
 
     /**
@@ -967,10 +1027,7 @@ class LocalAppsViewModel(
 
     private fun reduceAppEvent(event: AppEventDto) {
         when (event) {
-            // NOTE (local-apps#questionnaire, Task 5): `AppEventDto.AppTemplatesChanged`
-            // was deleted (human-partner ruling: total removal of the static
-            // template catalog) — no case for it exists on the wire enum
-            // anymore, so there is nothing to match here.
+            // The wire enum contains only dynamic-design application events.
             is AppEventDto.AppDetailsChanged -> reduceDetails(event.details)
             // The LLM finished (or discarded) authoring the questionnaire.
             // Stores the ordered steps under `questionnaires[appId]`, replacing
@@ -1000,16 +1057,16 @@ class LocalAppsViewModel(
             is AppEventDto.AppGenerationJobChanged -> reduceGenerationJob(event.job)
             is AppEventDto.AppBridgeResponse -> {
                 val response = event.response
-                val payload = response.resultJson ?: response.error?.let(JSONObject::quote)
                 _uiState.update { state ->
                     state.copy(
                         bridgeResults = state.bridgeResults + (
-                            response.requestId to LocalAppBridgeResult(
+                            LocalAppBridgeRequestKey(response.appId, response.requestId) to LocalAppBridgeResult(
                                 requestId = response.requestId,
                                 appId = response.appId,
                                 ok = response.ok,
-                                payloadJson = payload,
+                                payloadJson = response.resultJson,
                                 error = response.error,
+                                errorCode = response.errorCode,
                             )
                         ),
                     )
@@ -1227,6 +1284,10 @@ class LocalAppsViewModel(
             record.toUiApp(fallbackRuntime = prior?.runtime)
         }.sortedByDescending { it.updatedAtMs }
         val liveIds = apps.mapTo(hashSetOf()) { it.id }
+        // Only an explicit DeleteApp action may journal browser-data removal.
+        // A source/profile rebind can also make ids disappear from this local
+        // reducer, and must never be interpreted as user-authorized deletion.
+        webStorageCleanup.reconcile(liveIds)
         // Release the draft machinery for apps that left the record set. Nothing
         // else does, and every path back INTO such an app already refuses it —
         // `openApp` and `reduceDesignerRequested` both return early for an id
@@ -1285,6 +1346,7 @@ class LocalAppsViewModel(
                 details = state.details.filterKeys(liveIds::contains),
                 generation = state.generation.filterKeys(liveIds::contains),
                 previews = state.previews.filterKeys(liveIds::contains),
+                bridgeResults = state.bridgeResults.filterValues { it.appId in liveIds },
                 designer = state.designer?.takeIf { it.appId in liveIds },
                 // Pruned on the same set as everything above it, and for the
                 // same reason: `SelectDetailsTab` and both generation reducers
@@ -1439,14 +1501,42 @@ class LocalAppsViewModel(
         fun factory(
             sourceFlow: StateFlow<ConversationSource>,
             strings: LocalAppsStrings = DefaultLocalAppsStrings,
+            webStorageCleanup: LocalAppWebStorageCleanup = NoopLocalAppWebStorageCleanup,
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    LocalAppsViewModel(sourceFlow, strings = strings) as T
+                    LocalAppsViewModel(
+                        sourceFlow,
+                        strings = strings,
+                        webStorageCleanup = webStorageCleanup,
+                    ) as T
             }
     }
 }
+
+/**
+ * Exhaustive enum-to-wire mapping. Adding an operation to the UniFFI enum now
+ * breaks this `when` instead of silently leaving Android behind iOS.
+ */
+internal fun AppBridgeOperationDto.bridgeWireName(): String = when (this) {
+    AppBridgeOperationDto.QUERY_DATA -> "query_data"
+    AppBridgeOperationDto.MUTATE_DATA -> "mutate_data"
+    AppBridgeOperationDto.NETWORK_REQUEST -> "network_request"
+    AppBridgeOperationDto.RUNTIME_STATUS -> "runtime_status"
+    AppBridgeOperationDto.CAPTURE_PHOTO -> "capture_photo"
+    AppBridgeOperationDto.PICK_IMAGE -> "pick_image"
+    AppBridgeOperationDto.RECORD_AUDIO_START -> "record_audio_start"
+    AppBridgeOperationDto.RECORD_AUDIO_STOP -> "record_audio_stop"
+    AppBridgeOperationDto.GET_LOCATION -> "get_location"
+    AppBridgeOperationDto.TRANSCRIBE_SPEECH -> "transcribe_speech"
+    AppBridgeOperationDto.POST_NOTIFICATION -> "post_notification"
+    AppBridgeOperationDto.LLM_CHAT -> "llm_chat"
+    AppBridgeOperationDto.AGENT_POST -> "agent_post"
+}
+
+internal fun bridgeOperationFor(wireName: String): AppBridgeOperationDto? =
+    AppBridgeOperationDto.entries.firstOrNull { it.bridgeWireName() == wireName }
 
 /**
  * The app a destination is showing, or null on the two app-independent screens.
@@ -1461,12 +1551,6 @@ private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
     is LocalAppsDestination.Preview -> appId
     is LocalAppsDestination.Details -> appId
 }
-
-// NOTE (local-apps#questionnaire, Task 5): `AppTemplateKindDto`/`AppTemplateDto`
-// and the `toUiTemplateKind`/`toBindingTemplateKind`/`toUiTemplate` conversions
-// that used to live here were deleted from client-protocol (human-partner
-// ruling: total removal of the static template catalog). `LocalAppTemplate`
-// (the native UI model) was deleted in Task 18 alongside them.
 
 // (local-apps#questionnaire, Task 19): AUTHORING_QUESTIONNAIRE /
 // QUESTIONNAIRE_FAILED / PLANNING / PLAN_FAILED (core Task 3) now map 1:1 —

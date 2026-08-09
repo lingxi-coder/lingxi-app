@@ -38,7 +38,10 @@ pub fn screen_writes(writes: &[FileWrite]) -> Result<(), AppError> {
     for write in writes {
         screen_path(&write.path)?;
         if !seen.insert(write.path.as_str()) {
-            return Err(reject(format!("duplicate path `{}` in one batch", write.path)));
+            return Err(reject(format!(
+                "duplicate path `{}` in one batch",
+                write.path
+            )));
         }
         let bytes = write.contents.len();
         if bytes > MAX_GENERATED_FILE_BYTES {
@@ -61,7 +64,8 @@ pub fn screen_writes(writes: &[FileWrite]) -> Result<(), AppError> {
 /// hash-checked on every job), so a model write here is refused BEFORE it
 /// lands: letting it through would burn a repair attempt on a validator
 /// rejection the screen can see coming.
-pub(crate) const LOCKED_TEMPLATE_PATHS: &[&str] = &["lib/lingxi-bridge.js"];
+pub(crate) const LOCKED_TEMPLATE_PATHS: &[&str] =
+    &["lib/lingxi-bridge.js", "app/layout.jsx", "app/page.jsx"];
 
 fn screen_path(path: &str) -> Result<(), AppError> {
     if path.is_empty() {
@@ -136,13 +140,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_write_to_the_host_owned_bridge_helper_is_refused() {
-        let error = screen_writes(&[write("lib/lingxi-bridge.js")])
-            .expect_err("the host owns this file");
-        assert!(
-            error.to_string().contains("provided by the host"),
-            "{error}"
-        );
+    fn writes_to_host_owned_source_are_refused() {
+        for path in LOCKED_TEMPLATE_PATHS {
+            let error = screen_writes(&[write(path)]).expect_err("the host owns this file");
+            assert!(
+                error.to_string().contains("provided by the host"),
+                "{error}"
+            );
+        }
         // A sibling under the same root stays writable — the guard is one
         // path, not a ban on `lib/`.
         screen_writes(&[write("lib/format.js")]).expect("other lib files are the app's own");
@@ -168,13 +173,16 @@ mod tests {
     }
 
     fn write(path: &str) -> FileWrite {
-        FileWrite { path: path.into(), contents: "export default function P(){return null}".into() }
+        FileWrite {
+            path: path.into(),
+            contents: "export default function P(){return null}".into(),
+        }
     }
 
     #[test]
     fn accepts_writes_under_every_writable_root() {
         let writes = vec![
-            write("app/page.jsx"),
+            write("app/settings/page.jsx"),
             write("components/NoteList.jsx"),
             write("lib/store.js"),
             write("styles/globals.css"),
@@ -205,8 +213,9 @@ mod tests {
         // every leading-`/` path on its own. Kept anyway (see the comment on
         // the check itself) as a behavioral requirement and defense-in-depth,
         // not because this test can prove the line is load-bearing.
-        screen_writes(&[write("/app/page.jsx")])
-            .expect_err("a leading slash is rejected even when the rest of the path looks writable");
+        screen_writes(&[write("/app/page.jsx")]).expect_err(
+            "a leading slash is rejected even when the rest of the path looks writable",
+        );
     }
 
     #[test]
@@ -227,8 +236,9 @@ mod tests {
     #[test]
     fn rejects_a_bare_root_name() {
         for root in ["app", "components", "lib", "styles", "public"] {
-            screen_writes(&[write(root)])
-                .expect_err("a write naming only the root itself, with no child segment, is rejected");
+            screen_writes(&[write(root)]).expect_err(
+                "a write naming only the root itself, with no child segment, is rejected",
+            );
         }
     }
 
@@ -240,8 +250,11 @@ mod tests {
 
     #[test]
     fn rejects_a_duplicate_path_within_one_batch() {
-        screen_writes(&[write("app/page.jsx"), write("app/page.jsx")])
-            .expect_err("a batch that writes one path twice is ambiguous");
+        screen_writes(&[
+            write("components/AppShell.jsx"),
+            write("components/AppShell.jsx"),
+        ])
+        .expect_err("a batch that writes one path twice is ambiguous");
     }
 
     #[test]
@@ -253,7 +266,7 @@ mod tests {
     #[test]
     fn rejects_a_single_file_over_the_byte_cap() {
         let big = FileWrite {
-            path: "app/page.jsx".into(),
+            path: "components/AppShell.jsx".into(),
             contents: "x".repeat(MAX_GENERATED_FILE_BYTES + 1),
         };
         screen_writes(&[big]).expect_err("a single file is capped");
@@ -264,13 +277,17 @@ mod tests {
         let each = MAX_GENERATED_FILE_BYTES;
         let count = MAX_GENERATED_TOTAL_BYTES / each + 1;
         let writes: Vec<_> = (0..count)
-            .map(|i| FileWrite { path: format!("app/p{i}.jsx"), contents: "x".repeat(each) })
+            .map(|i| FileWrite {
+                path: format!("app/p{i}.jsx"),
+                contents: "x".repeat(each),
+            })
             .collect();
         screen_writes(&writes).expect_err("the batch total is capped");
     }
 
     #[test]
     fn rejects_an_empty_batch() {
-        screen_writes(&[]).expect_err("a generation that writes nothing is a failure, not a success");
+        screen_writes(&[])
+            .expect_err("a generation that writes nothing is a failure, not a success");
     }
 }

@@ -346,6 +346,8 @@ def validate_source_policy(template: pathlib.Path) -> None:
         "default-src 'self'",
         "script-src 'self' 'unsafe-inline'",
         "connect-src 'self'",
+        "media-src 'self' data: blob:",
+        "worker-src 'none'",
         "object-src 'none'",
         "base-uri 'none'",
         "frame-ancestors 'none'",
@@ -402,6 +404,7 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
     policy = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-policy.json")
     node = "/usr/bin/node"
     next_binary = "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next"
+    node_path = "/opt/lingxi/local-app-runtime/node_modules"
     if policy.get("schema_version") != 1:
         fail("local-app runtime policy must use schema_version 1")
     if policy.get("node_executable") != node or policy.get("next_executable") != next_binary:
@@ -418,7 +421,14 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         if (
             not isinstance(command, dict)
             or command.get("argv") != expected_build
-            or command.get("environment") != {"LINGXI_APP_OUTPUT": output, "NODE_ENV": "production"}
+            or command.get("environment")
+            != {
+                "LINGXI_APP_OUTPUT": output,
+                "NODE_ENV": "production",
+                "NODE_PATH": node_path,
+            }
+            or command.get("network_policy") != "disabled"
+            or command.get("memory_limit_bytes") != 800 * 1024 * 1024
             or command.get("timeout_ms") != 180000
         ):
             fail(f"fixed build command diverged: {name}")
@@ -427,7 +437,14 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         not isinstance(start, dict)
         or start.get("argv")
         != [node, next_binary, "start", "--hostname", "127.0.0.1", "--port", "{loopback_port}"]
-        or start.get("environment") != {"LINGXI_APP_OUTPUT": "server", "NODE_ENV": "production"}
+        or start.get("environment")
+        != {
+            "LINGXI_APP_OUTPUT": "server",
+            "NODE_ENV": "production",
+            "NODE_PATH": node_path,
+        }
+        or start.get("network_policy") != "loopback_only"
+        or start.get("memory_limit_bytes") != 800 * 1024 * 1024
         or start.get("cold_start_timeout_ms") != 120000
         or start.get("warm_start_timeout_ms") != 30000
     ):
@@ -440,9 +457,53 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         "interactive_terminal_apk": True,
         "generation_jobs": False,
         "mcp": False,
-        "npm_family_present": False,
+        "npm_family_present": True,
+        "npm_scope": "interactive_terminal_only",
     }:
         fail("local-app package-manager policy diverged")
+
+    launcher = policy.get("android_network_policy_launcher")
+    expected_source = "clients/android/app/src/main/cpp/mobile_linux_policy_launcher.c"
+    expected_artifact = "libmobile_linux_policy_launcher.so"
+    if not isinstance(launcher, dict):
+        fail("local-app runtime policy is missing the Android network-policy launcher")
+    if (
+        launcher.get("source") != expected_source
+        or launcher.get("artifact") != expected_artifact
+        or launcher.get("supported_network_policies") != ["disabled"]
+        or launcher.get("loopback_only_ready") is not False
+        or launcher.get("abis") != ["arm64-v8a", "x86_64"]
+        or launcher.get("variants") != ["play", "direct"]
+        or not valid_sha256(launcher.get("source_sha256"))
+    ):
+        fail("Android network-policy launcher policy diverged")
+    source = repo / expected_source
+    try:
+        actual_source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError as exc:
+        fail(f"missing Android network-policy launcher source: {exc}")
+    if actual_source_sha256 != launcher["source_sha256"]:
+        fail("Android network-policy launcher source SHA-256 diverged")
+
+    build_script = repo / "clients/android/scripts/build-mobile-linux-native.sh"
+    verify_script = repo / "clients/android/scripts/verify-mobile-linux-native.sh"
+    try:
+        build_text = build_script.read_text(encoding="utf-8")
+        verify_text = verify_script.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"missing Android native launcher packaging script: {exc}")
+    build_tokens = {
+        "app/src/main/cpp/mobile_linux_policy_launcher.c",
+        expected_artifact,
+        'build_policy_launcher "arm64-v8a"',
+        'build_policy_launcher "x86_64"',
+    }
+    if any(token not in build_text for token in build_tokens):
+        fail("Android build script does not package the network-policy launcher for both ABIs")
+    if expected_artifact not in verify_text or not all(
+        abi in verify_text for abi in launcher["abis"]
+    ):
+        fail("Android native verifier does not require the network-policy launcher for both ABIs")
 
 
 def validate_create_skill(repo: pathlib.Path) -> None:

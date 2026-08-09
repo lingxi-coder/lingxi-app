@@ -196,6 +196,10 @@ dependencies {
     // active session survive process death (low-memory kill while backgrounded).
     implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.10.0")
 
+    // Local-app WebView security boundary: document-start bridge injection and
+    // origin-scoped, main-frame-only WebMessageListener delivery.
+    implementation("androidx.webkit:webkit:1.12.1")
+
     // Activity + Compose
     implementation("androidx.activity:activity-compose:1.13.0")
 

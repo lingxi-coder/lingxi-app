@@ -100,6 +100,19 @@ build_proot() {
   "${TOOLCHAIN_BIN}/llvm-strip" "${JNI_ROOT}/${abi}/libproot.so"
 }
 
+build_policy_launcher() {
+  local abi="$1"
+  local triple="$2"
+  local cc="${TOOLCHAIN_BIN}/${triple}${ANDROID_API}-clang"
+  local source="${ANDROID_DIR}/app/src/main/cpp/mobile_linux_policy_launcher.c"
+  local output="${JNI_ROOT}/${abi}/libmobile_linux_policy_launcher.so"
+
+  mkdir -p "${JNI_ROOT}/${abi}"
+  "${cc}" "${source}" -o "${output}" -O2 -Wall -Wextra -Werror -fPIE -pie \
+    -Wl,-z,noexecstack
+  "${TOOLCHAIN_BIN}/llvm-strip" "${output}"
+}
+
 build_pty() {
   local abi="$1"
   local work="${BUILD_ROOT}/pty-${abi}"
@@ -129,6 +142,8 @@ build_pty() {
 
 build_proot "arm64-v8a" "aarch64-linux-android"
 build_proot "x86_64" "x86_64-linux-android"
+build_policy_launcher "arm64-v8a" "aarch64-linux-android"
+build_policy_launcher "x86_64" "x86_64-linux-android"
 build_pty "arm64-v8a"
 build_pty "x86_64"
 "${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}"

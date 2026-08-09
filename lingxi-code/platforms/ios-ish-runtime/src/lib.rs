@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::spawn_blocking;
+use traits::mobile_linux::LinuxEnforcementReceipt;
 use traits::{
     LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
@@ -1015,7 +1016,12 @@ impl MobileLinuxRuntime for IosIshRuntime {
             .map(|(id, _)| id.clone())
             .collect();
         for id in task_ids {
-            let _ = self.kill(&LinuxProcessHandle { id }).await;
+            let _ = self
+                .kill(&LinuxProcessHandle {
+                    id,
+                    enforcement: LinuxEnforcementReceipt::default(),
+                })
+                .await;
         }
         self.state.booted.store(false, Ordering::Release);
         Ok(())
@@ -1114,6 +1120,7 @@ impl MobileLinuxRuntime for IosIshRuntime {
                     exit_code: snapshot.exit_code.unwrap_or(-1),
                     timed_out: matches!(snapshot.status, MobileLinuxTaskStatus::TimedOut),
                     cancelled: matches!(snapshot.status, MobileLinuxTaskStatus::Cancelled),
+                    enforcement: handle.enforcement,
                 });
             }
             tokio::time::sleep(BACKGROUND_IDLE_POLL).await;
@@ -1164,7 +1171,10 @@ impl MobileLinuxRuntime for IosIshRuntime {
             .lock()
             .expect("ios-ish native handle mutex") = Some(native_process_id.clone());
         self.spawn_background_reader(task_id.clone(), native_process_id, task);
-        Ok(LinuxProcessHandle { id: task_id })
+        Ok(LinuxProcessHandle {
+            id: task_id,
+            enforcement: LinuxEnforcementReceipt::default(),
+        })
     }
 
     async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
@@ -1744,6 +1754,7 @@ fn parse_run_response(json: &str) -> Result<LinuxCommandResult, MobileLinuxError
         exit_code: payload.exit_code,
         timed_out: payload.timed_out,
         cancelled: payload.cancelled,
+        enforcement: LinuxEnforcementReceipt::default(),
     })
 }
 
@@ -1915,9 +1926,19 @@ fn validate_request(request: &LinuxCommandRequest) -> Result<(), MobileLinuxErro
         request.network,
         traits::NetworkPolicy::Disabled | traits::NetworkPolicy::LoopbackOnly
     ) {
-        return Err(MobileLinuxError::InvalidRequest(
-            "ios-ish runtime requires NetworkPolicy::Allowed; Disabled and LoopbackOnly are not enforced by the native bridge"
+        return Err(MobileLinuxError::NetworkPolicyUnavailable(
+            "ios-ish runtime cannot enforce Disabled or LoopbackOnly without a guest syscall policy hook"
                 .to_string(),
+        ));
+    }
+    let limits = request.resource_limits;
+    if limits.max_cpu_seconds.is_some()
+        || limits.max_memory_mb.is_some()
+        || limits.max_processes.is_some()
+        || limits.max_open_files.is_some()
+    {
+        return Err(MobileLinuxError::ResourceLimitExceeded(
+            "ios-ish runtime cannot prove per-process-group resource enforcement".to_string(),
         ));
     }
     if matches!(request.timeout_ms, Some(0)) {
@@ -2646,6 +2667,7 @@ mod tests {
             stdin: None,
             timeout_ms: Some(1000),
             network: NetworkPolicy::Allowed,
+            resource_limits: Default::default(),
             mounts: Vec::new(),
         }
     }
@@ -2699,7 +2721,10 @@ mod tests {
             mounts[0].guest_path,
             traits::mobile_linux::guest_paths::workspace(&config.stable_workspace_id)
         );
-        assert_eq!(mounts[1].guest_path, traits::mobile_linux::guest_paths::HOME);
+        assert_eq!(
+            mounts[1].guest_path,
+            traits::mobile_linux::guest_paths::HOME
+        );
         assert_eq!(
             mounts[1].host_path,
             config.managed_root.join("persistent/root")
@@ -2750,6 +2775,14 @@ mod tests {
         )
         .expect_err("persistent root override must fail");
         assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn validate_request_rejects_unenforced_memory_limit() {
+        let mut request = command_request();
+        request.resource_limits.max_memory_mb = Some(800);
+        let error = validate_request(&request).expect_err("memory limit must fail closed");
+        assert!(matches!(error, MobileLinuxError::ResourceLimitExceeded(_)));
     }
 
     #[test]
@@ -2928,11 +2961,17 @@ mod tests {
         let mut request = command_request();
         request.network = NetworkPolicy::Disabled;
         let error = validate_request(&request).expect_err("disabled network must fail");
-        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
+        assert!(matches!(
+            error,
+            MobileLinuxError::NetworkPolicyUnavailable(_)
+        ));
 
         request.network = NetworkPolicy::LoopbackOnly;
         let error = validate_request(&request).expect_err("loopback-only network must fail");
-        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
+        assert!(matches!(
+            error,
+            MobileLinuxError::NetworkPolicyUnavailable(_)
+        ));
     }
 
     #[test]
@@ -3024,6 +3063,7 @@ mod tests {
         let error = rt
             .block_on(runtime.kill(&LinuxProcessHandle {
                 id: String::from("bg-1"),
+                enforcement: LinuxEnforcementReceipt::default(),
             }))
             .expect_err("unknown background handle must fail");
         assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));

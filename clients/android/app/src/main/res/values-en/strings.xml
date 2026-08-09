@@ -1130,6 +1130,11 @@
     <string name="local_apps_design_conflict_reloaded">The design was updated elsewhere to version %1$s; it has been reloaded — please review before continuing.</string>
     <string name="local_apps_design_unsaved_retry">The design hasn\'t finished saving yet; please try again</string>
     <string name="local_apps_error_bridge_unsupported_op">The app requested an unsupported Bridge operation: %1$s</string>
+    <string name="local_apps_webview_upgrade_required">This Android System WebView cannot provide the secure local-app bridge. Update System WebView first.</string>
+    <string name="local_apps_webview_untrusted_origin">Local apps can only open from a trusted loopback origin.</string>
+    <string name="local_apps_webview_storage_cleanup_waiting">Safely clearing old browser data for this app address…</string>
+    <string name="local_apps_webview_storage_cleanup_failed">Browser data could not be prepared safely, so the app was not loaded.</string>
+    <string name="local_apps_error_web_storage_cleanup_queue">The browser-data cleanup could not be saved safely, so the app was not deleted.</string>
     <string name="local_apps_error_load_apps">Couldn\'t load apps: %1$s</string>
     <string name="local_apps_field_enabled">Enabled</string>
     <string name="local_apps_filter_all">All</string>

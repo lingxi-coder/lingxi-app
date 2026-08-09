@@ -69,6 +69,7 @@ mod local_apps_delta;
 // why a bare OnceLock would pin a torn-down engine's Swift objects.
 #[cfg(feature = "uniffi")]
 mod local_apps_device;
+#[cfg(feature = "uniffi")]
 mod local_apps_llm;
 #[cfg(feature = "uniffi")]
 mod local_apps_mcp;

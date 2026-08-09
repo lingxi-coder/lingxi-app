@@ -16,8 +16,8 @@ use futures_util::StreamExt;
 use llm_client::stream_accumulator::accumulate_stream_salvaging;
 use llm_client::{ApiService, ContentBlock};
 use local_apps::questionnaire::{
-    normalize_plan, validate_plan, validate_questionnaire, AppDesignStep, AppPlan,
-    MAX_COLLECTIONS, MAX_DOMAINS, MAX_FIELDS_PER_STEP, MAX_OPTIONS, MAX_STEPS,
+    normalize_plan, validate_plan, validate_questionnaire, AppDesignStep, AppPlan, MAX_COLLECTIONS,
+    MAX_DOMAINS, MAX_FIELDS_PER_STEP, MAX_OPTIONS, MAX_STEPS,
 };
 use local_apps::{AppError, DesignValue};
 use protocol::{ConversationMessage, MessageId};
@@ -262,7 +262,11 @@ pub struct ApiServiceModel {
 
 impl ApiServiceModel {
     #[must_use]
-    pub fn new(service: Arc<ApiService>, model: impl Into<String>, profile: Option<String>) -> Self {
+    pub fn new(
+        service: Arc<ApiService>,
+        model: impl Into<String>,
+        profile: Option<String>,
+    ) -> Self {
         Self {
             service,
             selection: RwLock::new((model.into(), profile)),
@@ -292,7 +296,11 @@ impl LocalAppsModel for ApiServiceModel {
         // block, or be blocked by, an in-flight structured call, but a
         // reader must also never see a model id paired with a profile from
         // a DIFFERENT `set_model` call.
-        let (model, profile) = self.selection.read().expect("selection lock poisoned").clone();
+        let (model, profile) = self
+            .selection
+            .read()
+            .expect("selection lock poisoned")
+            .clone();
 
         // Ask for a forced tool call first, and fall back to an UNFORCED one if
         // the provider rejects the directive itself.
@@ -341,7 +349,14 @@ impl LocalAppsModel for ApiServiceModel {
         // `docs/superpowers/specs/2026-08-07-structured-output-capability-gating.md`.
         // This stays a narrow, self-correcting workaround until that lands.
         let forced = self
-            .open_stream(&model, profile.as_deref(), system, user.clone(), &tool, Some(tool_name))
+            .open_stream(
+                &model,
+                profile.as_deref(),
+                system,
+                user.clone(),
+                &tool,
+                Some(tool_name),
+            )
             .await;
         let stream = match forced {
             Ok(stream) => stream,
@@ -415,7 +430,11 @@ impl LocalAppsModel for ApiServiceModel {
     async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
         // One acquisition for the pair, never held across the await — same
         // reasoning as `structured`.
-        let (model, profile) = self.selection.read().expect("selection lock poisoned").clone();
+        let (model, profile) = self
+            .selection
+            .read()
+            .expect("selection lock poisoned")
+            .clone();
         let messages = request
             .messages
             .into_iter()
@@ -490,7 +509,10 @@ impl ApiServiceModel {
         tool: &serde_json::Value,
         forced_tool: Option<&str>,
     ) -> Result<
-        futures_util::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        futures_util::stream::BoxStream<
+            'static,
+            Result<llm_client::LlmEvent, llm_client::LlmError>,
+        >,
         llm_client::LlmError,
     > {
         self.service
@@ -612,7 +634,12 @@ impl std::fmt::Display for ContentBlockKind<'_> {
         // when a new variant lands without this match being updated.
         let tag = serde_json::to_value(self.0)
             .ok()
-            .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| "unknown".to_string());
         f.write_str(&tag)
     }
@@ -760,7 +787,10 @@ impl LocalAppsLlm {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
         let steps: Vec<AppDesignStep> = serde_json::from_value(
-            value.get("steps").cloned().unwrap_or(serde_json::Value::Null),
+            value
+                .get("steps")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         )
         .map_err(|error| {
             AppError::LlmOutputRejected(format!("questionnaire is malformed: {error}"))
@@ -882,23 +912,31 @@ impl LocalAppsLlm {
             .model
             .structured(SOURCES_PROMPT, user, TOOL_SOURCES, sources_schema(), deltas)
             .await?;
-        let files = value.get("files").and_then(serde_json::Value::as_array).ok_or_else(|| {
-            AppError::LlmOutputRejected("generator returned no `files` array".into())
-        })?;
+        let files = value
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                AppError::LlmOutputRejected("generator returned no `files` array".into())
+            })?;
         let writes: Vec<FileWrite> = files
             .iter()
             .map(|file| {
                 let path = file
                     .get("path")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| AppError::LlmOutputRejected("a file entry has no path".into()))?;
+                    .ok_or_else(|| {
+                        AppError::LlmOutputRejected("a file entry has no path".into())
+                    })?;
                 let contents = file
                     .get("contents")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
                         AppError::LlmOutputRejected(format!("`{path}` has no contents"))
                     })?;
-                Ok(FileWrite { path: path.to_string(), contents: contents.to_string() })
+                Ok(FileWrite {
+                    path: path.to_string(),
+                    contents: contents.to_string(),
+                })
             })
             .collect::<Result<_, AppError>>()?;
         screen_writes(&writes).map_err(as_llm_output_rejected)?;
@@ -1171,7 +1209,9 @@ pub(crate) mod test_support {
             self.prompts.lock().expect("lock").push(user);
             let mut responses = self.responses.lock().expect("lock");
             if responses.is_empty() {
-                return Err(AppError::Io("the scripted model ran out of responses".into()));
+                return Err(AppError::Io(
+                    "the scripted model ran out of responses".into(),
+                ));
             }
             responses.remove(0)
         }
@@ -1390,7 +1430,10 @@ mod tests {
     #[tokio::test]
     async fn author_questionnaire_returns_the_validated_steps_and_name() {
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_questionnaire())]));
-        let (name, steps) = llm.author_questionnaire("一个记事本", None).await.expect("authoring");
+        let (name, steps) = llm
+            .author_questionnaire("一个记事本", None)
+            .await
+            .expect("authoring");
         assert_eq!(name.as_deref(), Some("记事本"));
         assert_eq!(steps.len(), 1);
         assert!(steps[0].fields[0].allows_defer);
@@ -1477,7 +1520,10 @@ mod tests {
             .expect("planning");
         assert_eq!(plan.collections.len(), 1);
         assert_eq!(plan.collections[0].id, "notes");
-        assert_eq!(plan.capabilities, vec![local_apps::AppCapability::DataMutation]);
+        assert_eq!(
+            plan.capabilities,
+            vec![local_apps::AppCapability::DataMutation]
+        );
         assert!(plan.summary.contains("记事本"));
     }
 
@@ -1489,7 +1535,9 @@ mod tests {
         let err = llm
             .plan("一个记事本", &[], &BTreeMap::new(), None)
             .await
-            .expect_err("an IP-literal domain must be rejected by validate_plan, not passed through");
+            .expect_err(
+                "an IP-literal domain must be rejected by validate_plan, not passed through",
+            );
         assert!(
             matches!(err, AppError::LlmOutputRejected(_)),
             "a validator rejection must surface as LlmOutputRejected, not InvalidRequest: {err:?}"
@@ -1535,7 +1583,9 @@ mod tests {
     async fn the_brief_reaches_the_model_prompt() {
         let model = ScriptedModel::new(vec![Ok(good_questionnaire())]);
         let llm = LocalAppsLlm::new(model.clone());
-        llm.author_questionnaire("一个带标签的记事本", None).await.expect("authoring");
+        llm.author_questionnaire("一个带标签的记事本", None)
+            .await
+            .expect("authoring");
         let prompt = model.prompt_at(0);
         assert!(
             prompt.contains("一个带标签的记事本"),
@@ -1545,16 +1595,19 @@ mod tests {
 
     fn good_sources() -> serde_json::Value {
         serde_json::json!({
-            "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            "files": [{"path": "components/AppShell.jsx", "contents": "'use client'; export function AppShell(){return null}"}]
         })
     }
 
     #[tokio::test]
     async fn generate_sources_returns_screened_writes() {
         let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Ok(good_sources())]));
-        let writes = llm.generate_sources(&initial_request(), None).await.expect("generation");
+        let writes = llm
+            .generate_sources(&initial_request(), None)
+            .await
+            .expect("generation");
         assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].path, "app/page.jsx");
+        assert_eq!(writes[0].path, "components/AppShell.jsx");
     }
 
     #[tokio::test]
@@ -1582,7 +1635,9 @@ mod tests {
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
         request.revision_prompt = Some("把搜索框挪到顶部".into());
-        llm.generate_sources(&request, None).await.expect("revision");
+        llm.generate_sources(&request, None)
+            .await
+            .expect("revision");
         let prompt = model.prompt_at(0);
         assert!(prompt.contains("把搜索框挪到顶部"), "got {prompt}");
     }
@@ -1592,8 +1647,9 @@ mod tests {
         let model = ScriptedModel::new(vec![Ok(good_sources())]);
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
-        request.validator_feedback =
-            Some(SourceFeedback::Rejected("app/page.jsx uses eval()".into()));
+        request.validator_feedback = Some(SourceFeedback::Rejected(
+            "components/AppShell.jsx uses eval()".into(),
+        ));
         llm.generate_sources(&request, None).await.expect("repair");
         let prompt = model.prompt_at(0);
         assert!(prompt.contains("eval()"), "got {prompt}");
@@ -1610,8 +1666,8 @@ mod tests {
     #[tokio::test]
     async fn a_discarded_answer_asks_for_every_file_again_not_just_the_fix() {
         let existing = vec![FileWrite {
-            path: "app/page.jsx".into(),
-            contents: "export default function Page() { return null }".into(),
+            path: "components/AppShell.jsx".into(),
+            contents: "'use client'; export function AppShell() { return null }".into(),
         }];
 
         let model = ScriptedModel::new(vec![Ok(good_sources())]);
@@ -1642,8 +1698,9 @@ mod tests {
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
         request.existing = existing;
-        request.validator_feedback =
-            Some(SourceFeedback::Rejected("app/page.jsx uses eval()".into()));
+        request.validator_feedback = Some(SourceFeedback::Rejected(
+            "components/AppShell.jsx uses eval()".into(),
+        ));
         llm.generate_sources(&request, None).await.expect("repair");
         let rejected = model.prompt_at(0);
         assert!(
@@ -1657,9 +1714,10 @@ mod tests {
         let model = ScriptedModel::new(vec![Ok(good_sources())]);
         let llm = LocalAppsLlm::new(model.clone());
         let mut request = initial_request();
-        request.existing_note =
-            Some("现有源码树超过了读取预算，省略了 3 个文件".into());
-        llm.generate_sources(&request, None).await.expect("generation");
+        request.existing_note = Some("现有源码树超过了读取预算，省略了 3 个文件".into());
+        llm.generate_sources(&request, None)
+            .await
+            .expect("generation");
         let prompt = model.prompt_at(0);
         assert!(
             prompt.contains("省略了 3 个文件"),
@@ -1670,7 +1728,10 @@ mod tests {
     #[test]
     fn extract_single_tool_call_accepts_exactly_one_match() {
         let blocks = vec![
-            ContentBlock::Text { text: "thinking out loud".into(), cache_control: None },
+            ContentBlock::Text {
+                text: "thinking out loud".into(),
+                cache_control: None,
+            },
             ContentBlock::ToolCall {
                 id: "call-1".into(),
                 name: TOOL_SOURCES.into(),
@@ -1684,7 +1745,10 @@ mod tests {
 
     #[test]
     fn extract_single_tool_call_rejects_zero_matches() {
-        let blocks = vec![ContentBlock::Text { text: "no tool call here".into(), cache_control: None }];
+        let blocks = vec![ContentBlock::Text {
+            text: "no tool call here".into(),
+            cache_control: None,
+        }];
         let err = extract_single_tool_call(blocks, TOOL_SOURCES, Some("end_turn"))
             .expect_err("no matching ToolCall block must be rejected");
         assert!(
@@ -1727,7 +1791,10 @@ mod tests {
     /// the required tool" sends the reader after the wrong one.
     #[test]
     fn a_truncated_answer_is_reported_as_a_budget_overrun_not_a_refusal() {
-        let blocks = vec![ContentBlock::Text { text: String::new(), cache_control: None }];
+        let blocks = vec![ContentBlock::Text {
+            text: String::new(),
+            cache_control: None,
+        }];
         let AppError::LlmOutputRejected(message) =
             extract_single_tool_call(blocks, TOOL_QUESTIONNAIRE, Some("max_tokens"))
                 .expect_err("a truncated response must still be rejected")
@@ -1772,8 +1839,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_model_error_propagates_rather_than_falling_back() {
-        let llm =
-            LocalAppsLlm::new(ScriptedModel::new(vec![Err(AppError::LlmUnavailable("offline".into()))]));
+        let llm = LocalAppsLlm::new(ScriptedModel::new(vec![Err(AppError::LlmUnavailable(
+            "offline".into(),
+        ))]));
         let err = llm
             .author_questionnaire("一个记事本", None)
             .await

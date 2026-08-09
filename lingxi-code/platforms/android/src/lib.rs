@@ -40,9 +40,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
     AndroidUiAutomation, CameraControl, Clipboard, Clock, FileSystem, HttpTransport,
-    MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService,
-    Platform, ProcessRunner, Sandbox, SandboxBackend, SandboxError, SecureStorage, SharingService,
-    SpeechToText, TextToSpeech, UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
+    LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec,
+    NotificationService, Platform, ProcessRunner, Sandbox, SandboxBackend, SandboxError,
+    SecureStorage, SharingService, SpeechToText, TextToSpeech, UnavailableMobileLinuxRuntime,
+    VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`AndroidPlatform`].
@@ -57,6 +58,8 @@ pub struct AndroidPlatformInputs {
     pub camera: Arc<dyn CameraControl>,
     /// Native microphone recorder (Kotlin impl).
     pub voice: Arc<dyn VoiceRecorder>,
+    /// Native one-shot location provider (Kotlin impl), when wired.
+    pub location: Option<Arc<dyn LocationProvider>>,
     /// Native share sheet (Kotlin impl).
     pub share: Arc<dyn SharingService>,
     /// Native speech-to-text (Kotlin impl), when wired. `None` keeps the
@@ -103,6 +106,7 @@ pub struct AndroidPlatform {
     worktree: Arc<dyn WorktreeManager>,
     camera: Arc<dyn CameraControl>,
     voice: Arc<dyn VoiceRecorder>,
+    location: Option<Arc<dyn LocationProvider>>,
     share: Arc<dyn SharingService>,
     stt: Option<Arc<dyn SpeechToText>>,
     tts: Option<Arc<dyn TextToSpeech>>,
@@ -248,6 +252,7 @@ impl AndroidPlatform {
             worktree: Arc::new(PosixWorktree::new()),
             camera: inputs.camera,
             voice: inputs.voice,
+            location: inputs.location,
             share: inputs.share,
             stt: inputs.stt,
             tts: inputs.tts,
@@ -353,6 +358,9 @@ impl Platform for AndroidPlatform {
     fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
         Some(self.voice.clone())
     }
+    fn location(&self) -> Option<Arc<dyn LocationProvider>> {
+        self.location.clone()
+    }
     fn share(&self) -> Option<Arc<dyn SharingService>> {
         Some(self.share.clone())
     }
@@ -385,9 +393,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use traits::{
-        CameraControl, CameraError, CapturePhotoOpts, CapturedImage, Platform, SandboxBackend,
-        ShareError, SharePayload, ShareResult, SharingService, UnavailableMobileLinuxRuntime,
-        VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
+        CameraControl, CameraError, CapturePhotoOpts, CapturedImage, LocationError, LocationFix,
+        Platform, SandboxBackend, ShareError, SharePayload, ShareResult, SharingService,
+        UnavailableMobileLinuxRuntime, VoiceError, VoiceRecorder, VoiceRecording,
+        VoiceRecordingOpts,
     };
 
     struct NoCam;
@@ -413,6 +422,13 @@ mod tests {
             false
         }
     }
+    struct NoLocation;
+    #[async_trait]
+    impl LocationProvider for NoLocation {
+        async fn current_location(&self) -> Result<LocationFix, LocationError> {
+            Err(LocationError::Unavailable)
+        }
+    }
     struct NoShare;
     #[async_trait]
     impl SharingService for NoShare {
@@ -426,6 +442,7 @@ mod tests {
             app_files_root: std::env::temp_dir(),
             camera: std::sync::Arc::new(NoCam),
             voice: std::sync::Arc::new(NoVoice),
+            location: None,
             share: std::sync::Arc::new(NoShare),
             stt: None,
             tts: None,
@@ -476,6 +493,17 @@ mod tests {
     fn no_shell_config_keeps_posix_minimal_stubs() {
         let p = AndroidPlatform::new(inputs(None));
         assert_eq!(p.sandbox().backend(), SandboxBackend::None);
+    }
+
+    #[test]
+    fn location_provider_is_exposed_only_when_injected() {
+        let without_location = AndroidPlatform::new(inputs(None));
+        assert!(without_location.location().is_none());
+
+        let mut with_location = inputs(None);
+        with_location.location = Some(Arc::new(NoLocation));
+        let with_location = AndroidPlatform::new(with_location);
+        assert!(with_location.location().is_some());
     }
 
     #[test]

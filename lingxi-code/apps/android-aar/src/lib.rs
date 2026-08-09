@@ -225,6 +225,8 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub local_apps_full_runtime: bool,
     /// Verified read-only local-app runtime bundle staged under app files.
     pub local_apps_runtime_root: Option<String>,
+    /// Device physical memory reported by the Android host.
+    pub physical_memory_bytes: u64,
 }
 
 #[cfg(feature = "uniffi")]
@@ -617,6 +619,7 @@ pub fn build_mobile_engine(
                 app_files_root: std::path::PathBuf::from(impls.app_files_root),
                 camera: impls.camera,
                 voice: impls.voice,
+                location: None,
                 share: impls.share,
                 stt: None,
                 tts: None,
@@ -792,6 +795,7 @@ fn command_request_to_traits(
         } else {
             traits::NetworkPolicy::Disabled
         },
+        resource_limits: traits::ResourceLimits::default(),
         mounts,
     })
 }
@@ -993,7 +997,10 @@ fn process_handle_to_traits(
             message: "process handle id must not be empty".to_string(),
         });
     }
-    Ok(traits::LinuxProcessHandle { id: handle.id })
+    Ok(traits::LinuxProcessHandle {
+        id: handle.id,
+        enforcement: traits::LinuxEnforcementReceipt::default(),
+    })
 }
 
 #[cfg(feature = "uniffi")]
@@ -1030,6 +1037,16 @@ fn mobile_linux_error_to_ffi(error: traits::MobileLinuxError) -> MobileLinuxApiE
         }
         traits::MobileLinuxError::Integrity(message) | traits::MobileLinuxError::Io(message) => {
             MobileLinuxApiErrorFfi::OperationFailed { message }
+        }
+        traits::MobileLinuxError::NetworkPolicyUnavailable(message) => {
+            MobileLinuxApiErrorFfi::OperationFailed {
+                message: format!("network_policy_unavailable: {message}"),
+            }
+        }
+        traits::MobileLinuxError::ResourceLimitExceeded(message) => {
+            MobileLinuxApiErrorFfi::OperationFailed {
+                message: format!("resource_limit_exceeded: {message}"),
+            }
         }
         traits::MobileLinuxError::Timeout => MobileLinuxApiErrorFfi::OperationFailed {
             message: "timeout".to_string(),
@@ -2065,6 +2082,82 @@ impl traits::SharingService for AndroidShareBridge {
             Ok(ShareResultFfi::Cancelled) => Ok(traits::ShareResult::Cancelled),
             Err(ShareFfiError::Unsupported) => Err(traits::ShareError::Unsupported),
             Err(ShareFfiError::Other { message }) => Err(traits::ShareError::Other(message)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Location — foreign (Kotlin) callback interface + its engine bridge.
+// ---------------------------------------------------------------------------
+
+/// FFI error surface for the Android one-shot location callback interface.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum LocationFfiError {
+    /// The user denied Android's location runtime permission.
+    #[error("location permission denied")]
+    PermissionDenied,
+    /// Location services are off, restricted, or absent.
+    #[error("location unavailable")]
+    Unavailable,
+    /// No fix arrived before the native deadline.
+    #[error("location timed out")]
+    Timeout,
+    /// Any other native failure.
+    #[error("location error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for one resolved Android location.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct LocationFixFfi {
+    /// Latitude in decimal degrees (WGS-84).
+    pub latitude: f64,
+    /// Longitude in decimal degrees (WGS-84).
+    pub longitude: f64,
+    /// Horizontal accuracy in meters, when reported by Android.
+    pub accuracy_m: Option<f64>,
+    /// Fix time, epoch milliseconds.
+    pub timestamp_ms: u64,
+}
+
+/// Crate-local foreign callback interface for one-shot Android location.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidLocation: Send + Sync {
+    /// Resolve the device's current location once.
+    async fn current_location(&self) -> Result<LocationFixFfi, LocationFfiError>;
+}
+
+/// Adapts the Kotlin callback onto the shared engine location seam.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidLocationBridge {
+    inner: Box<dyn AndroidLocation>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::LocationProvider for AndroidLocationBridge {
+    async fn current_location(&self) -> Result<traits::LocationFix, traits::LocationError> {
+        match self.inner.current_location().await {
+            Ok(fix) => Ok(traits::LocationFix {
+                latitude: fix.latitude,
+                longitude: fix.longitude,
+                accuracy_m: fix.accuracy_m,
+                timestamp_ms: fix.timestamp_ms,
+            }),
+            Err(LocationFfiError::PermissionDenied) => Err(traits::LocationError::PermissionDenied),
+            Err(LocationFfiError::Unavailable) => Err(traits::LocationError::Unavailable),
+            Err(LocationFfiError::Timeout) => Err(traits::LocationError::Timeout),
+            Err(LocationFfiError::Other { message }) => Err(traits::LocationError::Other(message)),
         }
     }
 }
@@ -3356,6 +3449,8 @@ fn bootstrap_bundled_shell(native_library_dir: &str, app_files_root: &str) -> Op
 /// - `share` — the foreign share callback (bridged to
 ///   [`traits::SharingService`]) so `tool-share` routes through the system
 ///   `Intent.ACTION_SEND` share sheet.
+/// - `location` — the foreign one-shot location callback (bridged to
+///   [`traits::LocationProvider`]) used by approved local-app bridge requests.
 /// - `shell` — optional Android sandbox/shell config (spec r3 §Android
 ///   inputs); `None`/`null` keeps shell support fully absent.
 /// - `git` — optional Android Git-tool config (spec P4 §G5 gate + §G3 auth);
@@ -3386,6 +3481,7 @@ pub fn build_android_engine(
     camera: Box<dyn AndroidCamera>,
     share: Box<dyn AndroidShare>,
     voice: Box<dyn AndroidVoice>,
+    location: Box<dyn AndroidLocation>,
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
@@ -3406,6 +3502,7 @@ pub fn build_android_engine(
             mobile_linux: None,
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
+            physical_memory_bytes: 0,
         },
         listener,
         stt,
@@ -3413,6 +3510,7 @@ pub fn build_android_engine(
         camera,
         share,
         voice,
+        location,
         notifications,
         clipboard,
         permissions,
@@ -3436,6 +3534,7 @@ pub fn build_android_engine_with_mobile_linux(
     camera: Box<dyn AndroidCamera>,
     share: Box<dyn AndroidShare>,
     voice: Box<dyn AndroidVoice>,
+    location: Box<dyn AndroidLocation>,
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
@@ -3455,6 +3554,7 @@ pub fn build_android_engine_with_mobile_linux(
         mobile_linux,
         local_apps_full_runtime,
         local_apps_runtime_root,
+        physical_memory_bytes,
     } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -3475,6 +3575,7 @@ pub fn build_android_engine_with_mobile_linux(
             lingxi_home: std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
             local_apps_full_runtime,
             local_apps_runtime_root: local_apps_runtime_root.map(std::path::PathBuf::from),
+            physical_memory_bytes,
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -3546,6 +3647,7 @@ pub fn build_android_engine_with_mobile_linux(
                 app_files_root: std::path::PathBuf::from(app_files_root),
                 camera: Arc::new(AndroidCameraBridge { inner: camera }),
                 voice: Arc::new(AndroidVoiceBridge { inner: voice }),
+                location: Some(Arc::new(AndroidLocationBridge { inner: location })),
                 share: Arc::new(AndroidShareBridge { inner: share }),
                 stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
                 tts: Some(Arc::new(AndroidTtsBridge { inner: tts })),
@@ -3778,6 +3880,7 @@ pub fn build_android_engine_with_mobile_linux(
             camera,
             share,
             voice,
+            location,
             notifications,
             clipboard,
             permissions,
@@ -4488,9 +4591,93 @@ mod tests {
     use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
     use tokio::sync::Mutex;
     use traits::{
-        CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-        SharingService, VoiceRecorder, WorktreeManager,
+        CameraControl, Clock, FileSystem, HttpTransport, LocationProvider, Platform, ProcessRunner,
+        Sandbox, SharingService, VoiceRecorder, WorktreeManager,
     };
+
+    struct FakeAndroidLocation {
+        failure: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl super::AndroidLocation for FakeAndroidLocation {
+        async fn current_location(&self) -> Result<super::LocationFixFfi, super::LocationFfiError> {
+            match self.failure {
+                Some("permission") => Err(super::LocationFfiError::PermissionDenied),
+                Some("unavailable") => Err(super::LocationFfiError::Unavailable),
+                Some("timeout") => Err(super::LocationFfiError::Timeout),
+                Some(message) => Err(super::LocationFfiError::Other {
+                    message: message.to_string(),
+                }),
+                None => Ok(super::LocationFixFfi {
+                    latitude: 31.2304,
+                    longitude: 121.4737,
+                    accuracy_m: Some(20.5),
+                    timestamp_ms: 1_753_000_000_000,
+                }),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn android_location_bridge_maps_fix_and_stable_errors() {
+        let success = super::AndroidLocationBridge {
+            inner: Box::new(FakeAndroidLocation { failure: None }),
+        }
+        .current_location()
+        .await
+        .expect("location fix");
+        assert_eq!(success.latitude, 31.2304);
+        assert_eq!(success.longitude, 121.4737);
+        assert_eq!(success.accuracy_m, Some(20.5));
+        assert_eq!(success.timestamp_ms, 1_753_000_000_000);
+
+        let permission = super::AndroidLocationBridge {
+            inner: Box::new(FakeAndroidLocation {
+                failure: Some("permission"),
+            }),
+        }
+        .current_location()
+        .await
+        .expect_err("permission failure");
+        assert!(matches!(
+            permission,
+            traits::LocationError::PermissionDenied
+        ));
+
+        let unavailable = super::AndroidLocationBridge {
+            inner: Box::new(FakeAndroidLocation {
+                failure: Some("unavailable"),
+            }),
+        }
+        .current_location()
+        .await
+        .expect_err("unavailable failure");
+        assert!(matches!(unavailable, traits::LocationError::Unavailable));
+
+        let timeout = super::AndroidLocationBridge {
+            inner: Box::new(FakeAndroidLocation {
+                failure: Some("timeout"),
+            }),
+        }
+        .current_location()
+        .await
+        .expect_err("timeout failure");
+        assert!(matches!(timeout, traits::LocationError::Timeout));
+
+        let other = super::AndroidLocationBridge {
+            inner: Box::new(FakeAndroidLocation {
+                failure: Some("native failure"),
+            }),
+        }
+        .current_location()
+        .await
+        .expect_err("other failure");
+        assert!(matches!(
+            other,
+            traits::LocationError::Other(message) if message == "native failure"
+        ));
+    }
 
     /// Off-device fake [`Platform`] shim (portable `platform-posix-minimal`
     /// handles over a temp root). Lets the SHARED `build_mobile_engine` build a

@@ -1130,6 +1130,11 @@
     <string name="local_apps_design_conflict_reloaded">デザインは他の場所でバージョン %1$s に更新されました。再読み込みしましたので、確認してから続行してください。</string>
     <string name="local_apps_design_unsaved_retry">デザインの保存が完了していません。もう一度お試しください</string>
     <string name="local_apps_error_bridge_unsupported_op">アプリが未対応の Bridge 操作を要求しました：%1$s</string>
+    <string name="local_apps_webview_upgrade_required">現在の Android System WebView は安全なローカルアプリ Bridge に対応していません。System WebView を更新してください。</string>
+    <string name="local_apps_webview_untrusted_origin">ローカルアプリは信頼済みのループバックオリジンからのみ開けます。</string>
+    <string name="local_apps_webview_storage_cleanup_waiting">このアプリのアドレスに残ったブラウザデータを安全に消去しています…</string>
+    <string name="local_apps_webview_storage_cleanup_failed">ブラウザデータを安全に準備できなかったため、アプリを読み込みませんでした。</string>
+    <string name="local_apps_error_web_storage_cleanup_queue">ブラウザデータのクリーンアップを安全に保存できなかったため、アプリは削除されませんでした。</string>
     <string name="local_apps_error_load_apps">アプリを読み込めません：%1$s</string>
     <string name="local_apps_field_enabled">有効</string>
     <string name="local_apps_filter_all">すべて</string>

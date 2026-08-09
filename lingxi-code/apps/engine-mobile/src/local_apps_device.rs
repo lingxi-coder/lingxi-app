@@ -30,11 +30,9 @@ pub(crate) struct MediaEntry {
 
 /// Engine-side, per-app store of what the device ops just captured.
 ///
-/// It exists because the WebView bridge caps ONE request payload at 64 KiB
-/// while a single default-preset photo is 400-700 KB base64: an app
-/// physically cannot hand a photo back to `llm.chat` inline. The bytes are
-/// already engine-side (the engine produced them), so a handle both fits the
-/// cap and skips a multi-megabyte round trip out to JS and back.
+/// It exists because even the bridge's bounded long-context lane should not
+/// carry base64 that the engine already owns. A handle skips a multi-megabyte
+/// round trip out to JS and back, along with base64's size inflation.
 ///
 /// Deliberately in memory only and bounded per app: this is a hand-off
 /// buffer between two bridge calls, not storage. An app that wants to KEEP a

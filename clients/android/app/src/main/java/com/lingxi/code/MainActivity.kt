@@ -15,6 +15,7 @@ import com.lingxi.code.vision.CameraController
 import com.lingxi.code.share.ShareController
 import com.lingxi.code.notify.NotificationController
 import com.lingxi.code.clipboard.ClipboardController
+import com.lingxi.code.location.LocationController
 import com.lingxi.code.voice.recorder.RecorderController
 import com.lingxi.code.offload.NativeOffloadRuntime
 import androidx.compose.animation.AnimatedVisibility
@@ -117,6 +118,9 @@ class MainActivity : ComponentActivity() {
         val notificationPermLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission(),
         ) { /* best-effort: nothing to do on grant/deny — posting self-gates */ }
+        val locationPermLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions(),
+        ) { grants -> LocationController.onLocationPermission(grants) }
         CameraController.attach(
             CameraController.makeLaunchers(
                 context = applicationContext,
@@ -146,6 +150,14 @@ class MainActivity : ComponentActivity() {
         // (engine-driven through tool-clipboard; no UI affordance). No manifest
         // permission is required for clipboard access.
         ClipboardController.attach(applicationContext)
+        // Device-location: the engine capability gate runs first; this controller
+        // then owns Android's fine/coarse runtime permission and one-shot fix.
+        LocationController.attach(
+            LocationController.makeLaunchers(
+                context = applicationContext,
+                requestPermission = locationPermLauncher,
+            ),
+        )
         // One flavor-resolved native-offload host. Protected operations remain
         // fail-closed until the engine's existing permission chain authorizes
         // the invocation; Direct and Play expose different compile-time catalogs.
@@ -389,6 +401,7 @@ class MainActivity : ComponentActivity() {
         RecorderController.detach()
         NotificationController.detach()
         ClipboardController.detach()
+        LocationController.detach()
         NativeOffloadRuntime.detach()
         super.onDestroy()
     }

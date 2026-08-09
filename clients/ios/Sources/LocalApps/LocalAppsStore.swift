@@ -169,10 +169,16 @@ final class LocalAppsStore {
     #endif
     @ObservationIgnored private var approvedUIAutomation: [String: LocalAppCapabilityDecision] = [:]
     @ObservationIgnored private var runtimeLastUsedAt: [String: Date] = [:]
+    @ObservationIgnored private let websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry
+    @ObservationIgnored private var websiteDataCleanupTask: Task<Void, Never>?
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
     #endif
+
+    init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry = .shared) {
+        self.websiteDataStoreRegistry = websiteDataStoreRegistry
+    }
 
     var filteredApps: [LocalAppSummary] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -197,6 +203,7 @@ final class LocalAppsStore {
                     $0.updatedAt > $1.updatedAt
                 }
                 apps = updatedApps
+                scheduleWebsiteDataCleanup(activeAppIDs: Set(updatedApps.map(\.id)))
                 // `createApp(brief:)` sends an empty `name`, letting the engine
                 // derive the display name from the brief (`AppService::create_app`,
                 // first 24 chars) — so the created row can no longer be matched by
@@ -933,7 +940,17 @@ final class LocalAppsStore {
 
     func delete(appID: String) async -> Bool {
         #if canImport(engine_mobileFFI)
-            return await send(.deleteApp(appId: appID))
+            // Journal first: if the process dies after Rust removes the app but
+            // before WebKit finishes, the next authoritative apps snapshot will
+            // retry the exact identified data-store removal.
+            websiteDataStoreRegistry.prepareForDeletion(appID: appID)
+            let submitted = await send(.deleteApp(appId: appID))
+            guard submitted else {
+                websiteDataStoreRegistry.cancelDeletion(appID: appID)
+                return false
+            }
+            LocalAppWebViewRegistry.shared.close(appID: appID)
+            return true
         #else
             return false
         #endif
@@ -980,6 +997,22 @@ final class LocalAppsStore {
     private func updateApp(appID: String, mutation: (inout LocalAppSummary) -> Void) {
         guard let index = apps.firstIndex(where: { $0.id == appID }) else { return }
         mutation(&apps[index])
+    }
+
+    /// Serializes WebKit cleanup and retries with the newest authoritative app
+    /// set if another snapshot arrives while an async removal is in progress.
+    private func scheduleWebsiteDataCleanup(activeAppIDs: Set<String>) {
+        guard websiteDataCleanupTask == nil else { return }
+        websiteDataCleanupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await websiteDataStoreRegistry.removeDataForDeletedApps(activeAppIDs: activeAppIDs)
+            websiteDataCleanupTask = nil
+
+            let latestAppIDs = Set(apps.map(\.id))
+            if latestAppIDs != activeAppIDs {
+                scheduleWebsiteDataCleanup(activeAppIDs: latestAppIDs)
+            }
+        }
     }
 
     #if canImport(engine_mobileFFI)

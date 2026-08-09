@@ -2,13 +2,6 @@ import Foundation
 
 #if canImport(engine_mobileFFI)
 enum LocalAppsProtocolAdapter {
-    // NOTE (local-apps#questionnaire, Task 13): `AppTemplateDto`/`AppTemplateKindDto`
-    // and the static template catalog they backed were deleted from
-    // client-protocol back in Task 5 (human-partner ruling: total removal).
-    // `LocalAppTemplate`/`LocalAppTemplateKind` (the native UI models) and the
-    // template-picker create screen are deleted here too; the questionnaire/plan
-    // this file now maps replace them.
-
     static func designStep(_ dto: AppDesignStepDto) -> LocalAppDesignStep {
         LocalAppDesignStep(
             id: dto.id,
@@ -19,8 +12,7 @@ enum LocalAppsProtocolAdapter {
         )
     }
 
-    /// The LLM-authored questionnaire, ordered the way `LocalAppTemplate.orderedSteps`
-    /// used to order the static catalog's steps: by declared order, id as tiebreak.
+    /// The LLM-authored questionnaire, ordered by declared order and then id.
     static func questionnaire(_ steps: [AppDesignStepDto]) -> [LocalAppDesignStep] {
         steps.map(designStep).sorted { lhs, rhs in
             lhs.order == rhs.order ? lhs.id < rhs.id : lhs.order < rhs.order

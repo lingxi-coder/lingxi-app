@@ -40,15 +40,30 @@ final class LocalAppWebViewRegistry {
         // its own outstanding requests before it stops being routable —
         // afterwards `resolveBridge` would just drop their answers.
         if let replaced = controllers[appID]?.value, replaced !== controller {
-            replaced.broker.failAllInFlight()
+            replaced.close()
         }
         controllers[appID] = WeakController(controller)
     }
 
     func unregister(_ controller: LocalAppWebViewController, appID: String) {
-        guard controllers[appID]?.value === controller else { return }
-        controller.broker.failAllInFlight()
-        controllers[appID] = nil
+        if controllers[appID]?.value === controller {
+            controllers[appID] = nil
+        }
+        // Even an outgoing controller that was already replaced still owns
+        // its page long enough to reject page promises during dismantling.
+        controller.close()
+    }
+
+    /// Detaches an app before its persistent website data is removed.
+    ///
+    /// WebKit requires every view using an identified data store to be released
+    /// before `remove(forIdentifier:)` runs. The local-app library normally has
+    /// no preview mounted while its delete confirmation is visible, but this
+    /// explicit close also covers a controller retained by a transition and
+    /// guarantees that page promises do not remain pending forever.
+    func close(appID: String) {
+        guard let controller = controllers.removeValue(forKey: appID)?.value else { return }
+        controller.close()
     }
 
     func resolveBridge(
@@ -88,9 +103,18 @@ final class LocalAppWebViewRegistry {
 }
 
 final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
-    /// Cap on ONE request payload. Attachments travel by `mediaId` precisely
-    /// because a capture does not fit here (see `local_apps_host_llm`).
-    static let maxPayloadBytes = 64 * 1_024
+    /// Control operations stay small. Model input gets a separate bounded
+    /// lane so a long provider context is not confused with control traffic.
+    static let maxControlBytes = 64 * 1_024
+    static let maxLLMBytes = 8 * 1_024 * 1_024
+    static let maxInFlightRequests = 128
+    static let requestIDInvalidCode = "request_id_invalid"
+    static let operationInvalidCode = "operation_invalid"
+    static let duplicateRequestIDCode = "duplicate_request_id"
+    static let tooManyInFlightCode = "too_many_requests"
+    static func byteLimit(namespace: String, operation: String) -> Int {
+        namespace == "llm" && operation == "chat" ? maxLLMBytes : maxControlBytes
+    }
 
     let appID: String
     var onRequest: ((LocalAppBridgeRequest) -> Void)?
@@ -108,6 +132,7 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
     /// `await` that never settles and no `finally` ever runs: a disabled
     /// button stays disabled, a Blob URL is never revoked.
     private var inFlight: Set<String> = []
+    private var isDetached = false
 
     init(appID: String, onRequest: ((LocalAppBridgeRequest) -> Void)? = nil) {
         self.appID = appID
@@ -115,16 +140,61 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.frameInfo.isMainFrame,
-              let body = message.body as? [String: Any],
-              let requestID = body["requestId"] as? String,
-              let operation = body["operation"] as? String,
-              requestID.count <= 128,
-              operation.count <= 128
-        else { return }
-
+        guard message.frameInfo.isMainFrame else { return }
         let namespace = message.name.replacingOccurrences(of: "lingxi", with: "").lowercased()
-        let rawPayload = body["payload"] as? [String: Any] ?? [:]
+        receive(body: message.body, namespace: namespace)
+    }
+
+    /// Internal entry point so admission limits can be regression-tested
+    /// without manufacturing a private WebKit `WKScriptMessage` initializer.
+    func receive(body rawBody: Any, namespace: String) {
+        guard !isDetached else { return }
+        guard let body = rawBody as? [String: Any],
+              let requestID = body["requestId"] as? String,
+              !requestID.isEmpty
+        else { return }
+        guard requestID.count <= 128 else {
+            rejectUntracked(
+                requestID: requestID,
+                error: String(localized: "local_apps_error_bridge_rejected"),
+                code: Self.requestIDInvalidCode)
+            return
+        }
+        guard let operation = body["operation"] as? String,
+              !operation.isEmpty,
+              operation.count <= 128
+        else {
+            rejectUntracked(
+                requestID: requestID,
+                error: String(localized: "local_apps_error_bridge_rejected"),
+                code: Self.operationInvalidCode)
+            return
+        }
+
+        let byteLimit = Self.byteLimit(namespace: namespace, operation: operation)
+        if let byteCount = Self.oversizedRequestByteCount(body, limit: byteLimit) {
+            rejectUntracked(
+                requestID: requestID,
+                error: String(
+                    localized:
+                        "local_apps_error_bridge_payload_too_large \(byteCount) \(byteLimit)"),
+                code: "request_too_large")
+            return
+        }
+
+        let rawPayload: [String: Any]
+        if let suppliedPayload = body["payload"] {
+            guard let objectPayload = suppliedPayload as? [String: Any] else {
+                rejectUntracked(
+                    requestID: requestID,
+                    error: String(localized: "local_apps_error_bridge_payload_invalid"),
+                    code: "payload_invalid")
+                return
+            }
+            rawPayload = objectPayload
+        } else {
+            rawPayload = [:]
+        }
         // A payload that is too large or not serializable used to be replaced
         // by `nil` and forwarded anyway — and the engine reads a missing
         // payload as `{}`, so a SIZE failure came back as a SCHEMA failure
@@ -133,21 +203,33 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
         guard JSONSerialization.isValidJSONObject(rawPayload),
               let data = try? JSONSerialization.data(withJSONObject: rawPayload)
         else {
-            resolve(
+            rejectUntracked(
                 requestID: requestID,
-                result: nil,
                 error: String(localized: "local_apps_error_bridge_payload_invalid"),
                 code: "payload_invalid")
             return
         }
-        guard data.count <= Self.maxPayloadBytes else {
-            resolve(
+        guard data.count <= byteLimit else {
+            rejectUntracked(
                 requestID: requestID,
-                result: nil,
                 error: String(
                     localized:
-                        "local_apps_error_bridge_payload_too_large \(data.count) \(Self.maxPayloadBytes)"),
+                        "local_apps_error_bridge_payload_too_large \(data.count) \(byteLimit)"),
                 code: "payload_too_large")
+            return
+        }
+        guard !inFlight.contains(requestID) else {
+            rejectUntracked(
+                requestID: requestID,
+                error: String(localized: "local_apps_error_bridge_rejected"),
+                code: Self.duplicateRequestIDCode)
+            return
+        }
+        guard inFlight.count < Self.maxInFlightRequests else {
+            rejectUntracked(
+                requestID: requestID,
+                error: String(localized: "local_apps_error_bridge_rejected"),
+                code: Self.tooManyInFlightCode)
             return
         }
         let payloadJSON = String(data: data, encoding: .utf8)
@@ -163,8 +245,29 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
         )
     }
 
+    static func oversizedRequestByteCount(_ body: [String: Any], limit: Int) -> Int? {
+        guard JSONSerialization.isValidJSONObject(body),
+              let data = try? JSONSerialization.data(withJSONObject: body),
+              data.count > limit
+        else { return nil }
+        return data.count
+    }
+
     func resolve(requestID: String, result: Any?, error: String?, code: String? = nil) {
         inFlight.remove(requestID)
+        sendEnvelope(requestID: requestID, result: result, error: error, code: code)
+    }
+
+    var inFlightCount: Int { inFlight.count }
+
+    private func rejectUntracked(requestID: String, error: String, code: String) {
+        sendEnvelope(requestID: requestID, result: nil, error: error, code: code)
+    }
+
+    /// Sends an answer without changing admission bookkeeping. Validation
+    /// failures happen before insertion, and especially a duplicate rejection
+    /// must not remove the original request from `inFlight`.
+    private func sendEnvelope(requestID: String, result: Any?, error: String?, code: String?) {
         guard let webView else { return }
         let envelope: [String: Any] = [
             "requestId": requestID,
@@ -192,6 +295,15 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
                 code: "bridge_detached")
         }
     }
+
+    /// Permanently stops this broker from accepting messages from a WebView
+    /// that is being replaced or deleted. Outstanding promises are rejected
+    /// first while the view is still reachable.
+    func detach() {
+        failAllInFlight()
+        isDetached = true
+        onRequest = nil
+    }
 }
 
 @MainActor
@@ -203,6 +315,18 @@ final class LocalAppWebViewController {
     init(appID: String, broker: LocalAppBridgeBroker) {
         self.appID = appID
         self.broker = broker
+    }
+
+    func close() {
+        broker.detach()
+        webView?.stopLoading()
+        for name in LocalAppWebViewRepresentable.messageHandlerNames {
+            webView?.configuration.userContentController.removeScriptMessageHandler(forName: name)
+        }
+        webView?.navigationDelegate = nil
+        webView?.uiDelegate = nil
+        broker.webView = nil
+        webView = nil
     }
 
     #if canImport(engine_mobileFFI)
@@ -477,7 +601,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = contentController
-        configuration.websiteDataStore = LocalAppWebsiteDataStoreRegistry.dataStore(appID: appID)
+        configuration.websiteDataStore = LocalAppWebsiteDataStoreRegistry.shared.dataStore(appID: appID)
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.preferences.isTextInteractionEnabled = true
 
@@ -505,15 +629,9 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
-        webView.stopLoading()
-        for name in messageHandlerNames {
-            webView.configuration.userContentController.removeScriptMessageHandler(forName: name)
-        }
-        coordinator.broker.webView = nil
-        coordinator.controller.webView = nil
+        // Unregister first so `bridge_detached` can still be evaluated into
+        // the live page before close removes handlers and clears references.
         LocalAppWebViewRegistry.shared.unregister(coordinator.controller, appID: coordinator.broker.appID)
-        webView.navigationDelegate = nil
-        webView.uiDelegate = nil
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
@@ -569,12 +687,29 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }
 
         private func isAllowed(_ url: URL) -> Bool {
-            guard url.scheme == "http" || url.scheme == "https" else {
-                return url.scheme == "about"
-            }
-            let loopbackHosts = ["127.0.0.1", "localhost", "::1"]
-            guard let host = url.host?.lowercased(), loopbackHosts.contains(host) else { return false }
-            return url.port == allowedOrigin.port
+            Self.isAllowed(url, origin: allowedOrigin)
+        }
+
+        static func isAllowed(_ url: URL, origin: URL) -> Bool {
+            guard url.scheme?.lowercased() != "about" else { return url.absoluteString == "about:blank" }
+            guard let scheme = url.scheme?.lowercased(),
+                  let originScheme = origin.scheme?.lowercased(),
+                  scheme == originScheme,
+                  scheme == "http" || scheme == "https",
+                  let host = normalizedHost(url),
+                  let originHost = normalizedHost(origin),
+                  host == originHost,
+                  ["127.0.0.1", "localhost", "::1"].contains(originHost)
+            else { return false }
+            return effectivePort(url, scheme: scheme) == effectivePort(origin, scheme: originScheme)
+        }
+
+        private static func normalizedHost(_ url: URL) -> String? {
+            url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        }
+
+        private static func effectivePort(_ url: URL, scheme: String) -> Int? {
+            url.port ?? (scheme == "http" ? 80 : scheme == "https" ? 443 : nil)
         }
     }
 
@@ -590,7 +725,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         const meta = document.createElement('meta');
         meta.httpEquiv = 'Content-Security-Policy';
         meta.dataset.lingxiCsp = 'v1';
-        meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+        meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
         document.head.prepend(meta);
         return true;
       };
@@ -598,7 +733,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         const observer = new MutationObserver(() => {
           if (installCsp()) observer.disconnect();
         });
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+        observer.observe(document.documentElement || document, { childList: true, subtree: true });
       }
       const localOnly = input => {
         const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -615,13 +750,28 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
       const pending = new Map();
       const request = (namespace, operation, payload = {}) => new Promise((resolve, reject) => {
         const requestId = crypto.randomUUID();
-        pending.set(requestId, { resolve, reject });
         const handler = window.webkit?.messageHandlers?.[`lingxi${namespace}`];
         if (!handler) {
-          pending.delete(requestId);
           reject(new Error(`Lingxi ${namespace} bridge unavailable`));
           return;
         }
+        let serialized;
+        try {
+          serialized = JSON.stringify({ requestId, operation, payload });
+        } catch (_) {
+          const error = new Error('Bridge payload is not serializable');
+          error.code = 'payload_invalid';
+          reject(error);
+          return;
+        }
+        const byteLimit = namespace === 'Llm' && operation === 'chat' ? 8388608 : 65536;
+        if (new TextEncoder().encode(serialized).byteLength > byteLimit) {
+          const error = new Error(`Bridge request exceeds ${byteLimit} bytes`);
+          error.code = 'request_too_large';
+          reject(error);
+          return;
+        }
+        pending.set(requestId, { resolve, reject });
         handler.postMessage({ requestId, operation, payload });
       });
       const api = Object.freeze({
@@ -675,17 +825,170 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
     """#
 }
 
-private enum LocalAppWebsiteDataStoreRegistry {
-    static func dataStore(appID: String) -> WKWebsiteDataStore {
-        let key = "local-apps.web-data-store.\(appID)"
-        let defaults = UserDefaults.standard
-        let identifier: UUID
-        if let rawValue = defaults.string(forKey: key), let stored = UUID(uuidString: rawValue) {
-            identifier = stored
-        } else {
-            identifier = UUID()
-            defaults.set(identifier.uuidString, forKey: key)
+/// Owns the durable app-id -> WebKit data-store mapping and deletion journal.
+///
+/// The journal deliberately lives outside the Rust app directory: Rust removes
+/// that directory first, while WebKit is the only component capable of deleting
+/// its own persistent store. A cleanup entry is removed only after WebKit reports
+/// success, so a process kill or WebKit failure is retried after the next app
+/// snapshot arrives.
+@MainActor
+final class LocalAppWebsiteDataStoreRegistry {
+    struct PendingCleanup: Codable, Hashable, Sendable {
+        let appID: String
+        let dataStoreIdentifier: UUID
+        var absenceConfirmed: Bool
+
+        init(appID: String, dataStoreIdentifier: UUID, absenceConfirmed: Bool = false) {
+            self.appID = appID
+            self.dataStoreIdentifier = dataStoreIdentifier
+            self.absenceConfirmed = absenceConfirmed
         }
-        return WKWebsiteDataStore(forIdentifier: identifier)
+
+        private enum CodingKeys: String, CodingKey {
+            case appID
+            case dataStoreIdentifier
+            case absenceConfirmed
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            appID = try values.decode(String.self, forKey: .appID)
+            dataStoreIdentifier = try values.decode(UUID.self, forKey: .dataStoreIdentifier)
+            absenceConfirmed = try values.decodeIfPresent(Bool.self, forKey: .absenceConfirmed) ?? false
+        }
+    }
+
+    typealias DataStoreRemover = @MainActor (UUID) async -> Bool
+
+    static let shared = LocalAppWebsiteDataStoreRegistry()
+
+    private static let mappingPrefix = "local-apps.web-data-store."
+    private static let pendingCleanupKey = "local-apps.pending-web-data-cleanup.v1"
+
+    private let defaults: UserDefaults
+    private let removeDataStore: DataStoreRemover
+
+    init(
+        defaults: UserDefaults = .standard,
+        removeDataStore: DataStoreRemover? = nil
+    ) {
+        self.defaults = defaults
+        self.removeDataStore = removeDataStore ?? Self.removePersistentDataStore
+    }
+
+    func dataStore(appID: String) -> WKWebsiteDataStore {
+        let currentIdentifier = identifier(appID: appID)
+        let isConfirmedForRemoval = pendingCleanups.contains {
+            $0.appID == appID
+                && $0.dataStoreIdentifier == currentIdentifier
+                && $0.absenceConfirmed
+        }
+        guard isConfirmedForRemoval else {
+            return WKWebsiteDataStore(forIdentifier: currentIdentifier)
+        }
+
+        // The app disappeared from an authoritative snapshot, so its old
+        // store is committed to deletion even if WebKit is still completing
+        // that async operation. A same-id recreation must get a fresh store
+        // immediately and must never reattach to the pending old identifier.
+        let replacement = UUID()
+        defaults.set(replacement.uuidString, forKey: Self.mappingKey(appID: appID))
+        return WKWebsiteDataStore(forIdentifier: replacement)
+    }
+
+    /// Journals the exact store identifier before the engine is asked to delete
+    /// the app. Materializing the store makes removal well-defined even for an
+    /// app that has never opened its preview.
+    func prepareForDeletion(appID: String) {
+        let dataStore = dataStore(appID: appID)
+        guard let dataStoreIdentifier = dataStore.identifier else { return }
+        let entry = PendingCleanup(appID: appID, dataStoreIdentifier: dataStoreIdentifier)
+        var pending = pendingCleanups
+        guard !pending.contains(entry) else { return }
+        pending.append(entry)
+        savePendingCleanups(pending)
+    }
+
+    /// Rolls back the journal when the engine did not accept the delete.
+    /// Once an authoritative snapshot confirmed absence, cleanup belongs to
+    /// that completed deletion and must survive any later same-id operation.
+    func cancelDeletion(appID: String) {
+        savePendingCleanups(pendingCleanups.filter {
+            $0.appID != appID || $0.absenceConfirmed
+        })
+    }
+
+    /// Removes only entries whose app absence has been confirmed by the latest
+    /// authoritative `AppsChanged` snapshot.
+    func removeDataForDeletedApps(activeAppIDs: Set<String>) async {
+        let eligible = pendingCleanups.filter {
+            $0.absenceConfirmed || !activeAppIDs.contains($0.appID)
+        }
+        for var entry in eligible {
+            guard !Task.isCancelled else { return }
+            entry.absenceConfirmed = true
+            replacePendingCleanup(entry)
+            LocalAppWebViewRegistry.shared.close(appID: entry.appID)
+            guard await removeDataStore(entry.dataStoreIdentifier) else { continue }
+
+            let mappingKey = Self.mappingKey(appID: entry.appID)
+            if defaults.string(forKey: mappingKey) == entry.dataStoreIdentifier.uuidString {
+                defaults.removeObject(forKey: mappingKey)
+            }
+            savePendingCleanups(pendingCleanups.filter { $0 != entry })
+        }
+    }
+
+    var pendingCleanups: [PendingCleanup] {
+        guard let data = defaults.data(forKey: Self.pendingCleanupKey),
+              let values = try? PropertyListDecoder().decode([PendingCleanup].self, from: data)
+        else { return [] }
+        return values
+    }
+
+    func storedIdentifier(appID: String) -> UUID? {
+        defaults.string(forKey: Self.mappingKey(appID: appID)).flatMap(UUID.init(uuidString:))
+    }
+
+    private func identifier(appID: String) -> UUID {
+        let key = Self.mappingKey(appID: appID)
+        if let rawValue = defaults.string(forKey: key), let stored = UUID(uuidString: rawValue) {
+            return stored
+        }
+        let created = UUID()
+        defaults.set(created.uuidString, forKey: key)
+        return created
+    }
+
+    private func savePendingCleanups(_ values: [PendingCleanup]) {
+        if values.isEmpty {
+            defaults.removeObject(forKey: Self.pendingCleanupKey)
+            return
+        }
+        guard let data = try? PropertyListEncoder().encode(values) else { return }
+        defaults.set(data, forKey: Self.pendingCleanupKey)
+    }
+
+    private func replacePendingCleanup(_ replacement: PendingCleanup) {
+        var pending = pendingCleanups
+        guard let index = pending.firstIndex(where: {
+            $0.appID == replacement.appID
+                && $0.dataStoreIdentifier == replacement.dataStoreIdentifier
+        }) else { return }
+        pending[index] = replacement
+        savePendingCleanups(pending)
+    }
+
+    private static func mappingKey(appID: String) -> String {
+        "\(mappingPrefix)\(appID)"
+    }
+
+    private static func removePersistentDataStore(identifier: UUID) async -> Bool {
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.remove(forIdentifier: identifier) { error in
+                continuation.resume(returning: error == nil)
+            }
+        }
     }
 }

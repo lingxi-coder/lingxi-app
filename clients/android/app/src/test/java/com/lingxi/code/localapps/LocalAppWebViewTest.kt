@@ -1,11 +1,111 @@
 package com.lingxi.code.localapps
 
+import com.lingxi.code.bindings.AppBridgeOperationDto
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalAppWebViewTest {
+
+    @Test
+    fun `all bridge operations have an exhaustive Android wire mapping`() {
+        val expected = setOf(
+            "query_data", "mutate_data", "network_request", "runtime_status",
+            "capture_photo", "pick_image", "record_audio_start", "record_audio_stop",
+            "get_location", "transcribe_speech", "post_notification", "llm_chat", "agent_post",
+        )
+
+        assertEquals(expected, AppBridgeOperationDto.entries.map { it.bridgeWireName() }.toSet())
+        AppBridgeOperationDto.entries.forEach { operation ->
+            assertEquals(operation, bridgeOperationFor(operation.bridgeWireName()))
+        }
+    }
+
+    @Test
+    fun `bridge parser binds the host app and enforces shape and byte limits`() {
+        val accepted = parseLocalAppBridgeMessage(
+            appId = "host-app",
+            rawMessage = """{"requestId":"r-1","operation":"get_location","payload":{}}""",
+            inFlightRequestIds = emptySet(),
+        ) as LocalAppBridgeIngress.Accepted
+        assertEquals("host-app", accepted.message.appId)
+        assertEquals("get_location", accepted.message.operation)
+
+        val largeText = "x".repeat(LOCAL_APP_BRIDGE_MAX_CONTROL_BYTES)
+        val acceptedLargeLlm = parseLocalAppBridgeMessage(
+            appId = "host-app",
+            rawMessage = """{"requestId":"r-2","operation":"llm_chat","payload":{"messages":[{"role":"user","content":"$largeText"}]}}""",
+            inFlightRequestIds = emptySet(),
+        ) as LocalAppBridgeIngress.Accepted
+        assertEquals("llm_chat", acceptedLargeLlm.message.operation)
+
+        val oversizedControl = parseLocalAppBridgeMessage(
+            appId = "host-app",
+            rawMessage = """{"requestId":"r-control","operation":"query_data","payload":{"value":"$largeText"}}""",
+            inFlightRequestIds = emptySet(),
+        ) as LocalAppBridgeIngress.Rejected
+        assertEquals("request_too_large", oversizedControl.code)
+
+        val oversizedUnknownField = parseLocalAppBridgeMessage(
+            appId = "host-app",
+            rawMessage = """{"requestId":"r-unknown","operation":"query_data","payload":{},"ignored":"${"x".repeat(LOCAL_APP_BRIDGE_MAX_CONTROL_BYTES)}"}""",
+            inFlightRequestIds = emptySet(),
+        ) as LocalAppBridgeIngress.Rejected
+        assertEquals("request_too_large", oversizedUnknownField.code)
+
+        val longOperation = parseLocalAppBridgeMessage(
+            appId = "host-app",
+            rawMessage = """{"requestId":"r-3","operation":"${"x".repeat(LOCAL_APP_BRIDGE_MAX_TEXT_LENGTH + 1)}","payload":{}}""",
+            inFlightRequestIds = emptySet(),
+        ) as LocalAppBridgeIngress.Rejected
+        assertEquals("operation_invalid", longOperation.code)
+    }
+
+    @Test
+    fun `LLM chat has a bounded large-context lane`() {
+        assertEquals(64 * 1024, localAppBridgeByteLimit("query_data"))
+        assertEquals(8 * 1024 * 1024, localAppBridgeByteLimit("llm_chat"))
+
+        val oversizedLlm = parseLocalAppBridgeMessage(
+            appId = "host-app",
+            rawMessage = """{"requestId":"large","operation":"llm_chat","payload":{"value":"${"x".repeat(LOCAL_APP_BRIDGE_MAX_LLM_BYTES)}"}}""",
+            inFlightRequestIds = emptySet(),
+        ) as LocalAppBridgeIngress.Rejected
+        assertEquals("request_too_large", oversizedLlm.code)
+    }
+
+    @Test
+    fun `bridge parser rejects duplicate and excess outstanding requests`() {
+        val duplicate = parseLocalAppBridgeMessage(
+            "app",
+            """{"requestId":"same","operation":"query_data","payload":{}}""",
+            setOf("same"),
+        ) as LocalAppBridgeIngress.Rejected
+        assertEquals("duplicate_request_id", duplicate.code)
+
+        val full = (0 until LOCAL_APP_BRIDGE_MAX_IN_FLIGHT).mapTo(linkedSetOf()) { "r-$it" }
+        val overflow = parseLocalAppBridgeMessage(
+            "app",
+            """{"requestId":"next","operation":"query_data","payload":{}}""",
+            full,
+        ) as LocalAppBridgeIngress.Rejected
+        assertEquals("too_many_requests", overflow.code)
+    }
+
+    @Test
+    fun `document start bootstrap exposes parity APIs and blocks direct external channels`() {
+        listOf(
+            "capturePhoto", "pickImage", "recordAudioStart", "recordAudioStop", "getLocation",
+            "transcribeSpeech", "postNotification", "llm_chat", "agent_post",
+            "Content-Security-Policy", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon",
+            "External resources are blocked", "error.code = envelope.code",
+            "const normalAnchor = attribute === 'href' && this.tagName === 'A'",
+            "request_too_large", "worker-src 'none'",
+        ).forEach { token -> assertTrue("missing bootstrap contract: $token", LINGXI_V1_BOOTSTRAP.contains(token)) }
+        assertFalse(LINGXI_V1_BOOTSTRAP.contains("addJavascriptInterface"))
+    }
 
     @Test
     fun `structured host script preserves semantic button and labelled textbox lookup`() {

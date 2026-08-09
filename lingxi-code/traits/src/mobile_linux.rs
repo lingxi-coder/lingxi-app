@@ -230,6 +230,8 @@ pub struct LinuxCommandRequest {
     pub stdin: Option<String>,
     pub timeout_ms: Option<u64>,
     pub network: NetworkPolicy,
+    #[serde(default)]
+    pub resource_limits: ResourceLimits,
     pub mounts: Vec<MountSpec>,
 }
 
@@ -253,6 +255,41 @@ pub struct LinuxCommandResult {
     pub exit_code: i32,
     pub timed_out: bool,
     pub cancelled: bool,
+    #[serde(default)]
+    pub enforcement: LinuxEnforcementReceipt,
+}
+
+/// Proof returned by a mobile Linux backend for the isolation requested by a
+/// command. Callers that require a policy must fail closed unless its bit is
+/// true; a backend must never report enforcement it did not apply to the whole
+/// guest process group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxEnforcementReceipt {
+    pub network_policy_enforced: bool,
+    pub memory_limit_enforced: bool,
+}
+
+impl LinuxEnforcementReceipt {
+    /// Validate the receipt against a request whose isolation is security
+    /// critical. `Allowed` needs no network isolation proof; every stricter
+    /// policy and every configured memory ceiling does.
+    pub fn ensure_for(
+        self,
+        network: NetworkPolicy,
+        limits: ResourceLimits,
+    ) -> Result<(), MobileLinuxError> {
+        if !matches!(network, NetworkPolicy::Allowed) && !self.network_policy_enforced {
+            return Err(MobileLinuxError::NetworkPolicyUnavailable(format!(
+                "backend did not enforce requested {network:?} network policy"
+            )));
+        }
+        if limits.max_memory_mb.is_some() && !self.memory_limit_enforced {
+            return Err(MobileLinuxError::ResourceLimitExceeded(
+                "backend did not enforce requested resident-memory limit".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl From<ProcessOutput> for LinuxCommandResult {
@@ -263,6 +300,7 @@ impl From<ProcessOutput> for LinuxCommandResult {
             exit_code: value.exit_code,
             timed_out: value.timed_out,
             cancelled: false,
+            enforcement: LinuxEnforcementReceipt::default(),
         }
     }
 }
@@ -282,6 +320,8 @@ impl From<LinuxCommandResult> for ProcessOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinuxProcessHandle {
     pub id: String,
+    #[serde(default)]
+    pub enforcement: LinuxEnforcementReceipt,
 }
 
 /// PTY open request.
@@ -321,6 +361,10 @@ pub enum MobileLinuxError {
     Integrity(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("network_policy_unavailable: {0}")]
+    NetworkPolicyUnavailable(String),
+    #[error("resource_limit_exceeded: {0}")]
+    ResourceLimitExceeded(String),
     #[error("io error: {0}")]
     Io(String),
     #[error("timeout")]
@@ -857,5 +901,41 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let parsed: MobileLinuxEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, event);
+    }
+
+    #[test]
+    fn enforcement_receipt_fails_closed_for_required_policies() {
+        let limits = ResourceLimits {
+            max_memory_mb: Some(800),
+            ..ResourceLimits::default()
+        };
+        let missing_network = LinuxEnforcementReceipt {
+            network_policy_enforced: false,
+            memory_limit_enforced: true,
+        }
+        .ensure_for(NetworkPolicy::Disabled, limits)
+        .expect_err("disabled network needs proof");
+        assert!(matches!(
+            missing_network,
+            MobileLinuxError::NetworkPolicyUnavailable(_)
+        ));
+
+        let missing_memory = LinuxEnforcementReceipt {
+            network_policy_enforced: true,
+            memory_limit_enforced: false,
+        }
+        .ensure_for(NetworkPolicy::LoopbackOnly, limits)
+        .expect_err("memory ceiling needs proof");
+        assert!(matches!(
+            missing_memory,
+            MobileLinuxError::ResourceLimitExceeded(_)
+        ));
+
+        LinuxEnforcementReceipt {
+            network_policy_enforced: true,
+            memory_limit_enforced: true,
+        }
+        .ensure_for(NetworkPolicy::LoopbackOnly, limits)
+        .expect("complete receipt");
     }
 }

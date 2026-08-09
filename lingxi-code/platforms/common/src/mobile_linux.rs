@@ -44,6 +44,12 @@ fn to_sandbox_error(error: MobileLinuxError) -> SandboxError {
         | MobileLinuxError::Integrity(message)
         | MobileLinuxError::InvalidRequest(message)
         | MobileLinuxError::Io(message) => SandboxError::Unavailable(message),
+        MobileLinuxError::NetworkPolicyUnavailable(message) => {
+            SandboxError::Unavailable(format!("network_policy_unavailable: {message}"))
+        }
+        MobileLinuxError::ResourceLimitExceeded(message) => {
+            SandboxError::Unavailable(format!("resource_limit_exceeded: {message}"))
+        }
         MobileLinuxError::Timeout => {
             SandboxError::Io("unexpected timeout during sandbox prepare".to_string())
         }
@@ -58,6 +64,12 @@ fn to_process_error(error: MobileLinuxError) -> ProcessError {
         | MobileLinuxError::Integrity(message)
         | MobileLinuxError::InvalidRequest(message)
         | MobileLinuxError::Io(message) => ProcessError::Io(message),
+        MobileLinuxError::NetworkPolicyUnavailable(message) => {
+            ProcessError::PolicyUnsupported(format!("network_policy_unavailable: {message}"))
+        }
+        MobileLinuxError::ResourceLimitExceeded(message) => {
+            ProcessError::SandboxEnforcementFailed(format!("resource_limit_exceeded: {message}"))
+        }
         MobileLinuxError::Timeout => ProcessError::Timeout,
     }
 }
@@ -259,6 +271,7 @@ fn build_linux_request(
             .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
             .filter(|timeout_ms| *timeout_ms > 0),
         network: policy.network,
+        resource_limits: policy.limits,
         mounts: mounts.to_vec(),
     };
     validate_linux_request(&request)?;
@@ -1938,8 +1951,9 @@ fn remove_path(path: PathBuf) -> Result<(), RootfsStoreError> {
 mod tests {
     use super::*;
     use traits::{
-        LinuxCommandResult, MobileLinuxCapability, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
-        PtyOpenRequest, PtySessionHandle, ResourceLimits,
+        LinuxCommandResult, LinuxEnforcementReceipt, MobileLinuxCapability,
+        MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, PtyOpenRequest, PtySessionHandle,
+        ResourceLimits,
     };
 
     fn manifest() -> RootfsManifest {
@@ -2610,6 +2624,7 @@ mod tests {
                 exit_code: 7,
                 timed_out: false,
                 cancelled: false,
+                enforcement: LinuxEnforcementReceipt::default(),
             })
         }
 
@@ -2631,6 +2646,7 @@ mod tests {
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
+                enforcement: LinuxEnforcementReceipt::default(),
             })
         }
 
@@ -2645,6 +2661,7 @@ mod tests {
             self.set_task_status("bg-task", MobileLinuxTaskStatus::Backgrounded);
             Ok(LinuxProcessHandle {
                 id: "bg-task".to_string(),
+                enforcement: LinuxEnforcementReceipt::default(),
             })
         }
 

@@ -62,7 +62,8 @@ user gave and is theirs to trigger, not yours.
   model and capabilities, not beyond them.
 - Use only structured collection requests for data
   (`mcp__local_apps__query_data`, `mcp__local_apps__mutate_data`). Never issue
-  SQL.
+  SQL. For additional query pages, pass the numeric `nextOffset` result back
+  as `offset`; never invent or send a string cursor.
 - Inspect UI with `mcp__local_apps__inspect_ui` before acting. Use only
   structured click, fill, select, toggle, scroll, navigate, back, or reload
   actions via `mcp__local_apps__act_on_ui`. Never execute JavaScript.

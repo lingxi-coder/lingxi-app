@@ -158,7 +158,8 @@ import XCTest
                 ),
                 mobileLinux: nil,
                 localAppsFullRuntime: false,
-                localAppsRuntimeRoot: nil
+                localAppsRuntimeRoot: nil,
+                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
             )
 
             XCTAssertNoThrow(

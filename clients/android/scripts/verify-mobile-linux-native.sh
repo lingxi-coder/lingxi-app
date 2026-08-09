@@ -24,6 +24,7 @@ required = (
     "libandroid_aar.so",
     "libproot.so",
     "libproot-loader.so",
+    "libmobile_linux_policy_launcher.so",
     "libpty_bridge.so",
     "libmksh.so",
     "libtoybox.so",
@@ -54,5 +55,5 @@ for abi, expected_machine in machines.items():
 
 if errors:
     raise SystemExit("\n".join(errors))
-print(f"verified six MobileLinux native artifacts for both ABIs under {root}")
+print(f"verified seven MobileLinux native artifacts for both ABIs under {root}")
 PY

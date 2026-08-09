@@ -207,7 +207,7 @@ impl LocalAppsHostBroker {
     ///
     /// The envelope carries BOTH the base64 (so the page can render it right
     /// away as a Blob URL) and a `mediaId` handle (so `llm.chat` can attach
-    /// it without pushing megabytes back through a 64 KiB request payload).
+    /// it without pushing megabytes back through the WebView request path).
     fn media_envelope(
         &self,
         app_id: &str,
@@ -467,10 +467,8 @@ impl LocalAppsHostBroker {
                 "no recording is active",
             )),
             Some(active) if active.app_id != app_id => {
-                let refused = BridgeFailure::coded(
-                    "not_recording",
-                    "another app owns the active recording",
-                );
+                let refused =
+                    BridgeFailure::coded("not_recording", "another app owns the active recording");
                 *guard = Some(active);
                 Err(refused)
             }
@@ -487,8 +485,8 @@ impl LocalAppsHostBroker {
                         finished
                     }
                     None => {
-                        let duration_ms = u64::try_from(active.started.elapsed().as_millis())
-                            .unwrap_or(u64::MAX);
+                        let duration_ms =
+                            u64::try_from(active.started.elapsed().as_millis()).unwrap_or(u64::MAX);
                         // Stop on the pinned recorder, and only give up the
                         // session once it has actually stopped. Taking the
                         // entry (and aborting the watchdog) before this call
@@ -698,8 +696,8 @@ mod tests {
     };
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability,
-        AppLayout, AppService, NoopAppEventObserver, NoopContinuationSink,
+        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
+        AppService, NoopAppEventObserver, NoopContinuationSink,
     };
     use serde_json::{json, Value};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1009,7 +1007,10 @@ mod tests {
         )
         .await;
         assert!(ok);
-        assert_eq!(camera.sized_calls.lock().unwrap().as_slice(), &[(2048, 0.5)]);
+        assert_eq!(
+            camera.sized_calls.lock().unwrap().as_slice(),
+            &[(2048, 0.5)]
+        );
     }
 
     #[tokio::test]
@@ -1181,7 +1182,10 @@ mod tests {
         };
         // Let the start reach the (blocked) native call.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!starting.is_finished(), "the fixture start must still be pending");
+        assert!(
+            !starting.is_finished(),
+            "the fixture start must still be pending"
+        );
 
         // The reclaim path must answer while that alert is still up.
         timeout(
@@ -1208,8 +1212,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
 
-        let (ok, _, _, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("not_recording"));
     }
@@ -1224,8 +1227,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
 
-        let (ok, _, _, _) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
         assert!(ok);
 
         // A second app on the same broker. Declared+granted so only the
@@ -1278,8 +1280,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
 
-        let (ok, _, _, _) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
         assert!(ok);
         // A reloaded page starts again: the orphan is reclaimed, not fatal.
         let (ok, restarted, error, code) =
@@ -1338,8 +1339,7 @@ mod tests {
             .await
             .expect("runtime starts");
         assert_eq!(started["state"], "running");
-        let (ok, _, _, _) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
         assert!(ok);
 
         h.broker
@@ -1350,8 +1350,7 @@ mod tests {
             voice.stopped.load(Ordering::SeqCst),
             "a runtime stop must release the recorder (and its audio-session lease)"
         );
-        let (ok, _, _, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("not_recording"));
     }
@@ -1422,8 +1421,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, result, _, _) =
-            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        let (ok, result, _, _) = execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
         assert!(ok);
         let media_id = result["mediaId"].as_str().expect("mediaId").to_string();
         let entry = h
@@ -1580,7 +1578,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(ok, "the returned tag must be re-postable: {error:?} {code:?}");
+        assert!(
+            ok,
+            "the returned tag must be re-postable: {error:?} {code:?}"
+        );
         assert_eq!(second["tag"], "hydrate");
         let requests = notifications.requests.lock().unwrap();
         assert_eq!(

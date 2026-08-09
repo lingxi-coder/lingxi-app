@@ -302,12 +302,19 @@ data class LocalAppPendingUiAction(
 )
 
 @Immutable
+data class LocalAppBridgeRequestKey(
+    val appId: String,
+    val requestId: String,
+)
+
+@Immutable
 data class LocalAppBridgeResult(
     val requestId: String,
     val appId: String,
     val ok: Boolean,
     val payloadJson: String?,
     val error: String?,
+    val errorCode: String? = null,
 )
 
 enum class LocalAppDetailsTab { Preview, Data, Code, History, PermissionsLogs }
@@ -345,7 +352,7 @@ data class LocalAppsUiState(
     val selectedAppId: String? = null,
     val selectedDetailsTab: LocalAppDetailsTab = LocalAppDetailsTab.Preview,
     val pendingAuthorization: LocalAppAuthorizationRequest? = null,
-    val bridgeResults: Map<String, LocalAppBridgeResult> = emptyMap(),
+    val bridgeResults: Map<LocalAppBridgeRequestKey, LocalAppBridgeResult> = emptyMap(),
     val pendingUiAction: LocalAppPendingUiAction? = null,
     val error: String? = null,
     val distributionMode: LocalAppRuntimeMode,
@@ -403,7 +410,7 @@ sealed interface LocalAppsAction {
     data class RestoreCheckpoint(val appId: String, val checkpointId: String) : LocalAppsAction
     data class ApprovePreview(val appId: String) : LocalAppsAction
     data class BridgeRequest(val message: LocalAppBridgeMessage) : LocalAppsAction
-    data class AcknowledgeBridgeResult(val requestId: String) : LocalAppsAction
+    data class AcknowledgeBridgeResult(val appId: String, val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
     data class UiActionHandled(
         val requestId: String,

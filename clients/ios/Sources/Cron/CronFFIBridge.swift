@@ -150,7 +150,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
             },
             localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot
+            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
         )
         let handle = try buildIosEngineWithConfig(
             config: config,

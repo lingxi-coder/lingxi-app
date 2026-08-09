@@ -18,7 +18,444 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertEqual(store.filteredApps.map(\.id), ["tracker"])
     }
 
+    func testWebsiteDataCleanupIsDurableAndWaitsForAppAbsence() async throws {
+        let suiteName = "LocalAppsStoreTests.website-cleanup.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var removedIdentifiers: [UUID] = []
+        let registry = LocalAppWebsiteDataStoreRegistry(
+            defaults: defaults,
+            removeDataStore: { identifier in
+                removedIdentifiers.append(identifier)
+                return true
+            }
+        )
+        registry.prepareForDeletion(appID: "tracker")
+        let identifier = try XCTUnwrap(registry.storedIdentifier(appID: "tracker"))
+
+        // A new registry reads the persisted journal, matching a process relaunch.
+        let relaunched = LocalAppWebsiteDataStoreRegistry(
+            defaults: defaults,
+            removeDataStore: { identifier in
+                removedIdentifiers.append(identifier)
+                return true
+            }
+        )
+        XCTAssertEqual(
+            relaunched.pendingCleanups,
+            [.init(appID: "tracker", dataStoreIdentifier: identifier)]
+        )
+
+        await relaunched.removeDataForDeletedApps(activeAppIDs: ["tracker"])
+        XCTAssertTrue(removedIdentifiers.isEmpty, "an existing app is not proof that deletion completed")
+        XCTAssertEqual(relaunched.pendingCleanups.count, 1)
+
+        await relaunched.removeDataForDeletedApps(activeAppIDs: [])
+        XCTAssertEqual(removedIdentifiers, [identifier])
+        XCTAssertTrue(relaunched.pendingCleanups.isEmpty)
+        XCTAssertNil(relaunched.storedIdentifier(appID: "tracker"))
+    }
+
+    func testFailedWebsiteDataCleanupKeepsJournalAndMappingForRetry() async throws {
+        let suiteName = "LocalAppsStoreTests.website-cleanup-failure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var removalSucceeds = false
+        let registry = LocalAppWebsiteDataStoreRegistry(
+            defaults: defaults,
+            removeDataStore: { _ in removalSucceeds }
+        )
+        registry.prepareForDeletion(appID: "tracker")
+        let identifier = try XCTUnwrap(registry.storedIdentifier(appID: "tracker"))
+
+        await registry.removeDataForDeletedApps(activeAppIDs: [])
+        XCTAssertEqual(registry.pendingCleanups.count, 1)
+        XCTAssertEqual(registry.pendingCleanups.first?.absenceConfirmed, true)
+        XCTAssertEqual(registry.storedIdentifier(appID: "tracker"), identifier)
+
+        registry.cancelDeletion(appID: "tracker")
+        XCTAssertEqual(
+            registry.pendingCleanups.count, 1,
+            "a later failed same-id request must not cancel already-confirmed cleanup"
+        )
+
+        removalSucceeds = true
+        await registry.removeDataForDeletedApps(activeAppIDs: [])
+        XCTAssertTrue(registry.pendingCleanups.isEmpty)
+        XCTAssertNil(registry.storedIdentifier(appID: "tracker"))
+    }
+
+    func testClosingAnAppDetachesItsWebViewAndBridge() async throws {
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        var forwarded = 0
+        broker.onRequest = { _ in forwarded += 1 }
+        let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+        let webView = try await makeBridgeCaptureWebView()
+        controller.webView = webView
+        broker.webView = webView
+        LocalAppWebViewRegistry.shared.register(controller, appID: "tracker")
+
+        broker.receive(
+            body: ["requestId": "before-close", "operation": "query", "payload": [:]],
+            namespace: "data"
+        )
+
+        LocalAppWebViewRegistry.shared.close(appID: "tracker")
+
+        XCTAssertNil(controller.webView)
+        XCTAssertNil(broker.webView)
+        let envelope = try await bridgeEnvelope(containing: "bridge_detached", in: webView)
+        XCTAssertTrue(envelope?.contains("bridge_detached") == true)
+        broker.receive(
+            body: ["requestId": "after-close", "operation": "query", "payload": [:]],
+            namespace: "data"
+        )
+        XCTAssertEqual(forwarded, 1)
+        XCTAssertEqual(broker.inFlightCount, 0)
+    }
+
+    func testBridgeRejectsEmptyIdentifiersAndOperations() async throws {
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        var forwarded = 0
+        broker.onRequest = { _ in forwarded += 1 }
+        let webView = try await makeBridgeCaptureWebView()
+        broker.webView = webView
+
+        broker.receive(
+            body: ["requestId": "", "operation": "query", "payload": [:]],
+            namespace: "data"
+        )
+        broker.receive(
+            body: ["requestId": "usable-id", "operation": "", "payload": [:]],
+            namespace: "data"
+        )
+
+        XCTAssertEqual(forwarded, 0)
+        XCTAssertEqual(broker.inFlightCount, 0)
+        XCTAssertEqual(LocalAppBridgeBroker.requestIDInvalidCode, "request_id_invalid")
+        XCTAssertEqual(LocalAppBridgeBroker.operationInvalidCode, "operation_invalid")
+        let envelope = try await bridgeEnvelope(containing: "operation_invalid", in: webView)
+        XCTAssertTrue(envelope?.contains("operation_invalid") == true)
+    }
+
+    func testBridgeCapsTheCompleteRequestEvenWhenPayloadAloneFits() async throws {
+        let payload: [String: Any] = [
+            "blob": String(repeating: "x", count: LocalAppBridgeBroker.maxControlBytes - 32),
+        ]
+        let payloadData = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertLessThanOrEqual(payloadData.count, LocalAppBridgeBroker.maxControlBytes)
+
+        let body: [String: Any] = [
+            "requestId": "request-with-envelope-overhead",
+            "operation": "mutate",
+            "payload": payload,
+        ]
+        let byteCount = try XCTUnwrap(LocalAppBridgeBroker.oversizedRequestByteCount(
+            body,
+            limit: LocalAppBridgeBroker.maxControlBytes
+        ))
+        XCTAssertGreaterThan(byteCount, LocalAppBridgeBroker.maxControlBytes)
+
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        let webView = try await makeBridgeCaptureWebView()
+        broker.webView = webView
+        var forwarded = 0
+        broker.onRequest = { _ in forwarded += 1 }
+        broker.receive(body: body, namespace: "data")
+        XCTAssertEqual(forwarded, 0)
+        XCTAssertEqual(broker.inFlightCount, 0)
+        let envelope = try await bridgeEnvelope(containing: "request_too_large", in: webView)
+        XCTAssertTrue(envelope?.contains("request_too_large") == true)
+    }
+
+    func testBridgeGivesLLMChatABoundedLargeContextLane() {
+        XCTAssertEqual(LocalAppBridgeBroker.byteLimit(namespace: "data", operation: "query"), 64 * 1_024)
+        XCTAssertEqual(
+            LocalAppBridgeBroker.byteLimit(namespace: "llm", operation: "chat"),
+            8 * 1_024 * 1_024
+        )
+
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        var forwarded: [LocalAppBridgeRequest] = []
+        broker.onRequest = { forwarded.append($0) }
+        broker.receive(
+            body: [
+                "requestId": "large-context",
+                "operation": "chat",
+                "payload": [
+                    "messages": [[
+                        "role": "user",
+                        "content": String(repeating: "x", count: LocalAppBridgeBroker.maxControlBytes),
+                    ]],
+                ],
+            ],
+            namespace: "llm"
+        )
+
+        XCTAssertEqual(forwarded.map(\.id), ["large-context"])
+    }
+
+    func testBridgeRejectsNonObjectPayloadInsteadOfCoercingItToEmptyObject() async throws {
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        let webView = try await makeBridgeCaptureWebView()
+        broker.webView = webView
+        var forwarded = 0
+        broker.onRequest = { _ in forwarded += 1 }
+
+        broker.receive(
+            body: ["requestId": "bad-payload", "operation": "mutate", "payload": []],
+            namespace: "data"
+        )
+
+        XCTAssertEqual(forwarded, 0)
+        XCTAssertEqual(broker.inFlightCount, 0)
+        let envelope = try await bridgeEnvelope(containing: "payload_invalid", in: webView)
+        XCTAssertTrue(envelope?.contains("payload_invalid") == true)
+    }
+
+    func testBridgeRejectsDuplicateIDsWithoutDroppingTheOriginalRequest() async throws {
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        var forwarded: [String] = []
+        broker.onRequest = { forwarded.append($0.id) }
+        let webView = try await makeBridgeCaptureWebView()
+        broker.webView = webView
+        let body: [String: Any] = ["requestId": "same-id", "operation": "query", "payload": [:]]
+
+        broker.receive(body: body, namespace: "data")
+        broker.receive(body: body, namespace: "data")
+
+        XCTAssertEqual(forwarded, ["same-id"])
+        XCTAssertEqual(broker.inFlightCount, 1, "the duplicate rejection must not remove the original")
+        XCTAssertEqual(LocalAppBridgeBroker.duplicateRequestIDCode, "duplicate_request_id")
+        let envelope = try await bridgeEnvelope(containing: "duplicate_request_id", in: webView)
+        XCTAssertTrue(envelope?.contains("duplicate_request_id") == true)
+    }
+
+    func testBridgeCapsOutstandingRequestsAt128() async throws {
+        let broker = LocalAppBridgeBroker(appID: "tracker")
+        var forwarded = 0
+        broker.onRequest = { _ in forwarded += 1 }
+        let webView = try await makeBridgeCaptureWebView()
+        broker.webView = webView
+        for index in 0 ... LocalAppBridgeBroker.maxInFlightRequests {
+            broker.receive(
+                body: ["requestId": "request-\(index)", "operation": "query", "payload": [:]],
+                namespace: "data"
+            )
+        }
+
+        XCTAssertEqual(forwarded, LocalAppBridgeBroker.maxInFlightRequests)
+        XCTAssertEqual(broker.inFlightCount, LocalAppBridgeBroker.maxInFlightRequests)
+        XCTAssertEqual(LocalAppBridgeBroker.tooManyInFlightCode, "too_many_requests")
+        let envelope = try await bridgeEnvelope(containing: "too_many_requests", in: webView)
+        XCTAssertTrue(envelope?.contains("too_many_requests") == true)
+    }
+
+    func testWebViewNavigationRequiresTheExactRuntimeOrigin() {
+        let origin = URL(string: "http://127.0.0.1:43123")!
+        XCTAssertTrue(LocalAppWebViewRepresentable.Coordinator.isAllowed(
+            URL(string: "http://127.0.0.1:43123/detail")!,
+            origin: origin
+        ))
+        XCTAssertFalse(LocalAppWebViewRepresentable.Coordinator.isAllowed(
+            URL(string: "https://127.0.0.1:43123/detail")!,
+            origin: origin
+        ))
+        XCTAssertFalse(LocalAppWebViewRepresentable.Coordinator.isAllowed(
+            URL(string: "http://localhost:43123/detail")!,
+            origin: origin
+        ))
+        XCTAssertFalse(LocalAppWebViewRepresentable.Coordinator.isAllowed(
+            URL(string: "http://127.0.0.1:43124/detail")!,
+            origin: origin
+        ))
+    }
+
+    func testInjectedCSPDisablesWorkersWithoutBlockingLocalMedia() {
+        let source = LocalAppWebViewRepresentable.bridgeSource
+        XCTAssertTrue(source.contains("worker-src 'none'"))
+        XCTAssertTrue(source.contains("media-src 'self' data: blob:"))
+    }
+
+    private func makeBridgeCaptureWebView() async throws -> WKWebView {
+        let webView = WKWebView()
+        webView.loadHTMLString(#"<div id="ready">ready</div>"#, baseURL: nil)
+        var loaded = false
+        for _ in 0 ..< 100 {
+            if (try? await webView.evaluateJavaScript("document.getElementById('ready') !== null") as? Bool) == true {
+                loaded = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(loaded, "bridge capture WebView did not finish loading")
+        _ = try await webView.evaluateJavaScript(
+            "window.__bridgeEnvelope = null; window.lingxi = { __resolve: value => window.__bridgeEnvelope = value };"
+        )
+        return webView
+    }
+
+    private func bridgeEnvelope(containing code: String, in webView: WKWebView) async throws -> String? {
+        for _ in 0 ..< 100 {
+            let value = try await webView.evaluateJavaScript("JSON.stringify(window.__bridgeEnvelope)") as? String
+            if value?.contains(code) == true { return value }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for bridge error code \(code)")
+        return nil
+    }
+
     #if canImport(engine_mobileFFI)
+        func testRejectedDeleteCancelsOnlyItsUnconfirmedCleanupJournal() async throws {
+            enum ExpectedFailure: Error { case rejected }
+            let suiteName = "LocalAppsStoreTests.delete-rejected.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            var removedIdentifiers: [UUID] = []
+            let registry = LocalAppWebsiteDataStoreRegistry(
+                defaults: defaults,
+                removeDataStore: { identifier in
+                    removedIdentifiers.append(identifier)
+                    return true
+                }
+            )
+            let originalIdentifier = try XCTUnwrap(registry.dataStore(appID: "tracker").identifier)
+            let store = LocalAppsStore(websiteDataStoreRegistry: registry)
+            store.configure { _ in throw ExpectedFailure.rejected }
+
+            let accepted = await store.delete(appID: "tracker")
+            XCTAssertFalse(accepted)
+            XCTAssertTrue(registry.pendingCleanups.isEmpty)
+            XCTAssertEqual(registry.storedIdentifier(appID: "tracker"), originalIdentifier)
+
+            await registry.removeDataForDeletedApps(activeAppIDs: [])
+            XCTAssertTrue(removedIdentifiers.isEmpty)
+        }
+
+        func testDeleteJournalsBeforeCommandAndCleansOnlyAfterSnapshotDropsApp() async throws {
+            let suiteName = "LocalAppsStoreTests.delete-cleanup.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            var removedIdentifiers: [UUID] = []
+            let registry = LocalAppWebsiteDataStoreRegistry(
+                defaults: defaults,
+                removeDataStore: { identifier in
+                    removedIdentifiers.append(identifier)
+                    return true
+                }
+            )
+            let store = LocalAppsStore(websiteDataStoreRegistry: registry)
+            var pendingAtSubmission: [LocalAppWebsiteDataStoreRegistry.PendingCleanup] = []
+            store.configure { _ in pendingAtSubmission = registry.pendingCleanups }
+            store.handle(event: .appsChanged(apps: [app(id: "tracker", name: "Tracker")]))
+
+            let submitted = await store.delete(appID: "tracker")
+            XCTAssertTrue(submitted)
+            XCTAssertEqual(pendingAtSubmission.count, 1, "the cleanup journal must precede the delete command")
+
+            store.handle(event: .appsChanged(apps: [app(id: "tracker", name: "Tracker")]))
+            try await Task.sleep(for: .milliseconds(20))
+            XCTAssertTrue(removedIdentifiers.isEmpty)
+
+            store.handle(event: .appsChanged(apps: []))
+            try await waitUntil("the confirmed deletion cleanup") { removedIdentifiers.count == 1 }
+            XCTAssertTrue(registry.pendingCleanups.isEmpty)
+        }
+
+        func testRecreatedAppGetsANewDataStoreBeforeOldRemovalCompletes() async throws {
+            let suiteName = "LocalAppsStoreTests.website-cleanup-race.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            var removalContinuation: CheckedContinuation<Bool, Never>?
+            let registry = LocalAppWebsiteDataStoreRegistry(
+                defaults: defaults,
+                removeDataStore: { _ in
+                    await withCheckedContinuation { continuation in
+                        removalContinuation = continuation
+                    }
+                }
+            )
+            registry.prepareForDeletion(appID: "tracker")
+            let oldIdentifier = try XCTUnwrap(registry.storedIdentifier(appID: "tracker"))
+
+            let cleanup = Task { @MainActor in
+                await registry.removeDataForDeletedApps(activeAppIDs: [])
+            }
+            try await waitUntil("the old store removal to start") { removalContinuation != nil }
+            XCTAssertEqual(registry.pendingCleanups.first?.absenceConfirmed, true)
+
+            let recreatedIdentifier = try XCTUnwrap(registry.dataStore(appID: "tracker").identifier)
+            XCTAssertNotEqual(recreatedIdentifier, oldIdentifier)
+            XCTAssertEqual(registry.storedIdentifier(appID: "tracker"), recreatedIdentifier)
+
+            let continuation = removalContinuation
+            removalContinuation = nil
+            continuation?.resume(returning: true)
+            await cleanup.value
+
+            XCTAssertTrue(registry.pendingCleanups.isEmpty)
+            XCTAssertEqual(
+                registry.storedIdentifier(appID: "tracker"),
+                recreatedIdentifier,
+                "finishing old cleanup must not delete the recreated app's mapping"
+            )
+        }
+
+        func testDeletedWebsiteDataStoreDoesNotRestoreLocalStorageWhenAppIDIsReused() async throws {
+            let suiteName = "LocalAppsStoreTests.website-cleanup-real.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let registry = LocalAppWebsiteDataStoreRegistry(defaults: defaults)
+            let origin = URL(string: "http://127.0.0.1:43199")!
+
+            func seedStore() async throws -> UUID {
+                let configuration = WKWebViewConfiguration()
+                configuration.websiteDataStore = registry.dataStore(appID: "tracker")
+                let webView = WKWebView(frame: .zero, configuration: configuration)
+                webView.loadHTMLString(#"<div id="ready">ready</div>"#, baseURL: origin)
+                try await waitForElement("ready", in: webView)
+                _ = try await webView.evaluateJavaScript("localStorage.setItem('lingxi-test', 'old-value')")
+                return try XCTUnwrap(configuration.websiteDataStore.identifier)
+            }
+
+            func readRecreatedStore() async throws -> (UUID, Bool) {
+                let configuration = WKWebViewConfiguration()
+                configuration.websiteDataStore = registry.dataStore(appID: "tracker")
+                let webView = WKWebView(frame: .zero, configuration: configuration)
+                webView.loadHTMLString(#"<div id="ready">ready</div>"#, baseURL: origin)
+                try await waitForElement("ready", in: webView)
+                let valueIsMissing = try await webView.evaluateJavaScript(
+                    "localStorage.getItem('lingxi-test') === null"
+                ) as? Bool
+                return (
+                    try XCTUnwrap(configuration.websiteDataStore.identifier),
+                    try XCTUnwrap(valueIsMissing)
+                )
+            }
+
+            let deletedIdentifier = try await seedStore()
+            registry.prepareForDeletion(appID: "tracker")
+            for _ in 0 ..< 20 where !registry.pendingCleanups.isEmpty {
+                await registry.removeDataForDeletedApps(activeAppIDs: [])
+                if !registry.pendingCleanups.isEmpty {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            XCTAssertTrue(registry.pendingCleanups.isEmpty, "WebKit must release and remove the identified store")
+
+            let (recreatedIdentifier, staleValueIsMissing) = try await readRecreatedStore()
+            XCTAssertNotEqual(recreatedIdentifier, deletedIdentifier)
+            XCTAssertTrue(
+                staleValueIsMissing,
+                "a recreated app id must not recover the deleted app's local storage"
+            )
+        }
+
         func testQuestionnaireEventReplacesTheStoredSteps() {
             let store = LocalAppsStore()
             store.handle(event: .appEvent(event: .appQuestionnaireChanged(
@@ -259,10 +696,11 @@ final class LocalAppsStoreTests: XCTestCase {
         /// the reachable contract here is the boundary itself.
         func testTheBridgePayloadCapMatchesTheDocumentedContract() {
             XCTAssertEqual(
-                LocalAppBridgeBroker.maxPayloadBytes, 64 * 1024,
-                "the generator prompt tells apps to pass large media by mediaId because one "
-                    + "request payload is capped here; moving the cap without moving that "
-                    + "guidance leaves the prompt lying")
+                LocalAppBridgeBroker.maxControlBytes, 64 * 1024,
+                "control operations must retain a small bounded request surface")
+            XCTAssertEqual(
+                LocalAppBridgeBroker.maxLLMBytes, 8 * 1024 * 1024,
+                "long model input needs a separate bounded lane; media still travels by mediaId")
         }
 
         /// A namespace the page can call but whose message handler is never

@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
-import android.webkit.JavascriptInterface
 import android.webkit.CookieManager
 import android.webkit.SafeBrowsingResponse
 import android.webkit.WebResourceRequest
@@ -17,17 +16,24 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.lingxi.code.BuildConfig
 import com.lingxi.code.R
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
+import java.lang.ref.WeakReference
 
 data class LocalAppBridgeMessage(
     val appId: String,
@@ -68,7 +74,14 @@ private data class RawJson(val json: String)
  * scripts; callers cannot supply executable JavaScript. The controller never
  * exposes [WebView.evaluateJavascript] itself.
  */
-class LocalAppWebViewController internal constructor(private val webView: WebView) {
+class LocalAppWebViewController internal constructor(
+    private val webView: WebView,
+    private val broker: LocalAppBridgeBroker,
+    private val guardedWebViewClient: WebViewClient,
+    private val initialUrl: String,
+) {
+    private var suspendedUrl: String? = null
+    private var deletionSuspended = false
     fun execute(
         action: LocalAppUiAutomationAction,
         onResult: (LocalAppUiExecutionResult) -> Unit = {},
@@ -127,11 +140,54 @@ class LocalAppWebViewController internal constructor(private val webView: WebVie
         }
     }
 
-    fun resolveBridgeRequest(requestId: String, ok: Boolean, payloadJson: String?) {
-        val encodedPayload = jsonStringLiteral(payloadJson ?: "null")
-        val script =
-            "window.lingxi?.v1?.__resolve(${jsonStringLiteral(requestId)},${if (ok) "true" else "false"},JSON.parse($encodedPayload))"
-        fixedScript(script) {}
+    fun resolveBridgeRequest(
+        requestId: String,
+        ok: Boolean,
+        resultJson: String?,
+        error: String?,
+        errorCode: String?,
+    ) {
+        broker.resolve(
+            requestId = requestId,
+            resultJson = resultJson,
+            error = if (ok) null else error ?: "Bridge request failed",
+            errorCode = errorCode.takeUnless { ok },
+        )
+    }
+
+    internal fun detach() {
+        broker.failAllInFlight()
+        webView.stopLoading()
+        WebViewCompat.removeWebMessageListener(webView, LINGXI_V1_MESSAGE_OBJECT)
+        // Replace the document immediately so a page cannot keep reading or
+        // mutating its origin while Rust processes the subsequent DeleteApp.
+        // The durable origin purge still happens only after AppsChanged proves
+        // the app record is gone.
+        webView.webViewClient = WebViewClient()
+        webView.loadUrl("about:blank")
+    }
+
+    internal fun suspendForDeletion() {
+        if (deletionSuspended) return
+        deletionSuspended = true
+        suspendedUrl = webView.url?.takeIf { Uri.parse(it).isTrustedLoopback() } ?: initialUrl
+        broker.failAllInFlight()
+        webView.stopLoading()
+        // about:blank must not be rejected by the normal loopback-only client.
+        // Keep the broker listener registered: its exact-origin rule excludes
+        // the blank document, and retaining it permits a safe resume if command
+        // submission fails.
+        webView.webViewClient = WebViewClient()
+        webView.loadUrl("about:blank")
+    }
+
+    internal fun resumeAfterFailedDeletion() {
+        if (!deletionSuspended) return
+        deletionSuspended = false
+        val url = suspendedUrl ?: initialUrl
+        suspendedUrl = null
+        webView.webViewClient = guardedWebViewClient
+        webView.loadUrl(url)
     }
 
     private fun executeStructuredAction(
@@ -406,7 +462,11 @@ private fun jsonStringLiteral(value: String): String = buildString(value.length 
             '\n' -> append("\\n")
             '\r' -> append("\\r")
             '\t' -> append("\\t")
-            else -> if (ch.code < 0x20) append("\\u%04x".format(ch.code)) else append(ch)
+            else -> if (ch.code < 0x20 || ch == '\u2028' || ch == '\u2029') {
+                append("\\u%04x".format(ch.code))
+            } else {
+                append(ch)
+            }
         }
     }
     append('"')
@@ -518,25 +578,214 @@ private fun findJsonValueEnd(text: String, start: Int): Int? {
     }
 }
 
-private class BoundLingXiBridge(
+internal const val LOCAL_APP_BRIDGE_MAX_TEXT_LENGTH = 128
+internal const val LOCAL_APP_BRIDGE_MAX_CONTROL_BYTES = 64 * 1024
+// Long model inputs are data, not control traffic. Eight MiB accommodates a
+// typical one-million-token text context plus JSON framing without turning
+// every bridge operation into an unbounded WebView IPC surface.
+internal const val LOCAL_APP_BRIDGE_MAX_LLM_BYTES = 8 * 1024 * 1024
+internal const val LOCAL_APP_BRIDGE_MAX_IN_FLIGHT = 128
+
+internal fun localAppBridgeByteLimit(operation: String): Int =
+    if (operation == "llm_chat") LOCAL_APP_BRIDGE_MAX_LLM_BYTES else LOCAL_APP_BRIDGE_MAX_CONTROL_BYTES
+
+internal sealed interface LocalAppBridgeIngress {
+    data class Accepted(val message: LocalAppBridgeMessage) : LocalAppBridgeIngress
+    data class Rejected(
+        val requestId: String?,
+        val message: String,
+        val code: String,
+    ) : LocalAppBridgeIngress
+}
+
+/** Pure validation seam used by the real WebMessageListener and JVM tests. */
+internal fun parseLocalAppBridgeMessage(
+    appId: String,
+    rawMessage: String,
+    inFlightRequestIds: Set<String>,
+): LocalAppBridgeIngress {
+    val requestBytes = rawMessage.toByteArray(Charsets.UTF_8).size
+    // Reject truly oversized input before doing any structural parsing. The
+    // operation-specific (usually much smaller) limit is applied below once
+    // the operation name has been validated.
+    if (requestBytes > LOCAL_APP_BRIDGE_MAX_LLM_BYTES) {
+        return LocalAppBridgeIngress.Rejected(
+            null,
+            "Bridge request is $requestBytes bytes; the absolute limit is $LOCAL_APP_BRIDGE_MAX_LLM_BYTES",
+            "request_too_large",
+        )
+    }
+    val requestId = extractTopLevelJsonField(rawMessage, "requestId")
+        ?.takeIf { it.startsWith('"') }
+        ?.let(::decodeJsonStringLiteral)
+        ?.takeIf { it.isNotBlank() }
+        ?: return LocalAppBridgeIngress.Rejected(null, "Bridge requestId is required", "request_id_invalid")
+    if (requestId.length > LOCAL_APP_BRIDGE_MAX_TEXT_LENGTH) {
+        return LocalAppBridgeIngress.Rejected(
+            requestId,
+            "Bridge requestId exceeds $LOCAL_APP_BRIDGE_MAX_TEXT_LENGTH characters",
+            "request_id_invalid",
+        )
+    }
+    val operation = extractTopLevelJsonField(rawMessage, "operation")
+        ?.takeIf { it.startsWith('"') }
+        ?.let(::decodeJsonStringLiteral)
+        ?.takeIf { it.isNotBlank() }
+        ?: return LocalAppBridgeIngress.Rejected(requestId, "Bridge operation is required", "operation_invalid")
+    if (operation.length > LOCAL_APP_BRIDGE_MAX_TEXT_LENGTH) {
+        return LocalAppBridgeIngress.Rejected(
+            requestId,
+            "Bridge operation exceeds $LOCAL_APP_BRIDGE_MAX_TEXT_LENGTH characters",
+            "operation_invalid",
+        )
+    }
+    val byteLimit = localAppBridgeByteLimit(operation)
+    if (requestBytes > byteLimit) {
+        return LocalAppBridgeIngress.Rejected(
+            requestId,
+            "Bridge request is $requestBytes bytes; the limit for $operation is $byteLimit",
+            "request_too_large",
+        )
+    }
+    if (requestId in inFlightRequestIds) {
+        return LocalAppBridgeIngress.Rejected(requestId, "Bridge requestId is already in flight", "duplicate_request_id")
+    }
+    if (inFlightRequestIds.size >= LOCAL_APP_BRIDGE_MAX_IN_FLIGHT) {
+        return LocalAppBridgeIngress.Rejected(
+            requestId,
+            "Bridge has too many outstanding requests",
+            "too_many_requests",
+        )
+    }
+    val payloadJson = extractTopLevelJsonField(rawMessage, "payload")?.trim() ?: "{}"
+    if (!payloadJson.startsWith('{') || !payloadJson.endsWith('}')) {
+        return LocalAppBridgeIngress.Rejected(
+            requestId,
+            "Bridge payload must be a JSON object",
+            "payload_invalid",
+        )
+    }
+    val payloadBytes = payloadJson.toByteArray(Charsets.UTF_8).size
+    if (payloadBytes > byteLimit) {
+        return LocalAppBridgeIngress.Rejected(
+            requestId,
+            "Bridge payload is $payloadBytes bytes; the limit for $operation is $byteLimit",
+            "payload_too_large",
+        )
+    }
+    return LocalAppBridgeIngress.Accepted(
+        LocalAppBridgeMessage(
+            appId = appId,
+            requestId = requestId,
+            operation = operation,
+            payloadJson = payloadJson,
+        ),
+    )
+}
+
+internal class LocalAppBridgeBroker(
     private val appId: String,
+    private val trustedOrigin: Uri,
+    private val webView: WebView,
     private val onMessage: (LocalAppBridgeMessage) -> Unit,
 ) {
-    @JavascriptInterface
-    fun postMessage(message: String) {
-        val json = runCatching { JSONObject(message) }.getOrNull() ?: return
-        val requestId = json.optString("requestId").takeIf { it.isNotBlank() } ?: return
-        val operation = json.optString("operation").takeIf { it.isNotBlank() } ?: return
-        onMessage(
-            LocalAppBridgeMessage(
-                appId = appId,
+    private val inFlightRequestIds = linkedSetOf<String>()
+
+    fun receive(rawMessage: String, sourceOrigin: Uri, isMainFrame: Boolean) {
+        if (!isMainFrame || !sourceOrigin.sameTrustedOrigin(trustedOrigin)) return
+        when (val ingress = parseLocalAppBridgeMessage(appId, rawMessage, inFlightRequestIds)) {
+            is LocalAppBridgeIngress.Accepted -> {
+                inFlightRequestIds += ingress.message.requestId
+                onMessage(ingress.message)
+            }
+            is LocalAppBridgeIngress.Rejected -> ingress.requestId?.let { requestId ->
+                // Admission failures were never inserted. In particular, a
+                // duplicate must not evict the original request while its
+                // Rust operation is still in flight.
+                rejectUntracked(requestId, ingress.message, ingress.code)
+            }
+        }
+    }
+
+    fun resolve(requestId: String, resultJson: String?, error: String?, errorCode: String?) {
+        inFlightRequestIds.remove(requestId)
+        val result = resultJson?.let { encoded ->
+            runCatching {
+                val tokener = JSONTokener(encoded)
+                val value = tokener.nextValue()
+                require(tokener.nextClean() == '\u0000') { "trailing JSON content" }
+                value
+            }.getOrElse {
+                sendResolution(
+                    requestId = requestId,
+                    result = JSONObject.NULL,
+                    error = "Bridge returned invalid JSON",
+                    errorCode = "result_invalid",
+                )
+                return
+            }
+        } ?: JSONObject.NULL
+        sendResolution(requestId, result, error, errorCode)
+    }
+
+    private fun rejectUntracked(requestId: String, error: String, errorCode: String) {
+        sendResolution(requestId, JSONObject.NULL, error, errorCode)
+    }
+
+    fun failAllInFlight() {
+        val outstanding = inFlightRequestIds.toList()
+        inFlightRequestIds.clear()
+        outstanding.forEach { requestId ->
+            sendResolution(
                 requestId = requestId,
-                operation = operation,
-                payloadJson = json.opt("payload")?.let { payload ->
-                    if (payload is String) jsonStringLiteral(payload) else jsonValueToJson(payload)
-                },
-            ),
+                result = JSONObject.NULL,
+                error = "The Lingxi bridge was detached",
+                errorCode = "bridge_detached",
+            )
+        }
+    }
+
+    private fun sendResolution(requestId: String, result: Any, error: String?, errorCode: String?) {
+        val envelope = JSONObject().apply {
+            put("requestId", requestId)
+            put("result", result)
+            put("error", error ?: JSONObject.NULL)
+            put("code", errorCode ?: JSONObject.NULL)
+        }
+        webView.evaluateJavascript(
+            "window.lingxi?.__resolve(JSON.parse(${jsonStringLiteral(envelope.toString())}));",
+            null,
         )
+    }
+}
+
+/** Active controllers are host-owned and keyed by the bound app id, never by page input. */
+internal object LocalAppWebViewRegistry {
+    private val controllers = mutableMapOf<String, WeakReference<LocalAppWebViewController>>()
+
+    @Synchronized
+    fun register(appId: String, controller: LocalAppWebViewController) {
+        controllers.put(appId, WeakReference(controller))?.get()?.detach()
+    }
+
+    @Synchronized
+    fun unregister(appId: String, controller: LocalAppWebViewController) {
+        if (controllers[appId]?.get() === controller) controllers.remove(appId)
+    }
+
+    @Synchronized
+    fun detach(appId: String) {
+        controllers.remove(appId)?.get()?.detach()
+    }
+
+    @Synchronized
+    fun suspendForDeletion(appId: String) {
+        controllers[appId]?.get()?.suspendForDeletion()
+    }
+
+    @Synchronized
+    fun resumeAfterFailedDeletion(appId: String) {
+        controllers[appId]?.get()?.resumeAfterFailedDeletion()
     }
 }
 
@@ -552,7 +801,56 @@ fun LocalAppWebView(
 ) {
     var pendingExternalUrl by remember(appId) { mutableStateOf<String?>(null) }
     var webView by remember(appId) { mutableStateOf<WebView?>(null) }
+    var controller by remember(appId) { mutableStateOf<LocalAppWebViewController?>(null) }
+    val currentBridgeHandler by rememberUpdatedState(onBridgeRequest)
+    val currentControllerHandler by rememberUpdatedState(onControllerReady)
     val trustedOrigin = remember(url) { Uri.parse(url).takeIf { it.isTrustedLoopback() } }
+    val bridgeSupported = remember {
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+    }
+
+    if (!bridgeSupported) {
+        Text(
+            text = stringResource(R.string.local_apps_webview_upgrade_required),
+            modifier = modifier,
+        )
+        return
+    }
+    if (trustedOrigin == null) {
+        Text(
+            text = stringResource(R.string.local_apps_webview_untrusted_origin),
+            modifier = modifier,
+        )
+        return
+    }
+    val trustedOriginRule = trustedOrigin.toTrustedOriginString()
+    val applicationContext = LocalContext.current.applicationContext
+    var storageGate by remember(appId, trustedOriginRule) {
+        mutableStateOf(LocalAppWebStorageGate.Waiting)
+    }
+    LaunchedEffect(appId, trustedOriginRule, applicationContext) {
+        storageGate = LocalAppWebStorageGate.Waiting
+        storageGate = if (
+            AndroidLocalAppWebStorageCleanup.get(applicationContext)
+                .awaitOriginReadyAndRemember(appId, trustedOriginRule)
+        ) {
+            LocalAppWebStorageGate.Ready
+        } else {
+            LocalAppWebStorageGate.Failed
+        }
+    }
+    when (storageGate) {
+        LocalAppWebStorageGate.Waiting -> {
+            Text(stringResource(R.string.local_apps_webview_storage_cleanup_waiting), modifier = modifier)
+            return
+        }
+        LocalAppWebStorageGate.Failed -> {
+            Text(stringResource(R.string.local_apps_webview_storage_cleanup_failed), modifier = modifier)
+            return
+        }
+        LocalAppWebStorageGate.Ready -> Unit
+    }
 
     AndroidView(
         modifier = modifier,
@@ -574,8 +872,25 @@ fun LocalAppWebView(
                     setAcceptCookie(false)
                     setAcceptThirdPartyCookies(this@webView, false)
                 }
-                addJavascriptInterface(BoundLingXiBridge(appId, onBridgeRequest), "LingXiNativeV1")
-                webViewClient = object : WebViewClient() {
+                val broker = LocalAppBridgeBroker(
+                    appId = appId,
+                    trustedOrigin = trustedOrigin,
+                    webView = this,
+                    onMessage = { currentBridgeHandler(it) },
+                )
+                WebViewCompat.addWebMessageListener(
+                    this,
+                    LINGXI_V1_MESSAGE_OBJECT,
+                    setOf(trustedOriginRule),
+                ) { _, message, sourceOrigin, isMainFrame, _ ->
+                    broker.receive(message.data.orEmpty(), sourceOrigin, isMainFrame)
+                }
+                WebViewCompat.addDocumentStartJavaScript(
+                    this,
+                    LINGXI_V1_BOOTSTRAP,
+                    setOf(trustedOriginRule),
+                )
+                val guardedClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         val target = request.url
                         if (target.sameTrustedOrigin(trustedOrigin)) return false
@@ -585,10 +900,6 @@ fun LocalAppWebView(
 
                     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                         if (!Uri.parse(url).sameTrustedOrigin(trustedOrigin)) view.stopLoading()
-                    }
-
-                    override fun onPageFinished(view: WebView, url: String) {
-                        view.evaluateJavascript(LINGXI_V1_BOOTSTRAP, null)
                     }
 
                     override fun onSafeBrowsingHit(
@@ -609,15 +920,17 @@ fun LocalAppWebView(
                         return super.shouldInterceptRequest(view, request)
                     }
                 }
-                onControllerReady(LocalAppWebViewController(this))
-                if (trustedOrigin != null) {
-                    tag = url
-                    loadUrl(url)
+                webViewClient = guardedClient
+                controller = LocalAppWebViewController(this, broker, guardedClient, url).also { attached ->
+                    LocalAppWebViewRegistry.register(appId, attached)
+                    currentControllerHandler(attached)
                 }
+                tag = url
+                loadUrl(url)
             }
         },
         update = { view ->
-            if (trustedOrigin != null && view.tag != url) {
+            if (view.tag != url) {
                 view.tag = url
                 view.loadUrl(url)
             }
@@ -626,11 +939,16 @@ fun LocalAppWebView(
 
     DisposableEffect(appId) {
         onDispose {
+            controller?.let { attached ->
+                LocalAppWebViewRegistry.unregister(appId, attached)
+                attached.detach()
+            }
             webView?.apply {
                 stopLoading()
-                removeJavascriptInterface("LingXiNativeV1")
+                WebViewCompat.removeWebMessageListener(this, LINGXI_V1_MESSAGE_OBJECT)
                 destroy()
             }
+            controller = null
             webView = null
         }
     }
@@ -653,24 +971,129 @@ fun LocalAppWebView(
     }
 }
 
+private enum class LocalAppWebStorageGate {
+    Waiting,
+    Ready,
+    Failed,
+}
+
 private fun Uri?.sameTrustedOrigin(other: Uri?): Boolean =
     this != null && other != null &&
         isTrustedLoopback() && other.isTrustedLoopback() &&
-        scheme == other.scheme && host == other.host && effectivePort() == other.effectivePort()
+        scheme == other.scheme && normalizedHost() == other.normalizedHost() && effectivePort() == other.effectivePort()
 
 private fun Uri.isTrustedLoopback(): Boolean =
-    scheme == "http" && host?.lowercase() in setOf("127.0.0.1", "localhost")
+    scheme == "http" && normalizedHost() in setOf("127.0.0.1", "localhost", "::1")
+
+private fun Uri.normalizedHost(): String? = host?.lowercase()?.removePrefix("[")?.removeSuffix("]")
 
 private fun Uri.effectivePort(): Int = if (port >= 0) port else if (scheme == "https") 443 else 80
 
-private const val LINGXI_V1_BOOTSTRAP = """
+internal fun Uri.toTrustedOriginString(): String {
+    require(isTrustedLoopback()) { "Only loopback HTTP origins are supported" }
+    val normalizedHost = normalizedHost()
+    val renderedHost = if (normalizedHost == "::1") "[::1]" else normalizedHost
+    return "$scheme://$renderedHost:${effectivePort()}"
+}
+
+private const val LINGXI_V1_MESSAGE_OBJECT = "LingXiNativeV1"
+
+internal const val LINGXI_V1_BOOTSTRAP = """
 (() => {
   if (window.lingxi?.v1) return;
+  const installCsp = () => {
+    if (!document.head || document.head.querySelector('meta[data-lingxi-csp]')) return false;
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'Content-Security-Policy';
+    meta.dataset.lingxiCsp = 'v1';
+    meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+    document.head.prepend(meta);
+    return true;
+  };
+  if (!installCsp()) {
+    const observer = new MutationObserver(() => {
+      if (installCsp()) observer.disconnect();
+    });
+    observer.observe(document.documentElement || document, { childList: true, subtree: true });
+  }
+  const localOnly = input => {
+    const raw = typeof input === 'string' || input instanceof URL ? input : input?.url;
+    const target = new URL(raw, location.href);
+    if (target.origin !== location.origin) {
+      throw new TypeError('External network access must use window.lingxi.v1.network');
+    }
+    return target;
+  };
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => { localOnly(input); return nativeFetch(input, init); };
+  const nativeOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, target, ...rest) {
+    localOnly(target);
+    return nativeOpen.call(this, method, target, ...rest);
+  };
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = function(target, protocols) {
+    localOnly(target);
+    return protocols === undefined ? new NativeWebSocket(target) : new NativeWebSocket(target, protocols);
+  };
+  window.WebSocket.prototype = NativeWebSocket.prototype;
+  const NativeEventSource = window.EventSource;
+  window.EventSource = function(target, options) {
+    localOnly(target);
+    return new NativeEventSource(target, options);
+  };
+  window.EventSource.prototype = NativeEventSource.prototype;
+  const nativeSendBeacon = navigator.sendBeacon?.bind(navigator);
+  if (nativeSendBeacon) {
+    navigator.sendBeacon = (target, data) => { localOnly(target); return nativeSendBeacon(target, data); };
+  }
+  const resourceUrlAllowed = (element, value) => {
+    const target = new URL(String(value), location.href);
+    if (target.origin === location.origin) return;
+    const media = ['IMG', 'AUDIO', 'VIDEO', 'SOURCE'].includes(element.tagName);
+    if (media && ['data:', 'blob:'].includes(target.protocol)) return;
+    throw new TypeError('External resources are blocked');
+  };
+  const guardedAttributes = new Set(['src', 'href', 'action', 'poster']);
+  const nativeSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    const attribute = String(name).toLowerCase();
+    // A[href] is navigation, not a subresource. Let WebViewClient inspect it
+    // and show the external-navigation confirmation; LINK[href] and every
+    // other resource-bearing attribute remain local-only.
+    const normalAnchor = attribute === 'href' && this.tagName === 'A';
+    if (guardedAttributes.has(attribute) && !normalAnchor) resourceUrlAllowed(this, value);
+    return nativeSetAttribute.call(this, name, value);
+  };
   const pending = new Map();
-  const request = (operation, payload) => new Promise((resolve, reject) => {
+  const request = (operation, payload = {}) => new Promise((resolve, reject) => {
     const requestId = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+    const handler = window.LingXiNativeV1;
+    if (!handler?.postMessage) {
+      pending.delete(requestId);
+      const error = new Error('Lingxi bridge unavailable');
+      error.code = 'bridge_unavailable';
+      reject(error);
+      return;
+    }
+    let serialized;
+    try {
+      serialized = JSON.stringify({requestId, operation, payload});
+    } catch (_) {
+      const error = new Error('Bridge payload is not serializable');
+      error.code = 'payload_invalid';
+      reject(error);
+      return;
+    }
+    const byteLimit = operation === 'llm_chat' ? 8388608 : 65536;
+    if (new TextEncoder().encode(serialized).byteLength > byteLimit) {
+      const error = new Error('Bridge request exceeds ' + byteLimit + ' bytes');
+      error.code = 'request_too_large';
+      reject(error);
+      return;
+    }
     pending.set(requestId, {resolve, reject});
-    LingXiNativeV1.postMessage(JSON.stringify({requestId, operation, payload}));
+    handler.postMessage(serialized);
   });
   const v1 = Object.freeze({
     data: Object.freeze({
@@ -682,16 +1105,41 @@ private const val LINGXI_V1_BOOTSTRAP = """
       request: (payload) => request('network_request', payload)
     }),
     runtime: Object.freeze({
-      info: () => request('runtime_status', null),
-      status: () => request('runtime_status', null)
+      info: () => request('runtime_status', {}),
+      status: () => request('runtime_status', {})
     }),
-    __resolve: (requestId, ok, payload) => {
-      const handler = pending.get(requestId);
-      if (!handler) return;
-      pending.delete(requestId);
-      if (ok) handler.resolve(payload); else handler.reject(payload);
-    }
+    device: Object.freeze({
+      capturePhoto: (payload = {}) => request('capture_photo', payload),
+      pickImage: (payload = {}) => request('pick_image', payload),
+      recordAudioStart: (payload = {}) => request('record_audio_start', payload),
+      recordAudioStop: () => request('record_audio_stop', {}),
+      getLocation: () => request('get_location', {}),
+      transcribeSpeech: (payload = {}) => request('transcribe_speech', payload),
+      postNotification: payload => request('post_notification', payload)
+    }),
+    llm: Object.freeze({
+      chat: payload => request('llm_chat', payload)
+    }),
+    agent: Object.freeze({
+      post: payload => request('agent_post', payload)
+    })
   });
-  Object.defineProperty(window, 'lingxi', {value: Object.freeze({v1}), configurable: false, writable: false});
+  const resolveNative = envelope => {
+    const handler = pending.get(envelope.requestId);
+    if (!handler) return;
+    pending.delete(envelope.requestId);
+    if (envelope.error) {
+      const error = new Error(envelope.error);
+      if (envelope.code) error.code = envelope.code;
+      handler.reject(error);
+    } else {
+      handler.resolve(envelope.result);
+    }
+  };
+  Object.defineProperty(window, 'lingxi', {
+    value: Object.freeze({v1, __resolve: resolveNative}),
+    configurable: false,
+    writable: false
+  });
 })();
 """

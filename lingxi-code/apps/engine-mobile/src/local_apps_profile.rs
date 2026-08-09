@@ -311,7 +311,12 @@ pub(crate) fn spawn_planning(
         let (plan_deltas, _transcript) =
             crate::local_apps_delta::GenerationTranscript::spawn(service.clone(), app_id.clone());
         match llm
-            .plan(&record.brief, &draft.questionnaire, &draft.fields, Some(plan_deltas))
+            .plan(
+                &record.brief,
+                &draft.questionnaire,
+                &draft.fields,
+                Some(plan_deltas),
+            )
             .await
         {
             Ok(plan) => {
@@ -405,6 +410,7 @@ impl ProfileApps {
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
         full_runtime: bool,
         runtime_root: Option<PathBuf>,
+        physical_memory_bytes: u64,
         llm: Arc<LocalAppsLlm>,
         devices: crate::local_apps_device::DeviceCapabilities,
     ) -> Result<Arc<Self>, AppError> {
@@ -413,12 +419,13 @@ impl ProfileApps {
             devices,
         ));
         let client_events = Arc::new(ClientEventFanout::new());
-        let host = LocalAppsHostBroker::new(
+        let host = LocalAppsHostBroker::new_with_physical_memory(
             root.clone(),
             client_events.clone(),
             mobile_linux.clone(),
             full_runtime,
             runtime_root,
+            physical_memory_bytes,
         );
         let executor = MobileAppGenerationExecutor::new(mobile_linux, host.clone(), llm.clone());
         let generation = AppGenerationCoordinator::new_with_observer(
@@ -461,6 +468,7 @@ pub(crate) async fn profile_apps(
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     full_runtime: bool,
     runtime_root: Option<PathBuf>,
+    physical_memory_bytes: u64,
     llm: Arc<LocalAppsLlm>,
     devices: crate::local_apps_device::DeviceCapabilities,
 ) -> Result<Arc<ProfileApps>, AppError> {
@@ -488,6 +496,7 @@ pub(crate) async fn profile_apps(
                     mobile_linux,
                     full_runtime,
                     runtime_root,
+                    physical_memory_bytes,
                     llm,
                     devices,
                 ))
@@ -526,6 +535,7 @@ mod tests {
             None,
             false,
             None,
+            0,
             no_op_llm(),
             crate::local_apps_device::DeviceCapabilities::default(),
         )
@@ -537,6 +547,7 @@ mod tests {
             None,
             false,
             None,
+            0,
             no_op_llm(),
             crate::local_apps_device::DeviceCapabilities::default(),
         )
@@ -564,6 +575,7 @@ mod tests {
                 None,
                 false,
                 None,
+                0,
                 no_op_llm(),
                 crate::local_apps_device::DeviceCapabilities::default(),
             )
@@ -593,7 +605,12 @@ mod tests {
                 .await
                 .expect("open designer");
             local_apps::test_support::stamp_fresh_plan(&profile.service, &app_id).await;
-            let revision = profile.service.draft(&app_id).await.expect("draft").revision;
+            let revision = profile
+                .service
+                .draft(&app_id)
+                .await
+                .expect("draft")
+                .revision;
             profile
                 .service
                 .confirm_design(&app_id, &interaction.interaction_id, revision)

@@ -16,11 +16,8 @@
 /// are now designed from a free-text `brief`) is a BREAKING structural
 /// change per the F1-09 guard.
 ///
-/// Bumped to 3.0.0 (local-apps#questionnaire, Task 5, coordinator ruling):
-/// total removal of the static template catalog — `AppTemplateKindDto`,
-/// `AppTemplateDto`, `ClientCommand::ListAppTemplates`,
-/// `AppEventDto::AppTemplatesChanged`, and `ClientCommand::CreateApp.template`
-/// are all deleted. Each is independently a BREAKING structural change per
-/// the F1-09 guard (a removed variant / removed field), so this is a real
-/// major bump, not folded into 2.0.0's.
+/// Bumped to 3.0.0 when the static catalog and its command/event fields were
+/// removed in favor of the dynamic brief/questionnaire/plan contract. Those
+/// removals are BREAKING structural changes under the F1-09 guard, so this is
+/// a real major bump rather than an additive protocol revision.
 pub const CLIENT_PROTOCOL_VERSION: &str = "3.0.0";

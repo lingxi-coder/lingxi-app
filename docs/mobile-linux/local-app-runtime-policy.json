@@ -16,8 +16,11 @@
       ],
       "environment": {
         "LINGXI_APP_OUTPUT": "export",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
       },
+      "network_policy": "disabled",
+      "memory_limit_bytes": 838860800,
       "timeout_ms": 180000
     },
     "full_build": {
@@ -28,8 +31,11 @@
       ],
       "environment": {
         "LINGXI_APP_OUTPUT": "server",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
       },
+      "network_policy": "disabled",
+      "memory_limit_bytes": 838860800,
       "timeout_ms": 180000
     },
     "full_start": {
@@ -44,8 +50,11 @@
       ],
       "environment": {
         "LINGXI_APP_OUTPUT": "server",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
       },
+      "network_policy": "loopback_only",
+      "memory_limit_bytes": 838860800,
       "cold_start_timeout_ms": 120000,
       "warm_start_timeout_ms": 30000
     }
@@ -56,10 +65,28 @@
     "max_page_size": 100,
     "max_batch_mutations": 50
   },
+  "android_network_policy_launcher": {
+    "source": "clients/android/app/src/main/cpp/mobile_linux_policy_launcher.c",
+    "source_sha256": "40378e0f058782bbe3f1442bcafcfa4c072e475924996bfcc0c53b0f8c705ca4",
+    "artifact": "libmobile_linux_policy_launcher.so",
+    "supported_network_policies": [
+      "disabled"
+    ],
+    "loopback_only_ready": false,
+    "abis": [
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "variants": [
+      "play",
+      "direct"
+    ]
+  },
   "package_manager_policy": {
     "interactive_terminal_apk": true,
     "generation_jobs": false,
     "mcp": false,
-    "npm_family_present": false
+    "npm_family_present": true,
+    "npm_scope": "interactive_terminal_only"
   }
 }

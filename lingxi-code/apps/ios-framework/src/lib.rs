@@ -179,6 +179,8 @@ pub struct IosEngineLaunchConfigFfi {
     pub local_apps_full_runtime: bool,
     /// Verified read-only local-app runtime bundle staged by the iOS build.
     pub local_apps_runtime_root: Option<String>,
+    /// Device physical memory reported by the iOS host.
+    pub physical_memory_bytes: u64,
 }
 
 /// FFI rootfs lifecycle state.
@@ -608,6 +610,7 @@ fn ios_mobile_config_from_launch_config(
             .local_apps_runtime_root
             .as_ref()
             .map(std::path::PathBuf::from),
+        physical_memory_bytes: config.physical_memory_bytes,
         // P0.2: production injects the real LINGXI.md hierarchy provider so the
         // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
         // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -1037,6 +1040,7 @@ fn command_request_from_ffi(value: MobileLinuxCommandRequestFfi) -> traits::Linu
         stdin: value.stdin,
         timeout_ms: value.timeout_ms,
         network: network_policy_from_ffi(value.network),
+        resource_limits: traits::ResourceLimits::default(),
         mounts: value.mounts.into_iter().map(mount_spec_from_ffi).collect(),
     }
 }
@@ -1210,6 +1214,16 @@ fn mobile_linux_error_to_ffi(error: traits::MobileLinuxError) -> MobileLinuxOper
             MobileLinuxOperationFfiError::InvalidRequest { message }
         }
         traits::MobileLinuxError::Io(message) => MobileLinuxOperationFfiError::Io { message },
+        traits::MobileLinuxError::NetworkPolicyUnavailable(message) => {
+            MobileLinuxOperationFfiError::Io {
+                message: format!("network_policy_unavailable: {message}"),
+            }
+        }
+        traits::MobileLinuxError::ResourceLimitExceeded(message) => {
+            MobileLinuxOperationFfiError::Io {
+                message: format!("resource_limit_exceeded: {message}"),
+            }
+        }
         traits::MobileLinuxError::Timeout => MobileLinuxOperationFfiError::Timeout,
     }
 }
@@ -2477,6 +2491,7 @@ pub fn build_ios_engine(
             mobile_linux,
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
+            physical_memory_bytes: 0,
         },
         listener,
         stt,
@@ -2827,6 +2842,7 @@ impl IosMobileLinuxRuntimeHandle {
         self.runtime
             .kill(&traits::LinuxProcessHandle {
                 id: task_id.clone(),
+                enforcement: traits::LinuxEnforcementReceipt::default(),
             })
             .await
             .map_err(mobile_linux_error_to_ffi)?;
@@ -3755,6 +3771,7 @@ mod tests {
             mobile_linux: None,
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
+            physical_memory_bytes: 7 * 1024_u64.pow(3),
         })
         .expect("launch config");
 
@@ -3765,6 +3782,7 @@ mod tests {
         assert_eq!(cfg.api_base, "https://example.invalid");
         assert_eq!(cfg.api_key, "sk-test");
         assert_eq!(cfg.default_model, "claude-test");
+        assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
         assert_eq!(
             cfg.lingxi_home,
             temp.path().join(branding::DOT_DIR),

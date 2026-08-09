@@ -5,6 +5,7 @@ import com.lingxi.code.bindings.AppDesignFieldTypeDto
 import com.lingxi.code.bindings.AppDesignPatchOpDto
 import com.lingxi.code.bindings.AppDesignStepDto
 import com.lingxi.code.bindings.AppAuthorizationDecisionDto
+import com.lingxi.code.bindings.AppBridgeResponseDto
 import com.lingxi.code.bindings.AppCapabilityKindDto
 import com.lingxi.code.bindings.AppCapabilityRequestDto
 import com.lingxi.code.bindings.AppDetailsDto
@@ -40,6 +41,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -51,10 +53,12 @@ class LocalAppsViewModelTest {
     private class RecordingSource : ConversationSource {
         private val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 32)
         val commands = mutableListOf<ClientCommand>()
+        var commandFailure: Throwable? = null
 
         override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
 
         override suspend fun submitClientCommand(command: ClientCommand) {
+            commandFailure?.let { throw it }
             commands += command
         }
 
@@ -62,6 +66,31 @@ class LocalAppsViewModelTest {
 
         fun emit(event: ClientEvent) {
             assertTrue("LocalAppsViewModel must subscribe before test events", events.tryEmit(event))
+        }
+    }
+
+    private class RecordingWebStorageCleanup : LocalAppWebStorageCleanup {
+        val prepared = mutableListOf<Pair<String, String?>>()
+        val snapshots = mutableListOf<Set<String>>()
+        val cancelled = mutableListOf<String>()
+        var retried = false
+        var prepareSucceeds = true
+
+        override fun prepareDeletion(appId: String, currentUrl: String?): Boolean {
+            prepared += appId to currentUrl
+            return prepareSucceeds
+        }
+
+        override fun cancelDeletion(appId: String) {
+            cancelled += appId
+        }
+
+        override fun reconcile(liveAppIds: Set<String>) {
+            snapshots += liveAppIds
+        }
+
+        override fun retryConfirmed() {
+            retried = true
         }
     }
 
@@ -1117,6 +1146,119 @@ class LocalAppsViewModelTest {
         }
     }
 
+    @Test
+    fun `delete queues web storage before command and confirms against AppsChanged`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val cleanup = RecordingWebStorageCleanup()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+                webStorageCleanup = cleanup,
+            )
+            runCurrent()
+            assertTrue(cleanup.retried)
+
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
+            runCurrent()
+            viewModel._uiState.update { state ->
+                state.copy(
+                    apps = state.apps.map { app ->
+                        app.copy(runtime = app.runtime.copy(url = "http://127.0.0.1:43100/preview"))
+                    },
+                )
+            }
+            viewModel.onAction(LocalAppsAction.DeleteApp(APP_ID))
+            runCurrent()
+
+            assertEquals(listOf(APP_ID to "http://127.0.0.1:43100/preview"), cleanup.prepared)
+            assertTrue(source.commands.last() is ClientCommand.DeleteApp)
+
+            source.emit(ClientEvent.AppsChanged(emptyList()))
+            runCurrent()
+            assertEquals(emptySet<String>(), cleanup.snapshots.last())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `app disappearance without delete does not journal browser cleanup`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val cleanup = RecordingWebStorageCleanup()
+            LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+                webStorageCleanup = cleanup,
+            )
+            runCurrent()
+
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(emptyList()))
+            runCurrent()
+
+            assertTrue(cleanup.prepared.isEmpty())
+            assertEquals(emptySet<String>(), cleanup.snapshots.last())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `failed delete submission cancels unconfirmed browser cleanup journal`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val cleanup = RecordingWebStorageCleanup()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+                webStorageCleanup = cleanup,
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
+            runCurrent()
+            source.commandFailure = IllegalStateException("delete rejected")
+
+            viewModel.onAction(LocalAppsAction.DeleteApp(APP_ID))
+            runCurrent()
+
+            assertEquals(listOf(APP_ID), cleanup.cancelled)
+            assertEquals("delete rejected", viewModel.uiState.value.error)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `delete is not submitted when browser cleanup cannot be journaled`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val cleanup = RecordingWebStorageCleanup().apply { prepareSucceeds = false }
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+                webStorageCleanup = cleanup,
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.DeleteApp(APP_ID))
+            runCurrent()
+
+            assertTrue(source.commands.none { it is ClientCommand.DeleteApp })
+            assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     /**
      * The case that IS worth a dialog: the app went away underneath a designer
      * the user was standing on, and took an answer they typed with it. The prune
@@ -1392,6 +1534,98 @@ class LocalAppsViewModelTest {
             assertEquals(
                 listOf("cap-a", "cap-b"),
                 source.commands.filterIsInstance<ClientCommand.ResolveAppCapabilityRequest>().map { it.requestId },
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `bridge errors preserve machine code and unsupported calls resolve locally`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppBridgeResponse(
+                        AppBridgeResponseDto(
+                            requestId = "engine-error",
+                            appId = APP_ID,
+                            ok = false,
+                            resultJson = null,
+                            error = "Location unavailable",
+                            errorCode = "location_unavailable",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            assertEquals(
+                "location_unavailable",
+                viewModel.uiState.value.bridgeResults[LocalAppBridgeRequestKey(APP_ID, "engine-error")]?.errorCode,
+            )
+
+            viewModel.onAction(
+                LocalAppsAction.BridgeRequest(
+                    LocalAppBridgeMessage(APP_ID, "bad-op", "not_supported", "{}"),
+                ),
+            )
+            runCurrent()
+            val localFailure = viewModel.uiState.value.bridgeResults[LocalAppBridgeRequestKey(APP_ID, "bad-op")]
+            assertEquals(false, localFailure?.ok)
+            assertEquals("operation_unsupported", localFailure?.errorCode)
+            assertTrue(source.commands.none { it is ClientCommand.ExecuteAppBridgeRequest })
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `same request id from two apps remains isolated through acknowledgement`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            listOf(APP_ID, OTHER_APP_ID).forEach { appId ->
+                source.emit(
+                    ClientEvent.AppEvent(
+                        AppEventDto.AppBridgeResponse(
+                            AppBridgeResponseDto(
+                                requestId = "shared-id",
+                                appId = appId,
+                                ok = true,
+                                resultJson = "{}",
+                                error = null,
+                                errorCode = null,
+                            ),
+                        ),
+                    ),
+                )
+            }
+            runCurrent()
+
+            assertEquals(2, viewModel.uiState.value.bridgeResults.size)
+            viewModel.onAction(LocalAppsAction.AcknowledgeBridgeResult(APP_ID, "shared-id"))
+            assertFalse(
+                viewModel.uiState.value.bridgeResults.containsKey(
+                    LocalAppBridgeRequestKey(APP_ID, "shared-id"),
+                ),
+            )
+            assertTrue(
+                viewModel.uiState.value.bridgeResults.containsKey(
+                    LocalAppBridgeRequestKey(OTHER_APP_ID, "shared-id"),
+                ),
             )
         } finally {
             Dispatchers.resetMain()

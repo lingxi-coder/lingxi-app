@@ -243,7 +243,11 @@ fun RootScreen(
     val state by chatViewModel.state.collectAsState()
     val localAppsViewModel: LocalAppsViewModel = viewModel(
         key = "local-apps",
-        factory = LocalAppsViewModel.factory(chatViewModel.engineSource, strings = localAppsStrings(context)),
+        factory = LocalAppsViewModel.factory(
+            chatViewModel.engineSource,
+            strings = localAppsStrings(context),
+            webStorageCleanup = com.lingxi.code.localapps.AndroidLocalAppWebStorageCleanup.get(appContext),
+        ),
     )
     val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
     var showingApps by rememberSaveable { mutableStateOf(false) }

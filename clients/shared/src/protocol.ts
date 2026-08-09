@@ -712,6 +712,8 @@ export interface AppManifestDto {
   design_revision: number;
   collections: AppDataCollectionDto[];
   allowed_domains: string[];
+  /** Capabilities the confirmed plan declared; empty for pre-capability manifests. */
+  capabilities: AppCapabilityKindDto[];
 }
 
 /** Runtime snapshot inside an app detail response (local_apps.rs `AppRuntimeDetailsDto`). */

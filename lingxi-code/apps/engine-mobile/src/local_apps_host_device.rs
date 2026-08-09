@@ -14,11 +14,13 @@ use base64::Engine as _;
 use client_protocol::local_apps::AppCapabilityKindDto;
 use local_apps::AppCapability;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use traits::{
     CameraError, CameraPosition, CapturePhotoOpts, LocationError, NotificationError,
-    NotificationRequest, SttError, SttOpts, VoiceError, VoiceRecording, VoiceRecordingOpts,
+    NotificationRequest, SttError, SttOpts, VoiceError, VoiceRecorder, VoiceRecording,
+    VoiceRecordingOpts,
 };
 
 /// Cap on the base64 body of one media response. A default-preset photo is
@@ -60,6 +62,15 @@ pub(super) struct ActiveRecording {
     started: Instant,
     watchdog: tokio::task::JoinHandle<()>,
     finished: Option<FinishedRecording>,
+    /// The recorder this session was STARTED on, pinned for its lifetime.
+    ///
+    /// The one place a live device handle must NOT be re-read per call: a
+    /// recording spans two bridge calls, and `profile_apps` swaps the whole
+    /// device set on every engine (re)build. Resolving the recorder again at
+    /// stop time would call a fresh `VoiceImpl` that was never started —
+    /// losing the audio and stranding the shared audio-session lease on the
+    /// old object with no handle left that can release it.
+    voice: Arc<dyn VoiceRecorder>,
 }
 
 /// A recording the duration watchdog already stopped, parked until the page
@@ -337,7 +348,16 @@ impl LocalAppsHostBroker {
 
         let mut guard = self.recording.lock().await;
         if let Some(active) = guard.as_ref() {
-            if active.app_id != app_id && active.finished.is_none() {
+            // A foreign session blocks a start while it is still running AND
+            // while it is parked but still collectable: the reclaim below
+            // discards the orphan's bytes outright, so exempting a parked
+            // recording here would let one app silently destroy audio another
+            // app is still entitled to fetch — with no error on either side.
+            let collectable = active
+                .finished
+                .as_ref()
+                .is_some_and(|finished| finished.at.elapsed() <= FINISHED_RECORDING_TTL);
+            if active.app_id != app_id && (active.finished.is_none() || collectable) {
                 return Err(BridgeFailure::coded(
                     "audio_session_busy",
                     "another app currently holds the recorder",
@@ -346,13 +366,14 @@ impl LocalAppsHostBroker {
         }
         // A same-app restart (a reloaded page) or an expired parked recording
         // is reclaimed rather than fatal — the orphan's bytes are discarded
-        // and, crucially, the native audio-session lease is released.
+        // and, crucially, the native audio-session lease is released on the
+        // recorder the orphan actually started on.
         let mut replaced_active = false;
         if let Some(orphan) = guard.take() {
             orphan.watchdog.abort();
             if orphan.finished.is_none() {
                 replaced_active = true;
-                let _ = voice.stop_recording().await;
+                let _ = orphan.voice.stop_recording().await;
             }
         }
         voice
@@ -395,6 +416,7 @@ impl LocalAppsHostBroker {
             started: Instant::now(),
             watchdog,
             finished: None,
+            voice,
         });
         Ok(json!({
             "started": true,
@@ -410,10 +432,6 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
     ) -> Result<Value, BridgeFailure> {
-        let voice = self
-            .devices()?
-            .voice
-            .ok_or_else(|| unavailable("the microphone"))?;
         let mut guard = self.recording.lock().await;
         match guard.take() {
             None => Err(BridgeFailure::coded(
@@ -428,10 +446,10 @@ impl LocalAppsHostBroker {
                 *guard = Some(active);
                 Err(refused)
             }
-            Some(active) => {
-                active.watchdog.abort();
-                let finished = match active.finished {
+            Some(mut active) => {
+                let finished = match active.finished.take() {
                     Some(finished) => {
+                        active.watchdog.abort();
                         if finished.at.elapsed() > FINISHED_RECORDING_TTL {
                             return Err(BridgeFailure::coded(
                                 "not_recording",
@@ -443,7 +461,21 @@ impl LocalAppsHostBroker {
                     None => {
                         let duration_ms = u64::try_from(active.started.elapsed().as_millis())
                             .unwrap_or(u64::MAX);
-                        let recording = voice.stop_recording().await.map_err(map_voice_error)?;
+                        // Stop on the pinned recorder, and only give up the
+                        // session once it has actually stopped. Taking the
+                        // entry (and aborting the watchdog) before this call
+                        // meant a transient native failure left the lease
+                        // open with nothing left to reclaim it: a retried
+                        // stop answered `not_recording`, and the runtime-stop
+                        // hook found no session to force-stop.
+                        let recording = match active.voice.stop_recording().await {
+                            Ok(recording) => recording,
+                            Err(error) => {
+                                *guard = Some(active);
+                                return Err(map_voice_error(error));
+                            }
+                        };
+                        active.watchdog.abort();
                         FinishedRecording {
                             recording,
                             duration_ms,
@@ -470,7 +502,6 @@ impl LocalAppsHostBroker {
     /// eviction, process exit) so the native audio-session lease never
     /// outlives the page that opened it.
     pub(super) async fn force_stop_recording(&self, app_id: &str) {
-        let voice = self.device.get().and_then(|cell| cell.current().voice);
         let mut guard = self.recording.lock().await;
         let owned = matches!(guard.as_ref(), Some(active) if active.app_id == app_id);
         if !owned {
@@ -479,9 +510,10 @@ impl LocalAppsHostBroker {
         let active = guard.take().expect("checked above");
         active.watchdog.abort();
         if active.finished.is_none() {
-            if let Some(voice) = voice {
-                let _ = voice.stop_recording().await;
-            }
+            // The recorder the session started on — the live device cell may
+            // already hold a different connection's `VoiceImpl`, which would
+            // leave this one's audio-session lease open forever.
+            let _ = active.voice.stop_recording().await;
         }
     }
 
@@ -606,19 +638,22 @@ impl LocalAppsHostBroker {
         // The app-scoped prefix is applied HERE, before the native layer, so
         // no app can address (and replace) another app's — or the
         // assistant's — notifications.
-        let tag = format!(
-            "local-app.{app_id}.{}",
-            page_tag.unwrap_or_else(|| self.request_id("n"))
-        );
+        // The page's own tag is what comes back, NOT the composed identifier.
+        // The composed form contains `.`, which this very function's grammar
+        // rejects — echoing it would hand the page a value it cannot pass
+        // back, breaking exactly the replace/dedupe round-trip a `tag` is for.
+        // (An app that supplied no tag gets its minted one back and can
+        // replace with it, because the same prefix is re-derived here.)
+        let echoed_tag = page_tag.unwrap_or_else(|| self.request_id("n"));
         notifications
             .notify(NotificationRequest {
                 title: title.to_string(),
                 body: body.to_string(),
-                tag: Some(tag.clone()),
+                tag: Some(format!("local-app.{app_id}.{echoed_tag}")),
             })
             .await
             .map_err(map_notification_error)?;
-        Ok(json!({ "posted": true, "tag": tag }))
+        Ok(json!({ "posted": true, "tag": echoed_tag }))
     }
 }
 
@@ -1382,17 +1417,43 @@ mod tests {
         .await;
         assert!(ok, "{error:?} {code:?}");
         let expected_tag = format!("local-app.{}.hydrate", h.app_id);
-        assert_eq!(result["tag"], expected_tag.as_str());
+        {
+            let requests = notifications.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].title, "提醒");
+            assert_eq!(requests[0].body, "该喝水了");
+            assert_eq!(
+                requests[0].tag.as_deref(),
+                Some(expected_tag.as_str()),
+                "the app-scoped prefix must be applied BEFORE the request reaches \
+                 the native layer, so no app can replace another app's (or the \
+                 assistant's) notification"
+            );
+        }
+
+        // The page gets ITS OWN tag back, never the composed identifier: a
+        // `tag` exists to be passed back so a later post REPLACES this one,
+        // and the composed form contains `.`, which this operation's own
+        // grammar rejects. Echoing it would hand the page a value that fails
+        // validation on the very next call.
+        assert_eq!(result["tag"], "hydrate");
+        let (ok, second, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::PostNotification,
+            json!({
+                "title": "提醒",
+                "body": "还是该喝水了",
+                "tag": result["tag"].as_str().expect("tag"),
+            }),
+        )
+        .await;
+        assert!(ok, "the returned tag must be re-postable: {error:?} {code:?}");
+        assert_eq!(second["tag"], "hydrate");
         let requests = notifications.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].title, "提醒");
-        assert_eq!(requests[0].body, "该喝水了");
         assert_eq!(
-            requests[0].tag.as_deref(),
+            requests[1].tag.as_deref(),
             Some(expected_tag.as_str()),
-            "the app-scoped prefix must be applied BEFORE the request reaches \
-             the native layer, so no app can replace another app's (or the \
-             assistant's) notification"
+            "a replace must resolve to the SAME native identifier as the first post"
         );
     }
 

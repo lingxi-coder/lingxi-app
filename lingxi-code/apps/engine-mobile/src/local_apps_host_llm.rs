@@ -37,6 +37,72 @@ const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 8;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Holds an app's single in-flight `llm.chat` slot and its "calling AI"
+/// indicator, and gives BOTH back when the call ends.
+///
+/// Straight-line cleanup after the await is not enough: `llm_chat_value`'s
+/// future is dropped whenever the connection is torn down mid-call (a
+/// reconnect, the local-app view closing, a `Task` cancellation on iOS) while
+/// `LocalAppsHostBroker` outlives it in the process-wide profile cache. Nothing
+/// else ever clears `llm_inflight` — no `stop_runtime`, no app delete — so a
+/// leaked slot meant every later `llm.chat` from that app answered `llm_busy`,
+/// and the indicator stayed lit, for the life of the process.
+struct LlmInflightGuard {
+    app_id: String,
+    slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    event_sink: std::sync::Arc<dyn client_adapter::ClientEventSink>,
+    armed: bool,
+}
+
+impl LlmInflightGuard {
+    /// The ordered release for the paths that actually return: the slot is
+    /// freed and `active:false` is AWAITED, so the indicator is out before the
+    /// caller sees its answer. Disarms `Drop`.
+    async fn release(&mut self) {
+        if !std::mem::take(&mut self.armed) {
+            return;
+        }
+        self.free_slot();
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::AppLlmActivityChanged {
+                    app_id: self.app_id.clone(),
+                    active: false,
+                },
+            })
+            .await;
+    }
+
+    fn free_slot(&self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.remove(&self.app_id);
+        }
+    }
+}
+
+impl Drop for LlmInflightGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.free_slot();
+        // Drop cannot await, so the indicator reset is fire-and-forget — and
+        // only when a runtime is still up, since dropping during shutdown must
+        // not panic inside a destructor.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let event_sink = self.event_sink.clone();
+            let app_id = self.app_id.clone();
+            handle.spawn(async move {
+                event_sink
+                    .emit(ClientEvent::AppEvent {
+                        event: AppEventDto::AppLlmActivityChanged { app_id, active: false },
+                    })
+                    .await;
+            });
+        }
+    }
+}
+
 const REASON_LLM: &str =
     "应用请求调用你配置的 AI 模型来实现应用内功能。调用走你当前选择的模型与密钥，会消耗你的模型用量/费用。";
 
@@ -297,7 +363,7 @@ impl LocalAppsHostBroker {
         if !self
             .llm_inflight
             .lock()
-            .await
+            .expect("llm inflight set poisoned")
             .insert(app_id.to_string())
         {
             return Err(BridgeFailure::coded(
@@ -305,12 +371,21 @@ impl LocalAppsHostBroker {
                 "this app already has a model call in flight",
             ));
         }
+        // Armed from here on, so the slot is released even on the exits the
+        // compiler cannot see: this future is dropped whenever the connection
+        // is torn down mid-call, while the broker outlives it in the
+        // process-wide profile cache.
+        let mut inflight = LlmInflightGuard {
+            app_id: app_id.to_string(),
+            slots: self.llm_inflight.clone(),
+            event_sink: self.event_sink.clone(),
+            armed: true,
+        };
         self.emit_llm_activity(app_id, true).await;
         let outcome = tokio::time::timeout(CHAT_TIMEOUT, llm.chat(request)).await;
-        self.llm_inflight.lock().await.remove(app_id);
-        // Cleared on EVERY exit path — a stuck "calling AI" indicator would
-        // outlive the call that raised it.
-        self.emit_llm_activity(app_id, false).await;
+        // The ordered release on the paths that do return: the "calling AI"
+        // indicator goes out before the caller sees its answer.
+        inflight.release().await;
 
         let outcome = match outcome {
             Err(_) => {

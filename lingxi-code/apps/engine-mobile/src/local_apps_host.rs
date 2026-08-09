@@ -348,7 +348,11 @@ pub(crate) struct LocalAppsHostBroker {
     media: crate::local_apps_device::MediaCache,
     /// Apps with an `llm.chat` call in flight. One per app: an app-initiated
     /// call spends the user's quota, so a page cannot fan out.
-    llm_inflight: Mutex<std::collections::HashSet<String>>,
+    ///
+    /// A std mutex behind an `Arc` on purpose: the slot is released by
+    /// `LlmInflightGuard::drop`, which cannot await, and the set is only ever
+    /// insert/remove — no lock is ever held across an await.
+    pub(super) llm_inflight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Serializes mailbox read-modify-writes. Held across the file update
     /// and NOTHING else — never across an emit, never across a client call.
     mailbox_writes: Mutex<()>,
@@ -415,7 +419,7 @@ impl LocalAppsHostBroker {
             device: OnceLock::new(),
             recording: Arc::new(Mutex::new(None)),
             media: crate::local_apps_device::MediaCache::default(),
-            llm_inflight: Mutex::new(std::collections::HashSet::new()),
+            llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),

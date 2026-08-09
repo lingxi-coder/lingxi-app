@@ -207,11 +207,17 @@ fn chat_part_block(part: ChatPart) -> protocol::ContentBlock {
     }
 }
 
+/// Project an assistant reply onto its text, matching the repo's existing
+/// fold (`orchestrator::hook_prompt_runner::extract_text`): `Text` AND
+/// `ConnectorText` contribute, tool-use / reasoning blocks do not, and the
+/// pieces are joined bare. Dropping `ConnectorText` would hand the page
+/// `ok: true` with an empty answer whenever a reply arrives on that block.
 fn extract_chat_text(content: &[ContentBlock]) -> String {
     content
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
+            ContentBlock::ConnectorText { connector_text, .. } => Some(connector_text.as_str()),
             _ => None,
         })
         .collect()

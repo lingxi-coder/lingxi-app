@@ -27,6 +27,13 @@ impl LocalAppsHostBroker {
             .and_then(Value::as_str)
             .ok_or_else(|| BridgeFailure::coded("invalid_request", "topic is required"))?
             .to_string();
+        // Shape-check BEFORE the capability gate, the contract
+        // `parse_chat_request` already follows: a malformed call must not make
+        // the user answer a permission sheet for a request that was never
+        // going to run — and a page retrying a bad topic would otherwise raise
+        // that sheet over and over.
+        local_apps::mailbox::validate_topic(&topic)
+            .map_err(|error| BridgeFailure::coded("invalid_request", error.to_string()))?;
         let body = payload.get("body").cloned().unwrap_or(json!({}));
         self.authorize_declared_capability(
             app_id,

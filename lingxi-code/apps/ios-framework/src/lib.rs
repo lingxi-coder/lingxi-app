@@ -2429,6 +2429,7 @@ pub fn build_ios_engine_with_config(
             clipboard,
             permissions,
             secure_storage,
+            location,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

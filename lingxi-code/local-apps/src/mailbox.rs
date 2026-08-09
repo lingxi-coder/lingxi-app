@@ -88,6 +88,20 @@ fn valid_topic(topic: &str) -> bool {
         })
 }
 
+/// The topic grammar, callable before an event is built.
+///
+/// `append` applies it too, but a caller that gates on a user permission has
+/// to be able to reject a malformed topic BEFORE raising the sheet — see
+/// `agent_post_value`.
+pub fn validate_topic(topic: &str) -> Result<(), AppError> {
+    if valid_topic(topic) {
+        return Ok(());
+    }
+    Err(AppError::InvalidRequest(format!(
+        "invalid mailbox topic {topic:?}: must match ^[a-z0-9][a-z0-9_.-]{{0,63}}$"
+    )))
+}
+
 impl AppMailbox {
     /// Append one event, evicting the oldest once a cap is hit. Returns the
     /// minted sequence number.
@@ -97,11 +111,7 @@ impl AppMailbox {
         body: serde_json::Value,
         created_at_ms: u64,
     ) -> Result<u64, AppError> {
-        if !valid_topic(topic) {
-            return Err(AppError::InvalidRequest(format!(
-                "invalid mailbox topic {topic:?}: must match ^[a-z0-9][a-z0-9_.-]{{0,63}}$"
-            )));
-        }
+        validate_topic(topic)?;
         let encoded = serde_json::to_vec(&body)
             .map_err(|error| AppError::InvalidRequest(format!("mailbox body: {error}")))?;
         if encoded.len() > MAX_MAILBOX_BODY_BYTES {
@@ -118,7 +128,17 @@ impl AppMailbox {
             body,
             created_at_ms,
         });
-        while self.events.len() > MAX_MAILBOX_EVENTS {
+        // Both caps, because neither alone bounds the document: the count cap
+        // admits MAX_MAILBOX_EVENTS x MAX_MAILBOX_BODY_BYTES = 1 MiB, four
+        // times what `save_mailbox` accepts, and `drain` advances a cursor
+        // without removing anything — so without a byte cap here the file
+        // grows until every later save fails and `agent.post` is dead for the
+        // life of the app. The byte cap never evicts the event just appended
+        // (one event is bounded by MAX_MAILBOX_BODY_BYTES, far under the
+        // document limit), so an append always leaves its own event readable.
+        while self.events.len() > MAX_MAILBOX_EVENTS
+            || (self.events.len() > 1 && self.encoded_len() > MAX_MAILBOX_BYTES)
+        {
             let evicted = self.events.remove(0);
             // Only count what nobody read: an event the agent already
             // drained is not a loss, and reporting it as one would make
@@ -128,6 +148,13 @@ impl AppMailbox {
             }
         }
         Ok(seq)
+    }
+
+    /// Size of this mailbox exactly as [`save_mailbox`] will write it
+    /// (pretty-printed, trailing newline), so `append`'s eviction budget and
+    /// the save-time cap cannot disagree.
+    fn encoded_len(&self) -> u64 {
+        serde_json::to_vec_pretty(self).map_or(0, |body| body.len() as u64 + 1)
     }
 
     /// Read without advancing the cursor. `after_seq` replays history the
@@ -269,6 +296,36 @@ mod tests {
             "an app must be able to tell that it lost events, not silently miss them"
         );
         assert_eq!(mailbox.events[0].body["text"], "5");
+    }
+
+    /// The count cap alone admits MAX_MAILBOX_EVENTS x MAX_MAILBOX_BODY_BYTES
+    /// = 1 MiB, four times what `save_mailbox` accepts — and since `drain`
+    /// never removes an event, a document that grows past the save cap can
+    /// never shrink again, so `agent.post` would fail forever. Every legal
+    /// append must therefore leave a document the writer will still take.
+    #[test]
+    fn a_run_of_max_size_bodies_stays_writable() {
+        let mut mailbox = AppMailbox::default();
+        let big = serde_json::json!({ "text": "x".repeat(MAX_MAILBOX_BODY_BYTES - 64) });
+        for i in 0..(MAX_MAILBOX_EVENTS + 5) {
+            let seq = mailbox
+                .append("sensor.sample", big.clone(), 1_000 + i as u64)
+                .expect("a body under the per-event cap must always be accepted");
+            assert!(
+                mailbox.events.iter().any(|event| event.seq == seq),
+                "an append must never evict the event it just minted"
+            );
+            let encoded = serde_json::to_vec_pretty(&mailbox).expect("serialize").len() + 1;
+            assert!(
+                encoded as u64 <= MAX_MAILBOX_BYTES,
+                "append #{i} left {encoded} bytes, which save_mailbox refuses \
+                 (limit {MAX_MAILBOX_BYTES}) — the mailbox is wedged from here on"
+            );
+        }
+        assert!(
+            mailbox.dropped_count > 0,
+            "the byte cap must report what it evicted, not drop it silently"
+        );
     }
 
     #[test]

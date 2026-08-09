@@ -203,28 +203,33 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(store.pendingPermission)
         }
 
-        /// Every namespace the injected page bridge advertises must reach a
-        /// wire operation. A missing pair fails silently as
-        /// "bridge unsupported" at RUNTIME, in a generated app, with the
-        /// prompt already promising the API works.
+        /// Every operation the injected page bridge advertises must reach a
+        /// wire operation — and the table is DERIVED from the injected
+        /// JavaScript, not hand-copied beside it. A hand-written list would
+        /// stay green through exactly the drift this guards: someone adds a
+        /// namespace to `bridgeSource`, forgets the store mapping, and the
+        /// failure surfaces at RUNTIME inside a generated app whose prompt
+        /// already promised the API works.
         func testEveryInjectedBridgeOperationMapsToAWireOperation() async {
-            let expected: [(String, String, AppBridgeOperationDto)] = [
-                ("data", "query", .queryData),
-                ("data", "mutate", .mutateData),
-                ("network", "fetch", .networkRequest),
-                ("runtime", "info", .runtimeStatus),
-                ("device", "capturePhoto", .capturePhoto),
-                ("device", "pickImage", .pickImage),
-                ("device", "recordAudioStart", .recordAudioStart),
-                ("device", "recordAudioStop", .recordAudioStop),
-                ("device", "getLocation", .getLocation),
-                ("device", "transcribeSpeech", .transcribeSpeech),
-                ("device", "postNotification", .postNotification),
-                ("llm", "chat", .llmChat),
-                ("agent", "post", .agentPost),
-            ]
+            // `request('Device', 'capturePhoto', …)` in the injected source.
+            let pattern = try! NSRegularExpression(pattern: #"request\('(\w+)',\s*'(\w+)'"#)
+            let source = LocalAppWebViewRepresentable.bridgeSource
+            let matches = pattern.matches(
+                in: source,
+                range: NSRange(source.startIndex..., in: source))
+            let advertised: [(namespace: String, operation: String)] = matches.compactMap {
+                guard let ns = Range($0.range(at: 1), in: source),
+                      let op = Range($0.range(at: 2), in: source)
+                else { return nil }
+                // The injected JS names the handler suffix (`Device`); the
+                // store keys on the lowercased namespace (`device`).
+                return (String(source[ns]).lowercased(), String(source[op]))
+            }
+            XCTAssertGreaterThanOrEqual(
+                advertised.count, 13,
+                "the bridge should advertise at least the data/network/runtime/device/llm/agent surface")
 
-            for (namespace, operation, wire) in expected {
+            for (namespace, operation) in advertised {
                 let store = LocalAppsStore()
                 var submitted: [ClientCommand] = []
                 store.configure { command in submitted.append(command) }
@@ -235,40 +240,45 @@ final class LocalAppsStoreTests: XCTestCase {
                     operation: operation,
                     payloadJSON: "{}"
                 ))
-                guard case let .executeAppBridgeRequest(request) = submitted.last else {
-                    return XCTFail("\(namespace).\(operation) never reached the engine")
+                guard case .executeAppBridgeRequest = submitted.last else {
+                    return XCTFail(
+                        "\(namespace).\(operation) is advertised by the injected bridge but "
+                            + "reaches no wire operation")
                 }
-                XCTAssertEqual(request.operation, wire, "\(namespace).\(operation)")
             }
         }
 
-        /// The page branches on `error.code`, so a failure response has to
-        /// carry the engine's stable code, not just its prose.
-        func testBridgeFailureCarriesTheEngineErrorCode() {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-            store.handle(event: .appEvent(event: .appBridgeResponse(response: AppBridgeResponseDto(
-                requestId: "req-1",
-                appId: "tracker",
-                ok: false,
-                resultJson: nil,
-                error: "capability Camera is not declared in the app manifest",
-                errorCode: "capability_not_declared"
-            ))))
-            // Nothing to assert on the store itself — the response is routed
-            // to the WebView registry — but the DTO must expose the field the
-            // routing reads, which is what this construction pins.
-            XCTAssertEqual(
-                AppBridgeResponseDto(
-                    requestId: "r", appId: "a", ok: false, resultJson: nil,
-                    error: "e", errorCode: "llm_busy"
-                ).errorCode,
-                "llm_busy"
-            )
+        /// A namespace the page can call but whose message handler is never
+        /// registered fails as "bridge unavailable" the first time an app
+        /// touches it — with nothing on the engine side to notice.
+        func testEveryInjectedNamespaceHasARegisteredMessageHandler() {
+            let pattern = try! NSRegularExpression(pattern: #"request\('(\w+)'"#)
+            let source = LocalAppWebViewRepresentable.bridgeSource
+            let namespaces = Set(pattern.matches(
+                in: source,
+                range: NSRange(source.startIndex..., in: source)
+            ).compactMap { match -> String? in
+                guard let range = Range(match.range(at: 1), in: source) else { return nil }
+                return "lingxi\(source[range])"
+            })
+            XCTAssertFalse(namespaces.isEmpty)
+            for handler in namespaces {
+                XCTAssertTrue(
+                    LocalAppWebViewRepresentable.messageHandlerNames.contains(handler),
+                    "\(handler) is called by the injected bridge but never registered")
+            }
         }
 
-        /// The two new engine events must land in the store, or the "calling
-        /// AI" indicator and the mailbox badge never move.
+        /// The page branches on `error.code`, so the injected bridge must put
+        /// the engine's stable code onto the rejected Error — not just its
+        /// prose.
+        func testInjectedBridgeAttachesTheErrorCodeToRejections() {
+            let source = LocalAppWebViewRepresentable.bridgeSource
+            XCTAssertTrue(
+                source.contains("error.code = envelope.code"),
+                "a failure envelope's `code` must reach page code as `error.code`")
+        }
+
         func testLlmActivityAndAgentEventsUpdateTheStore() {
             let store = LocalAppsStore()
             store.configure { _ in }

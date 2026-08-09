@@ -386,7 +386,10 @@ struct LocalAppWebView: View {
     }
 }
 
-private struct LocalAppWebViewRepresentable: UIViewRepresentable {
+// `internal`, not `private`: the injected bridge source is the contract the
+// generated page programs against, and LocalAppsStoreTests derives its
+// expectations from it rather than hand-copying them beside it.
+struct LocalAppWebViewRepresentable: UIViewRepresentable {
     let appID: String
     let url: URL
     let onBridgeRequest: ((LocalAppBridgeRequest) -> Void)?
@@ -517,11 +520,11 @@ private struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }
     }
 
-    private static let messageHandlerNames = [
+    static let messageHandlerNames = [
         "lingxiData", "lingxiNetwork", "lingxiRuntime", "lingxiDevice", "lingxiLlm", "lingxiAgent",
     ]
 
-    private static let bridgeSource = #"""
+    static let bridgeSource = #"""
     (() => {
       if (window.lingxi?.v1) return;
       const installCsp = () => {

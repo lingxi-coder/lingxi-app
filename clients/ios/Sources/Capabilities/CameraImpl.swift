@@ -86,6 +86,19 @@ import Foundation
                 throw CameraFfiError.Other(message: "no active scene to present from")
             }
             return try await withCheckedThrowingContinuation { cont in
+                // One slot, one picker — exactly like `LocationImpl`. Without
+                // this guard a second concurrent capture (a double-tapped
+                // button is two bridge requests, and the engine's camera tool
+                // shares this object with the local-app bridge) overwrites
+                // `continuation`, so the FIRST one is dropped unresumed: the
+                // Swift runtime logs a leaked-continuation misuse and the
+                // caller's `await` — which no timeout covers on the camera
+                // path — never returns.
+                guard self.continuation == nil else {
+                    cont.resume(throwing: CameraFfiError.Other(
+                        message: "another camera request is already in flight"))
+                    return
+                }
                 self.continuation = cont
                 self.pendingScaling = scaling
                 let picker = UIImagePickerController()

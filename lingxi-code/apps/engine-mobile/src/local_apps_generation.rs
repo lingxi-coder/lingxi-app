@@ -11,7 +11,8 @@ use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto};
 use local_apps::{
-    load_manifest, save_manifest, validate_workspace_source, AppDataStore, AppError,
+    load_manifest, save_manifest, validate_declared_capabilities, validate_workspace_source,
+    AppDataStore, AppError,
     AppGenerationExecutor, AppLayout, AppManifest, AppService, GenerationJob,
     GenerationJobObserver, GenerationJobStatus, GenerationRequest, GenerationRequestKind,
     WorkspaceSourcePolicy, WRITABLE_ROOTS,
@@ -427,7 +428,15 @@ impl AppGenerationExecutor for MobileAppGenerationExecutor {
                 write_file(&workspace, &write.path, write.contents.as_bytes(), true)?;
             }
             let policy = self.source_policy(request, layout).await?;
-            match validate_workspace_source(layout, &policy) {
+            // The capabilities the user actually approved. Read from the
+            // manifest rather than the draft plan because the manifest is
+            // what the RUNTIME gate consults — validating against anything
+            // else would let source pass here and still be refused at the
+            // first tap.
+            let declared = load_manifest(layout)
+                .map(|manifest| manifest.capabilities)
+                .unwrap_or_default();
+            match validate_declared_capabilities(layout, &policy, &declared) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let message = format!("{error}");
@@ -1227,6 +1236,46 @@ mod tests {
             second.contains("evil.example"),
             "the repair prompt must show the REJECTED bytes actually on disk, not a stale \
              pre-attempt snapshot that contradicts the validator feedback: {second}"
+        );
+    }
+
+    /// The whole point of the capability validator: a call the confirmed
+    /// plan never declared is caught HERE, where the model still has repair
+    /// attempts, instead of at the user's first tap — after which the plan
+    /// is frozen (`revise` cannot add a capability) and the app is
+    /// unrecoverable.
+    #[tokio::test]
+    async fn an_undeclared_capability_call_is_repaired_not_shipped() {
+        let harness = generation_harness(vec![
+            // Attempt 1: uses the camera, which this app's plan never declared.
+            Ok(serde_json::json!({
+                "files": [{
+                    "path": "app/page.jsx",
+                    "contents": "import {capturePhoto} from '../lib/lingxi-bridge';\n                                 export default function P(){capturePhoto();return null}"
+                }]
+            })),
+            Ok(serde_json::json!({
+                "files": [{"path": "app/page.jsx", "contents": "export default function P(){return null}"}]
+            })),
+        ])
+        .await;
+
+        harness
+            .executor
+            .generate_source(&harness.initial_request(), &harness.layout)
+            .await
+            .expect("the repair pass succeeds");
+
+        let repair_prompt = harness.prompt_at(1);
+        assert!(
+            repair_prompt.contains("camera"),
+            "the repair prompt must name the capability in the WIRE spelling the plan and \
+             prompts use, or the model is guessing: {repair_prompt}"
+        );
+        assert!(
+            repair_prompt.contains("never declared") || repair_prompt.contains("confirmed plan"),
+            "the feedback must say WHY, since the model cannot fix this by declaring: \
+             {repair_prompt}"
         );
     }
 

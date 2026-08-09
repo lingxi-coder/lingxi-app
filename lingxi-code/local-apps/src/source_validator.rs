@@ -7,6 +7,7 @@
 
 use crate::error::AppError;
 use crate::manifest::AppLayout;
+use crate::permissions::AppCapability;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -63,6 +64,16 @@ impl WorkspaceSourcePolicy {
 pub fn validate_workspace_source(
     layout: &AppLayout,
     policy: &WorkspaceSourcePolicy,
+) -> Result<(), AppError> {
+    validate_workspace_source_with(layout, policy, None)
+}
+
+/// The shared walk. `declared` present additionally screens every file for
+/// bridge calls the plan never declared.
+fn validate_workspace_source_with(
+    layout: &AppLayout,
+    policy: &WorkspaceSourcePolicy,
+    declared: Option<&[AppCapability]>,
 ) -> Result<(), AppError> {
     policy.validate()?;
     let workspace = layout.root().join(layout.workspace_rel());
@@ -144,7 +155,7 @@ pub fn validate_workspace_source(
                     "workspace exceeds {MAX_TOTAL_SOURCE_BYTES} bytes"
                 )));
             }
-            validate_file(relative, &path, policy)?;
+            validate_file(relative, &path, policy, declared)?;
         }
     }
 
@@ -190,10 +201,97 @@ fn validate_directory(relative: &Path, policy: &WorkspaceSourcePolicy) -> Result
     )))
 }
 
+/// Bridge calls that require a declared capability, and the capability each
+/// one needs.
+///
+/// The mirror image of the `forbidden` table in [`validate_file`]: that one
+/// lists calls no app may make, this one lists calls only a DECLARING app
+/// may make. Both needles per capability — the `lib/lingxi-bridge.js`
+/// wrapper the prompt steers apps toward, and the direct `window.lingxi.v1`
+/// form it also documents — matched against the same whitespace-stripped,
+/// lowercased text the forbidden table uses.
+const CAPABILITY_CALLS: &[(&str, AppCapability)] = &[
+    ("capturephoto(", AppCapability::Camera),
+    (".device.capturephoto", AppCapability::Camera),
+    ("pickimage(", AppCapability::PhotoLibrary),
+    (".device.pickimage", AppCapability::PhotoLibrary),
+    ("startrecording(", AppCapability::Microphone),
+    (".device.recordaudiostart", AppCapability::Microphone),
+    ("transcribespeech(", AppCapability::Microphone),
+    (".device.transcribespeech", AppCapability::Microphone),
+    ("getcurrentlocation(", AppCapability::Location),
+    (".device.getlocation", AppCapability::Location),
+    ("postnotification(", AppCapability::Notifications),
+    (".device.postnotification", AppCapability::Notifications),
+    ("requestllmchat(", AppCapability::Llm),
+    (".llm.chat(", AppCapability::Llm),
+    ("postagentevent(", AppCapability::AgentNotify),
+    (".agent.post(", AppCapability::AgentNotify),
+    ("mutatecollection(", AppCapability::DataMutation),
+    (".data.mutate(", AppCapability::DataMutation),
+];
+
+/// Reject generated source that calls a capability the confirmed plan never
+/// declared.
+///
+/// Without this the failure lands on the USER: generation, screening, build
+/// and preview approval all pass, and the first tap returns
+/// `capability_not_declared` — at which point the plan is frozen (`revise`
+/// cannot add a capability, and nothing reopens the designer), so the app is
+/// unrecoverable and the only recourse is building a new one. Here it is
+/// just another validator rejection, fed back to the model with two repair
+/// attempts left.
+///
+/// The model cannot fix it by DECLARING — the plan the user approved is the
+/// contract — so the message tells it to drop the call instead.
+///
+/// Runs through [`validate_workspace_source`]'s own traversal rather than a
+/// second one, so it inherits the symlink, `.git` and size guards instead of
+/// re-deriving (and eventually diverging from) them.
+pub fn validate_declared_capabilities(
+    layout: &AppLayout,
+    policy: &WorkspaceSourcePolicy,
+    declared: &[AppCapability],
+) -> Result<(), AppError> {
+    validate_workspace_source_with(layout, policy, Some(declared))
+}
+
+/// One file's capability check, against the same compacted text the
+/// forbidden-call table reads.
+fn validate_capability_calls(
+    relative: &Path,
+    text: &str,
+    declared: &[AppCapability],
+) -> Result<(), AppError> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = compact.to_lowercase();
+    for (needle, capability) in CAPABILITY_CALLS {
+        if lower.contains(needle) && !declared.contains(capability) {
+            // The WIRE spelling (`photo_library`), not the Rust variant
+            // (`PhotoLibrary`): this message is read by the model, and the
+            // plan schema and prompts it works from use snake_case. Naming
+            // the capability in a vocabulary it does not recognize would
+            // make the repair attempt a guess.
+            let wire = serde_json::to_string(capability)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string();
+            return Err(AppError::InvalidRequest(format!(
+                "{} calls the `{wire}` capability, which this app's confirmed plan never \
+                 declared. The plan is the contract and cannot be changed now — remove the \
+                 call and implement the feature without it.",
+                relative.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_file(
     relative: &Path,
     absolute: &Path,
     policy: &WorkspaceSourcePolicy,
+    declared: Option<&[AppCapability]>,
 ) -> Result<(), AppError> {
     validate_relative_file(relative)?;
     let mut components = relative.components();
@@ -242,7 +340,11 @@ fn validate_file(
     let source = std::str::from_utf8(&bytes).map_err(|_| {
         AppError::InvalidRequest(format!("text source {slash_path} is not valid UTF-8"))
     })?;
-    scan_forbidden_source(&slash_path, source)
+    scan_forbidden_source(&slash_path, source)?;
+    if let Some(declared) = declared {
+        validate_capability_calls(relative, source, declared)?;
+    }
+    Ok(())
 }
 
 fn scan_forbidden_source(relative: &str, source: &str) -> Result<(), AppError> {
@@ -386,6 +488,66 @@ mod tests {
             ]),
         };
         (root, layout, policy)
+    }
+
+    /// The gap this closes: a plan that omits `camera` while the generated
+    /// page calls `capturePhoto()` passes generation, screening, build and
+    /// preview approval, and fails at the user's FIRST tap — by which time
+    /// the capability list is frozen (`revise` cannot add one), so the app
+    /// is unrecoverable. Caught here it is a generation-time rejection the
+    /// model still has two repair attempts to fix.
+    #[test]
+    fn rejects_a_bridge_call_the_confirmed_plan_never_declared() {
+        let (root, layout, policy) = fixture();
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::write(
+            workspace.join("app/page.tsx"),
+            "import { capturePhoto } from '../lib/lingxi-bridge';\n             export default function Page() { capturePhoto(); return <main /> }",
+        )
+        .unwrap();
+
+        let error = validate_declared_capabilities(&layout, &policy, &[])
+            .expect_err("an undeclared capability must not reach the user");
+        let message = error.to_string();
+        assert!(message.contains("camera"), "{message}");
+        assert!(
+            message.contains("app/page.tsx"),
+            "the model needs the file to fix: {message}"
+        );
+
+        validate_declared_capabilities(&layout, &policy, &[AppCapability::Camera])
+            .expect("the same call is legal once the plan declares it");
+    }
+
+    /// The direct form the prompt also documents, for apps that skip the
+    /// helper wrapper.
+    #[test]
+    fn the_direct_window_form_is_screened_too() {
+        let (root, layout, policy) = fixture();
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::write(
+            workspace.join("app/page.tsx"),
+            "export default function Page() { window.lingxi.v1.llm.chat({}); return <main /> }",
+        )
+        .unwrap();
+
+        let error = validate_declared_capabilities(&layout, &policy, &[])
+            .expect_err("window.lingxi.v1.llm.chat needs the llm capability");
+        assert!(error.to_string().contains("llm"), "{error}");
+    }
+
+    /// A capability declared but never called is not an error: over-declaring
+    /// costs one permission prompt that never fires, while failing the build
+    /// over it would reject a legal app.
+    #[test]
+    fn an_unused_declared_capability_is_not_an_error() {
+        let (_root, layout, policy) = fixture();
+        validate_declared_capabilities(
+            &layout,
+            &policy,
+            &[AppCapability::Camera, AppCapability::Llm],
+        )
+        .expect("declaring more than you use is allowed");
     }
 
     #[test]

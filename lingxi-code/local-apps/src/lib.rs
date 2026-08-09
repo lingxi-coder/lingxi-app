@@ -74,7 +74,10 @@ pub use questionnaire::{
     AppDesignFieldOption, AppDesignFieldType, AppDesignStep, AppPlan,
 };
 pub use service::AppService;
-pub use source_validator::{validate_workspace_source, WorkspaceSourcePolicy, WRITABLE_ROOTS};
+pub use source_validator::{
+    validate_declared_capabilities, validate_workspace_source, WorkspaceSourcePolicy,
+    WRITABLE_ROOTS,
+};
 pub use state::{runtime_transition_allowed, AppState, DRAFT_EDITABLE_STATES};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppContinuationKind, AppDesignDraft,

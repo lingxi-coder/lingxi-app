@@ -1592,6 +1592,92 @@ impl traits::SharingService for IosShareBridge {
     }
 }
 
+/// FFI error surface for the iOS location callback interface. Flat, like its
+/// notification/camera siblings, so `UniFFI` can render it for an async
+/// `callback_interface` method.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum LocationFfiError {
+    /// The user denied location permission.
+    #[error("location permission denied")]
+    PermissionDenied,
+    /// Location services are off, restricted, or absent.
+    #[error("location unavailable")]
+    Unavailable,
+    /// No fix arrived before the native deadline.
+    #[error("location timed out")]
+    Timeout,
+    /// Any other native failure.
+    #[error("location error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for one resolved location crossing the callback-interface
+/// seam. Mapped to [`traits::LocationFix`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct LocationFixFfi {
+    /// Latitude in decimal degrees (WGS-84).
+    pub latitude: f64,
+    /// Longitude in decimal degrees (WGS-84).
+    pub longitude: f64,
+    /// Horizontal accuracy in meters, when the platform reports one.
+    pub accuracy_m: Option<f64>,
+    /// Fix time, epoch milliseconds.
+    pub timestamp_ms: u64,
+}
+
+/// Crate-local foreign callback interface for one-shot location — the Swift
+/// app implements it over `CLLocationManager`. Bridged to
+/// [`traits::LocationProvider`] by [`IosLocationBridge`].
+///
+/// One-shot only: continuous tracking would need a host-to-page push channel
+/// that does not exist yet, and a background-location entitlement nobody has
+/// asked for.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosLocation: Send + Sync {
+    /// Resolve the device's current location once.
+    async fn current_location(&self) -> Result<LocationFixFfi, LocationFfiError>;
+}
+
+/// Adapts the crate-local [`IosLocation`] callback interface to the shared
+/// [`traits::LocationProvider`] seam the engine consumes.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosLocationBridge {
+    inner: Box<dyn IosLocation>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::LocationProvider for IosLocationBridge {
+    async fn current_location(&self) -> Result<traits::LocationFix, traits::LocationError> {
+        match self.inner.current_location().await {
+            Ok(fix) => Ok(traits::LocationFix {
+                latitude: fix.latitude,
+                longitude: fix.longitude,
+                accuracy_m: fix.accuracy_m,
+                timestamp_ms: fix.timestamp_ms,
+            }),
+            Err(LocationFfiError::PermissionDenied) => {
+                Err(traits::LocationError::PermissionDenied)
+            }
+            Err(LocationFfiError::Unavailable) => Err(traits::LocationError::Unavailable),
+            Err(LocationFfiError::Timeout) => Err(traits::LocationError::Timeout),
+            Err(LocationFfiError::Other { message }) => {
+                Err(traits::LocationError::Other(message))
+            }
+        }
+    }
+}
+
 /// FFI error surface for the iOS notification callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::NotificationError`].
@@ -1782,6 +1868,29 @@ pub trait IosCamera: Send + Sync {
     ) -> Result<CapturedImageFfi, CameraFfiError>;
     /// Pick an existing image from the system photo library.
     async fn pick_from_library(&self) -> Result<CapturedImageFfi, CameraFfiError>;
+
+    /// Capture, then downscale to at most `max_dimension` px on the longer
+    /// side and re-encode at `jpeg_quality` (0.0..=1.0).
+    ///
+    /// The scaling happens natively because Rust ships no image codec here
+    /// (the mobile build vendors its dependencies offline), and a
+    /// full-resolution 12 MP JPEG is 3-6 MB — far past what a local app's
+    /// bridge response, or a provider's vision endpoint, will take.
+    async fn capture_photo_sized(
+        &self,
+        front: bool,
+        allow_editing: bool,
+        max_dimension: u32,
+        jpeg_quality: f32,
+    ) -> Result<CapturedImageFfi, CameraFfiError>;
+
+    /// Library pick with the same native downscale contract as
+    /// [`IosCamera::capture_photo_sized`].
+    async fn pick_from_library_sized(
+        &self,
+        max_dimension: u32,
+        jpeg_quality: f32,
+    ) -> Result<CapturedImageFfi, CameraFfiError>;
 }
 
 /// Adapts the crate-local [`IosCamera`] callback interface to the shared
@@ -1810,6 +1919,38 @@ impl traits::CameraControl for IosCameraBridge {
     }
     async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
         match self.inner.pick_from_library().await {
+            Ok(img) => Ok(captured_image_from_ffi(img)),
+            Err(e) => Err(camera_error_from_ffi(e)),
+        }
+    }
+    // Overrides the trait's delegating defaults: on iOS the native side CAN
+    // scale, and a local app's bridge budget depends on it doing so.
+    async fn capture_photo_sized(
+        &self,
+        opts: traits::CapturePhotoOpts,
+        max_dimension: u32,
+        jpeg_quality: f32,
+    ) -> Result<traits::CapturedImage, traits::CameraError> {
+        let front = matches!(opts.position, traits::CameraPosition::Front);
+        match self
+            .inner
+            .capture_photo_sized(front, opts.allow_editing, max_dimension, jpeg_quality)
+            .await
+        {
+            Ok(img) => Ok(captured_image_from_ffi(img)),
+            Err(e) => Err(camera_error_from_ffi(e)),
+        }
+    }
+    async fn pick_from_library_sized(
+        &self,
+        max_dimension: u32,
+        jpeg_quality: f32,
+    ) -> Result<traits::CapturedImage, traits::CameraError> {
+        match self
+            .inner
+            .pick_from_library_sized(max_dimension, jpeg_quality)
+            .await
+        {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
         }
@@ -1988,6 +2129,12 @@ pub enum VoiceFfiError {
     /// `stop_recording` was called with no active session.
     #[error("not currently recording")]
     NotRecording,
+    /// The shared `AVAudioSession` is held by another consumer (FlowMode's
+    /// voice orb, a hold-to-talk capture): the recorder is fine, the session
+    /// is not free. Distinct from `Other` so a local app can tell the user
+    /// "try again in a moment" instead of surfacing an opaque failure.
+    #[error("audio session busy")]
+    Busy,
     /// Any other native failure.
     #[error("voice error: {message}")]
     Other {
@@ -2077,6 +2224,7 @@ fn voice_error_from_ffi(e: VoiceFfiError) -> traits::VoiceError {
     match e {
         VoiceFfiError::PermissionDenied => traits::VoiceError::PermissionDenied,
         VoiceFfiError::NotRecording => traits::VoiceError::NotRecording,
+        VoiceFfiError::Busy => traits::VoiceError::Busy,
         VoiceFfiError::Other { message } => traits::VoiceError::Other(message),
     }
 }
@@ -2195,7 +2343,7 @@ pub fn build_ios_cron_store(
 }
 
 #[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[cfg_attr(feature = "uniffi", uniffi::export(default(location = None)))]
 #[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Swift callback.
 pub fn build_ios_engine_with_config(
     config: IosEngineLaunchConfigFfi,
@@ -2209,6 +2357,10 @@ pub fn build_ios_engine_with_config(
     clipboard: Box<dyn IosClipboard>,
     permissions: Box<dyn IosPermissionSink>,
     secure_storage: Option<Box<dyn IosSecureStorage>>,
+    // Defaulted so the two callers that have no location impl (the cron
+    // bridge, the engine round-trip test) keep compiling untouched; only the
+    // conversation host passes one.
+    location: Option<Box<dyn IosLocation>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
     #[cfg(target_os = "ios")]
@@ -2248,6 +2400,9 @@ pub fn build_ios_engine_with_config(
             clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
             secure_storage: secure_storage.map(|s| {
                 Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
+            }),
+            location: location.map(|l| {
+                Arc::new(IosLocationBridge { inner: l }) as Arc<dyn traits::LocationProvider>
             }),
             mobile_linux: ios_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
@@ -2318,6 +2473,7 @@ pub fn build_ios_engine(
         clipboard,
         permissions,
         secure_storage,
+        None,
     )
 }
 

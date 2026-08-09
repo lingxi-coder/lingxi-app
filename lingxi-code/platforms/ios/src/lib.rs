@@ -21,6 +21,7 @@
 use platform_common::{GuestPathFileSystem, MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
+use traits::LocationProvider;
 use traits::{
     CameraControl, Clipboard, Clock, FileSystem, HttpTransport, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService, Platform, ProcessRunner,
@@ -56,6 +57,9 @@ pub struct IosPlatformInputs {
     /// keeps the non-persisting development stub, which gates OAuth `/login` off
     /// (it cannot persist tokens). Inject a real store to enable subscription login.
     pub secure_storage: Option<Arc<dyn SecureStorage>>,
+    /// Native one-shot location (Swift impl), when wired. `None` keeps the
+    /// local-apps location bridge reporting "unavailable".
+    pub location: Option<Arc<dyn LocationProvider>>,
     /// Mobile Linux runtime bridge (iSH path). `None` keeps the legacy
     /// unavailable shell behavior in place.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
@@ -82,6 +86,7 @@ pub struct IosPlatform {
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
     secure_storage: Option<Arc<dyn SecureStorage>>,
+    location: Option<Arc<dyn LocationProvider>>,
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
 }
 
@@ -161,6 +166,7 @@ impl IosPlatform {
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
             secure_storage: inputs.secure_storage,
+            location: inputs.location,
             mobile_linux: effective_runtime,
         }
     }
@@ -216,6 +222,9 @@ impl Platform for IosPlatform {
     }
     fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
         self.tts.clone()
+    }
+    fn location(&self) -> Option<Arc<dyn LocationProvider>> {
+        self.location.clone()
     }
     fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
         self.notifications.clone()
@@ -293,6 +302,7 @@ mod tests {
             notifications: None,
             clipboard: None,
             secure_storage: None,
+            location: None,
             mobile_linux,
             workspace_host_path: Some(root.join("workspace")),
             stable_workspace_id: Some("abc".to_string()),

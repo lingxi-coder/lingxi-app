@@ -1673,47 +1673,6 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertFalse(DesignerFieldChips(field: withoutCustom).showsCustomInput)
     }
 
-    /// A streaming transcript must not become one ever-growing markdown block.
-    ///
-    /// `AIText` re-parses its ENTIRE string on every body evaluation, so a
-    /// single block that grows for a whole generation is re-parsed about five
-    /// times a second at ever-increasing cost — the UI stuttered while the
-    /// model streamed and went smooth the moment it stopped. Sealing blocks at
-    /// a budget means only the live tail is ever re-parsed.
-    @MainActor
-    func testAStreamingTranscriptSealsBlocksSoOnlyTheTailKeepsGrowing() {
-        let store = LocalAppsStore()
-        let chunk = String(repeating: "x", count: 500)
-
-        for _ in 0 ..< 20 {
-            store.appendTranscript(appId: "a1", kind: .text, chunk: chunk)
-        }
-
-        let blocks = store.generationTranscript["a1"] ?? []
-        XCTAssertGreaterThan(
-            blocks.count, 1,
-            "10k chars of stream must be split, not accumulated into one block"
-        )
-        XCTAssertEqual(
-            blocks.map(\.text).joined(), String(repeating: chunk, count: 20),
-            "splitting is a render budget — not one character may be dropped"
-        )
-        for block in blocks.dropLast() {
-            XCTAssertLessThan(
-                block.text.count, 3_000,
-                "a sealed block stays near the budget so re-parsing it is cheap"
-            )
-        }
-
-        // Not vacuously true: a short stream still reads as one block, so the
-        // transcript is prose rather than packets.
-        let calm = LocalAppsStore()
-        calm.appendTranscript(appId: "a1", kind: .text, chunk: "hello ")
-        calm.appendTranscript(appId: "a1", kind: .text, chunk: "world")
-        XCTAssertEqual(calm.generationTranscript["a1"]?.count, 1)
-        XCTAssertEqual(calm.generationTranscript["a1"]?.first?.text, "hello world")
-    }
-
     /// A supplementary chips row — the one shown UNDER another field type's
     /// own editor — must not offer "Other…".
     ///

@@ -221,28 +221,27 @@ private enum MDLine: Equatable {
     case numbered(marker: String, String)
 }
 
-struct AIText: View, Equatable {
+/// One top-level markdown block, rendered independently.
+///
+/// `Equatable` on its block value so a streaming message only pays for the
+/// block that changed — see `AIText.body`.
+private struct MDBlockView: View, Equatable {
     @Environment(\.theme) private var t
-    let markdown: String
+    let block: MDBlock
 
     private static let bodySize: CGFloat = 15.5
 
-    static func == (lhs: AIText, rhs: AIText) -> Bool {
-        lhs.markdown == rhs.markdown
+    static func == (lhs: MDBlockView, rhs: MDBlockView) -> Bool {
+        lhs.block == rhs.block
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(Self.parseBlocks(markdown).enumerated()), id: \.offset) { _, block in
-                switch block {
-                case let .code(code, _):
-                    codeBlock(code)
-                case let .text(lines):
-                    textBlock(lines)
-                }
-            }
+        switch block {
+        case let .code(code, _):
+            codeBlock(code)
+        case let .text(lines):
+            textBlock(lines)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // A fenced code block: monospaced, in a tinted rounded panel.
@@ -261,16 +260,41 @@ struct AIText: View, Equatable {
     // A text block: paragraphs and list items, each with inline spans.
     private func textBlock(_ lines: [MDLine]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
+            // Per LINE, not per block: `parseBlocks` folds every run of
+            // non-fenced lines into a SINGLE `.text` block, so block-level
+            // equality alone does nothing for ordinary prose — the one text
+            // block changes on every streamed chunk. Line granularity is what
+            // actually stops the whole message re-building its
+            // `AttributedString`s, and it keeps the layout byte-identical
+            // because the spacing still comes from this VStack.
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                switch line {
-                case let .paragraph(s):
-                    inlineText(s)
-                case let .bullet(s):
-                    listRow(marker: "•", s)
-                case let .numbered(marker, s):
-                    listRow(marker: marker, s)
-                }
+                MDLineView(line: line).equatable()
             }
+        }
+    }
+
+}
+
+/// One rendered markdown line. `Equatable` on the line so a streaming message
+/// only rebuilds the `AttributedString` for the line that actually changed.
+private struct MDLineView: View, Equatable {
+    @Environment(\.theme) private var t
+    let line: MDLine
+
+    private static let bodySize: CGFloat = 15.5
+
+    static func == (lhs: MDLineView, rhs: MDLineView) -> Bool {
+        lhs.line == rhs.line
+    }
+
+    var body: some View {
+        switch line {
+        case let .paragraph(s):
+            inlineText(s)
+        case let .bullet(s):
+            listRow(marker: "•", s)
+        case let .numbered(marker, s):
+            listRow(marker: marker, s)
         }
     }
 
@@ -288,12 +312,50 @@ struct AIText: View, Equatable {
         // Dynamic Type: the assistant body scales relative to .body. The inline
         // spans carry their own fixed-point fonts (bold / code) inside the
         // AttributedString; the outer .font sets the scalable default size.
-        Text(Self.parseInline(s, size: Self.bodySize))
+        Text(AIText.parseInline(s, size: Self.bodySize))
             .font(.scaledSystem(Self.bodySize, relativeTo: .body))
             .lineSpacing(Self.bodySize * 0.6)
             .foregroundColor(t.text)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+}
+
+struct AIText: View, Equatable {
+    @Environment(\.theme) private var t
+    let markdown: String
+
+    private static let bodySize: CGFloat = 15.5
+
+    static func == (lhs: AIText, rhs: AIText) -> Bool {
+        lhs.markdown == rhs.markdown
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // One Equatable view PER BLOCK, not one view for the whole
+            // document. While a message streams, `markdown` changes on every
+            // chunk, so this body re-runs — but only the block that actually
+            // changed (the last, still-open one) re-evaluates its own body and
+            // rebuilds its `AttributedString`s. Every earlier block compares
+            // equal and is skipped.
+            //
+            // Without this, `parseInline` rebuilt an `AttributedString`
+            // character by character for every line of the WHOLE message on
+            // every chunk — quadratic in the length of the stream. The UI
+            // stuttered worse the longer a response ran and went smooth the
+            // instant it stopped, which is the signature of per-change work
+            // rather than per-scroll work.
+            //
+            // Splitting on `parseBlocks`' own boundaries is what makes this
+            // safe: it closes a fenced code block only at its closing fence,
+            // so no block is ever cut through the middle of a construct.
+            ForEach(Array(Self.parseBlocks(markdown).enumerated()), id: \.offset) { _, block in
+                MDBlockView(block: block).equatable()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: block parsing

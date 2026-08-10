@@ -47,4 +47,13 @@ final class ConversationNavigationTests: XCTestCase {
 
         XCTAssertEqual(request.cwd, .workspaceRelative("docs"))
     }
+
+    func testSessionDetailsRouteUsesTheCurrentSessionID() {
+        let navigation = AppNavigationModel()
+
+        navigation.openSessionDetails(sessionID: "session-details-1")
+
+        XCTAssertEqual(navigation.path.last, .sessionDetails(sessionID: "session-details-1"))
+        XCTAssertEqual(navigation.path.last?.id, "session-details:session-details-1")
+    }
 }

@@ -133,10 +133,31 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var navigation = navigation
-        NavigationStack(path: $navigation.path) {
-            rootSurface
-                .navigationDestination(for: AppRoute.self, destination: destination)
-                .id(localization.language)
+        ZStack {
+            // Sidebar + chat. In compact width this collapses to a stack whose
+            // root is the sidebar, which is what gives the chat a system back
+            // button and a back-swipe for free.
+            NavigationSplitView(
+                columnVisibility: $navigation.columnVisibility,
+                preferredCompactColumn: $navigation.compactColumn
+            ) {
+                sidebar
+                    .id(localization.language)
+            } detail: {
+                NavigationStack(path: $navigation.path) {
+                    detailSurface
+                        .navigationDestination(for: AppRoute.self, destination: destination)
+                        .id(localization.language)
+                }
+            }
+
+            // Onboarding owns the whole window, sidebar and navigation bars
+            // included, so it sits outside the split view rather than in a column.
+            if !app.setupDone {
+                SetupWizardView(convo: source.model, onSetModel: { source.setModel($0) })
+                    .zIndex(100)
+                    .transition(.opacity)
+            }
         }
         .environment(\.locale, localization.effectiveLocale())
         .onChange(of: scenePhase, handleScenePhase)
@@ -206,7 +227,7 @@ struct RootView: View {
                 onRefreshMcp: { source.refreshMcpServers() },
                 openTerminal: {
                     navigation.closeSettings()
-                    navigation.openTerminal(projectID: projectStore.activeProjectId)
+                    openCurrentWorkspaceTerminal()
                 },
                 onClose: { navigation.closeSettings() },
                 navigation: navigation
@@ -236,16 +257,34 @@ struct RootView: View {
         }
     }
 
-    private var rootSurface: some View {
+    private var sidebar: some View {
+        Drawer(
+            projectStore: projectStore,
+            localAppsStore: localAppsStore,
+            activeSession: $activeSession,
+            source: source,
+            openSettings: { navigation.showSettings() },
+            openTerminal: openCurrentWorkspaceTerminal,
+            openApps: { appID in navigation.openLocalApps(appID: appID) },
+            onSelectProject: { switchProject(to: $0) },
+            onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
+            onNewChat: { switchProject(to: $0, startNew: true) }
+        )
+        .id(sourceGeneration)
+    }
+
+    private var detailSurface: some View {
         ZStack {
             theme.windowBg.ignoresSafeArea()
             ChatView(
                 session: session,
-                openDrawer: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { navigation.showDrawer() } },
                 draft: $draft,
                 voiceInteraction: voiceInteraction,
                 source: source,
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
+                onOpenSessionDetails: {
+                    navigation.openSessionDetails(sessionID: session.id)
+                },
                 onOpenShellTask: { request in
                     navigation.openTerminal(
                         shellRequest: request,
@@ -268,65 +307,12 @@ struct RootView: View {
             )
             .id(sourceGeneration)
 
-            if navigation.drawerOpen {
-                Drawer(
-                    projectStore: projectStore,
-                    cronRepository: cronRepository,
-                    localAppsStore: localAppsStore,
-                    activeSession: $activeSession,
-                    source: source,
-                    onClose: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { navigation.closeDrawer() } },
-                    openSettings: { closeDrawerThen { navigation.showSettings() } },
-                    openTerminal: {
-                        closeDrawerThen {
-                            navigation.openTerminal(projectID: projectStore.activeProjectId)
-                        }
-                    },
-                    openCron: { scopeID, taskID in
-                        closeDrawerThen { navigation.openCron(scopeID: scopeID, taskID: taskID) }
-                    },
-                    openApps: { appID in
-                        closeDrawerThen { navigation.openLocalApps(appID: appID) }
-                    },
-                    onSelectProject: { switchProject(to: $0) },
-                    onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
-                    onNewChat: { switchProject(to: $0, startNew: true) }
-                )
-                .id(sourceGeneration)
-                // The conditional insertion happens here, so the transition
-                // must live on this boundary (a transition inside Drawer never
-                // participates in RootView's if/else transaction).
-                .transition(.move(edge: .leading).combined(with: .opacity))
-                .zIndex(50)
-            }
-
             if projectSwitching {
                 ProgressView(String(localized: "project_switching_message"))
                     .padding(18)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                     .zIndex(90)
             }
-
-            if !app.setupDone {
-                SetupWizardView(convo: source.model, onSetModel: { source.setModel($0) })
-                    .zIndex(100)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: navigation.drawerOpen)
-    }
-
-    /// Presentation state must change in a fresh transaction after the drawer
-    /// starts leaving. Updating a sheet/full-screen route in the same animated
-    /// transaction can make SwiftUI discard the presentation on iOS 26.
-    private func closeDrawerThen(_ action: @escaping @MainActor () -> Void) {
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-            navigation.closeDrawer()
-        }
-        Task { @MainActor in
-            await Task.yield()
-            guard !navigation.drawerOpen else { return }
-            action()
         }
     }
 
@@ -369,6 +355,13 @@ struct RootView: View {
                 initialAppID: appID,
                 onDismiss: { navigation.closePresentedRoute() }
             )
+        case .sessionDetails(let sessionID):
+            SessionDetailsView(
+                session: session.id == sessionID ? session : SessionRef(id: sessionID, title: session.title),
+                source: source,
+                workspacePath: currentWorkspaceGuestPath,
+                onOpenTerminal: openCurrentWorkspaceTerminal
+            )
         }
     }
 
@@ -396,7 +389,20 @@ struct RootView: View {
                 initialAppID: appID,
                 onDismiss: { navigation.closePresentedRoute() }
             )
+        case .sessionDetails:
+            EmptyView()
         }
+    }
+
+    private var currentWorkspaceGuestPath: String {
+        projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
+    }
+
+    private func openCurrentWorkspaceTerminal() {
+        navigation.openTerminal(
+            projectID: projectStore.activeProjectId,
+            requestedCwd: .guestPath(currentWorkspaceGuestPath)
+        )
     }
 
     private func popRoute() {
@@ -484,7 +490,7 @@ struct RootView: View {
         guard !projectSwitching else { return }
         voiceInteraction.handleContextChange()
         if projectID == projectStore.activeProjectId {
-            navigation.closeDrawer()
+            navigation.closeSidebar()
             if let resumeSessionID {
                 pendingSessionRestoreID = resumeSessionID
                 activeSession = resumeSessionID
@@ -502,7 +508,7 @@ struct RootView: View {
         persistConversationScope()
         let previousSource = source
         projectSwitching = true
-        navigation.closeDrawer()
+        navigation.closeSidebar()
         Task { @MainActor in
             var rollback: ProjectActiveSelectionRollback?
             do {
@@ -664,7 +670,7 @@ struct RootView: View {
     }
 
     private func applyAppAction(_ action: LingxiAppAction) {
-        navigation.closeDrawer()
+        navigation.closeSidebar()
         navigation.closeSettings()
         navigation.closePresentedRoute()
         navigation.path.removeAll()

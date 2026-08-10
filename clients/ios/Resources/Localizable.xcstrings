@@ -32846,6 +32846,40 @@
         }
       }
     },
+    "settings_save": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "儲存"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "저장"
+          }
+        }
+      }
+    },
     "settings_dream_last_run_seed": {
       "localizations": {
         "zh-Hans": {
@@ -40254,6 +40288,142 @@
           "stringUnit": {
             "state": "translated",
             "value": "적용 후 삭제됩니다"
+          }
+        }
+      }
+    },
+    "settings_provider_discard_key_changes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "放弃密钥修改"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "放棄金鑰修改"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Discard key changes"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キーの変更を破棄"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "키 변경 사항 버리기"
+          }
+        }
+      }
+    },
+    "settings_provider_pending_key_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用并重连会将修改安全保存；放弃不会改动安全存储中现有的密钥。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "套用並重新連線會安全儲存修改；放棄不會變更安全儲存中現有的金鑰。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apply and reconnect saves the change securely. Discarding leaves the existing secure-store key unchanged."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "適用して再接続すると変更が安全に保存されます。破棄してもセキュアストレージ内の既存キーは変更されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "적용 후 다시 연결하면 변경 사항이 안전하게 저장됩니다. 버려도 보안 저장소의 기존 키는 변경되지 않습니다."
+          }
+        }
+      }
+    },
+    "settings_provider_pending_key_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密钥修改尚未应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "金鑰修改尚未套用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Key changes not applied"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キーの変更が未適用です"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "키 변경 사항이 적용되지 않음"
+          }
+        }
+      }
+    },
+    "settings_provider_replace_key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更换"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更換"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Replace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "変更"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "교체"
           }
         }
       }
@@ -55353,6 +55523,82 @@
           }
         }
       }
-    }
+    },
+    "session_details_title": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "会话详情" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Session Details" } }
+    } },
+    "session_details_button": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "详情" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Details" } }
+    } },
+    "session_details_agents": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "Agents" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Agents" } }
+    } },
+    "session_details_agents_subtitle": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前会话中的协作 Agent" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Collaborators in this session" } }
+    } },
+    "session_details_tasks": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "Tasks" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Tasks" } }
+    } },
+    "session_details_tasks_subtitle": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "工具调用与 Shell 命令" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Tool calls and shell commands" } }
+    } },
+    "session_details_plan": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "Plan & progress" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Plan & progress" } }
+    } },
+    "session_details_plan_subtitle": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "Reasoning 与执行进度" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Reasoning and execution progress" } }
+    } },
+    "session_details_no_agents": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前没有协作 Agent" } },
+      "en": { "stringUnit": { "state": "translated", "value": "No collaborating agents yet" } }
+    } },
+    "session_details_no_tasks": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前没有工具或命令任务" } },
+      "en": { "stringUnit": { "state": "translated", "value": "No tool or command tasks yet" } }
+    } },
+    "session_details_no_plan": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前没有结构化计划数据" } },
+      "en": { "stringUnit": { "state": "translated", "value": "No structured plan data yet" } }
+    } },
+    "session_details_workspace": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "工作区" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Workspace" } }
+    } },
+    "session_details_model": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "模型" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Model" } }
+    } },
+    "session_details_messages": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "消息" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Messages" } }
+    } },
+    "session_details_runs": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "执行轮次" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Runs" } }
+    } },
+    "session_details_agent_count": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "Agents" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Agents" } }
+    } },
+    "session_details_task_count": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "Tasks" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Tasks" } }
+    } },
+    "session_details_status": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "状态" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Status" } }
+    } },
+    "session_details_status_ready": { "localizations": {
+      "zh-Hans": { "stringUnit": { "state": "translated", "value": "就绪" } },
+      "en": { "stringUnit": { "state": "translated", "value": "Ready" } }
+    } }
   }
 }

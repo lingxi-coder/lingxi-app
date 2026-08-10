@@ -1,21 +1,23 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The real workspace drawer. Projects and scheduled tasks come from their
-/// repositories; presets remain creation choices and are never rendered as
-/// persisted rows.
+/// The workspace sidebar — the `NavigationSplitView` sidebar column. The
+/// highest-frequency workspace action (Terminal) lives in the header so it is
+/// always reachable without scrolling past the session list.
+///
+/// Dismissal belongs to the split view, not to this view: in compact width the
+/// system back button and back-swipe pop it, and every navigation callback
+/// already resets the column through `AppNavigationModel`. That is why there is
+/// no close button and no scrim here.
 struct Drawer: View {
     @Environment(\.theme) private var t
     @Bindable var projectStore: ProjectStore
-    @Bindable var cronRepository: CronRepository
     @Bindable var localAppsStore: LocalAppsStore
     @Binding var activeSession: String
 
     let source: any ConversationSource
-    let onClose: () -> Void
     let openSettings: () -> Void
     let openTerminal: () -> Void
-    let openCron: (String?, String?) -> Void
     let openApps: (String?) -> Void
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
@@ -31,33 +33,27 @@ struct Drawer: View {
     @State private var pickerMode: FolderPickerMode = .importProject
     @FocusState private var searchFocused: Bool
 
-    private enum Section: String { case chats, projects, crons, apps }
+    private enum Section: String { case chats, projects, apps }
     private enum FolderPickerMode { case importProject, reauthorize(String) }
 
     init(
         projectStore: ProjectStore,
-        cronRepository: CronRepository,
         localAppsStore: LocalAppsStore,
         activeSession: Binding<String>,
         source: any ConversationSource,
-        onClose: @escaping () -> Void,
         openSettings: @escaping () -> Void,
         openTerminal: @escaping () -> Void,
-        openCron: @escaping (String?, String?) -> Void,
         openApps: @escaping (String?) -> Void,
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
         onNewChat: @escaping (String?) -> Void
     ) {
         self.projectStore = projectStore
-        self.cronRepository = cronRepository
         self.localAppsStore = localAppsStore
         _activeSession = activeSession
         self.source = source
-        self.onClose = onClose
         self.openSettings = openSettings
         self.openTerminal = openTerminal
-        self.openCron = openCron
         self.openApps = openApps
         self.onSelectProject = onSelectProject
         self.onSelectSession = onSelectSession
@@ -76,12 +72,6 @@ struct Drawer: View {
         }
     }
 
-    private var cronTasks: [CronScopedTask] {
-        cronRepository.state.tasks.filter {
-            matches($0.scope.projectName, $0.task.prompt, $0.task.cron, $0.task.human)
-        }
-    }
-
     private var searching: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -91,24 +81,18 @@ struct Drawer: View {
     }
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            Button(action: onClose) { Color.black.opacity(0.4).ignoresSafeArea() }
-                .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "drawer_close_a11y"))
-
-            panel
-                .frame(width: 330)
-                .frame(maxHeight: .infinity)
-                .background(t.sidebarBg)
-                .overlay(Rectangle().frame(width: 0.5).foregroundColor(t.border), alignment: .trailing)
-                .shadow(color: .black.opacity(0.3), radius: 15, x: 8)
-                .onAppear {
-                    source.listSessions()
-                    if let active = projectStore.activeProjectId { openProjects.insert(active) }
-                    Task { await cronRepository.refresh() }
-                    Task { await localAppsStore.refresh() }
-                }
-        }
+        panel
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background { t.sidebarBg.ignoresSafeArea() }
+            .onAppear {
+                source.listSessions()
+                if let active = projectStore.activeProjectId { openProjects.insert(active) }
+                Task { await localAppsStore.refresh() }
+            }
+            // Titles the compact back button that returns to this column.
+            .navigationTitle(String(localized: "app_name"))
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationSplitViewColumnWidth(min: 300, ideal: 330, max: 420)
         .alert(String(localized: "drawer_new_local_project"), isPresented: $showCreateAlert) {
             TextField("drawer_project_name_placeholder", text: $createProjectName)
             Button("common_create") { createInternalProject() }
@@ -127,32 +111,58 @@ struct Drawer: View {
 
     private var panel: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: 54)
-            header
+            activeScopeCaption
             scopePills
             searchBar
             sectionTabs
             sectionBody
-            shortcuts
             accountRow
         }
     }
 
-    private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("app_name").font(.system(size: 17, weight: .bold)).foregroundColor(t.text)
-                Text(projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session"))
-                    .font(.caption).foregroundColor(t.text4).lineLimit(1)
+    /// The app name stays in the navigation title; this header makes the active
+    /// workspace and its primary developer action visible at a glance.
+    private var activeScopeCaption: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session"))
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(t.text)
+                        .lineLimit(1)
+                    Text(currentWorkspaceGuestPath)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(t.text4)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button(action: openTerminal) {
+                    Label("settings_linux_section_terminal", systemImage: "terminal.fill")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(t.accent)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(t.accent.opacity(0.14), in: Capsule())
+                        .overlay(Capsule().stroke(t.accent.opacity(0.28), lineWidth: 0.7))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.terminal.top")
             }
-            Spacer()
-            Button(action: onClose) {
-                LXIcon(name: .x, size: 20, color: t.text3, stroke: 1.8).frame(width: 36, height: 36)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "drawer_close_a11y"))
         }
-        .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 12)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 12)
+        .background(t.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(t.border, lineWidth: 0.7)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+
+    private var currentWorkspaceGuestPath: String {
+        projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
     }
 
     private var scopePills: some View {
@@ -217,7 +227,6 @@ struct Drawer: View {
         HStack(spacing: 4) {
             tab(.chats, .message, String(localized: "drawer_tab_chats"), engineSessions.count)
             tab(.projects, .folder, String(localized: "drawer_tab_projects"), projects.count)
-            tab(.crons, .clock, String(localized: "drawer_tab_crons"), cronTasks.count)
             tab(.apps, .skill, String(localized: "drawer_tab_apps"), localApps.count)
         }
         .padding(.horizontal, 14).padding(.bottom, 8)
@@ -249,7 +258,6 @@ struct Drawer: View {
                     switch section {
                     case .chats: chatsSection
                     case .projects: projectsSection
-                    case .crons: cronsSection
                     case .apps: appsSection
                     }
                 }
@@ -263,14 +271,13 @@ struct Drawer: View {
         switch section {
         case .chats: engineSessions.isEmpty
         case .projects: projects.isEmpty
-        case .crons: cronTasks.isEmpty
         case .apps: localApps.isEmpty
         }
     }
 
     private var emptyState: some View {
         VStack(spacing: 10) {
-            LXIcon(name: searching ? .search : section == .projects ? .folder : section == .crons ? .clock : section == .apps ? .skill : .message,
+            LXIcon(name: searching ? .search : section == .projects ? .folder : section == .apps ? .skill : .message,
                    size: 24, color: t.text4, stroke: 1.8)
             Text(searching ? String(localized: "drawer_no_match") : emptyCopy)
                 .font(.system(size: 13)).foregroundColor(t.text4).multilineTextAlignment(.center)
@@ -278,13 +285,12 @@ struct Drawer: View {
             if !searching, section == .projects {
                 projectCreationMenu
             }
-            if !searching, section == .crons {
-                dashedButton(String(localized: "cron_new_task_button")) {
-                    openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
-                }
-            }
             if !searching, section == .apps {
                 dashedButton(String(localized: "drawer_create_app")) { openApps(nil) }
+                    // Same identifier as the populated section's own create row
+                    // (they never render together), so the apps route has one
+                    // addressable entry point whether or not any app exists.
+                    .accessibilityIdentifier("drawer.apps.create")
             }
         }
         .frame(maxWidth: .infinity).padding(.top, 38).padding(.horizontal, 10)
@@ -294,7 +300,6 @@ struct Drawer: View {
         switch section {
         case .chats: return String(localized: "drawer_empty_chats")
         case .projects: return String(localized: "drawer_empty_projects")
-        case .crons: return String(localized: "drawer_empty_crons")
         case .apps: return String(localized: "drawer_empty_apps")
         }
     }
@@ -323,7 +328,6 @@ struct Drawer: View {
     private func newChatButton(projectID: String?) -> some View {
         Button {
             onNewChat(projectID)
-            onClose()
         } label: {
             Label("chat_new_conversation", systemImage: "square.and.pencil")
                 .font(.system(size: 13.5, weight: .medium)).foregroundColor(t.accent)
@@ -396,7 +400,6 @@ struct Drawer: View {
                     }
                     Button {
                         onNewChat(project.id)
-                        onClose()
                     } label: {
                         Label("drawer_project_new_session", systemImage: "plus").font(.caption).foregroundColor(t.text3).padding(8)
                     }
@@ -446,7 +449,6 @@ struct Drawer: View {
         let active = id == activeSession && projectID == projectStore.activeProjectId
         return Button {
             onSelectSession(projectID, id)
-            onClose()
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.system(size: 13.5, weight: active ? .semibold : .medium)).foregroundColor(active ? t.text : t.text2).lineLimit(1)
@@ -458,38 +460,6 @@ struct Drawer: View {
         .buttonStyle(.plain)
     }
 
-    private var cronsSection: some View {
-        VStack(spacing: 8) {
-            ForEach(cronTasks) { scoped in
-                Button {
-                    openCron(scoped.scope.scopeID, scoped.task.id)
-                    onClose()
-                } label: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Circle().fill(scoped.activeRun == nil ? t.accent : Color.orange).frame(width: 8, height: 8)
-                            Text(scoped.task.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? scoped.task.id)
-                                .font(.system(size: 14, weight: .semibold)).foregroundColor(t.text).lineLimit(1)
-                            Spacer()
-                            Text(scoped.scope.projectName).font(.caption).foregroundColor(t.text4)
-                        }
-                        Text(scoped.task.human).font(.system(size: 12, design: .monospaced)).foregroundColor(t.text3)
-                        Text(scoped.lastRun.map { String(localized: "cron_last_run \($0.status.label)") } ?? String(localized: "drawer_never_run"))
-                            .font(.caption).foregroundColor(t.text4)
-                    }
-                    .padding(12).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
-                }
-                .buttonStyle(.plain)
-            }
-            if !searching {
-                dashedButton(String(localized: "cron_new_task_button")) {
-                    openCron(projectStore.activeProjectId ?? globalCronScopeID, nil)
-                }
-            }
-        }
-    }
-
     private func dashedButton(_ label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(label, systemImage: "plus")
@@ -498,27 +468,6 @@ struct Drawer: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
         }
         .buttonStyle(.plain)
-    }
-
-    private var shortcuts: some View {
-        HStack(spacing: 4) {
-            Button(action: openTerminal) { shortcut(.workflow, String(localized: "settings_linux_section_terminal")) }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("drawer.shortcut.terminal")
-            Button { openCron(nil, nil) } label: { shortcut(.clock, String(localized: "settings_title_cron")) }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("drawer.shortcut.cron")
-        }
-        .padding(.horizontal, 12).padding(.top, 4)
-        .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .top)
-    }
-
-    private func shortcut(_ icon: LXIconName, _ label: String) -> some View {
-        HStack(spacing: 8) {
-            LXIcon(name: icon, size: 15, color: t.text3, stroke: 1.7)
-            Text(label).font(.system(size: 13.5, weight: .medium)).foregroundColor(t.text3)
-        }
-        .frame(maxWidth: .infinity).padding(.vertical, 11)
     }
 
     private var accountRow: some View {

@@ -6,12 +6,12 @@ struct ChatView: View {
     @Environment(\.theme) private var t
 
     let session: SessionRef
-    let openDrawer: () -> Void
 
     /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
     /// published `model` and forwards user input to it — it no longer owns the
     /// transcript or the canned reply timer.
     let source: any ConversationSource
+    var onOpenSessionDetails: () -> Void = {}
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
 
@@ -48,18 +48,18 @@ struct ChatView: View {
     @StateObject private var connectivity = ConnectivityMonitor()
 
     init(session: SessionRef,
-         openDrawer: @escaping () -> Void,
          draft: Binding<String>,
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
          onOpenVoiceSettings: @escaping () -> Void = {},
+         onOpenSessionDetails: @escaping () -> Void = {},
          onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
         self.session = session
-        self.openDrawer = openDrawer
         self._draft = draft
         self.voiceInteraction = voiceInteraction
         self.source = source
         self.onOpenVoiceSettings = onOpenVoiceSettings
+        self.onOpenSessionDetails = onOpenSessionDetails
         self.onOpenShellTask = onOpenShellTask
         self.convo = source.model
     }
@@ -74,14 +74,13 @@ struct ChatView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                topBar
                 // Offline banner: shown only while the device is offline. Sits
                 // above the transcript so it's visible without obscuring the
                 // conversation; the retry re-warms the engine source (rebuilds
                 // the handle / re-lists models).
                 if connectivity.isOffline {
                     OfflineBanner(onRetry: retryConnection)
-                        .padding(.horizontal, 14).padding(.bottom, 8)
+                        .padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 8)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
@@ -165,30 +164,40 @@ struct ChatView: View {
             guard let completion else { return }
             voiceInteraction.handleTurnCompletion(completion)
         }
-    }
-
-    // MARK: top bar
-    private var topBar: some View {
-        HStack(spacing: 4) {
-            iconButton(.menu, color: t.text, label: String(localized: "chat_open_drawer"), action: openDrawer)
-            Spacer()
-            Text(convo.isNew ? String(localized: "chat_new_conversation") : session.title)
-                .font(.scaledSystem(14.5, weight: .semibold, relativeTo: .subheadline))
-                .foregroundColor(t.text)
-                .lineLimit(1)
-            Spacer()
-            iconButton(app.isDark ? .sun : .moon, size: 18, color: t.text2,
-                       label: app.isDark ? String(localized: "chat_theme_light") : String(localized: "chat_theme_dark")) { app.toggleTheme() }
-            iconButton(.edit, size: 18, color: t.accent, label: String(localized: "chat_new_chat")) { newChat() }
+        // The chat is the detail column of RootView's split view. Its chrome is
+        // the system navigation bar so that the leading item stays the system's
+        // sidebar affordance — the only thing that both opens the sidebar and
+        // advertises the back-swipe. Nothing here may hide that bar.
+        .navigationTitle(convo.isNew ? String(localized: "chat_new_conversation") : session.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button(action: onOpenSessionDetails) {
+                    Label("session_details_button", systemImage: "info.circle")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(t.accent)
+                .accessibilityIdentifier("conversation.session-details")
+                toolbarIconButton(
+                    app.isDark ? .sun : .moon,
+                    color: t.text2,
+                    label: app.isDark
+                        ? String(localized: "chat_theme_light")
+                        : String(localized: "chat_theme_dark")
+                ) { app.toggleTheme() }
+                toolbarIconButton(
+                    .edit,
+                    color: t.accent,
+                    label: String(localized: "chat_new_chat")
+                ) { newChat() }
+            }
         }
-        .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 10)
     }
 
-    private func iconButton(_ name: LXIconName, size: CGFloat = 20, color: Color,
-                            label: String, action: @escaping () -> Void) -> some View {
+    private func toolbarIconButton(_ name: LXIconName, color: Color,
+                                   label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            LXIcon(name: name, size: size, color: color, stroke: 1.8)
-                .frame(width: 38, height: 38)
+            LXIcon(name: name, size: 18, color: color, stroke: 1.8)
         }
         .accessibilityLabel(label)
     }

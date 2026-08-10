@@ -9,7 +9,7 @@ final class LingxiCodeUITests: XCTestCase {
         app = XCUIApplication()
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
         app.launch()
-        XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 12))
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
     func testStructuredShellCardOpensProjectTerminal() {
@@ -42,7 +42,7 @@ final class LingxiCodeUITests: XCTestCase {
         // `app.scrollViews["conversation.message-list"]`.
         XCTAssertTrue(app.descendants(matching: .any)["terminal.root"].waitForExistence(timeout: 8))
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 5))
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 5), app.debugDescription)
     }
 
     func testComposerTracksKeyboardAndKeepsVoiceModesSeparate() {
@@ -127,7 +127,7 @@ final class LingxiCodeUITests: XCTestCase {
         openDrawer()
         XCTAssertTrue(app.buttons["drawer.tab.chats"].exists)
         XCTAssertTrue(app.buttons["drawer.tab.projects"].exists)
-        XCTAssertTrue(app.buttons["drawer.tab.crons"].exists)
+        XCTAssertFalse(app.buttons["drawer.tab.crons"].exists)
 
         app.buttons["drawer.tab.projects"].tap()
         let create = app.buttons["drawer.project.create"]
@@ -145,22 +145,83 @@ final class LingxiCodeUITests: XCTestCase {
         field.typeText(projectName)
         app.buttons["创建"].tap()
 
-        XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 10))
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
         openDrawer()
         let projectScope = app.buttons["drawer.scope.project.\(projectName)"]
         XCTAssertTrue(projectScope.waitForExistence(timeout: 5))
         XCTAssertEqual(projectScope.value as? String, "当前项目")
 
         app.buttons["drawer.scope.global"].tap()
-        XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 10))
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
         openDrawer()
         let persistedProjectScope = app.buttons["drawer.scope.project.\(projectName)"]
         XCTAssertTrue(persistedProjectScope.waitForExistence(timeout: 5))
         persistedProjectScope.tap()
-        XCTAssertTrue(app.buttons["打开抽屉"].waitForExistence(timeout: 10))
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
-    func testProviderAndCronManagementEntryPoints() {
+    /// The hand-written drawer had no drag affordance at all — `DragGesture` did
+    /// not appear anywhere in Sources. Collapsing the split view onto a
+    /// navigation stack hands the interactive back-swipe over for free, so pin
+    /// it: an edge drag on the chat must land on the sidebar.
+    ///
+    /// Only the opening direction is a gesture. iOS has no forward swipe, so
+    /// returning to the chat is a tap — here the already-active scope pill,
+    /// which routes through `switchProject` and its `closeSidebar()`.
+    func testEdgeSwipeOpensTheSidebar() {
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
+
+        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5))
+        origin.press(forDuration: 0.05, thenDragTo: target)
+
+        XCTAssertTrue(
+            app.buttons["drawer.tab.chats"].waitForExistence(timeout: 8),
+            app.debugDescription
+        )
+
+        app.buttons["drawer.scope.global"].tap()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+    }
+
+    /// Every sidebar route used to be routed through a deferred close
+    /// (`closeDrawerThen` + `Task.yield()`) because dismissing the hand-written
+    /// drawer and changing presentation state in one animated transaction made
+    /// SwiftUI drop the presentation. `NavigationSplitView` removed that
+    /// coupling and the deferral went with it, so all three remaining presentation shapes
+    /// are pinned here: a sheet, a push, and two full-screen covers. Each must
+    /// arrive AND leave the sidebar behind.
+    func testEverySidebarRoutePresentsAndLeavesTheSidebar() {
+        // Settings — a sheet.
+        openDrawer()
+        app.buttons["drawer.settings"].tap()
+        XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
+        app.buttons["关闭设置"].tap()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+
+        // Terminal — a push onto the detail column's stack, i.e. the one route
+        // that changes the split view's column and the stack's path together.
+        openDrawer()
+        app.buttons["drawer.terminal.top"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["terminal.root"].waitForExistence(timeout: 15),
+            app.debugDescription
+        )
+        app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+
+        // Local apps — a full-screen cover reached from the drawer's apps tab.
+        openDrawer()
+        app.buttons["drawer.tab.apps"].tap()
+        let createApp = app.buttons["drawer.apps.create"]
+        XCTAssertTrue(createApp.waitForExistence(timeout: 8), app.debugDescription)
+        createApp.tap()
+        XCTAssertTrue(app.navigationBars["应用"].waitForExistence(timeout: 15), app.debugDescription)
+        app.buttons["关闭"].tap()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+    }
+
+    func testProviderManagementDoesNotExposeScheduledTasksInDrawer() {
         openDrawer()
         app.buttons["drawer.settings"].tap()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 5))
@@ -194,21 +255,38 @@ final class LingxiCodeUITests: XCTestCase {
         let visibility = app.buttons["provider.api-key.visibility"]
         let clear = app.buttons["provider.api-key.clear"]
         XCTAssertTrue(keyField.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(visibility.exists)
+        XCTAssertFalse(visibility.exists)
         XCTAssertTrue(clear.exists)
+
+        keyField.tap()
+        keyField.typeText("sk-ui-draft")
+        XCTAssertTrue(visibility.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertLessThanOrEqual(keyField.frame.maxX, visibility.frame.minX + 0.5)
         XCTAssertLessThanOrEqual(visibility.frame.maxX, clear.frame.minX + 0.5)
 
         app.buttons["完成"].tap()
+        let discardKeyChanges = app.buttons["放弃密钥修改"]
+        XCTAssertTrue(discardKeyChanges.waitForExistence(timeout: 5), app.debugDescription)
+        discardKeyChanges.tap()
         app.buttons["关闭设置"].tap()
         openDrawer()
-        app.buttons["drawer.shortcut.cron"].tap()
-        let newCron = app.buttons["cron.add"]
-        XCTAssertTrue(newCron.waitForExistence(timeout: 8), app.debugDescription)
-        let schedulingNote = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "系统调度")
-        ).firstMatch
-        XCTAssertTrue(schedulingNote.exists)
+        XCTAssertFalse(app.buttons["drawer.tab.crons"].exists)
+        XCTAssertFalse(app.buttons["drawer.shortcut.cron"].exists)
+    }
+
+    func testSessionDetailsOpensFromChatHeader() {
+        let details = app.buttons["conversation.session-details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 8), app.debugDescription)
+        details.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["session-details.root"].waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["会话详情"].exists)
+        XCTAssertTrue(app.staticTexts["Agents"].exists)
+        XCTAssertTrue(app.staticTexts["Tasks"].exists)
+        XCTAssertTrue(app.staticTexts["Plan & progress"].exists)
+
+        app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
     }
 
     func testAppIntegrationExposesRealSystemActions() {
@@ -384,13 +462,19 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["composer.model.provider.row.\(reference)"]
     }
 
+    /// The chat is the detail column of a `NavigationSplitView`. In compact width
+    /// that collapses to a stack rooted at the sidebar, so "open the drawer" is
+    /// the system back button — the leading navigation-bar item — not an
+    /// app-drawn control any more.
     private func openDrawer() {
-        let trigger = app.buttons["打开抽屉"]
+        let chatsTab = app.buttons["drawer.tab.chats"]
+        if chatsTab.exists { return }
+
+        let trigger = app.navigationBars.firstMatch.buttons.element(boundBy: 0)
         XCTAssertTrue(trigger.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(trigger, timeout: 5), app.debugDescription)
         trigger.tap()
 
-        let chatsTab = app.buttons["drawer.tab.chats"]
         if !chatsTab.waitForExistence(timeout: 5),
            trigger.exists,
            waitUntilHittable(trigger, timeout: 2) {
@@ -400,6 +484,11 @@ final class LingxiCodeUITests: XCTestCase {
             trigger.tap()
         }
         XCTAssertTrue(chatsTab.waitForExistence(timeout: 8), app.debugDescription)
+    }
+
+    /// The transcript identifies the chat column without depending on chrome.
+    private var chatSurface: XCUIElement {
+        app.scrollViews["conversation.message-list"]
     }
 
     private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {

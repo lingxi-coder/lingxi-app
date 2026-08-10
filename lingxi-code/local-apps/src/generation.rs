@@ -581,7 +581,9 @@ impl AppGenerationCoordinator {
         self.set_stage(key, GenerationJobStatus::Scaffolding, "scaffold", 5)
             .await?;
         self.executor.prepare_scaffold(&request, &layout).await?;
-        if job.kind == GenerationRequestKind::Initial {
+        if job.kind == GenerationRequestKind::Initial
+            && service.git_version_control_enabled(&key.app_id).await?
+        {
             service
                 .create_checkpoint(
                     &key.app_id,
@@ -614,13 +616,15 @@ impl AppGenerationCoordinator {
         self.set_stage(key, GenerationJobStatus::Building, "build", 70)
             .await?;
         self.executor.build(&request, &layout).await?;
-        service
-            .create_checkpoint(
-                &key.app_id,
-                AppCheckpointKind::GenerationValidated,
-                "Generation validated",
-            )
-            .await?;
+        if service.git_version_control_enabled(&key.app_id).await? {
+            service
+                .create_checkpoint(
+                    &key.app_id,
+                    AppCheckpointKind::GenerationValidated,
+                    "Generation validated",
+                )
+                .await?;
+        }
 
         self.set_stage(
             key,
@@ -842,32 +846,37 @@ impl AppGenerationCoordinator {
             .await?;
         }
         let service = self.attached_service()?;
-        let checkpoints = service.list_checkpoints(&continuation.app_id).await?;
-        let already_recorded = checkpoints.iter().any(|checkpoint| {
-            checkpoint.kind == AppCheckpointKind::PreviewApproved
-                && checkpoint.created_at_ms >= candidate.created_at_ms
-        });
-        if !already_recorded {
-            service
-                .create_checkpoint(
-                    &continuation.app_id,
-                    AppCheckpointKind::PreviewApproved,
-                    "Preview approved",
-                )
-                .await?;
-        }
-        let user_approved = checkpoints.iter().any(|checkpoint| {
-            checkpoint.kind == AppCheckpointKind::UserApproved
-                && checkpoint.created_at_ms >= candidate.created_at_ms
-        });
-        if !user_approved {
-            service
-                .create_checkpoint(
-                    &continuation.app_id,
-                    AppCheckpointKind::UserApproved,
-                    "User approved",
-                )
-                .await?;
+        if service
+            .git_version_control_enabled(&continuation.app_id)
+            .await?
+        {
+            let checkpoints = service.list_checkpoints(&continuation.app_id).await?;
+            let already_recorded = checkpoints.iter().any(|checkpoint| {
+                checkpoint.kind == AppCheckpointKind::PreviewApproved
+                    && checkpoint.created_at_ms >= candidate.created_at_ms
+            });
+            if !already_recorded {
+                service
+                    .create_checkpoint(
+                        &continuation.app_id,
+                        AppCheckpointKind::PreviewApproved,
+                        "Preview approved",
+                    )
+                    .await?;
+            }
+            let user_approved = checkpoints.iter().any(|checkpoint| {
+                checkpoint.kind == AppCheckpointKind::UserApproved
+                    && checkpoint.created_at_ms >= candidate.created_at_ms
+            });
+            if !user_approved {
+                service
+                    .create_checkpoint(
+                        &continuation.app_id,
+                        AppCheckpointKind::UserApproved,
+                        "User approved",
+                    )
+                    .await?;
+            }
         }
         Ok(())
     }

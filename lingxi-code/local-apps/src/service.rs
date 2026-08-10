@@ -853,12 +853,16 @@ impl AppService {
 
     /// Git-backed checkpoints of one app, newest first.
     pub async fn list_checkpoints(&self, app_id: &str) -> Result<Vec<AppCheckpoint>, AppError> {
-        {
-            let apps = self.state.lock().await;
-            Self::position(&apps, app_id)?;
+        if !self.git_version_control_enabled(app_id).await? {
+            return Ok(Vec::new());
         }
         let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
         Self::run_blocking(move || AppCheckpointStore::new(&layout).list()).await
+    }
+
+    /// Whether this app opted into Git-backed source version control.
+    pub async fn git_version_control_enabled(&self, app_id: &str) -> Result<bool, AppError> {
+        Ok(self.record(app_id).await?.git_enabled)
     }
 
     /// Commit the current workspace as a retained Git checkpoint and emit its
@@ -869,6 +873,11 @@ impl AppService {
         kind: AppCheckpointKind,
         label: &str,
     ) -> Result<AppCheckpoint, AppError> {
+        if !self.git_version_control_enabled(app_id).await? {
+            return Err(AppError::NotYetAvailable(
+                "Git version control is disabled for this app".into(),
+            ));
+        }
         {
             let apps = self.state.lock().await;
             Self::position(&apps, app_id)?;
@@ -899,6 +908,11 @@ impl AppService {
         app_id: &str,
         checkpoint_id: &str,
     ) -> Result<AppCheckpoint, AppError> {
+        if !self.git_version_control_enabled(app_id).await? {
+            return Err(AppError::NotYetAvailable(
+                "Git version control is disabled for this app".into(),
+            ));
+        }
         {
             let apps = self.state.lock().await;
             Self::position(&apps, app_id)?;
@@ -939,6 +953,23 @@ impl AppService {
         brief: &str,
         conversation_id: Option<String>,
     ) -> Result<AppRecord, AppError> {
+        self.create_app_with_git(
+            name,
+            brief,
+            conversation_id,
+            crate::types::DEFAULT_GIT_VERSION_CONTROL,
+        )
+        .await
+    }
+
+    /// Create a new app with an explicit Git version-control choice.
+    pub async fn create_app_with_git(
+        &self,
+        name: Option<&str>,
+        brief: &str,
+        conversation_id: Option<String>,
+        git_enabled: bool,
+    ) -> Result<AppRecord, AppError> {
         let trimmed_brief = brief.trim();
         if trimmed_brief.is_empty() {
             return Err(AppError::InvalidRequest(
@@ -976,7 +1007,8 @@ impl AppService {
         let completion = tokio::spawn(async move {
             let persisted = Self::run_blocking(move || {
                 let id = Self::mint_app_id(&root, &existing_ids)?;
-                let app = AppState::create(id, name, brief, conversation_id, now);
+                let app =
+                    AppState::create_with_git(id, name, brief, conversation_id, git_enabled, now);
                 // Per-app files first; the index entry is the commit point.
                 storage::save_app_files(&root, &app)?;
                 let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
@@ -2984,6 +3016,43 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn git_version_control_choice_persists_and_disables_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app_with_git(Some("No Git"), "an app without Git", None, false)
+            .await
+            .unwrap();
+
+        assert!(!record.git_enabled);
+        assert!(!h
+            .service
+            .git_version_control_enabled(&record.id)
+            .await
+            .unwrap());
+        assert!(h
+            .service
+            .list_checkpoints(&record.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let error = h
+            .service
+            .create_checkpoint(
+                &record.id,
+                AppCheckpointKind::UserApproved,
+                "must not create",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), AppErrorCode::NotYetAvailable);
+
+        let reloaded = reload_service(&h.service).await;
+        assert!(!reloaded.record(&record.id).await.unwrap().git_enabled);
     }
 
     /// The store's own documents live inside `apps/<id>/workspace`, which is

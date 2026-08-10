@@ -1126,6 +1126,7 @@
     <string name="local_apps_card_menu_a11y">应用操作</string>
     <string name="local_apps_checkpoint_restore_action">恢复</string>
     <string name="local_apps_create_and_design">创建并开始设计</string>
+    <string name="local_apps_create_git_version_control">使用 Git 管理应用版本（推荐）</string>
     <string name="local_apps_create_name_hint">稍后可在设计器中继续完善用途和目标用户。</string>
     <string name="local_apps_data_field_name">字段名称</string>
     <string name="local_apps_data_field_type_boolean">布尔</string>

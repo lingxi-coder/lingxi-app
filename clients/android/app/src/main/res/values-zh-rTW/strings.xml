@@ -1112,6 +1112,7 @@
     <string name="local_apps_card_menu_a11y">應用操作</string>
     <string name="local_apps_checkpoint_restore_action">恢復</string>
     <string name="local_apps_create_and_design">建立並開始設計</string>
+    <string name="local_apps_create_git_version_control">使用 Git 管理應用版本（推薦）</string>
     <string name="local_apps_create_name_hint">稍後可在設計器中繼續完善用途和目標使用者。</string>
     <string name="local_apps_data_field_name">欄位名稱</string>
     <string name="local_apps_data_field_type_boolean">布林</string>

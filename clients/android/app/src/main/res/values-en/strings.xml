@@ -1112,6 +1112,7 @@
     <string name="local_apps_card_menu_a11y">App actions</string>
     <string name="local_apps_checkpoint_restore_action">Restore</string>
     <string name="local_apps_create_and_design">Create and start designing</string>
+    <string name="local_apps_create_git_version_control">Use Git to manage app versions (recommended)</string>
     <string name="local_apps_create_name_hint">You can keep refining the purpose and target users later in the designer.</string>
     <string name="local_apps_data_field_name">Field name</string>
     <string name="local_apps_data_field_type_boolean">Boolean</string>

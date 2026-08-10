@@ -73,9 +73,29 @@ final class LocalAppsStore {
 
     /// Append one live chunk, growing the trailing block when the kind is
     /// unchanged so the transcript reads as prose rather than as packets.
-    private func appendTranscript(appId: String, kind: LocalAppTranscriptBlock.Kind, chunk: String) {
+    /// Longest a transcript block grows before the next chunk starts a new one.
+    ///
+    /// This is a RENDER budget, not a storage one — nothing is dropped, the
+    /// text is only split across more blocks. `AIText` re-parses its whole
+    /// markdown string on every body evaluation (`parseBlocks` + a
+    /// character-by-character `AttributedString` per line), so a single block
+    /// that grows for the length of a generation is re-parsed in full about
+    /// five times a second, costing more each time: the stream visibly
+    /// stuttered and got worse the longer it ran, while the finished
+    /// transcript scrolled smoothly because nothing was changing any more.
+    ///
+    /// Sealed blocks never change again, so `MessageBubble`'s `.equatable()`
+    /// skips them and only the live tail is re-parsed. That turns the cost of
+    /// a stream from quadratic in its length into linear.
+    private static let transcriptBlockCharBudget = 2_000
+
+    // Internal, not private, so the block-sealing budget is directly
+    // testable without standing up an engine and a live event stream.
+    func appendTranscript(appId: String, kind: LocalAppTranscriptBlock.Kind, chunk: String) {
         var blocks = generationTranscript[appId] ?? []
-        if var last = blocks.last, last.kind == kind {
+        if var last = blocks.last,
+           last.kind == kind,
+           last.text.count < Self.transcriptBlockCharBudget {
             last.text += chunk
             blocks[blocks.count - 1] = last
         } else {
@@ -535,7 +555,7 @@ final class LocalAppsStore {
     /// eliminating (local-apps#questionnaire, Task 11). A dedicated name
     /// input is Task 16's "创建入口" job; this method itself no longer
     /// fabricates anything.
-    func createApp(brief: String) async -> Bool {
+    func createApp(brief: String, gitEnabled: Bool = true) async -> Bool {
         let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             errorMessage = String(localized: "local_apps_error_brief_required")
@@ -548,6 +568,7 @@ final class LocalAppsStore {
                     name: "",
                     origin: .library,
                     brief: trimmed,
+                    gitEnabled: gitEnabled,
                     conversationId: nil
                 )
             )

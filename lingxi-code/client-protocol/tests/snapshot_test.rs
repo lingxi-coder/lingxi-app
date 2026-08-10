@@ -47,24 +47,21 @@ use client_protocol::computer_access::{
     TccStateDto,
 };
 use client_protocol::error::ClientError;
-use client_protocol::events::{
-    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto,
-};
+use client_protocol::events::{AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
-    AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
-    AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
-    AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
-    AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
-    AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
-    AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto,
-    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
+    AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
+    AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto, AppCheckpointKindDto,
+    AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto,
+    AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto, AppDesignFieldValueDto,
+    AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto, AppDetailsDto, AppErrorCodeDto,
+    AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppManifestDto, AppPlanDto,
+    AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto,
+    AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
     AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -836,6 +833,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 name: "Habits".to_string(),
                 origin: AppCreateOriginDto::Chat,
                 brief: "Track daily habits with streaks".to_string(),
+                git_enabled: true,
                 conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
             },
         ),
@@ -1381,6 +1379,7 @@ fn canonical_app_record() -> AppRecordDto {
         id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
         brief: "A daily habit tracker".to_string(),
+        git_enabled: true,
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
         workflow_state: AppWorkflowStateDto::CollectingSpec,

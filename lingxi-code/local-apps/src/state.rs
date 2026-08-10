@@ -132,12 +132,33 @@ impl AppState {
         conversation_id: Option<String>,
         now_ms: u64,
     ) -> Self {
+        Self::create_with_git(
+            id,
+            name,
+            brief,
+            conversation_id,
+            crate::types::DEFAULT_GIT_VERSION_CONTROL,
+            now_ms,
+        )
+    }
+
+    /// Build a new app with an explicit Git version-control choice.
+    #[must_use]
+    pub fn create_with_git(
+        id: String,
+        name: String,
+        brief: String,
+        conversation_id: Option<String>,
+        git_enabled: bool,
+        now_ms: u64,
+    ) -> Self {
         let workspace_rel = storage::workspace_rel_str(&id);
         Self {
             record: AppRecord {
                 id: id.clone(),
                 name,
                 brief,
+                git_enabled,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 workflow_state: AppWorkflowState::AuthoringQuestionnaire,

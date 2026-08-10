@@ -223,8 +223,8 @@ private fun LocalAppsLibraryScreen(
     if (showCreateDialog) {
         CreateAppDialog(
             onDismiss = { showCreateDialog = false },
-            onCreate = { brief ->
-                onAction(LocalAppsAction.CreateFromBrief(brief))
+            onCreate = { brief, gitEnabled ->
+                onAction(LocalAppsAction.CreateFromBrief(brief, gitEnabled))
                 showCreateDialog = false
             },
         )
@@ -245,9 +245,10 @@ private fun LocalAppsLibraryScreen(
 @Composable
 private fun CreateAppDialog(
     onDismiss: () -> Unit,
-    onCreate: (String) -> Unit,
+    onCreate: (String, Boolean) -> Unit,
 ) {
     var brief by remember { mutableStateOf("") }
+    var gitEnabled by remember { mutableStateOf(true) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.local_apps_create)) },
@@ -266,10 +267,20 @@ private fun CreateAppDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) {
+                    Checkbox(
+                        checked = gitEnabled,
+                        onCheckedChange = { gitEnabled = it },
+                    )
+                    Text(stringResource(R.string.local_apps_create_git_version_control))
+                }
             }
         },
         confirmButton = {
-            Button(enabled = canSubmitBrief(brief), onClick = { onCreate(brief) }) {
+            Button(enabled = canSubmitBrief(brief), onClick = { onCreate(brief, gitEnabled) }) {
                 Text(stringResource(R.string.local_apps_create_and_design))
             }
         },

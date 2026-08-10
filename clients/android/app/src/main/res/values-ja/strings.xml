@@ -1112,6 +1112,7 @@
     <string name="local_apps_card_menu_a11y">アプリの操作</string>
     <string name="local_apps_checkpoint_restore_action">復元</string>
     <string name="local_apps_create_and_design">作成してデザインを開始</string>
+    <string name="local_apps_create_git_version_control">Git でアプリのバージョンを管理する（推奨）</string>
     <string name="local_apps_create_name_hint">用途や対象ユーザーは、後でデザイナー内に引き続き詳しく設定できます。</string>
     <string name="local_apps_data_field_name">フィールド名</string>
     <string name="local_apps_data_field_type_boolean">真偽値</string>

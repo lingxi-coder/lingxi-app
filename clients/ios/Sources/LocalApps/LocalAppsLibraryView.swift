@@ -321,6 +321,7 @@ struct LocalAppCreateView: View {
     @Binding var path: [LocalAppsRoute]
 
     @State var brief = ""
+    @State private var gitEnabled = true
     @State private var creating = false
 
     /// The submit predicate, as a pure function of the text.
@@ -351,6 +352,7 @@ struct LocalAppCreateView: View {
                 Text("local_apps_create_brief_detail")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                Toggle("local_apps_create_git_version_control", isOn: $gitEnabled)
             }
         }
         .navigationTitle("local_apps_create")
@@ -368,7 +370,7 @@ struct LocalAppCreateView: View {
 
     private func create() async {
         creating = true
-        let succeeded = await store.createApp(brief: brief)
+        let succeeded = await store.createApp(brief: brief, gitEnabled: gitEnabled)
         creating = false
         if succeeded, !path.isEmpty {
             path.removeLast()

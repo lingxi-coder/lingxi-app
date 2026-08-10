@@ -284,6 +284,7 @@ fn app_record_round_trips_and_skips_none_conversation() {
         id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
         brief: "Track daily habits".to_string(),
+        git_enabled: true,
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
         workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -293,6 +294,7 @@ fn app_record_round_trips_and_skips_none_conversation() {
     let json = serde_json::to_value(&record).expect("serialize AppRecordDto");
     assert_eq!(json["id"], "habits-1a2b");
     assert_eq!(json["brief"], "Track daily habits");
+    assert_eq!(json["git_enabled"], true);
     assert_eq!(json["created_at_ms"], 1_750_000_000_000_u64);
     assert_eq!(json["workflow_state"], "collecting_spec");
     assert_eq!(json["workspace_rel"], "apps/habits-1a2b/workspace");

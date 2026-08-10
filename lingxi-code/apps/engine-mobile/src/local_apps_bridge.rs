@@ -39,11 +39,11 @@ use client_protocol::local_apps::{
     DesignValueDto,
 };
 use local_apps::{
-    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppDesignDraft,
-    AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignPatch, AppDesignPatchOp,
-    AppDesignStep, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest,
-    AppPlan, AppRecord, AppRuntimeRecord, AppRuntimeState, AppService, AppWorkflowState,
-    DataCollectionSchema, DataFieldKind, DataFieldSchema, DensityLevel, DesignValue,
+    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppDesignDraft, AppDesignField,
+    AppDesignFieldOption, AppDesignFieldType, AppDesignPatch, AppDesignPatchOp, AppDesignStep,
+    AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest, AppPlan, AppRecord,
+    AppRuntimeRecord, AppRuntimeState, AppService, AppWorkflowState, DataCollectionSchema,
+    DataFieldKind, DataFieldSchema, DensityLevel, DesignValue,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -342,6 +342,7 @@ pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
         id: record.id.clone(),
         name: record.name.clone(),
         brief: record.brief.clone(),
+        git_enabled: record.git_enabled,
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
         workflow_state: lower_workflow_state(record.workflow_state),
@@ -515,7 +516,11 @@ fn lower_design_field(field: &AppDesignField) -> AppDesignFieldDto {
         allows_custom: field.allows_custom,
         allows_defer: field.allows_defer,
         default_value: field.default_value.clone().map(lower_design_value),
-        options: field.options.iter().map(lower_design_field_option).collect(),
+        options: field
+            .options
+            .iter()
+            .map(lower_design_field_option)
+            .collect(),
     }
 }
 
@@ -558,7 +563,12 @@ pub(crate) fn lower_plan(plan: &AppPlan) -> AppPlanDto {
             .cloned()
             .map(|collection| lower_collection(collection, true))
             .collect(),
-        capabilities: plan.capabilities.iter().copied().map(lower_capability).collect(),
+        capabilities: plan
+            .capabilities
+            .iter()
+            .copied()
+            .map(lower_capability)
+            .collect(),
         domains: plan.domains.clone(),
         summary: plan.summary.clone(),
     }
@@ -829,7 +839,9 @@ fn raise_density(level: DensityLevelDto) -> Result<DensityLevel, AppError> {
 // in a non-test build.
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn raise_design_field_type(field_type: AppDesignFieldTypeDto) -> Result<AppDesignFieldType, AppError> {
+fn raise_design_field_type(
+    field_type: AppDesignFieldTypeDto,
+) -> Result<AppDesignFieldType, AppError> {
     Ok(match field_type {
         AppDesignFieldTypeDto::ShortText => AppDesignFieldType::ShortText,
         AppDesignFieldTypeDto::LongText => AppDesignFieldType::LongText,
@@ -1176,6 +1188,7 @@ mod tests {
             id: "app00001".into(),
             name: "Habits".into(),
             brief: "a habit tracker".into(),
+            git_enabled: true,
             created_at_ms: 1,
             updated_at_ms: 2,
             workflow_state: AppWorkflowState::AwaitingSpecConfirmation,
@@ -1276,6 +1289,7 @@ mod tests {
             id: "app00001".into(),
             name: "Habits".into(),
             brief: "a habit tracker".into(),
+            git_enabled: true,
             created_at_ms: 11,
             updated_at_ms: 22,
             workflow_state: AppWorkflowState::Ready,
@@ -1287,6 +1301,7 @@ mod tests {
             id: "app00001".into(),
             name: "Habits".into(),
             brief: "a habit tracker".into(),
+            git_enabled: true,
             created_at_ms: 11,
             updated_at_ms: 22,
             workflow_state: AppWorkflowStateDto::Ready,

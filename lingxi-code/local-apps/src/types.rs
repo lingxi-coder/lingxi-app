@@ -13,6 +13,14 @@ use std::fmt;
 /// Schema version stamped on every persisted local-apps file.
 pub const APPS_SCHEMA_VERSION: u32 = 1;
 
+/// New apps use Git-backed source version control unless the user opts out
+/// during creation. Missing values on older records deserialize as enabled.
+pub const DEFAULT_GIT_VERSION_CONTROL: bool = true;
+
+fn default_git_version_control() -> bool {
+    DEFAULT_GIT_VERSION_CONTROL
+}
+
 /// Designer/generation workflow state of an app (spec §B state machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +138,9 @@ pub struct AppRecord {
     /// `service.record()` to reach it. Storing a second copy would
     /// inevitably drift.
     pub brief: String,
+    /// Whether Git controls this app's source checkpoints and restores.
+    #[serde(default = "default_git_version_control")]
+    pub git_enabled: bool,
     /// Creation time, epoch milliseconds.
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
@@ -617,6 +628,7 @@ mod tests {
             id: "abc123".into(),
             name: "Habits".into(),
             brief: "Track daily habits".into(),
+            git_enabled: true,
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
             workflow_state: AppWorkflowState::CollectingSpec,
@@ -632,6 +644,7 @@ mod tests {
         assert!(json.contains("\"workflowState\":\"collecting_spec\""));
         assert!(json.contains("\"workspaceRel\":\"apps/abc123/workspace\""));
         assert!(json.contains("\"brief\":\"Track daily habits\""));
+        assert!(json.contains("\"gitEnabled\":true"));
         assert!(!json.contains("conversationId"));
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);

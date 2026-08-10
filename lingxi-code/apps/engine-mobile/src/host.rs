@@ -3071,6 +3071,7 @@ impl MobileEngineHandle {
         name: &str,
         origin: AppCreateOriginDto,
         brief: &str,
+        git_enabled: bool,
         conversation_id: Option<String>,
     ) {
         let Some(service) = self.local_apps_or_report(None).await else {
@@ -3096,7 +3097,10 @@ impl MobileEngineHandle {
         // real seed now (Task 11) — `name` is a display label, never the
         // spec the questionnaire gets authored from; see
         // `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
-        match service.create_app(Some(name), brief, conversation_id).await {
+        match service
+            .create_app_with_git(Some(name), brief, conversation_id, git_enabled)
+            .await
+        {
             Ok(record) => {
                 let epoch = record.llm_round;
                 self.trigger_authoring(&service, record.id, epoch);
@@ -4130,9 +4134,10 @@ impl MobileEngineHandle {
                 name,
                 origin,
                 brief,
+                git_enabled,
                 conversation_id,
             } => {
-                self.handle_create_app(&name, origin, &brief, conversation_id)
+                self.handle_create_app(&name, origin, &brief, git_enabled, conversation_id)
                     .await;
                 Ok(())
             }
@@ -8209,6 +8214,7 @@ mod tests {
                     name: "Tracker".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -8276,6 +8282,7 @@ mod tests {
                     name: NAME.into(),
                     origin: AppCreateOriginDto::Library,
                     brief: BRIEF.into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -8367,6 +8374,7 @@ mod tests {
                     name: String::new(),
                     origin: AppCreateOriginDto::Library,
                     brief: "一个记事本".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -8409,6 +8417,7 @@ mod tests {
                     name: String::new(),
                     origin: AppCreateOriginDto::Library,
                     brief: "一个记事本".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -8466,6 +8475,7 @@ mod tests {
                     name: String::new(),
                     origin: AppCreateOriginDto::Library,
                     brief: "一个记事本".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -8531,6 +8541,7 @@ mod tests {
                     name: String::new(),
                     origin: AppCreateOriginDto::Library,
                     brief: "一个记事本".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -8584,6 +8595,7 @@ mod tests {
                     name: "Habit Tracker".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: Some("conv-ignored".into()),
                 })
                 .await
@@ -8916,6 +8928,7 @@ mod tests {
                     name: "Board".into(),
                     origin: AppCreateOriginDto::Chat,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: Some("conv-7".into()),
                 })
                 .await
@@ -9025,6 +9038,7 @@ mod tests {
                     name: "Persist".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -9103,6 +9117,7 @@ mod tests {
                     name: "Moodboard".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -9350,6 +9365,7 @@ mod tests {
                     name: "Gallery".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -9552,6 +9568,7 @@ mod tests {
                         name: "Reentrant".into(),
                         origin: AppCreateOriginDto::Library,
                         brief: "a test app".into(),
+                        git_enabled: true,
                         conversation_id: None,
                     })
                     .await
@@ -9626,6 +9643,7 @@ mod tests {
                     name: "Sweep".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -9756,6 +9774,7 @@ mod tests {
                     name: "Telemetry".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -9857,6 +9876,7 @@ mod tests {
                     name: "Conflicted".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -9966,6 +9986,7 @@ mod tests {
                     name: "Fifo".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await
@@ -10133,6 +10154,7 @@ mod tests {
                     name: "Habit Tracker".into(),
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
+                    git_enabled: true,
                     conversation_id: None,
                 })
                 .await

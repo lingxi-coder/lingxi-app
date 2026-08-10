@@ -37,6 +37,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_git_version_control() -> bool {
+    true
+}
+
 /// Designer/generation workflow state of an app — mirrors the core
 /// `AppWorkflowState` (spec §B state machine). A bare wire STRING
 /// (`"collecting_spec"`, …). `#[non_exhaustive]` so a future state is additive.
@@ -299,6 +303,9 @@ pub struct AppRecordDto {
     pub name: String,
     /// One-line description the user gave at creation time.
     pub brief: String,
+    /// Whether Git controls this app's source checkpoints and restores.
+    #[serde(default = "default_git_version_control")]
+    pub git_enabled: bool,
     /// Creation time, epoch milliseconds.
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.

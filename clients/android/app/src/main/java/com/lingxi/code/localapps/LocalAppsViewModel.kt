@@ -220,7 +220,7 @@ class LocalAppsViewModel(
             LocalAppsAction.Create -> _uiState.update { it.copy(createName = "") }
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
             is LocalAppsAction.ChangeCreateName -> _uiState.update { it.copy(createName = action.name) }
-            is LocalAppsAction.CreateFromBrief -> createFromBrief(action.brief)
+            is LocalAppsAction.CreateFromBrief -> createFromBrief(action.brief, action.gitEnabled)
             is LocalAppsAction.UpdateBrief -> submit(ClientCommand.UpdateAppBrief(action.appId, action.brief))
             is LocalAppsAction.RetryQuestionnaire -> submit(ClientCommand.RetryAppQuestionnaire(action.appId))
             is LocalAppsAction.BeginPlanning -> submit(ClientCommand.BeginAppPlanning(action.appId))
@@ -298,7 +298,7 @@ class LocalAppsViewModel(
     // exactly. `LocalAppsViewModelTest`'s "create app fabricates the brief
     // from the display name" tripwire (Task 11's stopgap, carried through
     // Task 18) is now a permanent guard that this stays true.
-    private fun createFromBrief(brief: String) {
+    private fun createFromBrief(brief: String, gitEnabled: Boolean) {
         val trimmedBrief = brief.trim()
         if (trimmedBrief.isEmpty()) return
         pendingCreates += trimmedBrief
@@ -307,6 +307,7 @@ class LocalAppsViewModel(
                 name = "",
                 origin = AppCreateOriginDto.LIBRARY,
                 brief = trimmedBrief,
+                gitEnabled = gitEnabled,
                 conversationId = null,
             ),
         )
@@ -1605,6 +1606,7 @@ private fun AppRecordDto.toUiApp(
     id = id,
     name = name,
     brief = brief,
+    gitEnabled = gitEnabled,
     workflow = workflowState.toUiWorkflow(),
     runtime = runtime ?: fallbackRuntime ?: LocalAppRuntime(),
     updatedAtMs = updatedAtMs.toLong(),

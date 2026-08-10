@@ -2210,6 +2210,7 @@ class LocalAppsViewModelTest {
         id = id,
         name = name,
         brief = brief,
+        gitEnabled = true,
         createdAtMs = 1u,
         updatedAtMs = 2u,
         workflowState = workflow,

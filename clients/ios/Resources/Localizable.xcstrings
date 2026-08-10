@@ -15642,6 +15642,40 @@
         }
       }
     },
+    "local_apps_create_git_version_control": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Git 管理应用版本（推荐）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Git 管理應用版本（推薦）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use Git to manage app versions (recommended)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git でアプリのバージョンを管理する（推奨）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git으로 앱 버전 관리(권장)"
+          }
+        }
+      }
+    },
     "local_apps_create_brief_detail": {
       "localizations": {
         "zh-Hans": {

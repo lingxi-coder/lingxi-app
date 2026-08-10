@@ -40,6 +40,6 @@ fn version_is_semver() {
 /// change here is a deliberate, reviewed bump — this test makes an accidental
 /// edit visible.
 #[test]
-fn version_is_three_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "3.0.0");
+fn version_is_four_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "4.0.0");
 }

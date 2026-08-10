@@ -40,6 +40,14 @@ use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_git_version_control() -> bool {
+    true
+}
+
+fn is_default_git_version_control(value: &bool) -> bool {
+    *value
+}
+
 /// A provider credential carried over the authenticated local bridge.
 ///
 /// The wire representation is a plain JSON string for TypeScript/UniFFI
@@ -342,6 +350,13 @@ pub enum ClientCommand {
         /// display label is not a spec, and conflating the two used to leave
         /// the questionnaire authored from a bare app name.
         brief: String,
+        /// Whether to keep Git-backed source versions. Defaults to enabled
+        /// when omitted by an older client.
+        #[serde(
+            default = "default_git_version_control",
+            skip_serializing_if = "is_default_git_version_control"
+        )]
+        git_enabled: bool,
         /// Conversation the app was created from (`origin: chat`). Skipped
         /// from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

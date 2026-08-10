@@ -281,6 +281,7 @@ fn apps_changed_round_trips() {
             id: "habits-1a2b".to_string(),
             name: "Habits".to_string(),
             brief: "Track daily habits".to_string(),
+            git_enabled: true,
             created_at_ms: 1_750_000_000_000,
             updated_at_ms: 1_750_000_000_001,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -598,19 +599,13 @@ fn extended_local_app_events_round_trip() {
             "/event/job/continuation_seq",
             serde_json::Value::from(1_u64),
         ),
-        (
-            "/event/response/result_json",
-            serde_json::Value::from("[]"),
-        ),
+        ("/event/response/result_json", serde_json::Value::from("[]")),
         ("/event/request/action", serde_json::Value::from("inspect")),
         (
             "/event/request/capability",
             serde_json::Value::from("network_domain"),
         ),
-        (
-            "/event/app_id",
-            serde_json::Value::from("habits-1a2b"),
-        ),
+        ("/event/app_id", serde_json::Value::from("habits-1a2b")),
     ];
     assert_eq!(
         events.len(),
@@ -622,7 +617,10 @@ fn extended_local_app_events_round_trip() {
     {
         let json = serde_json::to_value(&event).expect("serialize extended app event");
         assert_eq!(json["type"], "app_event", "outer envelope tag");
-        assert_eq!(json["event"]["type"], expected_type, "inner AppEventDto tag");
+        assert_eq!(
+            json["event"]["type"], expected_type,
+            "inner AppEventDto tag"
+        );
         assert_eq!(
             json.pointer(leaf_pointer),
             Some(&leaf_value),

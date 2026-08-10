@@ -30,6 +30,7 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// (local-apps#questionnaire, Task 13): there is no more static template
     /// catalog to classify an app by.
     var brief: String
+    var gitEnabled: Bool = true
     var updatedAt: Date
     var workflow: LocalAppWorkflow
     var workspaceRelativePath: String

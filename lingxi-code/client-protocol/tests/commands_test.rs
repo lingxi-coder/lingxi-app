@@ -545,6 +545,7 @@ fn create_app_round_trips() {
         name: "Habits".to_string(),
         origin: AppCreateOriginDto::Chat,
         brief: "Track daily habits with streaks".to_string(),
+        git_enabled: true,
         conversation_id: Some("conv-42".to_string()),
     };
     let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
@@ -553,6 +554,10 @@ fn create_app_round_trips() {
     assert_eq!(json["origin"], "chat");
     assert_eq!(json["brief"], "Track daily habits with streaks");
     assert_eq!(json["conversation_id"], "conv-42");
+    assert!(
+        json.get("git_enabled").is_none(),
+        "default Git choice is compact on the wire"
+    );
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize CreateApp");
     assert_eq!(back, cmd);
 
@@ -561,6 +566,7 @@ fn create_app_round_trips() {
         name: "Recipes".to_string(),
         origin: AppCreateOriginDto::Library,
         brief: "A recipe box with tags".to_string(),
+        git_enabled: true,
         conversation_id: None,
     };
     let json_l = serde_json::to_value(&from_library).expect("serialize library CreateApp");
@@ -572,6 +578,20 @@ fn create_app_round_trips() {
     let back_l: ClientCommand =
         serde_json::from_value(json_l).expect("deserialize library CreateApp");
     assert_eq!(back_l, from_library);
+
+    let without_git = ClientCommand::CreateApp {
+        name: "Offline".to_string(),
+        origin: AppCreateOriginDto::Library,
+        brief: "An offline app".to_string(),
+        git_enabled: false,
+        conversation_id: None,
+    };
+    let json_without_git = serde_json::to_value(&without_git).expect("serialize no-Git CreateApp");
+    assert_eq!(json_without_git["git_enabled"], false);
+    assert_eq!(
+        serde_json::from_value::<ClientCommand>(json_without_git).unwrap(),
+        without_git
+    );
 }
 
 /// `UpdateAppBrief` / `RetryAppQuestionnaire` / `BeginAppPlanning` /
@@ -887,6 +907,7 @@ fn no_live_command_carries_session_id() {
             name: "Habits".to_string(),
             origin: AppCreateOriginDto::Chat,
             brief: "Track daily habits with streaks".to_string(),
+            git_enabled: true,
             conversation_id: Some("conv-42".to_string()),
         },
         ClientCommand::UpdateAppBrief {

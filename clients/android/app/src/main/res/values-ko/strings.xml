@@ -1112,6 +1112,7 @@
     <string name="local_apps_card_menu_a11y">앱 작업</string>
     <string name="local_apps_checkpoint_restore_action">복원</string>
     <string name="local_apps_create_and_design">만들고 디자인 시작</string>
+    <string name="local_apps_create_git_version_control">Git으로 앱 버전 관리(권장)</string>
     <string name="local_apps_create_name_hint">용도와 대상 사용자는 나중에 디자이너에서 계속 다듬을 수 있습니다.</string>
     <string name="local_apps_data_field_name">필드 이름</string>
     <string name="local_apps_data_field_type_boolean">불리언</string>

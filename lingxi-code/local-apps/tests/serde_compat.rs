@@ -44,12 +44,12 @@
 use local_apps::storage::{self, save_app_files, save_index};
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    save_manifest, save_permissions, AppContinuation,
-    AppContinuationKind, AppDesignDraft, AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion,
-    AppEventObserver, AppInteractionKind, AppInteractionRequest, AppInteractions, AppLayout,
-    AppManifest, AppPermissions, AppRecord, AppRuntimeRecord, AppRuntimeState, AppService,
-    AppState, AppWorkflowState, ContinuationSink, DensityLevel, DesignValue,
-    NoopAppEventObserver, RecordingContinuationSink, APPS_SCHEMA_VERSION,
+    save_manifest, save_permissions, AppContinuation, AppContinuationKind, AppDesignDraft,
+    AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion, AppEventObserver, AppInteractionKind,
+    AppInteractionRequest, AppInteractions, AppLayout, AppManifest, AppPermissions, AppRecord,
+    AppRuntimeRecord, AppRuntimeState, AppService, AppState, AppWorkflowState, ContinuationSink,
+    DensityLevel, DesignValue, NoopAppEventObserver, RecordingContinuationSink,
+    APPS_SCHEMA_VERSION,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -339,6 +339,7 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
             id: "aaaa1111".to_string(),
             name: "Fixture Maximal".to_string(),
             brief: "a fixture app with every design-value kind".to_string(),
+            git_enabled: true,
             created_at_ms: T0,
             updated_at_ms: T0 + 700,
             workflow_state: AppWorkflowState::AwaitingPreviewConfirmation,
@@ -424,6 +425,7 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
             id: "bbbb2222".to_string(),
             name: "Fixture Minimal".to_string(),
             brief: "a minimal fixture app".to_string(),
+            git_enabled: true,
             created_at_ms: T0,
             updated_at_ms: T0 + 900,
             workflow_state: AppWorkflowState::CollectingSpec,

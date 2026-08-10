@@ -126,6 +126,7 @@ enum LocalAppsProtocolAdapter {
             id: dto.id,
             name: dto.name,
             brief: dto.brief,
+            gitEnabled: dto.gitEnabled,
             updatedAt: Date(timeIntervalSince1970: TimeInterval(dto.updatedAtMs) / 1_000),
             workflow: workflow(dto.workflowState),
             workspaceRelativePath: dto.workspaceRel

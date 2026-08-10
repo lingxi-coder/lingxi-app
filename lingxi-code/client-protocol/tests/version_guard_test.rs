@@ -627,6 +627,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp.name", "String");
     put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
     put("ClientCommand::CreateApp.brief", "String");
+    put("ClientCommand::CreateApp.git_enabled", "bool");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
 
     put("ClientCommand::UpdateAppBrief", "update_app_brief");
@@ -1135,6 +1136,7 @@ fn current_contract_index() -> ContractIndex {
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
     put("AppRecordDto.brief", "String");
+    put("AppRecordDto.git_enabled", "bool");
     put("AppRecordDto.created_at_ms", "u64");
     put("AppRecordDto.updated_at_ms", "u64");
     put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
@@ -1278,11 +1280,23 @@ fn current_contract_index() -> ContractIndex {
     put("AppBridgeOperationDto::RuntimeStatus", "runtime_status");
     put("AppBridgeOperationDto::CapturePhoto", "capture_photo");
     put("AppBridgeOperationDto::PickImage", "pick_image");
-    put("AppBridgeOperationDto::RecordAudioStart", "record_audio_start");
-    put("AppBridgeOperationDto::RecordAudioStop", "record_audio_stop");
+    put(
+        "AppBridgeOperationDto::RecordAudioStart",
+        "record_audio_start",
+    );
+    put(
+        "AppBridgeOperationDto::RecordAudioStop",
+        "record_audio_stop",
+    );
     put("AppBridgeOperationDto::GetLocation", "get_location");
-    put("AppBridgeOperationDto::TranscribeSpeech", "transcribe_speech");
-    put("AppBridgeOperationDto::PostNotification", "post_notification");
+    put(
+        "AppBridgeOperationDto::TranscribeSpeech",
+        "transcribe_speech",
+    );
+    put(
+        "AppBridgeOperationDto::PostNotification",
+        "post_notification",
+    );
     put("AppBridgeOperationDto::LlmChat", "llm_chat");
     put("AppBridgeOperationDto::AgentPost", "agent_post");
 
@@ -1398,10 +1412,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put("AppEventDto::AppLlmActivityChanged.app_id", "String");
     put("AppEventDto::AppLlmActivityChanged.active", "bool");
-    put(
-        "AppEventDto::AppAgentEventPosted",
-        "app_agent_event_posted",
-    );
+    put("AppEventDto::AppAgentEventPosted", "app_agent_event_posted");
     put("AppEventDto::AppAgentEventPosted.app_id", "String");
     put("AppEventDto::AppAgentEventPosted.seq", "u64");
     put("AppEventDto::AppAgentEventPosted.topic", "String");
@@ -1687,8 +1698,8 @@ fn contract_index_covers_every_dto() {
         AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
         AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
         AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-        AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
-        AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+        AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, DensityLevelDto,
+        DesignValueDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -1877,6 +1888,7 @@ fn contract_index_covers_every_dto() {
             id: String::new(),
             name: String::new(),
             brief: String::new(),
+            git_enabled: true,
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -1997,6 +2009,7 @@ fn contract_index_covers_every_dto() {
             id: String::new(),
             name: String::new(),
             brief: String::new(),
+            git_enabled: true,
             created_at_ms: 0,
             updated_at_ms: 0,
             workflow_state: AppWorkflowStateDto::CollectingSpec,
@@ -2097,7 +2110,6 @@ fn contract_index_covers_every_dto() {
             created_at_ms: 0,
         },
     ];
-
 
     // Sanity: the index is non-empty and contains a known anchor key.
     let ix = current_contract_index();

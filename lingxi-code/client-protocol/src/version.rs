@@ -20,4 +20,7 @@
 /// removed in favor of the dynamic brief/questionnaire/plan contract. Those
 /// removals are BREAKING structural changes under the F1-09 guard, so this is
 /// a real major bump rather than an additive protocol revision.
-pub const CLIENT_PROTOCOL_VERSION: &str = "3.0.0";
+///
+/// Bumped to 4.0.0 when app records began carrying the persisted
+/// `git_enabled` creation choice.
+pub const CLIENT_PROTOCOL_VERSION: &str = "4.0.0";

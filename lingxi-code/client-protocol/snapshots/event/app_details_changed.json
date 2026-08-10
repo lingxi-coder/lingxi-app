@@ -7,6 +7,7 @@
         "id": "habits-1a2b",
         "name": "Habits",
         "brief": "A daily habit tracker",
+        "git_enabled": true,
         "created_at_ms": 1750000000000,
         "updated_at_ms": 1750000000001,
         "workflow_state": "collecting_spec",

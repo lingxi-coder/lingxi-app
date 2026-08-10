@@ -70,8 +70,8 @@ pub use permissions::{
     SessionPermissions,
 };
 pub use questionnaire::{
-    validate_answers, validate_plan, validate_questionnaire, AppDesignField,
-    AppDesignFieldOption, AppDesignFieldType, AppDesignStep, AppPlan,
+    validate_answers, validate_plan, validate_questionnaire, AppDesignField, AppDesignFieldOption,
+    AppDesignFieldType, AppDesignStep, AppPlan,
 };
 pub use service::AppService;
 pub use source_validator::{
@@ -83,6 +83,6 @@ pub use types::{
     AppCheckpoint, AppCheckpointKind, AppContinuation, AppContinuationKind, AppDesignDraft,
     AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress,
     AppInteractionKind, AppInteractionRequest, AppInteractions, AppPreview, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, DensityLevel,
-    DesignValue, APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, DensityLevel, DesignValue,
+    APPS_SCHEMA_VERSION, DEFAULT_GIT_VERSION_CONTROL,
 };

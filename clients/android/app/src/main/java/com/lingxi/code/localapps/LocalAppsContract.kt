@@ -37,11 +37,12 @@ data class LocalAppItem(
      * authors the questionnaire from. Replaces `templateKind`/`templateName`
      * (local-apps#questionnaire, Task 18): there is no more static template
      * catalog to classify an app by.
-     */
+    */
     val brief: String,
     val workflow: LocalAppWorkflow,
     val runtime: LocalAppRuntime = LocalAppRuntime(),
     val updatedAtMs: Long,
+    val gitEnabled: Boolean = true,
 )
 
 enum class LocalAppWorkflow {
@@ -377,7 +378,7 @@ sealed interface LocalAppsAction {
     data class Search(val query: String) : LocalAppsAction
     data class ChangeCreateName(val name: String) : LocalAppsAction
     /** Creates a new app from a one-line brief — replaces the deleted template picker. */
-    data class CreateFromBrief(val brief: String) : LocalAppsAction
+    data class CreateFromBrief(val brief: String, val gitEnabled: Boolean = true) : LocalAppsAction
     /** Replaces an app's brief and re-authors its questionnaire from scratch. */
     data class UpdateBrief(val appId: String, val brief: String) : LocalAppsAction
     /** Retries questionnaire authoring after it failed, reusing the same brief. */

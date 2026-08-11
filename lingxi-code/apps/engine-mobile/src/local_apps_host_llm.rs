@@ -416,9 +416,7 @@ impl LocalAppsHostBroker {
 #[cfg(test)]
 mod tests {
     use crate::local_apps_host::LocalAppsHostBroker;
-    use crate::local_apps_llm::{
-        ChatOutcome, ChatPart, ChatRequest, GenerationDeltaSink, LocalAppsLlm, LocalAppsModel,
-    };
+    use crate::local_apps_llm::{ChatOutcome, ChatPart, ChatRequest, LocalAppsLlm, LocalAppsModel};
     use crate::local_apps_profile::SharedLlm;
     use async_trait::async_trait;
     use base64::Engine as _;
@@ -431,7 +429,7 @@ mod tests {
     use local_apps::test_support::FixedClock;
     use local_apps::{
         load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
-        AppService, NoopAppEventObserver, NoopContinuationSink,
+        AppService, NoopAppEventObserver,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -470,17 +468,6 @@ mod tests {
 
     #[async_trait]
     impl LocalAppsModel for ChatModel {
-        async fn structured(
-            &self,
-            _system: &str,
-            _user: String,
-            _tool_name: &str,
-            _schema: Value,
-            _deltas: Option<Arc<dyn GenerationDeltaSink>>,
-        ) -> Result<Value, AppError> {
-            unreachable!("the llm bridge never calls structured")
-        }
-
         async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
             self.seen.lock().expect("lock").push(request);
             if self.hang {
@@ -555,7 +542,6 @@ mod tests {
             AppService::load(
                 root.path(),
                 Arc::new(FixedClock::new(1)),
-                Arc::new(NoopContinuationSink),
                 Arc::new(NoopAppEventObserver),
             )
             .await

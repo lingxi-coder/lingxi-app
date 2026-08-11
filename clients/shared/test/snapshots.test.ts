@@ -178,23 +178,7 @@ function validatePermissionMode(v: unknown): void {
 // ── local_apps.rs validators (bare-string enums + kind/op-tagged DTOs) ────────
 
 function validateAppWorkflowState(v: unknown): void {
-  assert.ok(
-    [
-      'authoring_questionnaire',
-      'questionnaire_failed',
-      'collecting_spec',
-      'planning',
-      'plan_failed',
-      'awaiting_spec_confirmation',
-      'generating',
-      'validating',
-      'awaiting_preview_confirmation',
-      'revising',
-      'ready',
-      'generation_failed',
-      'validation_failed',
-    ].includes(v as string),
-  );
+  assert.ok(['draft', 'ready'].includes(v as string));
 }
 
 function validateAppRuntimeState(v: unknown): void {
@@ -235,57 +219,19 @@ function validateAppCheckpointKind(v: unknown): void {
   );
 }
 
-function validateDesignValue(v: unknown): void {
-  const o = rec(v);
-  switch (o['kind']) {
-    case 'short_text':
-    case 'long_text':
-    case 'single_choice':
-    case 'color':
-      assert.ok(isString(o['value']));
-      break;
-    case 'multiple_choice':
-    case 'screen_list':
-    case 'feature_list':
-    case 'domain_list':
-      assert.ok(Array.isArray(o['value']));
-      for (const item of o['value'] as unknown[]) assert.ok(isString(item));
-      break;
-    case 'data_field_list':
-      assert.ok(Array.isArray(o['value']));
-      for (const item of o['value'] as unknown[]) validateAppDataField(item);
-      break;
-    case 'boolean':
-      assert.ok(isBool(o['value']));
-      break;
-    case 'density':
-      assert.ok(['compact', 'comfortable'].includes(o['value'] as string));
-      break;
-    case 'deferred':
-      break;
-    default:
-      assert.fail(`unknown DesignValueDto kind: ${String(o['kind'])}`);
-  }
+function validateAppSessionKind(v: unknown): void {
+  assert.ok(['init', 'conversation'].includes(v as string));
 }
 
-function validateDesignPatch(v: unknown): void {
+function validateAppSessionRow(v: unknown): void {
   const o = rec(v);
-  assert.ok(Array.isArray(o['ops']));
-  for (const op of o['ops'] as unknown[]) {
-    const p = rec(op);
-    switch (p['op']) {
-      case 'set':
-        assert.ok(isString(p['field_id']));
-        validateDesignValue(p['value']);
-        break;
-      case 'remove':
-        assert.ok(isString(p['field_id']));
-        break;
-      default:
-        assert.fail(`unknown AppDesignPatchOpDto op: ${String(p['op'])}`);
-    }
-  }
-  if ('note' in o) assert.ok(isString(o['note']));
+  assert.ok(
+    isString(o['uuid']) &&
+      isString(o['title']) &&
+      isString(o['modified_rfc3339']) &&
+      isNumber(o['message_count']),
+  );
+  validateAppSessionKind(o['kind']);
 }
 
 function validateAppDataField(v: unknown): void {
@@ -314,47 +260,6 @@ function validateAppDataCollection(v: unknown): void {
   for (const f of o['fields'] as unknown[]) validateAppDataField(f);
 }
 
-function validateAppDesignField(v: unknown): void {
-  const o = rec(v);
-  assert.ok(
-    isString(o['id']) &&
-      isString(o['label']) &&
-      isBool(o['required']) &&
-      isBool(o['allows_custom']) &&
-      isBool(o['allows_defer']),
-  );
-  assert.ok(
-    [
-      'short_text',
-      'long_text',
-      'single_choice',
-      'multiple_choice',
-      'boolean',
-      'color',
-      'density',
-      'screen_list',
-      'feature_list',
-      'data_field_list',
-      'domain_list',
-    ].includes(o['field_type'] as string),
-  );
-  if ('description' in o) assert.ok(isString(o['description']));
-  if ('default_value' in o) validateDesignValue(o['default_value']);
-  assert.ok(Array.isArray(o['options']));
-  for (const opt of o['options'] as unknown[]) {
-    const p = rec(opt);
-    assert.ok(isString(p['value']) && isString(p['label']));
-  }
-}
-
-function validateAppDesignStep(v: unknown): void {
-  const s = rec(v);
-  assert.ok(isString(s['id']) && isNumber(s['order']) && isString(s['title']));
-  if ('description' in s) assert.ok(isString(s['description']));
-  assert.ok(Array.isArray(s['fields']));
-  for (const f of s['fields'] as unknown[]) validateAppDesignField(f);
-}
-
 const APP_CAPABILITY_KINDS = [
   'data_mutation',
   'ui_control',
@@ -368,19 +273,6 @@ const APP_CAPABILITY_KINDS = [
   'llm',
   'agent_notify',
 ];
-
-function validateAppPlan(v: unknown): void {
-  const o = rec(v);
-  assert.ok(Array.isArray(o['collections']));
-  for (const c of o['collections'] as unknown[]) validateAppDataCollection(c);
-  assert.ok(Array.isArray(o['capabilities']));
-  for (const cap of o['capabilities'] as unknown[]) {
-    assert.ok(APP_CAPABILITY_KINDS.includes(cap as string));
-  }
-  assert.ok(Array.isArray(o['domains']));
-  for (const d of o['domains'] as unknown[]) assert.ok(isString(d));
-  assert.ok(isString(o['summary']));
-}
 
 function validateAppRuntimeDetails(v: unknown): void {
   const o = rec(v);
@@ -404,34 +296,6 @@ function validateAppRuntimeDetails(v: unknown): void {
     );
   }
   if ('last_error' in o) assert.ok(isString(o['last_error']));
-}
-
-function validateAppGenerationJob(v: unknown): void {
-  const o = rec(v);
-  assert.ok(
-    isString(o['id']) &&
-      isString(o['app_id']) &&
-      isNumber(o['revision']) &&
-      isNumber(o['continuation_seq']) &&
-      isNumber(o['updated_at_ms']),
-  );
-  assert.ok(
-    [
-      'queued',
-      'scaffolding',
-      'generating',
-      'validating',
-      'building',
-      'starting_preview',
-      'awaiting_approval',
-      'succeeded',
-      'failed',
-      'cancelled',
-    ].includes(o['state'] as string),
-  );
-  if ('percent' in o) assert.ok(isNumber(o['percent']));
-  if ('detail' in o) assert.ok(isString(o['detail']));
-  if ('log_rel' in o) assert.ok(isString(o['log_rel']));
 }
 
 function validateAppManifest(v: unknown): void {
@@ -525,12 +389,14 @@ function validateAppRecord(v: unknown): void {
     isString(o['id']) &&
       isString(o['name']) &&
       isString(o['brief']) &&
+      isBool(o['git_enabled']) &&
       isNumber(o['created_at_ms']) &&
       isNumber(o['updated_at_ms']) &&
       isString(o['workspace_rel']),
   );
   validateAppWorkflowState(o['workflow_state']);
   if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
+  if ('init_session_id' in o) assert.ok(isString(o['init_session_id']));
 }
 
 function validateAppCheckpoint(v: unknown): void {
@@ -542,19 +408,8 @@ function validateAppCheckpoint(v: unknown): void {
 function validateAppDetails(v: unknown): void {
   const o = rec(v);
   validateAppRecord(o['app']);
-  assert.ok(isNumber(o['design_revision']));
-  assert.ok(Array.isArray(o['design_fields']));
-  for (const pair of o['design_fields'] as unknown[]) {
-    const p = rec(pair);
-    assert.ok(isString(p['field_id']));
-    validateDesignValue(p['value']);
-  }
-  assert.ok(Array.isArray(o['questionnaire']));
-  for (const step of o['questionnaire'] as unknown[]) validateAppDesignStep(step);
-  if ('plan' in o) validateAppPlan(o['plan']);
   if ('manifest' in o) validateAppManifest(o['manifest']);
   validateAppRuntimeDetails(o['runtime']);
-  if ('generation_job' in o) validateAppGenerationJob(o['generation_job']);
   assert.ok(Array.isArray(o['checkpoints']));
   for (const c of o['checkpoints'] as unknown[]) validateAppCheckpoint(c);
 }
@@ -564,18 +419,6 @@ function validateAppEvent(v: unknown): void {
   switch (o['type']) {
     case 'app_details_changed':
       validateAppDetails(o['details']);
-      break;
-    case 'app_questionnaire_changed':
-      assert.ok(isString(o['app_id']) && isNumber(o['revision']));
-      assert.ok(Array.isArray(o['steps']));
-      for (const step of o['steps'] as unknown[]) validateAppDesignStep(step);
-      break;
-    case 'app_plan_changed':
-      assert.ok(isString(o['app_id']) && isNumber(o['revision']));
-      if ('plan' in o) validateAppPlan(o['plan']);
-      break;
-    case 'app_generation_job_changed':
-      validateAppGenerationJob(o['job']);
       break;
     case 'app_bridge_response':
       validateAppBridgeResponse(o['response']);
@@ -752,52 +595,22 @@ function validateCommand(name: string, v: unknown): void {
     case 'create_app':
       assert.ok(isString(o['name']) && isString(o['brief']));
       validateAppCreateOrigin(o['origin']);
+      if ('git_enabled' in o) assert.ok(isBool(o['git_enabled']));
       if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
       break;
-    case 'update_app_brief':
-      assert.ok(isString(o['app_id']) && isString(o['brief']));
-      break;
-    case 'open_app_designer':
-    case 'cancel_app_design':
     case 'start_app':
     case 'stop_app':
     case 'restart_app':
     case 'get_app_details':
-    case 'retry_app_generation':
-    case 'retry_app_questionnaire':
-    case 'begin_app_planning':
-    case 'retry_app_plan':
     case 'reset_app_permissions':
     case 'list_app_checkpoints':
     case 'delete_app':
       assert.ok(isString(o['app_id']));
       break;
-    case 'update_app_design_draft':
-      assert.ok(isString(o['app_id']) && isNumber(o['expected_revision']));
-      validateDesignPatch(o['patch']);
-      break;
-    case 'apply_agent_design_suggestion':
-      assert.ok(
-        isString(o['app_id']) &&
-          isString(o['suggestion_id']) &&
-          isNumber(o['expected_revision']),
-      );
-      break;
-    case 'confirm_app_design':
-    case 'confirm_app_preview':
-      assert.ok(
-        isString(o['app_id']) && isNumber(o['revision']) && isString(o['interaction_id']),
-      );
-      break;
-    case 'request_app_revision':
-      assert.ok(isString(o['app_id']) && isString(o['prompt']));
-      break;
-    case 'request_app_design_suggestion':
-      assert.ok(isString(o['app_id']) && isNumber(o['expected_revision']));
-      if ('prompt' in o) assert.ok(isString(o['prompt']));
-      break;
-    case 'dismiss_app_design_suggestion':
-      assert.ok(isString(o['app_id']) && isString(o['suggestion_id']));
+    case 'list_app_sessions':
+      assert.ok(isString(o['app_id']));
+      if ('offset' in o) assert.ok(isNumber(o['offset']));
+      if ('limit' in o) assert.ok(isNumber(o['limit']));
       break;
     case 'execute_app_bridge_request':
       validateAppBridgeRequest(o['request']);
@@ -1047,40 +860,9 @@ function validateEvent(name: string, v: unknown): void {
     case 'app_event':
       validateAppEvent(o['event']);
       break;
-    case 'app_designer_requested':
-      assert.ok(
-        isString(o['app_id']) && isString(o['interaction_id']) && isNumber(o['revision']),
-      );
-      break;
-    case 'app_design_draft_changed': {
-      assert.ok(isString(o['app_id']) && isNumber(o['revision']));
-      const fields = rec(o['fields']);
-      for (const value of Object.values(fields)) validateDesignValue(value);
-      break;
-    }
-    case 'app_design_suggestion_available':
-      assert.ok(
-        isString(o['app_id']) &&
-          isString(o['suggestion_id']) &&
-          isNumber(o['based_on_revision']),
-      );
-      validateDesignPatch(o['patch']);
-      break;
-    case 'app_design_conflict':
-      assert.ok(
-        isString(o['app_id']) &&
-          isNumber(o['expected_revision']) &&
-          isNumber(o['actual_revision']),
-      );
-      break;
     case 'app_workflow_changed':
       assert.ok(isString(o['app_id']));
       validateAppWorkflowState(o['state']);
-      if ('detail' in o) assert.ok(isString(o['detail']));
-      break;
-    case 'app_generation_progress':
-      assert.ok(isString(o['app_id']) && isString(o['stage']));
-      if ('percent' in o) assert.ok(isNumber(o['percent']));
       if ('detail' in o) assert.ok(isString(o['detail']));
       break;
     case 'app_runtime_changed':
@@ -1089,11 +871,11 @@ function validateEvent(name: string, v: unknown): void {
       if ('details' in o) validateAppRuntimeDetails(o['details']);
       if ('last_error' in o) assert.ok(isString(o['last_error']));
       break;
-    case 'app_preview_ready':
-      assert.ok(
-        isString(o['app_id']) && isString(o['interaction_id']) && isNumber(o['revision']),
-      );
-      if ('url' in o) assert.ok(isString(o['url']));
+    case 'app_sessions_changed':
+      assert.ok(isString(o['app_id']));
+      assert.ok(Array.isArray(o['sessions']));
+      for (const row of o['sessions'] as unknown[]) validateAppSessionRow(row);
+      if ('next_offset' in o) assert.ok(isNumber(o['next_offset']));
       break;
     case 'app_checkpoint_created':
       assert.ok(isString(o['app_id']));
@@ -1195,7 +977,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 54, `expected 54 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 41, `expected 41 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1203,7 +985,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 59, `expected 59 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 51, `expected 51 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

@@ -170,7 +170,7 @@ mod tests {
     use local_apps::test_support::FixedClock;
     use local_apps::{
         load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
-        AppService, NoopAppEventObserver, NoopContinuationSink,
+        AppService, NoopAppEventObserver,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -192,7 +192,6 @@ mod tests {
             AppService::load(
                 root.path(),
                 Arc::new(FixedClock::new(1_700_000_000_000)),
-                Arc::new(NoopContinuationSink),
                 Arc::new(NoopAppEventObserver),
             )
             .await

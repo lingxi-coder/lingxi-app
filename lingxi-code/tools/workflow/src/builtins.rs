@@ -28,7 +28,20 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     manual_only: true,
 };
 
-const BUILTINS: &[BuiltinWorkflowDescriptor] = &[DEEP_RESEARCH];
+/// The v3 local-app build segment: the `create-local-app` skill has the agent
+/// gather requirements interactively in the MAIN session (AskUserQuestion),
+/// then hand the confirmed spec to this workflow, which writes the source,
+/// builds until green (≤3 attempts) and starts the preview. Deliberately
+/// model-invocable (`manual_only: false`): the skill instructs the model to
+/// call it by name.
+const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
+    name: "local-app-build",
+    description: "Implement a confirmed local-app spec: write the source, build until green, and start the preview.",
+    script: include_str!("local_app_build_workflow.js"),
+    manual_only: false,
+};
+
+const BUILTINS: &[BuiltinWorkflowDescriptor] = &[DEEP_RESEARCH, LOCAL_APP_BUILD];
 
 impl BuiltinWorkflowRegistry {
     /// Return an immutable built-in by exact name.
@@ -76,5 +89,40 @@ mod tests {
     #[test]
     fn unknown_names_do_not_fall_back() {
         assert!(BUILTIN_WORKFLOWS.get("not-a-workflow").is_none());
+    }
+
+    #[test]
+    fn local_app_build_is_model_invocable_and_pins_its_contract() {
+        let descriptor = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
+        assert!(
+            !descriptor.manual_only,
+            "the create-local-app skill instructs the model to invoke it by name"
+        );
+        workflow::validate_meta(descriptor.script).expect("valid built-in metadata");
+        workflow::check_determinism(descriptor.script).expect("deterministic built-in");
+        for phase in ["Generate", "Build"] {
+            assert!(
+                descriptor.script.contains(&format!("title: '{phase}'")),
+                "missing {phase} phase"
+            );
+        }
+        // The workspace contract must ride into EVERY agent prompt: writable
+        // roots, locked files, the bridge-only rule, and the no-new-deps rule.
+        for anchor in [
+            "app/, components/, lib/, styles/, public/",
+            "lib/lingxi-bridge.js",
+            "window.lingxi.v1",
+            "No new npm dependencies",
+            "mcp__local_apps__build",
+            "mcp__local_apps__manage_runtime",
+            "up to 3 attempts",
+        ] {
+            assert!(
+                descriptor.script.contains(anchor),
+                "missing contract anchor: {anchor}"
+            );
+        }
+        // Fails fast without an app id rather than spawning agents blind.
+        assert!(descriptor.script.contains("requires args.app_id"));
     }
 }

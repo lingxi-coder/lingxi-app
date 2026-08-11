@@ -7,6 +7,57 @@ struct LocalAppSourceFile: Identifiable, Hashable, Sendable {
     let size: Int
 }
 
+/// The single derivation + validation of a local app's workspace directory
+/// (`<appSandboxRoot>/apps/<id>/workspace`). The code browser AND the
+/// conversation-scope cwd resolution both go through here — two independent
+/// derivations of this path is exactly the divergence that broke every
+/// local-app build once before.
+enum LocalAppWorkspacePath {
+    enum PathError: LocalizedError {
+        case escaped
+
+        var errorDescription: String? {
+            String(localized: "local_apps_browser_error_path_escaped")
+        }
+    }
+
+    /// Workspace directory relative to the engine data root — the same shape
+    /// `AppRecordDto.workspaceRel` always carries (`apps/<id>/workspace`).
+    static func relativePath(appID: String) -> String {
+        "apps/\(appID)/workspace"
+    }
+
+    /// Validates the relative path (exactly `apps/<legal-id>/workspace`) and
+    /// resolves it under the app sandbox root, refusing anything that escapes.
+    static func validatedRoot(relativePath: String) throws -> URL {
+        let sandbox = URL(
+            fileURLWithPath: ConversationSourceFactory.appSandboxRoot(),
+            isDirectory: true
+        ).standardizedFileURL.resolvingSymlinksInPath()
+        guard !relativePath.hasPrefix("/") else { throw PathError.escaped }
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 3,
+              components[0] == "apps",
+              components[2] == "workspace",
+              String(components[1]).range(of: #"^[a-z0-9][a-z0-9-]{0,63}$"#, options: .regularExpression) != nil
+        else { throw PathError.escaped }
+        let candidate = sandbox
+            .appendingPathComponent(relativePath, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        guard isDescendant(candidate, of: sandbox) else { throw PathError.escaped }
+        return candidate
+    }
+
+    static func validatedRoot(appID: String) throws -> URL {
+        try validatedRoot(relativePath: relativePath(appID: appID))
+    }
+
+    static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
+        candidate.path == root.path || candidate.path.hasPrefix(root.path + "/")
+    }
+}
+
 @Observable
 @MainActor
 final class LocalAppCodeBrowser {
@@ -123,23 +174,7 @@ final class LocalAppCodeBrowser {
     }
 
     private func workspaceRoot() throws -> URL {
-        let sandbox = URL(
-            fileURLWithPath: ConversationSourceFactory.appSandboxRoot(),
-            isDirectory: true
-        ).standardizedFileURL.resolvingSymlinksInPath()
-        guard !workspaceRelativePath.hasPrefix("/") else { throw BrowserError.pathEscaped }
-        let components = workspaceRelativePath.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count == 3,
-              components[0] == "apps",
-              components[2] == "workspace",
-              String(components[1]).range(of: #"^[a-z0-9][a-z0-9-]{0,63}$"#, options: .regularExpression) != nil
-        else { throw BrowserError.pathEscaped }
-        let candidate = sandbox
-            .appendingPathComponent(workspaceRelativePath, isDirectory: true)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-        guard Self.isDescendant(candidate, of: sandbox) else { throw BrowserError.pathEscaped }
-        return candidate
+        try LocalAppWorkspacePath.validatedRoot(relativePath: workspaceRelativePath)
     }
 
     private func resolvedFileURL(relativePath: String) throws -> URL {
@@ -160,7 +195,7 @@ final class LocalAppCodeBrowser {
     }
 
     private static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
-        candidate.path == root.path || candidate.path.hasPrefix(root.path + "/")
+        LocalAppWorkspacePath.isDescendant(candidate, of: root)
     }
 
     private static func isEditable(_ url: URL) -> Bool {

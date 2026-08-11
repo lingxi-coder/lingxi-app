@@ -242,6 +242,11 @@ dependencies {
     // engine reply-stream ordering tests (subscribe-before-submit, terminal
     // completion) on the plain JVM with virtual time.
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    // Real org.json for JVM unit tests: `isReturnDefaultValues = true` makes the
+    // android.jar JSONObject stub return null everywhere, so the per-scope
+    // conversation-state store (ScopeStateStore) could not be exercised at all.
+    // The real artifact shadows the stub on the unit-test classpath only.
+    testImplementation("org.json:json:20240303")
 
     // Instrumented + Compose UI tests
     androidTestImplementation("androidx.test.ext:junit:1.3.0")

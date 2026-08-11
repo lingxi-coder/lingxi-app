@@ -2,29 +2,18 @@
 //! (local-apps phase 1: agent-designed Next.js mini-apps).
 //!
 //! Protocol-local mirrors of the `local-apps` core types (`AppRecord`,
-//! `AppDesignPatch`, `DesignValue`, `AppCheckpoint`, `AppErrorCode`, …) — the
-//! core crate never appears here; the engine lowers core ⇄ DTO at the dispatch
-//! boundary, exactly like the other listing/row DTOs.
+//! `AppCheckpoint`, `AppErrorCode`, …) — the core crate never appears here;
+//! the engine lowers core ⇄ DTO at the dispatch boundary, exactly like the
+//! other listing/row DTOs.
 //!
-//! Serde conventions (decision §0.1) with two DELIBERATE departures, both
-//! following the [`crate::computer_access::AccessTierDto`] precedent of staying
-//! byte-identical to the source contract:
-//! - the fieldless enums ([`AppWorkflowStateDto`],
-//!   [`AppRuntimeStateDto`], [`AppCreateOriginDto`], [`AppErrorCodeDto`],
-//!   [`AppCheckpointKindDto`], [`DensityLevelDto`]) ride as bare wire STRINGS
-//!   (`"dashboard"`, `"collecting_spec"`, `"not_found"`, …) — a plain
-//!   `#[serde(rename_all = "snake_case")]` fieldless enum, byte-identical to
-//!   the core enums' canonical `as_str()` values;
-//! - [`DesignValueDto`] is tagged on `kind` (`{ "kind": "short_text",
-//!   "value": … }`) and [`AppDesignPatchOpDto`] on `op` (`{ "op": "set",
-//!   "field_id": …, "value": … }`) — the discriminator names the local-apps
-//!   spec §A fixes. [`DesignValueDto`] is byte-compatible with the core
-//!   `DesignValue` wire form; [`AppDesignPatchOpDto`] is NOT — this wire
-//!   keeps protocol `snake_case` `"field_id"` while the core persists
-//!   camelCase `"fieldId"` (each pinned by its own tests/fixtures), so patch
-//!   ops must cross the seam through the engine's `raise_patch` /
-//!   `lower_patch`, never by re-serializing one side's serde form as the
-//!   other's.
+//! Serde conventions (decision §0.1) with one DELIBERATE departure, following
+//! the [`crate::computer_access::AccessTierDto`] precedent of staying
+//! byte-identical to the source contract: the fieldless enums
+//! ([`AppWorkflowStateDto`], [`AppRuntimeStateDto`], [`AppCreateOriginDto`],
+//! [`AppErrorCodeDto`], [`AppCheckpointKindDto`]) ride as bare wire STRINGS
+//! (`"draft"`, `"stopped"`, `"not_found"`, …) — a plain
+//! `#[serde(rename_all = "snake_case")]` fieldless enum, byte-identical to
+//! the core enums' canonical `as_str()` values.
 //!
 //! Every optional field uses
 //! `#[serde(default, skip_serializing_if = "Option::is_none")]`;
@@ -41,42 +30,18 @@ fn default_git_version_control() -> bool {
     true
 }
 
-/// Designer/generation workflow state of an app — mirrors the core
-/// `AppWorkflowState` (spec §B state machine). A bare wire STRING
-/// (`"collecting_spec"`, …). `#[non_exhaustive]` so a future state is additive.
+/// Workflow state of an app — mirrors the core `AppWorkflowState`. A bare
+/// wire STRING (`"draft"` / `"ready"`). `#[non_exhaustive]` so a future state
+/// is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AppWorkflowStateDto {
-    /// LLM is authoring the questionnaire for this brief. Designer is
-    /// read-only.
-    AuthoringQuestionnaire,
-    /// Authoring failed; retryable, or the brief can be changed and
-    /// re-authored.
-    QuestionnaireFailed,
-    /// Draft is being filled in; no confirmation gate is open.
-    CollectingSpec,
-    /// LLM is deriving the plan from the answers. Designer is read-only.
-    Planning,
-    /// Planning failed; retryable.
-    PlanFailed,
-    /// The designer interaction is pending user confirmation.
-    AwaitingSpecConfirmation,
-    /// Code generation is running.
-    Generating,
-    /// Generated output is being validated.
-    Validating,
-    /// The preview interaction is pending user confirmation.
-    AwaitingPreviewConfirmation,
-    /// A revision pass is running after feedback or failed validation.
-    Revising,
-    /// The app is generated, validated and user-approved.
+    /// The app exists but has not been built/approved yet.
+    Draft,
+    /// The app is built and usable.
     Ready,
-    /// Generation failed; retry requires a confirmed, unchanged draft.
-    GenerationFailed,
-    /// Validation failed; a revision pass fixes it up.
-    ValidationFailed,
 }
 
 /// Runtime (dev-server) state of an app — mirrors the core `AppRuntimeState`
@@ -147,6 +112,37 @@ pub enum AppErrorCodeDto {
     LlmOutputRejected,
 }
 
+/// Whether a catalog row is the app's pinned init session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum AppSessionKindDto {
+    /// The pinned set-up conversation (`AppRecordDto::init_session_id`).
+    Init,
+    /// Any other conversation in the app's workspace catalog.
+    Conversation,
+}
+
+/// One row of an app's workspace-scoped session catalog. Field-for-field the
+/// shared [`SessionRowDto`](crate::listings::SessionRowDto) shape plus the
+/// init marker — no file paths cross the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "snake_case")]
+pub struct AppSessionRowDto {
+    /// Bare session uuid (the resume key).
+    pub uuid: String,
+    /// Display title (custom > ai > summary > first-prompt derivation).
+    pub title: String,
+    /// Last-modified time, RFC 3339 seconds.
+    pub modified_rfc3339: String,
+    /// Transcript line count (`usize` lowered to `u32`, matching
+    /// [`SessionRowDto`](crate::listings::SessionRowDto)).
+    pub message_count: u32,
+    /// Init marker for the pinned first row.
+    pub kind: AppSessionKindDto,
+}
+
 /// Why a checkpoint was recorded — mirrors the core `AppCheckpointKind` (git
 /// wiring is phase 5). A bare wire STRING (`"scaffold_created"`, …).
 /// `#[non_exhaustive]` so a future kind is additive.
@@ -165,20 +161,6 @@ pub enum AppCheckpointKindDto {
     UserApproved,
     /// Automatic safety checkpoint taken before a restore.
     PreRestore,
-}
-
-/// Density choice for [`DesignValueDto::Density`] — mirrors the core
-/// `DensityLevel`. A bare wire STRING (`"compact"` / `"comfortable"`).
-/// `#[non_exhaustive]` so a future level is additive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum DensityLevelDto {
-    /// Tight spacing.
-    Compact,
-    /// Relaxed spacing.
-    Comfortable,
 }
 
 /// Supported field types in an app-owned structured data collection.
@@ -220,78 +202,6 @@ pub struct AppDataCollectionDto {
     pub enabled_by_default: bool,
 }
 
-/// Dynamic field kind rendered by the platform design wizards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AppDesignFieldTypeDto {
-    ShortText,
-    LongText,
-    SingleChoice,
-    MultipleChoice,
-    Boolean,
-    Color,
-    Density,
-    ScreenList,
-    FeatureList,
-    DataFieldList,
-    DomainList,
-}
-
-/// One selectable option for a dynamic design field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppDesignFieldOptionDto {
-    pub value: String,
-    pub label: String,
-}
-
-/// One Rust-defined input rendered by Android and iOS without hard-coded forms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppDesignFieldDto {
-    pub id: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub field_type: AppDesignFieldTypeDto,
-    pub required: bool,
-    /// 渲染 `Other…` 自由文本框。
-    #[serde(default)]
-    pub allows_custom: bool,
-    /// 渲染「由你决定」。
-    #[serde(default)]
-    pub allows_defer: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_value: Option<DesignValueDto>,
-    pub options: Vec<AppDesignFieldOptionDto>,
-}
-
-/// One ordered step in the canonical five-step app designer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppDesignStepDto {
-    pub id: String,
-    pub order: u32,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub fields: Vec<AppDesignFieldDto>,
-}
-
-/// 确认页展示的「将创建」摘要。由 LLM 从答案推导，经 `local-apps` 校验。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppPlanDto {
-    pub collections: Vec<AppDataCollectionDto>,
-    pub capabilities: Vec<AppCapabilityKindDto>,
-    /// 外部 HTTPS 主机名。
-    pub domains: Vec<String>,
-    /// 给用户读的一段人话；每个被 defer 的字段最终定成什么写在这里。
-    pub summary: String,
-}
-
 /// One app row — the lowered core `AppRecord`. Carried by
 /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,123 +220,20 @@ pub struct AppRecordDto {
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
     pub updated_at_ms: u64,
-    /// Current designer/generation workflow state.
+    /// Current workflow state (`draft` / `ready`).
     pub workflow_state: AppWorkflowStateDto,
     /// Conversation the app was created from (`origin: chat`), if any. Skipped
     /// from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// The app's pinned "init" session (bare uuid) — listed first in its
+    /// session catalog. Skipped from the wire when `None` (pre-v3 records
+    /// before the boot backfill runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_session_id: Option<String>,
     /// Workspace directory relative to the engine data root (always
     /// `apps/<id>/workspace`, forward slashes).
     pub workspace_rel: String,
-}
-
-/// A single draft field value, tagged by field kind — mirrors the core
-/// `DesignValue`. Tagged on `kind` with the payload under `value`
-/// (`{ "kind": "short_text", "value": "…" }`; see the module doc), the shape
-/// the local-apps spec §A fixes. `#[non_exhaustive]` so a future field kind is
-/// additive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum DesignValueDto {
-    /// One-line free text.
-    ShortText {
-        /// The text value.
-        value: String,
-    },
-    /// Multi-line free text.
-    LongText {
-        /// The text value.
-        value: String,
-    },
-    /// Exactly one choice out of a template-defined set.
-    SingleChoice {
-        /// The chosen option.
-        value: String,
-    },
-    /// Any number of choices out of a template-defined set.
-    MultipleChoice {
-        /// The chosen options.
-        value: Vec<String>,
-    },
-    /// On/off toggle.
-    Boolean {
-        /// The toggle state.
-        value: bool,
-    },
-    /// Color value (e.g. `#aabbcc`).
-    Color {
-        /// The color string.
-        value: String,
-    },
-    /// Layout density.
-    Density {
-        /// The density level.
-        value: DensityLevelDto,
-    },
-    /// Ordered list of screen names.
-    ScreenList {
-        /// The screen names in order.
-        value: Vec<String>,
-    },
-    /// Ordered list of feature names.
-    FeatureList {
-        /// The feature names in order.
-        value: Vec<String>,
-    },
-    /// Structured collection field declarations.
-    DataFieldList { value: Vec<AppDataFieldDto> },
-    /// HTTPS host names an app may request through the native network bridge.
-    DomainList { value: Vec<String> },
-    /// The user explicitly chose to let the LLM decide this field. Carries no
-    /// payload — `{ "kind": "deferred" }` is the complete wire form. Mirrors
-    /// the core `DesignValue::Deferred` (local-apps#questionnaire, Task 1/2);
-    /// `local-apps` and `engine-mobile` gate every write/load/lowering path
-    /// so this variant only ever appears once a legitimate answer exists.
-    Deferred,
-}
-
-/// One patch operation against the draft field map — mirrors the core
-/// `AppDesignPatchOp` in shape, NOT in bytes: this wire keeps protocol
-/// `snake_case` `field_id` while the core persists camelCase `fieldId` (see the
-/// module doc). Tagged on `op` (`{ "op": "set", "field_id": …, "value": … }` /
-/// `{ "op": "remove", "field_id": … }`).
-/// `#[non_exhaustive]` so a future op is additive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(tag = "op", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AppDesignPatchOpDto {
-    /// Insert or replace `field_id` with `value`.
-    Set {
-        /// Field to set.
-        field_id: String,
-        /// New value.
-        value: DesignValueDto,
-    },
-    /// Remove `field_id` (a no-op when the field is absent).
-    Remove {
-        /// Field to remove.
-        field_id: String,
-    },
-}
-
-/// An ordered batch of draft edits — mirrors the core `AppDesignPatch`.
-/// Carried by
-/// [`UpdateAppDesignDraft`](crate::commands::ClientCommand::UpdateAppDesignDraft)
-/// and
-/// [`AppDesignSuggestionAvailable`](crate::events::ClientEvent::AppDesignSuggestionAvailable).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppDesignPatchDto {
-    /// Operations applied in order.
-    pub ops: Vec<AppDesignPatchOpDto>,
-    /// Optional human-readable summary of the edit. Skipped from the wire when
-    /// `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
 }
 
 /// One restorable checkpoint of an app workspace — the lowered core
@@ -480,42 +287,6 @@ pub enum AppRuntimeRecoveryStateDto {
     Failed,
 }
 
-/// Persisted generation/build queue state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AppGenerationJobStateDto {
-    Queued,
-    Scaffolding,
-    Generating,
-    Validating,
-    Building,
-    StartingPreview,
-    AwaitingApproval,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-/// One durable generation job, including enough state for restart recovery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppGenerationJobDto {
-    pub id: String,
-    pub app_id: String,
-    pub revision: u64,
-    pub continuation_seq: u64,
-    pub state: AppGenerationJobStateDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub percent: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub log_rel: Option<String>,
-    pub updated_at_ms: u64,
-}
-
 /// Generated application manifest consumed by the host and app bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -554,29 +325,10 @@ pub struct AppRuntimeDetailsDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AppDetailsDto {
     pub app: AppRecordDto,
-    pub design_revision: u64,
-    pub design_fields: Vec<AppDesignFieldValueDto>,
-    /// The LLM-authored questionnaire driving the designer. Empty before
-    /// authoring completes.
-    pub questionnaire: Vec<AppDesignStepDto>,
-    /// The LLM-derived plan awaiting confirmation, if one has been authored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<AppPlanDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<AppManifestDto>,
     pub runtime: AppRuntimeDetailsDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation_job: Option<AppGenerationJobDto>,
     pub checkpoints: Vec<AppCheckpointDto>,
-}
-
-/// A deterministic design field/value pair; unlike a map it crosses `UniFFI`
-/// and serializes in a stable order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct AppDesignFieldValueDto {
-    pub field_id: String,
-    pub value: DesignValueDto,
 }
 
 /// Operations accepted by the versioned `window.lingxi.v1` bridge.
@@ -737,22 +489,6 @@ pub enum AppAuthorizationDecisionDto {
 pub enum AppEventDto {
     AppDetailsChanged {
         details: AppDetailsDto,
-    },
-    /// The LLM finished (or discarded) authoring the questionnaire.
-    AppQuestionnaireChanged {
-        app_id: String,
-        revision: u64,
-        steps: Vec<AppDesignStepDto>,
-    },
-    /// The LLM finished (or discarded) deriving the plan.
-    AppPlanChanged {
-        app_id: String,
-        revision: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan: Option<AppPlanDto>,
-    },
-    AppGenerationJobChanged {
-        job: AppGenerationJobDto,
     },
     AppBridgeResponse {
         response: AppBridgeResponseDto,

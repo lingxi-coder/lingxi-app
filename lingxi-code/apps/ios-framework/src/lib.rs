@@ -71,7 +71,8 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    PermissionRequestSink, ProviderConnectionTestDto,
+    MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink,
+    ProviderConnectionTestDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -583,14 +584,24 @@ fn ios_project_cwd(
             _ => None,
         })
         .collect();
-    let valid = components.len() == 3
+    let is_managed_project = components.len() == 3
         && matches!(components[0], "Projects" | "projects")
         && is_lowercase_uuid(components[1])
-        && components[2] == "workspace"
-        && workspace.is_dir();
+        && components[2] == "workspace";
+    // v3 local apps: an app's conversation scope roots at
+    // `appSandboxRoot/apps/<id>/workspace` — the same shape Swift's
+    // `LocalAppWorkspacePath` derives, with the id legality delegated to the
+    // engine's own minting rule instead of a twin regex.
+    let is_local_app_workspace = components.len() == 3
+        && components[0] == "apps"
+        && local_apps::ids::is_valid_app_id(components[1])
+        && components[2] == "workspace";
+    let valid = (is_managed_project || is_local_app_workspace) && workspace.is_dir();
     if !valid {
         return Err(MobileEngineError::Internal(
-            "iOS Project workspace must match appSandboxRoot/Projects/<lowercase UUID>/workspace"
+            "iOS conversation workspace must match \
+             appSandboxRoot/Projects/<lowercase UUID>/workspace or \
+             appSandboxRoot/apps/<app id>/workspace"
                 .to_string(),
         ));
     }
@@ -1687,14 +1698,10 @@ impl traits::LocationProvider for IosLocationBridge {
                 accuracy_m: fix.accuracy_m,
                 timestamp_ms: fix.timestamp_ms,
             }),
-            Err(LocationFfiError::PermissionDenied) => {
-                Err(traits::LocationError::PermissionDenied)
-            }
+            Err(LocationFfiError::PermissionDenied) => Err(traits::LocationError::PermissionDenied),
             Err(LocationFfiError::Unavailable) => Err(traits::LocationError::Unavailable),
             Err(LocationFfiError::Timeout) => Err(traits::LocationError::Timeout),
-            Err(LocationFfiError::Other { message }) => {
-                Err(traits::LocationError::Other(message))
-            }
+            Err(LocationFfiError::Other { message }) => Err(traits::LocationError::Other(message)),
         }
     }
 }
@@ -2319,9 +2326,7 @@ impl traits::TextToSpeech for IosTtsBridge {
                 // Audio-session contention is real for playback too, but
                 // `TtsError` has no busy variant; keep it recognizable in
                 // the message rather than folding it into a bare "other".
-                SpeechFfiError::Busy => {
-                    traits::TtsError::Other("audio session busy".to_string())
-                }
+                SpeechFfiError::Busy => traits::TtsError::Other("audio session busy".to_string()),
             }),
         }
     }
@@ -3295,7 +3300,10 @@ mod tests {
         }
         let ffi = super::event_to_ffi(event(traits::MobileLinuxTaskStatus::Completed))
             .expect("terminal status maps");
-        assert!(matches!(ffi.kind, super::MobileLinuxStreamEventKindFfi::Exit));
+        assert!(matches!(
+            ffi.kind,
+            super::MobileLinuxStreamEventKindFfi::Exit
+        ));
         assert_eq!(ffi.stream_id, "session-1");
         let timed_out = super::event_to_ffi(event(traits::MobileLinuxTaskStatus::TimedOut))
             .expect("terminal status maps");
@@ -3698,7 +3706,7 @@ mod tests {
     }
 
     #[test]
-    fn ios_project_cwd_accepts_only_managed_workspace_shape() {
+    fn ios_project_cwd_accepts_managed_project_and_local_app_workspaces() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -3720,6 +3728,32 @@ mod tests {
         assert_eq!(
             resolved,
             workspace.canonicalize().expect("canonical workspace")
+        );
+
+        // v3 local apps: `apps/<engine-minted id>/workspace` is a first-class
+        // conversation scope — the exact cwd the client hands `prepare()` when
+        // it jumps into a freshly created app's init session.
+        let app_workspace = root.join("apps").join("9b48dfb5").join("workspace");
+        std::fs::create_dir_all(&app_workspace).expect("create app fixture");
+        let resolved_app = super::ios_project_cwd(
+            root.to_str().expect("utf8"),
+            Some(app_workspace.to_str().expect("utf8")),
+        )
+        .expect("local app workspace is accepted");
+        assert_eq!(
+            resolved_app,
+            app_workspace.canonicalize().expect("canonical app workspace")
+        );
+
+        let illegal_app = root.join("apps").join("Bad_ID").join("workspace");
+        std::fs::create_dir_all(&illegal_app).expect("create illegal-app fixture");
+        assert!(
+            super::ios_project_cwd(
+                root.to_str().expect("utf8"),
+                Some(illegal_app.to_str().expect("utf8")),
+            )
+            .is_err(),
+            "ids the engine could never mint must not become conversation workspaces"
         );
 
         let malformed = root.join("Projects").join("user-name").join("workspace");

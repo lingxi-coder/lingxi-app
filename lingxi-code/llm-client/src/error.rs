@@ -237,7 +237,8 @@ impl LlmError {
 /// - TLS/SSL codes → the seven `Unable to connect to API: …` forms, default
 ///   `Unable to connect to API: SSL error ({code})`
 /// - `"Connection error."` → `Unable to connect to API…`
-/// - empty message → `API error (status …)`
+/// - empty provider response → `API error (status …)`; an empty local
+///   authentication error instead explains that no API key is configured
 /// - a message embedding a JSON body → `FOu`: `body.error.message`, else
 ///   `body.message`, re-prefixed with the status
 /// - otherwise the message unchanged
@@ -297,6 +298,9 @@ pub fn error_display_text(error: &LlmError) -> String {
         return "Unable to connect to API. Check your internet connection".to_string();
     }
     if message.is_empty() {
+        if matches!(error, LlmError::Authentication { .. }) {
+            return "No API key is configured for the selected provider".to_string();
+        }
         return "API error (status unknown)".to_string();
     }
     api_error_detail(message)
@@ -450,6 +454,15 @@ mod api_error_status_tests {
         assert_eq!(
             error_display_text(&LlmError::QuotaExceeded),
             "quota exceeded"
+        );
+
+        // A locally missing credential is raised before any HTTP request. It
+        // must not masquerade as a provider response with an unknown status.
+        assert_eq!(
+            error_display_text(&LlmError::Authentication {
+                message: String::new()
+            }),
+            "No API key is configured for the selected provider"
         );
     }
 

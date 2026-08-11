@@ -33,9 +33,7 @@
 
 use crate::computer_access::ComputerAccessResponseDto;
 use crate::listings::TaskStatusDto;
-use crate::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppDesignPatchDto,
-};
+use crate::local_apps::{AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto};
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -334,12 +332,7 @@ pub enum ClientCommand {
     },
 
     /// Create a new local-app record and its workspace. Confirmed by an
-    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event. The
-    /// engine starts authoring the questionnaire from `brief` in the
-    /// background — `CreateApp` returns as soon as the record is persisted,
-    /// well before that LLM round trip lands
-    /// ([`AppQuestionnaireChanged`](crate::events::ClientEvent::AppEvent)/
-    /// `WorkflowChanged` follow later on the same channel).
+    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event.
     CreateApp {
         /// User-facing display name.
         name: String,
@@ -363,112 +356,6 @@ pub enum ClientCommand {
         conversation_id: Option<String>,
     },
 
-    /// Replace an app's brief and re-author its questionnaire from scratch
-    /// (discarding any prior questionnaire/answers/plan). Valid from
-    /// `collecting_spec`, `questionnaire_failed`, or `plan_failed`.
-    UpdateAppBrief {
-        /// App whose brief to replace.
-        app_id: String,
-        /// The new one-line description.
-        brief: String,
-    },
-
-    /// Retry questionnaire authoring after it failed (`questionnaire_failed
-    /// -> authoring_questionnaire`), reusing the same brief.
-    RetryAppQuestionnaire {
-        /// App whose questionnaire authoring to retry.
-        app_id: String,
-    },
-
-    /// Begin planning from the collected answers (`collecting_spec ->
-    /// planning`). The engine validates the answers are self-consistent
-    /// before starting the background plan round trip.
-    BeginAppPlanning {
-        /// App to begin planning for.
-        app_id: String,
-    },
-
-    /// Retry planning after it failed (`plan_failed -> planning`), reusing
-    /// the same answers.
-    RetryAppPlan {
-        /// App whose planning to retry.
-        app_id: String,
-    },
-
-    /// Open the design-spec confirmation gate. Replied with an
-    /// [`AppDesignerRequested`](crate::events::ClientEvent::AppDesignerRequested)
-    /// event carrying the `interaction_id` the confirm command must echo.
-    OpenAppDesigner {
-        /// App whose designer to open.
-        app_id: String,
-    },
-
-    /// Apply a user edit batch to the design draft. Optimistic-concurrency
-    /// gated: `expected_revision` must equal the current draft revision, else
-    /// the engine emits
-    /// [`AppDesignConflict`](crate::events::ClientEvent::AppDesignConflict)
-    /// and the draft is left untouched (no silent overwrite).
-    UpdateAppDesignDraft {
-        /// App whose draft to edit.
-        app_id: String,
-        /// Draft revision the client believes to be current.
-        expected_revision: u64,
-        /// The edit batch, applied in order.
-        patch: AppDesignPatchDto,
-    },
-
-    /// Apply the pending agent design suggestion. `suggestion_id` must match
-    /// the pending suggestion (from
-    /// [`AppDesignSuggestionAvailable`](crate::events::ClientEvent::AppDesignSuggestionAvailable))
-    /// and `expected_revision` the current draft revision.
-    ApplyAgentDesignSuggestion {
-        /// App whose pending suggestion to apply.
-        app_id: String,
-        /// Id of the pending suggestion being applied.
-        suggestion_id: String,
-        /// Draft revision the client believes to be current.
-        expected_revision: u64,
-    },
-
-    /// Ask the agent to propose a patch against the current draft revision.
-    RequestAppDesignSuggestion {
-        /// App whose draft should receive a suggestion.
-        app_id: String,
-        /// Current draft revision used as the suggestion base.
-        expected_revision: u64,
-        /// Optional user direction for the suggestion.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt: Option<String>,
-    },
-
-    /// Dismiss the current suggestion without changing the draft.
-    DismissAppDesignSuggestion {
-        /// App that owns the pending suggestion.
-        app_id: String,
-        /// Pending suggestion to dismiss.
-        suggestion_id: String,
-    },
-
-    /// Confirm the design spec and start generation. `interaction_id` must be
-    /// the pending designer gate (delivered by
-    /// [`AppDesignerRequested`](crate::events::ClientEvent::AppDesignerRequested))
-    /// and `revision` the CURRENT draft revision.
-    ConfirmAppDesign {
-        /// App whose design to confirm.
-        app_id: String,
-        /// Draft revision being confirmed (must be current).
-        revision: u64,
-        /// The pending designer interaction id being resolved.
-        interaction_id: String,
-    },
-
-    /// Cancel out of the design confirmation gate (voids the pending designer
-    /// interaction; the draft keeps collecting).
-    CancelAppDesign {
-        /// App whose designer gate to cancel.
-        app_id: String,
-    },
-
     /// Start the app's dev-server runtime. Phase 1 validates the app exists,
     /// then fails typed with
     /// [`AppOperationFailed`](crate::events::ClientEvent::AppOperationFailed)
@@ -490,42 +377,6 @@ pub enum ClientCommand {
     RestartApp {
         /// App to restart.
         app_id: String,
-    },
-
-    /// Approve the generated preview. `interaction_id` must be the pending
-    /// preview gate (delivered by
-    /// [`AppPreviewReady`](crate::events::ClientEvent::AppPreviewReady)) and
-    /// `revision` the CURRENT draft revision.
-    ConfirmAppPreview {
-        /// App whose preview to approve.
-        app_id: String,
-        /// Draft revision being approved (must be current).
-        revision: u64,
-        /// The pending preview interaction id being resolved.
-        interaction_id: String,
-    },
-
-    /// Request a revision pass with feedback (from the preview gate or a ready
-    /// app). The prompt is recorded for the agent continuation.
-    RequestAppRevision {
-        /// App to revise.
-        app_id: String,
-        /// The user's revision feedback.
-        prompt: String,
-    },
-
-    /// Retry a persisted failed generation job for its confirmed revision.
-    RetryAppGeneration {
-        /// App whose persisted failed job should be retried.
-        app_id: String,
-        /// The user's own words for this retry, from the failure screen.
-        ///
-        /// `None` replays the job unchanged. `Some` reaches the generator as
-        /// the revision prompt, which is what makes a failed generation
-        /// something the user can talk their way out of rather than only
-        /// re-run.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt: Option<String>,
     },
 
     /// Execute one data-only request from the versioned local-app bridge.
@@ -561,6 +412,22 @@ pub enum ClientCommand {
     ResetAppPermissions {
         /// App whose saved grants should be cleared.
         app_id: String,
+    },
+
+    /// Page through one app's workspace-scoped session catalog. Replied with
+    /// an [`AppSessionsChanged`](crate::events::ClientEvent::AppSessionsChanged)
+    /// event. `offset`/`limit` page the modified-descending catalog
+    /// (default limit 50, max 100); the reply's `next_offset` is `None` on
+    /// the last page.
+    ListAppSessions {
+        /// App whose sessions to list.
+        app_id: String,
+        /// Zero-based row offset into the modified-descending catalog.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        /// Page size (default 50, max 100).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
     },
 
     /// List an app's restorable checkpoints. Phase 1 replies with an empty

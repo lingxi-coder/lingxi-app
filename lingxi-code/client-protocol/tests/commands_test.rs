@@ -22,7 +22,6 @@ use client_protocol::commands::{
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
-    AppDesignPatchDto, AppDesignPatchOpDto, DesignValueDto,
 };
 use client_protocol::permission::PermissionResponseDto;
 
@@ -476,21 +475,6 @@ fn extended_local_app_commands_round_trip() {
         ClientCommand::GetAppDetails {
             app_id: "habits-1a2b".to_string(),
         },
-        ClientCommand::RequestAppDesignSuggestion {
-            app_id: "habits-1a2b".to_string(),
-            expected_revision: 4,
-            prompt: Some("make it calmer".to_string()),
-        },
-        ClientCommand::DismissAppDesignSuggestion {
-            app_id: "habits-1a2b".to_string(),
-            suggestion_id: "sugg-1".to_string(),
-        },
-        ClientCommand::RetryAppGeneration {
-            app_id: "habits-1a2b".to_string(),
-            // Carried so the round trip proves the user's retry words survive
-            // the wire, not merely that the command still parses without them.
-            prompt: Some("配色再淡一点".to_string()),
-        },
         ClientCommand::ExecuteAppBridgeRequest {
             request: AppBridgeRequestDto {
                 request_id: "bridge-1".to_string(),
@@ -516,9 +500,6 @@ fn extended_local_app_commands_round_trip() {
 
     let expected_types = [
         "get_app_details",
-        "request_app_design_suggestion",
-        "dismiss_app_design_suggestion",
-        "retry_app_generation",
         "execute_app_bridge_request",
         "resolve_app_ui_request",
         "resolve_app_capability_request",
@@ -594,147 +575,6 @@ fn create_app_round_trips() {
     );
 }
 
-/// `UpdateAppBrief` / `RetryAppQuestionnaire` / `BeginAppPlanning` /
-/// `RetryAppPlan` — the Task 11 authoring/planning trigger commands. Plain
-/// `app_id` (+ `brief` for the first) round trips.
-#[test]
-fn authoring_and_planning_trigger_commands_round_trip() {
-    let cmd = ClientCommand::UpdateAppBrief {
-        app_id: "habits-1a2b".to_string(),
-        brief: "A todo list instead".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize UpdateAppBrief");
-    assert_eq!(json["type"], "update_app_brief");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["brief"], "A todo list instead");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize UpdateAppBrief");
-    assert_eq!(back, cmd);
-
-    let cmd = ClientCommand::RetryAppQuestionnaire {
-        app_id: "habits-1a2b".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize RetryAppQuestionnaire");
-    assert_eq!(json["type"], "retry_app_questionnaire");
-    let back: ClientCommand =
-        serde_json::from_value(json).expect("deserialize RetryAppQuestionnaire");
-    assert_eq!(back, cmd);
-
-    let cmd = ClientCommand::BeginAppPlanning {
-        app_id: "habits-1a2b".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize BeginAppPlanning");
-    assert_eq!(json["type"], "begin_app_planning");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize BeginAppPlanning");
-    assert_eq!(back, cmd);
-
-    let cmd = ClientCommand::RetryAppPlan {
-        app_id: "habits-1a2b".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize RetryAppPlan");
-    assert_eq!(json["type"], "retry_app_plan");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize RetryAppPlan");
-    assert_eq!(back, cmd);
-}
-
-/// `OpenAppDesigner` — opens the design-spec gate for one app.
-#[test]
-fn open_app_designer_round_trips() {
-    let cmd = ClientCommand::OpenAppDesigner {
-        app_id: "habits-1a2b".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize OpenAppDesigner");
-    assert_eq!(json["type"], "open_app_designer");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize OpenAppDesigner");
-    assert_eq!(back, cmd);
-}
-
-/// `UpdateAppDesignDraft` — optimistic-concurrency gated draft edit carrying
-/// the spec-§A patch shape (`{op, field_id, value}` ops).
-#[test]
-fn update_app_design_draft_round_trips() {
-    let cmd = ClientCommand::UpdateAppDesignDraft {
-        app_id: "habits-1a2b".to_string(),
-        expected_revision: 3,
-        patch: AppDesignPatchDto {
-            ops: vec![
-                AppDesignPatchOpDto::Set {
-                    field_id: "title".to_string(),
-                    value: DesignValueDto::ShortText {
-                        value: "Habit Tracker".to_string(),
-                    },
-                },
-                AppDesignPatchOpDto::Remove {
-                    field_id: "accent".to_string(),
-                },
-            ],
-            note: Some("rename + drop accent".to_string()),
-        },
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize UpdateAppDesignDraft");
-    assert_eq!(json["type"], "update_app_design_draft");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["expected_revision"], 3);
-    assert_eq!(json["patch"]["ops"][0]["op"], "set");
-    assert_eq!(json["patch"]["ops"][0]["field_id"], "title");
-    assert_eq!(json["patch"]["ops"][0]["value"]["kind"], "short_text");
-    assert_eq!(json["patch"]["ops"][1]["op"], "remove");
-    assert_eq!(json["patch"]["note"], "rename + drop accent");
-    let back: ClientCommand =
-        serde_json::from_value(json).expect("deserialize UpdateAppDesignDraft");
-    assert_eq!(back, cmd);
-}
-
-/// `ApplyAgentDesignSuggestion` — echoes the pending suggestion id under the
-/// same revision gating as a draft edit.
-#[test]
-fn apply_agent_design_suggestion_round_trips() {
-    let cmd = ClientCommand::ApplyAgentDesignSuggestion {
-        app_id: "habits-1a2b".to_string(),
-        suggestion_id: "sugg-77".to_string(),
-        expected_revision: 4,
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize ApplyAgentDesignSuggestion");
-    assert_eq!(json["type"], "apply_agent_design_suggestion");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["suggestion_id"], "sugg-77");
-    assert_eq!(json["expected_revision"], 4);
-    let back: ClientCommand =
-        serde_json::from_value(json).expect("deserialize ApplyAgentDesignSuggestion");
-    assert_eq!(back, cmd);
-}
-
-/// `ConfirmAppDesign` — echoes the pending designer `interaction_id` (only
-/// delivered via `AppDesignerRequested`) plus the CURRENT draft revision.
-#[test]
-fn confirm_app_design_round_trips() {
-    let cmd = ClientCommand::ConfirmAppDesign {
-        app_id: "habits-1a2b".to_string(),
-        revision: 5,
-        interaction_id: "int-designer-9".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize ConfirmAppDesign");
-    assert_eq!(json["type"], "confirm_app_design");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["revision"], 5);
-    assert_eq!(json["interaction_id"], "int-designer-9");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize ConfirmAppDesign");
-    assert_eq!(back, cmd);
-}
-
-/// `CancelAppDesign` — voids the pending designer gate.
-#[test]
-fn cancel_app_design_round_trips() {
-    let cmd = ClientCommand::CancelAppDesign {
-        app_id: "habits-1a2b".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize CancelAppDesign");
-    assert_eq!(json["type"], "cancel_app_design");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize CancelAppDesign");
-    assert_eq!(back, cmd);
-}
-
 /// The runtime trio (`StartApp` / `StopApp` / `RestartApp`) — phase 1 replies
 /// with a typed `not_yet_available` failure, but the wire shape is frozen now.
 #[test]
@@ -767,39 +607,6 @@ fn app_runtime_commands_round_trip() {
             serde_json::from_value(json).expect("deserialize runtime command");
         assert_eq!(back, cmd);
     }
-}
-
-/// `ConfirmAppPreview` — echoes the pending preview `interaction_id` (only
-/// delivered via `AppPreviewReady`) plus the CURRENT draft revision.
-#[test]
-fn confirm_app_preview_round_trips() {
-    let cmd = ClientCommand::ConfirmAppPreview {
-        app_id: "habits-1a2b".to_string(),
-        revision: 6,
-        interaction_id: "int-preview-3".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize ConfirmAppPreview");
-    assert_eq!(json["type"], "confirm_app_preview");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["revision"], 6);
-    assert_eq!(json["interaction_id"], "int-preview-3");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize ConfirmAppPreview");
-    assert_eq!(back, cmd);
-}
-
-/// `RequestAppRevision` — carries the user's revision feedback prompt.
-#[test]
-fn request_app_revision_round_trips() {
-    let cmd = ClientCommand::RequestAppRevision {
-        app_id: "habits-1a2b".to_string(),
-        prompt: "make the chart blue".to_string(),
-    };
-    let json = serde_json::to_value(&cmd).expect("serialize RequestAppRevision");
-    assert_eq!(json["type"], "request_app_revision");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["prompt"], "make the chart blue");
-    let back: ClientCommand = serde_json::from_value(json).expect("deserialize RequestAppRevision");
-    assert_eq!(back, cmd);
 }
 
 /// `ListAppCheckpoints` — phase 1 replies with an empty list (git is phase 5).
@@ -910,48 +717,6 @@ fn no_live_command_carries_session_id() {
             git_enabled: true,
             conversation_id: Some("conv-42".to_string()),
         },
-        ClientCommand::UpdateAppBrief {
-            app_id: "habits-1a2b".to_string(),
-            brief: "A todo list instead".to_string(),
-        },
-        ClientCommand::RetryAppQuestionnaire {
-            app_id: "habits-1a2b".to_string(),
-        },
-        ClientCommand::BeginAppPlanning {
-            app_id: "habits-1a2b".to_string(),
-        },
-        ClientCommand::RetryAppPlan {
-            app_id: "habits-1a2b".to_string(),
-        },
-        ClientCommand::OpenAppDesigner {
-            app_id: "habits-1a2b".to_string(),
-        },
-        ClientCommand::UpdateAppDesignDraft {
-            app_id: "habits-1a2b".to_string(),
-            expected_revision: 1,
-            patch: AppDesignPatchDto {
-                ops: vec![AppDesignPatchOpDto::Set {
-                    field_id: "title".to_string(),
-                    value: DesignValueDto::ShortText {
-                        value: "T".to_string(),
-                    },
-                }],
-                note: None,
-            },
-        },
-        ClientCommand::ApplyAgentDesignSuggestion {
-            app_id: "habits-1a2b".to_string(),
-            suggestion_id: "sugg-1".to_string(),
-            expected_revision: 1,
-        },
-        ClientCommand::ConfirmAppDesign {
-            app_id: "habits-1a2b".to_string(),
-            revision: 1,
-            interaction_id: "int-1".to_string(),
-        },
-        ClientCommand::CancelAppDesign {
-            app_id: "habits-1a2b".to_string(),
-        },
         ClientCommand::StartApp {
             app_id: "habits-1a2b".to_string(),
         },
@@ -960,15 +725,6 @@ fn no_live_command_carries_session_id() {
         },
         ClientCommand::RestartApp {
             app_id: "habits-1a2b".to_string(),
-        },
-        ClientCommand::ConfirmAppPreview {
-            app_id: "habits-1a2b".to_string(),
-            revision: 1,
-            interaction_id: "int-2".to_string(),
-        },
-        ClientCommand::RequestAppRevision {
-            app_id: "habits-1a2b".to_string(),
-            prompt: "p".to_string(),
         },
         ClientCommand::ListAppCheckpoints {
             app_id: "habits-1a2b".to_string(),

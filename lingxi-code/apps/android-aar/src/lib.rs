@@ -261,14 +261,27 @@ fn android_project_cwd(
             _ => None,
         })
         .collect();
-    let valid = components.len() == 3
+    let is_managed_project = components.len() == 3
         && components[0] == "projects"
         && is_lowercase_uuid(components[1])
-        && components[2] == "workspace"
-        && workspace.is_dir();
+        && components[2] == "workspace";
+    // v3 local apps: an app's conversation scope roots at
+    // `filesDir/apps/<id>/workspace` — the same shape Kotlin's
+    // `LocalAppWorkspace` derives, with the id legality delegated to the
+    // engine's own minting rule instead of a twin regex. This MUST stay in
+    // lockstep with `ios_project_cwd`: the engine mints and lists app
+    // sessions platform-neutrally, so a gate that rejects them here shows the
+    // user rows they could never open.
+    let is_local_app_workspace = components.len() == 3
+        && components[0] == "apps"
+        && local_apps::ids::is_valid_app_id(components[1])
+        && components[2] == "workspace";
+    let valid = (is_managed_project || is_local_app_workspace) && workspace.is_dir();
     if !valid {
         return Err(MobileEngineError::Internal(
-            "Android Project workspace must match filesDir/projects/<lowercase UUID>/workspace"
+            "Android conversation workspace must match \
+             filesDir/projects/<lowercase UUID>/workspace or \
+             filesDir/apps/<app id>/workspace"
                 .to_string(),
         ));
     }
@@ -4882,7 +4895,7 @@ mod tests {
     }
 
     #[test]
-    fn android_project_cwd_accepts_only_managed_workspace_shape() {
+    fn android_project_cwd_accepts_managed_project_and_local_app_workspaces() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -4904,6 +4917,33 @@ mod tests {
         assert_eq!(
             resolved,
             workspace.canonicalize().expect("canonical workspace")
+        );
+
+        // v3 local apps: `apps/<engine-minted id>/workspace` is a first-class
+        // conversation scope on Android too — the engine mints and lists app
+        // sessions platform-neutrally, so a gate that rejects them here would
+        // show rows that can never be opened.
+        let app_workspace = root.join("apps").join("9b48dfb5").join("workspace");
+        std::fs::create_dir_all(&app_workspace).expect("create app fixture");
+        let resolved_app = super::android_project_cwd(
+            root.to_str().expect("utf8"),
+            Some(app_workspace.to_str().expect("utf8")),
+        )
+        .expect("local app workspace is accepted");
+        assert_eq!(
+            resolved_app,
+            app_workspace.canonicalize().expect("canonical app workspace")
+        );
+
+        let illegal_app = root.join("apps").join("Bad_ID").join("workspace");
+        std::fs::create_dir_all(&illegal_app).expect("create illegal-app fixture");
+        assert!(
+            super::android_project_cwd(
+                root.to_str().expect("utf8"),
+                Some(illegal_app.to_str().expect("utf8")),
+            )
+            .is_err(),
+            "ids the engine could never mint must not become conversation workspaces"
         );
 
         let malformed = root.join("projects").join("user-name").join("workspace");

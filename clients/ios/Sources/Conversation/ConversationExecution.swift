@@ -3,6 +3,12 @@ import Foundation
 enum ConversationRenderItem: Identifiable, Equatable {
     case message(Message)
     case run(ConversationExecutionRun)
+    /// An interactive `AskUserQuestion` questionnaire waiting for the user,
+    /// appended after the messages while pending.
+    case question(ConversationPendingQuestion)
+    /// A standalone transcript notice (e.g. a background task finishing after
+    /// its turn already ended, so no run row exists to attach it to).
+    case notice(ConversationExecutionNotice)
 
     var id: String {
         switch self {
@@ -10,8 +16,71 @@ enum ConversationRenderItem: Identifiable, Equatable {
             return "message:\(message.id.uuidString)"
         case let .run(run):
             return "run:\(run.id)"
+        case let .question(question):
+            return "question:\(question.requestId)"
+        case let .notice(notice):
+            return "notice:\(notice.id)"
         }
     }
+}
+
+// MARK: - AskUserQuestion (FFI-independent mirror of the wire payload)
+
+/// One selectable answer of an interactive question — mirrors `AskOptionDto`
+/// without requiring the generated bindings, so previews/mock builds compile.
+struct ConversationAskOption: Equatable, Hashable {
+    let label: String
+    let description: String
+    let preview: String?
+}
+
+/// One question of an interactive questionnaire — mirrors `AskQuestionDto`.
+/// `question` is the complete question text AND the answer-map key.
+struct ConversationAskQuestion: Equatable, Hashable {
+    let question: String
+    let header: String
+    let options: [ConversationAskOption]
+    let multiSelect: Bool
+}
+
+/// One background task announced by the engine — a Workflow build segment,
+/// a background bash job, … — the row the pinned tasks panel renders. Fed by
+/// `TaskRow` (TaskList replies, which carry the description) and
+/// `TaskStatusChanged` pushes (which may arrive first — the panel shows the
+/// bare id until the row backfills).
+struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
+    enum Status: Equatable, Hashable {
+        case pending
+        case running
+        case completed
+        case failed
+        case cancelled
+
+        var isTerminal: Bool {
+            switch self {
+            case .pending, .running: return false
+            case .completed, .failed, .cancelled: return true
+            }
+        }
+    }
+
+    /// 9-char engine task id.
+    let id: String
+    /// Human-readable description; empty until a `TaskRow` supplies it.
+    var descriptionText: String
+    var status: Status
+}
+
+/// One pending interactive `AskUserQuestion` request — mirrors
+/// `AskUserQuestionRequestDto`. `requestId` is the connection-scoped
+/// correlator echoed by the answer/cancel command.
+struct ConversationPendingQuestion: Identifiable, Equatable, Hashable {
+    let requestId: UInt64
+    let questions: [ConversationAskQuestion]
+    /// Idle auto-continue window in seconds; `nil` means wait indefinitely.
+    let timeoutSecs: UInt64?
+
+    var id: UInt64 { requestId }
 }
 
 struct ConversationMessageDetail: Equatable {

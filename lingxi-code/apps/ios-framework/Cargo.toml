@@ -50,6 +50,7 @@ uniffi = [
     "dep:tokio",
     "dep:orchestrator",
     "dep:serde_json",
+    "dep:local-apps",
     "engine-mobile/uniffi",
 ]
 # M10-P1b: opt-in bindings-generator toolchain for the `uniffi-bindgen` bin.
@@ -103,6 +104,10 @@ client-protocol = { path = "../../client-protocol", optional = true }
 platform-ios-ish-runtime = { path = "../../platforms/ios-ish-runtime", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
 orchestrator = { path = "../../orchestrator", optional = true }
+# The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd
+# validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
+# local-apps service mints ids with, never a twin regex.
+local-apps = { path = "../../local-apps", optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 # M10-P1b: the `cli`-gated bindgen-bin deps. Pinned to match the offline-vendored

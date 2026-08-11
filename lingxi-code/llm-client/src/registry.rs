@@ -111,6 +111,34 @@ impl ModelRegistry {
             }
         }
 
+        // Mobile and other structured clients expose `profile/model` refs so
+        // two providers serving the same model remain distinguishable. The
+        // provider protocol accepts only its native `model`, however. Prefer an
+        // exact model/alias match above (important for legitimate slash-bearing
+        // wire ids such as OpenRouter's `openrouter/auto`), then repair a known
+        // provider-qualified UI ref at this final routing boundary. This is the
+        // last fail-safe if a lifecycle path lets the display ref reach the LLM
+        // client without first splitting it.
+        if matches.is_empty() {
+            if let Some((qualifier, provider_model)) = requested.split_once('/') {
+                if profile.is_none_or(|scoped| scoped == qualifier) {
+                    for provider in &self.config.providers {
+                        if provider.profile_name != qualifier {
+                            continue;
+                        }
+                        for model in &provider.models {
+                            let is_match = model.display_model == provider_model
+                                || model.request_model == provider_model
+                                || model.aliases.iter().any(|alias| alias == provider_model);
+                            if is_match {
+                                matches.push((provider, model));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         match matches.as_slice() {
             [] => Err(LlmError::ModelUnavailable),
             [(provider, model)] => Ok(ResolvedRoute {

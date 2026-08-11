@@ -356,7 +356,10 @@ object LocalAppRuntimeAssets {
             }
         }
         destination
-            .takeIf { File(it, "node_modules/next/dist/bin/next").isFile }
+            .takeIf {
+                File(it, "node_modules/next/dist/bin/next").isFile &&
+                    File(it, "node_modules/vite/bin/vite.js").isFile
+            }
             ?.absolutePath
     }.getOrNull()
 

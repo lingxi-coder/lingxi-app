@@ -89,6 +89,7 @@ dependencies = [
  "client-protocol",
  "engine-mobile",
  "hex",
+ "local-apps",
  "orchestrator",
  "platform-android",
  "platform-android-minijail",
@@ -1860,6 +1861,7 @@ dependencies = [
 name = "engine-mobile"
 version = "0.9.0"
 dependencies = [
+ "agent",
  "async-trait",
  "base64 0.22.1",
  "branding",
@@ -1892,6 +1894,7 @@ dependencies = [
  "sha2",
  "sidequery",
  "skill-api",
+ "tasks",
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
@@ -1911,10 +1914,13 @@ dependencies = [
  "tool-task",
  "tool-ui",
  "tool-web",
+ "tool-workflow",
  "tracing",
  "traits",
  "uniffi",
+ "url",
  "uuid",
+ "workflow",
 ]
 
 [[package]]
@@ -3002,6 +3008,7 @@ dependencies = [
  "camino",
  "client-protocol",
  "engine-mobile",
+ "local-apps",
  "orchestrator",
  "platform-ios",
  "platform-ios-ish-runtime",

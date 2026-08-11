@@ -304,6 +304,21 @@ impl RegistrySlashDispatcher {
         }
     }
 
+    /// Return the live command catalog used by the slash palette and the
+    /// model-facing skill surface. Hosts that expose settings must read this
+    /// registry instead of maintaining a second, hard-coded skill list. Commands
+    /// explicitly hidden from model invocation are intentionally excluded.
+    pub async fn list_commands(&self) -> Vec<crate::model::SlashCommand> {
+        let registry = self.registry.read().await;
+        let mut commands: Vec<_> = registry
+            .model_invocable_commands()
+            .into_iter()
+            .cloned()
+            .collect();
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands
+    }
+
     /// Format the locked unknown-command literal.
     ///
     /// Public so callers can render the same string outside the dispatch loop
@@ -1085,6 +1100,33 @@ mod tests {
         assert_eq!(
             cmd.argument_names,
             vec!["env".to_string(), "region".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_commands_excludes_model_hidden_entries() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "visible".to_string(),
+            description: "Visible".to_string(),
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "hidden".to_string(),
+            description: "Hidden".to_string(),
+            disable_model_invocation: true,
+            ..SlashCommand::default()
+        });
+
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        let commands = dispatcher.list_commands().await;
+
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible"]
         );
     }
 

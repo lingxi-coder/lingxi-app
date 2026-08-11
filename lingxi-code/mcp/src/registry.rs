@@ -1748,6 +1748,18 @@ impl McpRegistry {
         Ok(())
     }
 
+    /// Remove a configured server and its cached client from the registry.
+    ///
+    /// This is intentionally separate from `disconnect`: a disconnected
+    /// server remains visible in `/mcp`, while a configuration reload must
+    /// remove entries deleted from the on-disk config as well.
+    pub async fn remove(&self, name: &str) -> Result<(), McpError> {
+        self.disconnect(name).await?;
+        self.connections.write().await.remove(name);
+        self.clients.write().await.shift_remove(name);
+        Ok(())
+    }
+
     /// Toggle one registered server immediately and retain the updated config
     /// for subsequent reconnects/startups. Disabling retires the live transport
     /// and dynamic tool partition without revoking OAuth credentials; enabling

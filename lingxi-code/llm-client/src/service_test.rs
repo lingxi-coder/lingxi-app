@@ -604,9 +604,10 @@ mod tests {
                 .max_tokens
         };
 
-        let model_ceiling =
-            u32::try_from(crate::model::context_window::max_output_tokens_for_model(model))
-                .expect("the model ceiling fits u32");
+        let model_ceiling = u32::try_from(
+            crate::model::context_window::max_output_tokens_for_model(model),
+        )
+        .expect("the model ceiling fits u32");
         assert_eq!(
             build(None),
             Some(model_ceiling),

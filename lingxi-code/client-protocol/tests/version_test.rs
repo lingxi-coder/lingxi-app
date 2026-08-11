@@ -32,14 +32,14 @@ fn version_is_semver() {
     }
 }
 
-/// Task 5's total removal of the static template catalog (`AppTemplateKindDto`,
-/// `AppTemplateDto`, `ClientCommand::ListAppTemplates`,
-/// `AppEventDto::AppTemplatesChanged`, `ClientCommand::CreateApp.template`)
-/// pins the contract at `3.0.0` (a further MAJOR bump past Task 2's `2.0.0` —
-/// see `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
+/// The removal of the local-app designer/generation pipeline (the
+/// design/questionnaire/plan/generation command, event, and DTO families;
+/// `AppWorkflowStateDto` collapsed to `draft`/`ready`) pins the contract at
+/// `5.0.0` (a further MAJOR bump past the `git_enabled` `4.0.0` — see
+/// `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
 /// change here is a deliberate, reviewed bump — this test makes an accidental
 /// edit visible.
 #[test]
-fn version_is_four_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "4.0.0");
+fn version_is_five_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "5.0.0");
 }

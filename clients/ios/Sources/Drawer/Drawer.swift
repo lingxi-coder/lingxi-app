@@ -13,6 +13,10 @@ struct Drawer: View {
     @Environment(\.theme) private var t
     @Bindable var projectStore: ProjectStore
     @Bindable var localAppsStore: LocalAppsStore
+    /// The conversation scope the chat surface currently runs in. When it is
+    /// `.localApp`, the chats section lists that app's session catalog
+    /// instead of the engine's project/global history.
+    let activeScope: ConversationScope
     @Binding var activeSession: String
 
     let source: any ConversationSource
@@ -22,6 +26,8 @@ struct Drawer: View {
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
     let onNewChat: (String?) -> Void
+    let onSelectAppSession: (String, String) -> Void
+    let onNewAppChat: (String) -> Void
 
     @ObservedObject private var convo: ConversationModel
     @State private var section: Section = .chats
@@ -39,6 +45,7 @@ struct Drawer: View {
     init(
         projectStore: ProjectStore,
         localAppsStore: LocalAppsStore,
+        activeScope: ConversationScope = .global,
         activeSession: Binding<String>,
         source: any ConversationSource,
         openSettings: @escaping () -> Void,
@@ -46,10 +53,13 @@ struct Drawer: View {
         openApps: @escaping (String?) -> Void,
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
-        onNewChat: @escaping (String?) -> Void
+        onNewChat: @escaping (String?) -> Void,
+        onSelectAppSession: @escaping (String, String) -> Void = { _, _ in },
+        onNewAppChat: @escaping (String) -> Void = { _ in }
     ) {
         self.projectStore = projectStore
         self.localAppsStore = localAppsStore
+        self.activeScope = activeScope
         _activeSession = activeSession
         self.source = source
         self.openSettings = openSettings
@@ -58,11 +68,27 @@ struct Drawer: View {
         self.onSelectProject = onSelectProject
         self.onSelectSession = onSelectSession
         self.onNewChat = onNewChat
+        self.onSelectAppSession = onSelectAppSession
+        self.onNewAppChat = onNewAppChat
         convo = source.model
     }
 
     private var engineSessions: [EngineSession] {
         convo.engineSessions.filter { matches($0.title, $0.relativeTime) }
+    }
+
+    /// The active local app when the conversation runs in an app scope.
+    private var activeApp: LocalAppSummary? {
+        activeScope.appID.flatMap { localAppsStore.app(id: $0) }
+    }
+
+    /// The active app's cached session catalog rows (fetched by the app
+    /// detail's sessions tab / RootView scope switches — the drawer only
+    /// re-renders the store's cache).
+    private var activeAppSessions: [LocalAppSessionRow] {
+        guard let appID = activeScope.appID else { return [] }
+        return (localAppsStore.sessionPages[appID]?.rows ?? [])
+            .filter { matches($0.title, $0.relativeTime) }
     }
 
     private var projects: [ProjectSnapshot] {
@@ -88,6 +114,9 @@ struct Drawer: View {
                 source.listSessions()
                 if let active = projectStore.activeProjectId { openProjects.insert(active) }
                 Task { await localAppsStore.refresh() }
+                if let appID = activeScope.appID {
+                    Task { await localAppsStore.listSessions(appID: appID) }
+                }
             }
             // Titles the compact back button that returns to this column.
             .navigationTitle(String(localized: "app_name"))
@@ -126,7 +155,9 @@ struct Drawer: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session"))
+                    Text(activeScope.isLocalApp
+                        ? (activeApp?.name ?? activeScope.appID ?? "")
+                        : (projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session")))
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(t.text)
                         .lineLimit(1)
@@ -179,7 +210,7 @@ struct Drawer: View {
     }
 
     private func scopePill(id: String?, name: String, icon: String) -> some View {
-        let active = projectStore.activeProjectId == id
+        let active = projectStore.activeProjectId == id && !activeScope.isLocalApp
         return Button {
             onSelectProject(id)
         } label: {
@@ -225,7 +256,8 @@ struct Drawer: View {
 
     private var sectionTabs: some View {
         HStack(spacing: 4) {
-            tab(.chats, .message, String(localized: "drawer_tab_chats"), engineSessions.count)
+            tab(.chats, .message, String(localized: "drawer_tab_chats"),
+                activeScope.isLocalApp ? activeAppSessions.count : engineSessions.count)
             tab(.projects, .folder, String(localized: "drawer_tab_projects"), projects.count)
             tab(.apps, .skill, String(localized: "drawer_tab_apps"), localApps.count)
         }
@@ -269,7 +301,7 @@ struct Drawer: View {
 
     private var currentSectionEmpty: Bool {
         switch section {
-        case .chats: engineSessions.isEmpty
+        case .chats: activeScope.isLocalApp ? false : engineSessions.isEmpty
         case .projects: projects.isEmpty
         case .apps: localApps.isEmpty
         }
@@ -316,13 +348,71 @@ struct Drawer: View {
         )
     }
 
+    @ViewBuilder
     private var chatsSection: some View {
-        VStack(spacing: 2) {
-            if !searching { newChatButton(projectID: projectStore.activeProjectId) }
-            ForEach(engineSessions) { session in
-                sessionButton(session.id, title: session.title, subtitle: String(localized: "drawer_session_subtitle \(session.relativeTime) \(session.messageCount)"), projectID: projectStore.activeProjectId)
+        if case let .localApp(appID) = activeScope {
+            appChatsSection(appID: appID)
+        } else {
+            VStack(spacing: 2) {
+                if !searching { newChatButton(projectID: projectStore.activeProjectId) }
+                ForEach(engineSessions) { session in
+                    sessionButton(session.id, title: session.title, subtitle: String(localized: "drawer_session_subtitle \(session.relativeTime) \(session.messageCount)"), projectID: projectStore.activeProjectId)
+                }
             }
         }
+    }
+
+    /// The active app's session catalog: the app name as the section header,
+    /// its cached rows (init pinned first by the store), and 新对话.
+    private func appChatsSection(appID: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: localAppIconSystemName)
+                    .font(.system(size: 12))
+                    .foregroundColor(t.accent)
+                Text(activeApp?.name ?? appID)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(t.text3)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .accessibilityIdentifier("drawer.chats.app-header")
+            if !searching {
+                Button {
+                    onNewAppChat(appID)
+                } label: {
+                    Label("chat_new_conversation", systemImage: "square.and.pencil")
+                        .font(.system(size: 13.5, weight: .medium)).foregroundColor(t.accent)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                        .background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.chats.app-new")
+            }
+            ForEach(activeAppSessions) { row in
+                let title = row.isInit
+                    ? "\(row.title) · \(String(localized: "local_apps_session_init_badge"))"
+                    : row.title
+                appSessionButton(appID: appID, sessionID: row.uuid, title: title,
+                                 subtitle: String(localized: "drawer_session_subtitle \(row.relativeTime) \(row.messageCount)"))
+            }
+        }
+    }
+
+    private func appSessionButton(appID: String, sessionID: String, title: String, subtitle: String) -> some View {
+        let active = sessionID == activeSession
+        return Button {
+            onSelectAppSession(appID, sessionID)
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13.5, weight: active ? .semibold : .medium)).foregroundColor(active ? t.text : t.text2).lineLimit(1)
+                Text(subtitle).font(.caption).foregroundColor(t.text4).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(9)
+            .background(active ? t.surfaceActive : .clear).clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 
     private func newChatButton(projectID: String?) -> some View {
@@ -446,7 +536,9 @@ struct Drawer: View {
     }
 
     private func sessionButton(_ id: String, title: String, subtitle: String, projectID: String?) -> some View {
-        let active = id == activeSession && projectID == projectStore.activeProjectId
+        let active = id == activeSession
+            && projectID == projectStore.activeProjectId
+            && !activeScope.isLocalApp
         return Button {
             onSelectSession(projectID, id)
         } label: {

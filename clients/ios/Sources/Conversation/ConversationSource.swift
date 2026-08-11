@@ -25,6 +25,8 @@ import OSLog
 import SwiftUI
 
 #if canImport(engine_mobileFFI)
+    import AuthenticationServices
+    import UIKit
     import engine_mobileFFI
 #endif
 
@@ -244,9 +246,14 @@ final class ConversationModel: ObservableObject {
     /// provisional SessionStarted row to be replaced by the durable JSONL catalog.
     @Published var sessionRefreshRevision: UInt64 = 0
     /// Real MCP servers from the engine (`McpServers` listing, lowered to the UI
-    /// `MCPServer` model). Empty ⇒ the settings page keeps its mock list. Refreshed
-    /// out-of-band via `refreshMcpServers()` when the MCP settings page opens.
+    /// `MCPServer` model). `mcpServersLoaded` distinguishes an authoritative
+    /// empty listing from the initial not-yet-loaded state.
     @Published var mcpServers: [MCPServer] = []
+    @Published var mcpServersLoaded = false
+    /// Real skills/slash commands from the engine registry. The settings page
+    /// never invents rows when this catalog is empty.
+    @Published var skills: [Skill] = []
+    @Published var skillsLoaded = false
     /// A transient, dim status line (tool activity / connection state). NOT used
     /// for errors anymore — those go to `error` (the persistent banner).
     @Published var statusLine: String? = nil
@@ -255,6 +262,17 @@ final class ConversationModel: ObservableObject {
     /// A non-clean turn outcome (MaxTurns / Cancelled) surfaced distinctly from a
     /// normal end (PR-4 item 3). Cleared when a new turn starts.
     @Published var notice: TurnNotice? = nil
+    /// Pending interactive `AskUserQuestion` questionnaires, oldest first. The
+    /// chat surface renders each as a card appended after the messages;
+    /// answered/cancelled requests are dropped when the engine confirms with
+    /// `askUserQuestionResolved`, and the queue is cleared on session end.
+    @Published var pendingQuestions: [ConversationPendingQuestion] = []
+    /// Background tasks announced by this scope's engine (Workflow builds,
+    /// background jobs), oldest first. Engine-scoped: switching sessions
+    /// within the scope keeps the panel; a scope switch builds a fresh
+    /// source and starts empty. Drives the pinned tasks panel above the
+    /// composer.
+    @Published var backgroundTasks: [BackgroundTaskSnapshot] = []
     #if canImport(engine_mobileFFI)
         /// FIFO queue of engine-parked permission requests (SHIP-BLOCKER #3). The
         /// chat view renders the head (`first`) as a modal prompt; answering it pops
@@ -359,6 +377,18 @@ protocol ConversationSource: AnyObject {
             profile: ProviderLaunchProfile,
             credentialOverride: String?
         ) async throws -> ProviderConnectionTestResult
+        /// Run the native browser OAuth flow. The engine owns PKCE/state and
+        /// only receives the callback URL from this coordinator.
+        func loginOAuth(provider: String) async throws -> ProviderOAuthState
+        func logoutOAuth(provider: String) async throws
+        func authState(provider: String) async throws -> ProviderOAuthState
+        func testOAuthConnection(
+            provider: String,
+            profile: ProviderLaunchProfile
+        ) async throws -> ProviderConnectionTestResult
+        /// Route an app-level `lingxi://oauth/callback` into the pending web
+        /// authentication session when iOS delivers it through `onOpenURL`.
+        func handleOAuthCallback(_ url: URL)
         /// Observe out-of-band engine events without duplicating the listener.
         func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?)
     #endif
@@ -395,6 +425,20 @@ extension ConversationSource {
         ) async throws -> ProviderConnectionTestResult {
             .failure(message: String(localized: "chat_provider_engine_unavailable"))
         }
+        func loginOAuth(provider: String) async throws -> ProviderOAuthState {
+            throw NSError(domain: "ConversationSource", code: 1, userInfo: [NSLocalizedDescriptionKey: "OAuth requires the engine"])
+        }
+        func logoutOAuth(provider: String) async throws {}
+        func authState(provider: String) async throws -> ProviderOAuthState {
+            ProviderOAuthState(provider: provider, signedIn: false, accountLabel: nil, accountID: nil, organizationID: nil, fedramp: false)
+        }
+        func testOAuthConnection(
+            provider: String,
+            profile: ProviderLaunchProfile
+        ) async throws -> ProviderConnectionTestResult {
+            .failure(message: String(localized: "chat_provider_engine_unavailable"))
+        }
+        func handleOAuthCallback(_ url: URL) {}
         func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {}
     }
 #endif
@@ -784,6 +828,15 @@ final class MockConversationSource: ConversationSource {
         }
     }
 
+    private final class OAuthPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+        func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+            return windows.first(where: \.isKeyWindow) ?? windows.first ?? UIWindow()
+        }
+    }
+
     /// The real conversation source: an in-process engine reached over UniFFI.
     ///
     /// Lifecycle: lazily build the `MobileEngineHandle` on first `send`; register
@@ -823,6 +876,10 @@ final class MockConversationSource: ConversationSource {
         /// approval.
         private var permissionSink: EnginePermissionSink?
         private var externalEventHandler: ((ClientEvent) -> Void)?
+        private var oauthSession: ASWebAuthenticationSession?
+        private var oauthPresentationProvider: OAuthPresentationContextProvider?
+        private var oauthFlowID: String?
+        private var oauthCallbackHandler: ((URL) -> Void)?
         /// Index into `model.messages` of the assistant message currently being
         /// streamed (deltas append into it). `nil` between turns.
         private var streamingIndex: Int?
@@ -1114,6 +1171,16 @@ final class MockConversationSource: ConversationSource {
             // A pending permission belongs to the turn we're abandoning — drop it
             // so a stale prompt can't leak into the session we're switching to.
             model.pendingPermissions = []
+            // Same for a pending questionnaire: its request id is scoped to
+            // the abandoned session/connection. If the target session still
+            // has one pending, the broker replays it after the switch.
+            model.pendingQuestions = []
+            // The task panel is a view of THIS conversation's background work.
+            // The engine's task registry is host-wide, so keeping the rows
+            // would show the new session tasks it never started (and grow
+            // without bound across a long app run). The bootstrap `TaskList`
+            // on the next handle build re-seeds anything still live.
+            model.backgroundTasks = []
         }
 
         private func invalidateTurnContext() {
@@ -1329,6 +1396,19 @@ final class MockConversationSource: ConversationSource {
         }
 
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
+            switch event {
+            case .askUserQuestion, .askUserQuestionResolved, .taskStatusChanged, .taskRow:
+                // Deliberately OUTSIDE the turn gate: the engine's broker
+                // replays a still-pending AskUserQuestion (and resolves it)
+                // after a foreground re-connect, a background task's status
+                // change lands after its turn already ended, and `TaskRow`
+                // rows answer an out-of-band `TaskList` — all of these
+                // arrive with no turn in flight and must not be dropped as
+                // out-of-turn strays.
+                return true
+            default:
+                break
+            }
             guard let currentTurnId, let activeTurnEpoch, activeTurnEpoch == sessionEpoch else {
                 return false
             }
@@ -1551,8 +1631,137 @@ final class MockConversationSource: ConversationSource {
                 }
             )
             return result.connected
-                ? .success(message: "\(result.message) · \(result.latencyMs)ms")
+                ? .success(
+                    message: "\(result.message) · \(result.latencyMs)ms",
+                    usedStoredCredential: result.usedStoredCredential
+                )
                 : .failure(message: result.message)
+        }
+
+        func loginOAuth(provider: String) async throws -> ProviderOAuthState {
+            let handle = try await ensureHandle()
+            let session = try await handle.beginOAuth(
+                provider: provider,
+                redirectUri: "lingxi://oauth/callback"
+            )
+            guard let authorizationURL = URL(string: session.authorizationUrl) else {
+                throw NSError(domain: "ConversationSource", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "OAuth 授权地址无效",
+                ])
+            }
+
+            return try await withCheckedThrowingContinuation { continuation in
+                oauthFlowID = session.flowId
+                let flowID = session.flowId
+                let callbackScheme = session.callbackUrlScheme
+                let presentationProvider = OAuthPresentationContextProvider()
+                oauthPresentationProvider = presentationProvider
+                oauthCallbackHandler = { [weak self] url in
+                    guard let self else { return }
+                    guard self.oauthFlowID == flowID else { return }
+                    self.oauthCallbackHandler = nil
+                    self.oauthFlowID = nil
+                    Task { @MainActor in
+                        do {
+                            let state = try await handle.completeOAuth(
+                                flowId: flowID,
+                                callbackUrl: url.absoluteString
+                            )
+                            self.oauthSession = nil
+                            self.oauthPresentationProvider = nil
+                            continuation.resume(returning: Self.lowerOAuthState(state))
+                        } catch {
+                            self.oauthSession = nil
+                            self.oauthPresentationProvider = nil
+                            // The callback has become terminal even when the
+                            // token exchange or secure-store write fails. Rust
+                            // normally consumes the flow before exchange, but
+                            // cancel is an idempotent defence for malformed
+                            // callbacks and older engine binaries.
+                            await handle.cancelOAuth(flowId: flowID)
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+
+                let webSession = ASWebAuthenticationSession(
+                    url: authorizationURL,
+                    callbackURLScheme: callbackScheme
+                ) { [weak self] url, error in
+                    guard let self else { return }
+                    guard self.oauthFlowID == flowID else { return }
+                    if let error {
+                        self.oauthCallbackHandler = nil
+                        self.oauthSession = nil
+                        self.oauthPresentationProvider = nil
+                        self.oauthFlowID = nil
+                        Task { await handle.cancelOAuth(flowId: flowID) }
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    if let url {
+                        self.handleOAuthCallback(url)
+                    }
+                }
+                webSession.presentationContextProvider = presentationProvider
+                webSession.prefersEphemeralWebBrowserSession = false
+                oauthSession = webSession
+                if !webSession.start() {
+                    oauthCallbackHandler = nil
+                    oauthSession = nil
+                    oauthPresentationProvider = nil
+                    oauthFlowID = nil
+                    Task { await handle.cancelOAuth(flowId: flowID) }
+                    continuation.resume(throwing: NSError(
+                        domain: "ConversationSource",
+                        code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "无法启动系统浏览器 OAuth 会话"]
+                    ))
+                }
+            }
+        }
+
+        func logoutOAuth(provider: String) async throws {
+            let handle = try await ensureHandle()
+            try await handle.logoutOAuth(provider: provider)
+        }
+
+        func authState(provider: String) async throws -> ProviderOAuthState {
+            let handle = try await ensureHandle()
+            return Self.lowerOAuthState(try await handle.authState(provider: provider))
+        }
+
+        func testOAuthConnection(
+            provider: String,
+            profile: ProviderLaunchProfile
+        ) async throws -> ProviderConnectionTestResult {
+            let handle = try await ensureHandle()
+            let result = await handle.testOAuthConnection(
+                provider: provider,
+                apiBase: profile.baseURL,
+                model: profile.modelID
+            )
+            return result.connected
+                ? .success(
+                    message: "\(result.message) · \(result.latencyMs)ms",
+                    usedStoredCredential: result.usedStoredCredential
+                )
+                : .failure(message: result.message)
+        }
+
+        func handleOAuthCallback(_ url: URL) {
+            oauthCallbackHandler?(url)
+        }
+
+        private static func lowerOAuthState(_ state: MobileOAuthStateDto) -> ProviderOAuthState {
+            ProviderOAuthState(
+                provider: state.provider,
+                signedIn: state.signedIn,
+                accountLabel: state.accountLabel,
+                accountID: state.accountId,
+                organizationID: state.organizationId,
+                fedramp: state.fedramp
+            )
         }
 
         func setExternalEventHandler(_ handler: ((ClientEvent) -> Void)?) {
@@ -1604,6 +1813,12 @@ final class MockConversationSource: ConversationSource {
                 try await handle.submit(
                     command: .listSessions(limit: EngineConversationSource.completeSessionListLimit)
                 )
+                // Seed the pinned tasks panel: a re-opened scope may already
+                // have a Workflow build running; its rows arrive as `TaskRow`
+                // events (zero rows ⇒ zero events). Best-effort — unlike the
+                // model/session listings above, the panel is not worth
+                // failing the whole handle over (it self-heals on pushes).
+                try? await handle.submit(command: .taskList(statusFilter: nil))
                 return handle
             }
             handleBuildTask = buildTask
@@ -1689,6 +1904,70 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        /// Pull the background-task rows (out-of-band, like `listSessions`).
+        /// Each row lands on `apply` as a `TaskRow` event → the pinned panel.
+        /// Uses the LIVE handle only — this is called from `apply`, where a
+        /// handle necessarily exists in production; never trigger a build
+        /// (hermetic `applyForTesting` callers must stay engine-free).
+        func refreshBackgroundTasks() {
+            guard let handle else { return }
+            Task {
+                // Best-effort: the panel self-heals on the next status push.
+                try? await handle.submit(command: .taskList(statusFilter: nil))
+            }
+        }
+
+        /// Rows kept in the panel. The engine's registry is host-wide and
+        /// never prunes, so the client bounds its own view: past the cap the
+        /// oldest FINISHED rows are dropped (an active row is never dropped —
+        /// it is the thing the user is waiting on).
+        private static let backgroundTaskLimit = 40
+
+        /// Upsert one background-task row. `description: nil` keeps whatever
+        /// text is already known (a status push carries no description).
+        /// Returns the status the row held before this update, or `nil` when
+        /// the row is new — callers use it to fire terminal-state side
+        /// effects exactly once (a broker replay repeats the same status).
+        @discardableResult
+        private func upsertBackgroundTask(
+            id: String,
+            description: String?,
+            status: BackgroundTaskSnapshot.Status
+        ) -> BackgroundTaskSnapshot.Status? {
+            if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
+                let previous = model.backgroundTasks[index].status
+                model.backgroundTasks[index].status = status
+                if let description, !description.isEmpty {
+                    model.backgroundTasks[index].descriptionText = description
+                }
+                return previous
+            }
+            model.backgroundTasks.append(BackgroundTaskSnapshot(
+                id: id,
+                descriptionText: description ?? "",
+                status: status
+            ))
+            if model.backgroundTasks.count > Self.backgroundTaskLimit {
+                if let oldestFinished = model.backgroundTasks.firstIndex(where: { $0.status.isTerminal }) {
+                    model.backgroundTasks.remove(at: oldestFinished)
+                }
+            }
+            return nil
+        }
+
+        private static func backgroundTaskStatus(
+            _ status: TaskStatusDto
+        ) -> BackgroundTaskSnapshot.Status? {
+            switch status {
+            case .pending: return .pending
+            case .running: return .running
+            case .completed: return .completed
+            case .failed: return .failed
+            case .cancelled: return .cancelled
+            @unknown default: return nil
+            }
+        }
+
         /// Pull the engine's real MCP server listing (out-of-band, like
         /// `listSessions`). The `McpServers` reply lands on `apply` → `model.mcpServers`.
         func refreshMcpServers() {
@@ -1743,6 +2022,72 @@ final class MockConversationSource: ConversationSource {
                 )
                 updateActiveRun { $0.notices.append(notice) }
                 model.statusLine = message
+
+            case let .askUserQuestion(request):
+                // Passes the turn gate via the allowlist in `acceptTurnEvent`:
+                // a broker replay after a foreground re-connect arrives
+                // OUTSIDE a turn. Dedupe by request id — a replay of a
+                // still-pending request must not stack a second card.
+                guard acceptTurnEvent(event) else { return }
+                let question = Self.pendingQuestion(from: request)
+                guard !model.pendingQuestions.contains(where: { $0.requestId == question.requestId }) else {
+                    return
+                }
+                model.pendingQuestions.append(question)
+
+            case let .askUserQuestionResolved(requestId):
+                // Allowlisted like `.askUserQuestion` above — resolution can
+                // also be replayed outside a turn. Drop the card whether the
+                // request was answered here, elsewhere, or auto-continued.
+                guard acceptTurnEvent(event) else { return }
+                model.pendingQuestions.removeAll { $0.requestId == requestId }
+
+            case let .taskRow(task):
+                // A `TaskList` reply row (out-of-band, allowlisted). Rows
+                // both seed the panel at bootstrap and backfill the
+                // description for ids first seen via a status push.
+                guard acceptTurnEvent(event) else { return }
+                if let mapped = Self.backgroundTaskStatus(task.status) {
+                    upsertBackgroundTask(
+                        id: task.taskId,
+                        description: task.description,
+                        status: mapped
+                    )
+                }
+
+            case let .taskStatusChanged(taskId, status):
+                // Allowlisted through the turn gate: a background task
+                // normally finishes after its spawning turn already ended.
+                guard acceptTurnEvent(event) else { return }
+                var isRepeat = false
+                if let mapped = Self.backgroundTaskStatus(status) {
+                    let previous = upsertBackgroundTask(
+                        id: taskId, description: nil, status: mapped)
+                    // Same terminal status seen twice = a broker replay after
+                    // a foreground reconnect, not a second completion.
+                    isRepeat = previous == mapped
+                    if previous == nil {
+                        // First sighting via a push — pull the row list so
+                        // the panel can show the human description instead
+                        // of the bare id.
+                        refreshBackgroundTasks()
+                    }
+                }
+                let text: String?
+                switch status {
+                case .completed: text = String(localized: "chat_task_completed \(taskId)")
+                case .failed: text = String(localized: "chat_task_failed \(taskId)")
+                case .cancelled: text = String(localized: "chat_task_cancelled \(taskId)")
+                case .pending, .running: text = nil
+                @unknown default: text = nil
+                }
+                if let text, !isRepeat {
+                    model.items.append(.notice(ConversationExecutionNotice(
+                        id: "task-\(taskId)-\(UUID().uuidString)",
+                        kind: status == .failed ? .error : .info,
+                        text: text
+                    )))
+                }
 
             case let .toolUseStarted(id, tool, inputJson):
                 let accepted = acceptTurnEvent(event)
@@ -2079,12 +2424,17 @@ final class MockConversationSource: ConversationSource {
                 setPendingSessionTransition(nil)
                 invalidateTurnContext()
                 model.turnCompletion = nil
+                // A pending questionnaire belongs to the ended session; its
+                // request id can never be answered now.
+                model.pendingQuestions = []
 
             case let .mcpServers(servers):
-                // Out-of-band MCP listing → the UI `MCPServer` model. The DTO is
-                // thinner than the mock (no url / tool-count), so those default;
-                // status maps Connected→connected, Disconnected→idle, Error→error.
-                model.mcpServers = servers.map { dto in
+                // Out-of-band MCP listing → the UI `MCPServer` model. The wire
+                // intentionally carries health/name/transport only; endpoint
+                // and command details are merged from the real config file by
+                // the settings host, never fabricated here. `local_apps` is an
+                // engine-owned provider, not a user-editable MCP configuration.
+                model.mcpServers = servers.filter { $0.name != "local_apps" }.map { dto in
                     let status: ConnStatus
                     switch dto.status {
                     case .connected: status = .connected
@@ -2092,9 +2442,37 @@ final class MockConversationSource: ConversationSource {
                     case .error: status = .error
                     @unknown default: status = .idle
                     }
-                    return MCPServer(id: dto.name, name: dto.name, url: "", tools: 0,
-                                     status: status, enabled: status == .connected, transport: dto.transport)
+                    return MCPServer(id: dto.name, name: dto.name, url: nil, command: "",
+                                     args: [], env: [:], headers: [:], tools: nil,
+                                     status: status, enabled: status == .connected,
+                                     transport: MCPServer.normalizedTransport(dto.transport))
                 }
+                model.mcpServersLoaded = true
+
+            case let .slashCommandCatalog(commands):
+                // The engine registry is the source of truth for skills. Slash
+                // command names are the executable triggers, so keep the
+                // leading slash in the UI while preserving the engine source.
+                model.skills = commands.map { command in
+                    let source = command.source
+                    let author: String
+                    switch source {
+                    case "builtin", "bundled": author = String(localized: "skills_author_official")
+                    case "user": author = String(localized: "skills_author_mine")
+                    default: author = command.source
+                    }
+                    return Skill(
+                        id: "skill:\(command.name)",
+                        name: command.name,
+                        author: author,
+                        desc: command.description,
+                        triggers: ["/\(command.name)"],
+                        enabled: true,
+                        builtin: source == "builtin" || source == "bundled" || source == "managed",
+                        source: source
+                    )
+                }
+                model.skillsLoaded = true
 
             default:
                 // Cost / message-boundary / other listing events are not rendered
@@ -2184,6 +2562,31 @@ final class MockConversationSource: ConversationSource {
         fileprivate struct RenderedMessage {
             let message: Message
             let detail: ConversationMessageDetail?
+        }
+
+        /// Lower one wire `AskUserQuestionRequestDto` onto the FFI-independent
+        /// model the chat surface renders.
+        fileprivate static func pendingQuestion(
+            from dto: AskUserQuestionRequestDto
+        ) -> ConversationPendingQuestion {
+            ConversationPendingQuestion(
+                requestId: dto.requestId,
+                questions: dto.questions.map { question in
+                    ConversationAskQuestion(
+                        question: question.question,
+                        header: question.header,
+                        options: question.options.map { option in
+                            ConversationAskOption(
+                                label: option.label,
+                                description: option.description,
+                                preview: option.preview
+                            )
+                        },
+                        multiSelect: question.multiSelect
+                    )
+                },
+                timeoutSecs: dto.timeoutSecs
+            )
         }
 
         fileprivate static func message(from dto: MessageDto) -> RenderedMessage {

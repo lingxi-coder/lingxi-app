@@ -43,6 +43,10 @@ mod host;
 // (an FFI-only optional dep) and only the FFI host constructs a real loader.
 #[cfg(feature = "uniffi")]
 mod skill_loader;
+// v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
+// invoker), consumed by the `host` build path.
+#[cfg(feature = "uniffi")]
+mod workflow_support;
 
 // LOCAL-APPS (phase 1): the domain ⇄ protocol bridge for the engine-owned
 // `local_apps::AppService` — the observer that lowers domain events onto the
@@ -53,30 +57,23 @@ mod skill_loader;
 mod local_apps_bridge;
 
 #[cfg(feature = "uniffi")]
-mod local_apps_generation;
+mod local_apps_build;
 #[cfg(feature = "uniffi")]
 mod local_apps_host;
-// LOCAL-APPS (conversational design, Task 8): the three LLM calls — author
-// the questionnaire, derive the plan, write the app's source. Behind the
-// `LocalAppsModel` seam so the three calls unit-test with a scripted fake and
-// zero network. uniffi-gated like its siblings: it names `llm-client`'s
-// `ApiService` (for `ApiServiceModel`) and `local-apps`'s validators, both of
-// which are pulled only under this feature.
-#[cfg(feature = "uniffi")]
-mod local_apps_delta;
 // Live per-connection device handles (camera / voice / location /
 // notifications) behind a SharedLlm-style swap cell — see the module doc for
 // why a bare OnceLock would pin a torn-down engine's Swift objects.
 #[cfg(feature = "uniffi")]
 mod local_apps_device;
+// LOCAL-APPS (v3): the app-facing LLM seam — `LocalAppsModel` + the
+// `ApiService`-backed `chat` used by the `llm.chat` bridge operation. The
+// designer/generation pipeline that used to live behind this seam is gone.
 #[cfg(feature = "uniffi")]
 mod local_apps_llm;
 #[cfg(feature = "uniffi")]
 mod local_apps_mcp;
 #[cfg(feature = "uniffi")]
 mod local_apps_profile;
-#[cfg(feature = "uniffi")]
-mod local_apps_sources;
 
 #[cfg(feature = "uniffi")]
 pub use host::{
@@ -84,6 +81,7 @@ pub use host::{
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
     MobileEngineHandle, MobileRuntime, ProviderConnectionTestDto,
+    MobileOAuthSessionDto, MobileOAuthStateDto,
 };
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`

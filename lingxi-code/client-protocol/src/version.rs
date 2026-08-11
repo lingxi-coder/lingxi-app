@@ -23,4 +23,10 @@
 ///
 /// Bumped to 4.0.0 when app records began carrying the persisted
 /// `git_enabled` creation choice.
-pub const CLIENT_PROTOCOL_VERSION: &str = "4.0.0";
+///
+/// Bumped to 5.0.0 when the local-app designer/generation pipeline was
+/// removed from the wire contract: the design/questionnaire/plan/generation
+/// command, event, and DTO families are gone and `AppWorkflowStateDto`
+/// collapsed to `draft` / `ready`. Removals are BREAKING structural changes
+/// under the F1-09 guard, so this is a real major bump.
+pub const CLIENT_PROTOCOL_VERSION: &str = "5.0.0";

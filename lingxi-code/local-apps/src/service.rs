@@ -1,45 +1,39 @@
 //! [`AppService`] — the single source of truth for local apps.
 //!
 //! Owns the in-memory aggregates, all persistence (rebuilding fully from disk
-//! at construction), continuation delivery, and typed domain-event emission.
-//! Every mutation follows clone → transition → persist → commit → emit, so a
-//! failed persist never leaves memory ahead of disk, and observers never run
-//! while the state lock is held. A separate emission-order lock spans every
-//! commit → emit window (and snapshot emissions), so concurrent commands can
-//! never deliver events out of commit order — a stale snapshot is never
-//! delivered after a newer mutation's events.
+//! at construction), and typed domain-event emission. Every mutation follows
+//! clone → transition → persist → commit → emit, so a failed persist never
+//! leaves memory ahead of disk, and observers never run while the state lock
+//! is held. A separate emission-order lock spans every commit → emit window
+//! (and snapshot emissions), so concurrent commands can never deliver events
+//! out of commit order — a stale snapshot is never delivered after a newer
+//! mutation's events.
 //!
 //! Event DELIVERY runs in spawned emission tasks, never in the caller's
 //! future: a mutating call commits and hands its already-held emission-order
 //! guard (plus the events) to a `tokio::spawn`ed task, so cancelling the
-//! caller between commit and emission can no longer lose gate announcements,
-//! and an observer that blocks cannot wedge the mutating caller. Ordering
-//! still holds because the guard is ACQUIRED in the caller before the commit
-//! (tokio's `Mutex` is FIFO-fair, so guards are granted in request order —
-//! this fairness is load-bearing) and only RELEASED by the emission task
-//! after delivery. Observers must not call back into emitting paths; a
-//! task-local reentrancy guard turns that programming error into a loud
-//! panic instead of a silent permanent deadlock. All blocking multi-fsync
-//! storage I/O runs on the blocking pool (`spawn_blocking`) over owned
-//! clones, never on the async executor threads.
+//! caller between commit and emission cannot lose events, and an observer
+//! that blocks cannot wedge the mutating caller. Ordering still holds because
+//! the guard is ACQUIRED in the caller before the commit (tokio's `Mutex` is
+//! FIFO-fair, so guards are granted in request order — this fairness is
+//! load-bearing) and only RELEASED by the emission task after delivery.
+//! Observers must not call back into emitting paths; a task-local reentrancy
+//! guard turns that programming error into a loud panic instead of a silent
+//! permanent deadlock. All blocking multi-fsync storage I/O runs on the
+//! blocking pool (`spawn_blocking`) over owned clones, never on the async
+//! executor threads.
 
 use crate::checkpoints::AppCheckpointStore;
-use crate::continuation::ContinuationSink;
 use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
 use crate::ids;
-use crate::manifest::{
-    save_manifest, validate_domain, validate_identifier, AppLayout, AppManifest,
-};
+use crate::manifest::{save_manifest, AppLayout, AppManifest};
 use crate::permissions::{save_permissions, AppPermissions};
-use crate::questionnaire::{AppDesignStep, AppPlan};
-use crate::state::{self, AppState};
+use crate::state::AppState;
 use crate::storage;
 use crate::types::{
-    AppCheckpoint, AppCheckpointKind, AppContinuation, AppDesignDraft, AppDesignPatch,
-    AppDesignPatchOp, AppDesignSuggestion, AppGenerationProgress, AppInteractionKind,
-    AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeMode, AppRuntimeRecord,
-    AppRuntimeState, AppWorkflowState, DesignValue,
+    AppCheckpoint, AppCheckpointKind, AppRecord, AppRuntimeMode, AppRuntimeRecord,
+    AppRuntimeState, AppWorkflowState,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -61,38 +55,22 @@ const MAX_ID_MINT_ATTEMPTS: usize = 32;
 
 // ── Input caps ───────────────────────────────────────────────────────────────
 // The service is the single enforcement point for client-supplied payload
-// sizes (phase 1's producer is the on-device UI; phases 2–3 hand the same
-// seam to agent-generated input). Every violation fails typed
-// `invalid_request` BEFORE anything is cloned, persisted, or re-emitted —
-// index.json and the full `AppsChanged` record set are rewritten on every
-// mutation, and `DesignDraftChanged` re-ships the whole field map, so an
-// uncapped value would be amplified on every subsequent edit of any app.
-// String caps are UTF-8 bytes (what memory/disk/the wire actually pay).
+// sizes. Every violation fails typed `invalid_request` BEFORE anything is
+// cloned, persisted, or re-emitted — index.json and the full `AppsChanged`
+// record set are rewritten on every mutation, so an uncapped value would be
+// amplified on every subsequent edit of any app. String caps are UTF-8 bytes
+// (what memory/disk/the wire actually pay).
 
 /// Maximum app name length in bytes (after trimming).
 pub const MAX_NAME_BYTES: usize = 200;
 /// Maximum app `brief` length in bytes (after trimming). Generous relative to
-/// [`MAX_NAME_BYTES`] — the brief is prose the LLM reads for context in all
-/// three stages, not a label.
+/// [`MAX_NAME_BYTES`] — the brief is prose the agent reads for context, not a
+/// label.
 pub const MAX_BRIEF_BYTES: usize = 4_000;
 /// Maximum `conversation_id` length in bytes.
 pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
-/// Maximum operations in one design patch.
-pub const MAX_PATCH_OPS: usize = 64;
-/// Maximum field id length in bytes.
-pub const MAX_FIELD_ID_BYTES: usize = 200;
-/// Maximum text value length in bytes (short/long text, single choice, color).
+/// Maximum text value length in bytes (also the runtime `last_error` cap).
 pub const MAX_TEXT_VALUE_BYTES: usize = 20_000;
-/// Maximum items in one list value (multiple choice, screens, features).
-pub const MAX_LIST_ITEMS: usize = 200;
-/// Maximum list item length in bytes.
-pub const MAX_LIST_ITEM_BYTES: usize = 500;
-/// Maximum patch note length in bytes.
-pub const MAX_NOTE_BYTES: usize = 2_000;
-/// Maximum revision prompt length in bytes.
-pub const MAX_PROMPT_BYTES: usize = 20_000;
-/// Maximum fields a draft may accumulate across all patches.
-pub const MAX_DRAFT_FIELDS: usize = 256;
 
 fn ensure_within(what: &str, len: usize, max: usize) -> Result<(), AppError> {
     if len <= max {
@@ -130,165 +108,8 @@ fn truncate_last_error(last_error: Option<String>) -> Option<String> {
     })
 }
 
-fn validate_design_value(field_id: &str, value: &DesignValue) -> Result<(), AppError> {
-    match value {
-        DesignValue::ShortText(text)
-        | DesignValue::LongText(text)
-        | DesignValue::SingleChoice(text)
-        | DesignValue::Color(text) => ensure_within(
-            &format!("value of field {field_id:?}"),
-            text.len(),
-            MAX_TEXT_VALUE_BYTES,
-        ),
-        DesignValue::MultipleChoice(items)
-        | DesignValue::ScreenList(items)
-        | DesignValue::FeatureList(items) => {
-            if items.len() > MAX_LIST_ITEMS {
-                return Err(AppError::InvalidRequest(format!(
-                    "value of field {field_id:?} has {} items (limit {MAX_LIST_ITEMS})",
-                    items.len()
-                )));
-            }
-            for item in items {
-                ensure_within(
-                    &format!("a list item of field {field_id:?}"),
-                    item.len(),
-                    MAX_LIST_ITEM_BYTES,
-                )?;
-            }
-            Ok(())
-        }
-        // The domain list and the data-field ids below are the only draft
-        // values the scaffold copies VERBATIM onto the manifest, where
-        // `AppManifest::validate` rejects them while the app is already
-        // `generating` — a state whose only exit replays the same input. The
-        // manifest contract is therefore enforced here, at ingest, where a
-        // rejection leaves the draft revision and the workflow state intact.
-        DesignValue::DomainList(domains) => {
-            if domains.len() > MAX_LIST_ITEMS {
-                return Err(AppError::InvalidRequest(format!(
-                    "value of field {field_id:?} has {} domains (limit {MAX_LIST_ITEMS})",
-                    domains.len()
-                )));
-            }
-            for domain in domains {
-                // `validate_domain` caps at 253 bytes, stricter than
-                // `MAX_LIST_ITEM_BYTES`, so no separate length check.
-                validate_domain(domain)?;
-            }
-            Ok(())
-        }
-        DesignValue::DataFieldList(fields) => {
-            if fields.len() > MAX_LIST_ITEMS {
-                return Err(AppError::InvalidRequest(format!(
-                    "value of field {field_id:?} has {} data fields (limit {MAX_LIST_ITEMS})",
-                    fields.len()
-                )));
-            }
-            for field in fields {
-                // Shape (and the 64-byte cap) per the manifest contract. The
-                // label / enum-option / duplicate-id rules are NOT mirrored:
-                // the designer patches the whole list on every keystroke, so a
-                // field that is still being typed would have its edit rejected
-                // mid-flight.
-                validate_identifier("data field", &field.id)?;
-                ensure_within(
-                    &format!("data field label of field {field_id:?}"),
-                    field.label.len(),
-                    MAX_TEXT_VALUE_BYTES,
-                )?;
-                for option in &field.enum_options {
-                    ensure_within(
-                        &format!("enum option of field {field_id:?}"),
-                        option.len(),
-                        MAX_LIST_ITEM_BYTES,
-                    )?;
-                }
-            }
-            Ok(())
-        }
-        DesignValue::Boolean(_) | DesignValue::Density(_) => Ok(()),
-        // `Deferred` is the questionnaire-answer sentinel ("let the model
-        // decide") — a legitimate draft value since Task 2's `AppDesignDraft`
-        // three-way split. It carries no payload, so there is nothing here to
-        // size-check; WHETHER a given field is allowed to defer (its
-        // questionnaire entry's `allows_defer`) is a semantic question this
-        // generic, schema-agnostic patch validator cannot answer — that gate
-        // is `questionnaire::validate_answers`, run when advancing to
-        // planning. Accepting it here is what lets `storage.rs`'s load-path
-        // guard drop its matching check for `fields`/`pending_suggestion`
-        // (this function is the only write path into both), and what lets
-        // `engine-mobile`'s `lower_design_value`/`raise_design_value` map it
-        // to/from `DesignValueDto::Deferred` instead of treating it as
-        // unreachable.
-        DesignValue::Deferred => Ok(()),
-    }
-}
-
-/// Cap one inbound patch (op count, note, field ids, values) — shared by
-/// `update_draft` and `store_suggestion` (an applied suggestion re-applies a
-/// patch that already passed this gate).
-fn validate_patch(patch: &AppDesignPatch) -> Result<(), AppError> {
-    if patch.ops.len() > MAX_PATCH_OPS {
-        return Err(AppError::InvalidRequest(format!(
-            "patch has {} ops (limit {MAX_PATCH_OPS})",
-            patch.ops.len()
-        )));
-    }
-    if let Some(note) = &patch.note {
-        ensure_within("patch note", note.len(), MAX_NOTE_BYTES)?;
-    }
-    for op in &patch.ops {
-        match op {
-            AppDesignPatchOp::Set { field_id, value } => {
-                ensure_within(
-                    &format!("field id {field_id:?}"),
-                    field_id.len(),
-                    MAX_FIELD_ID_BYTES,
-                )?;
-                validate_design_value(field_id, value)?;
-            }
-            AppDesignPatchOp::Remove { field_id } => {
-                ensure_within(
-                    &format!("field id {field_id:?}"),
-                    field_id.len(),
-                    MAX_FIELD_ID_BYTES,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Post-apply guard shared by `update_draft` / `apply_suggestion`: individual
-/// patches are capped, but fields accumulate across patches — an over-limit
-/// draft is rejected BEFORE it is persisted (the working clone is discarded).
-fn ensure_draft_field_count(draft: &AppDesignDraft) -> Result<(), AppError> {
-    if draft.fields.len() <= MAX_DRAFT_FIELDS {
-        Ok(())
-    } else {
-        Err(AppError::InvalidRequest(format!(
-            "draft would have {} fields (limit {MAX_DRAFT_FIELDS})",
-            draft.fields.len()
-        )))
-    }
-}
-
-/// Outcome of one `apply_suggestion` transition, making the commit/report
-/// split explicit (instead of a nested `Ok(Err(..))` puzzle): BOTH variants
-/// commit through `with_app`'s success path — `RejectedConsumed` persists
-/// the suggestion's consumption while the caller still receives the typed
-/// error.
-enum SuggestionOutcome {
-    /// The patch applied; carries the new draft revision.
-    Applied(u64),
-    /// The suggestion was consumed WITHOUT applying (over-cap poison, or a
-    /// stale `based_on_revision`); carries the typed error the caller sees.
-    RejectedConsumed(AppError),
-}
-
-/// Single source of truth for local apps (phase 1: data model, state
-/// machines, storage, continuations — no runtime, no git).
+/// Single source of truth for local apps (data model, runtime state machine,
+/// storage, git checkpoints).
 pub struct AppService {
     /// `pub(crate)` (not private) solely so [`crate::test_support`]'s
     /// cross-crate test fixtures can splice fixture state onto disk without
@@ -296,7 +117,6 @@ pub struct AppService {
     /// business touching it.
     pub(crate) root: PathBuf,
     clock: Arc<dyn Clock>,
-    sink: Arc<dyn ContinuationSink>,
     observer: Arc<dyn AppEventObserver>,
     /// `Arc` so completion tasks can hold an [`OwnedMutexGuard`] across a
     /// caller-cancellation boundary (see the module doc). `pub(crate)` for
@@ -324,15 +144,10 @@ impl AppService {
     /// missing; corrupt state fails with `storage_corrupt` instead of being
     /// silently reset. A store torn by a crash between the per-app batch and
     /// the index rewrite is repaired forward here (see the [`crate::storage`]
-    /// module doc). Before returning, the pending human gate of every app is
-    /// re-announced through the observer (see `announce_pending_gates`) so a
-    /// persisted `interaction_id` whose original announcement was lost to a
-    /// crash — or one freshly minted by a load-time re-arm — still reaches
-    /// the client.
+    /// module doc).
     pub async fn load(
         root: impl Into<PathBuf>,
         clock: Arc<dyn Clock>,
-        sink: Arc<dyn ContinuationSink>,
         observer: Arc<dyn AppEventObserver>,
     ) -> Result<Self, AppError> {
         let root = root.into();
@@ -358,65 +173,14 @@ impl AppService {
             })
             .await?
         };
-        let service = Self {
+        Ok(Self {
             root,
             clock,
-            sink,
             observer,
             state: Arc::new(Mutex::new(apps)),
             emit_order: Arc::new(Mutex::new(())),
             retired_ids: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
-        };
-        service.fail_interrupted_llm_rounds().await;
-        service.announce_pending_gates().await;
-        Ok(service)
-    }
-
-    /// Fail closed any app left in `authoring_questionnaire` / `planning`
-    /// from a PREVIOUS process. Those two states are driven entirely by a
-    /// background task the ENGINE owns (`host.rs`'s `spawn_authoring` /
-    /// `spawn_planning`), not by this service — a crash, a panic, or the OS
-    /// killing a backgrounded app mid round trip leaves the record here with
-    /// no task left anywhere to finish it. Nothing else can rescue it either:
-    /// `questionnaire_ready`/`plan_ready` and their `_failed` siblings are
-    /// guarded to the SAME state they leave, so only the (engine-owned) task
-    /// that started it may resolve it, and that task no longer exists. This
-    /// runs unconditionally at every load, so the record is never stuck for
-    /// longer than one restart — the client sees the same retryable-failure
-    /// UI a live LLM error would produce, not a spinner that never resolves.
-    async fn fail_interrupted_llm_rounds(&self) {
-        let stuck: Vec<(String, AppWorkflowState, u64)> = {
-            let apps = self.state.lock().await;
-            apps.iter()
-                .filter_map(|app| match app.record.workflow_state {
-                    state @ (AppWorkflowState::AuthoringQuestionnaire
-                    | AppWorkflowState::Planning) => {
-                        Some((app.record.id.clone(), state, app.record.llm_round))
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        for (app_id, state, epoch) in stuck {
-            let result = match state {
-                AppWorkflowState::AuthoringQuestionnaire => {
-                    self.questionnaire_failed(&app_id, "interrupted by an engine restart", epoch)
-                        .await
-                }
-                AppWorkflowState::Planning => {
-                    self.plan_failed(&app_id, "interrupted by an engine restart", epoch)
-                        .await
-                }
-                _ => unreachable!("filtered to only these two states above"),
-            };
-            if let Err(error) = result {
-                tracing::warn!(
-                    app_id = %app_id,
-                    error = %error,
-                    "failed to fail-close an app interrupted mid authoring/planning at load"
-                );
-            }
-        }
+        })
     }
 
     /// Run one blocking storage closure on the blocking pool. A join failure
@@ -428,67 +192,6 @@ impl AppService {
         tokio::task::spawn_blocking(work)
             .await
             .map_err(|error| AppError::Io(format!("storage task failed: {error}")))?
-    }
-
-    /// Announce the pending human gate of EVERY app (as `DesignerRequested` /
-    /// `PreviewReady`) right after a load. A crash between persisting a gate
-    /// and emitting its announcement — or a load-time gate re-arm — would
-    /// otherwise leave a pending `interaction_id` no event ever carried,
-    /// wedging the client protocol surface (the id gates `confirm_*`).
-    /// Emitted unconditionally, not just for re-armed gates: clients treat
-    /// gate announcements idempotently, so re-announcing an id they already
-    /// know is a no-op.
-    /// Re-announce pending gates once observers are attached.
-    ///
-    /// [`Self::load`] announces too, but it runs BEFORE the host subscribes its
-    /// client and domain observers, so those events reach a fanout with no
-    /// subscribers and are dropped. After a relaunch with an armed designer
-    /// gate that left the client without the pending `interaction_id`, which
-    /// gates `confirm_design` — and the UI, seeing no id, would try
-    /// `open_designer`, which is illegal from `awaiting_spec_confirmation`.
-    /// The app was then unreachable from either side.
-    ///
-    /// Safe to call repeatedly: announcements are idempotent by design.
-    pub async fn resync_pending_gates(&self) {
-        self.announce_pending_gates().await;
-    }
-
-    async fn announce_pending_gates(&self) {
-        let order = self.acquire_emit_order().await;
-        let events: Vec<AppEvent> = {
-            let apps = self.state.lock().await;
-            apps.iter()
-                .filter_map(|app| {
-                    app.interactions
-                        .pending
-                        .as_ref()
-                        .map(Self::gate_announcement)
-                })
-                .collect()
-        };
-        Self::spawn_emission(Arc::clone(&self.observer), order, events);
-    }
-
-    /// THE pending-gate announcement shape, defined exactly once: `Designer`
-    /// -> `DesignerRequested`, `Preview` -> `PreviewReady` (`url` stays
-    /// `None` until phase 4). Shared by the live gate-opening paths
-    /// ([`Self::open_designer`], [`Self::validation_passed`]) and the
-    /// load-time re-announcement, so the three surfaces can never drift —
-    /// when phase 4 adds a real preview url, one edit updates them all.
-    fn gate_announcement(pending: &AppInteractionRequest) -> AppEvent {
-        match pending.kind {
-            AppInteractionKind::Designer => AppEvent::DesignerRequested {
-                app_id: pending.app_id.clone(),
-                interaction_id: pending.interaction_id.clone(),
-                revision: pending.revision,
-            },
-            AppInteractionKind::Preview => AppEvent::PreviewReady {
-                app_id: pending.app_id.clone(),
-                interaction_id: pending.interaction_id.clone(),
-                revision: pending.revision,
-                url: None,
-            },
-        }
     }
 
     fn now_ms(&self) -> u64 {
@@ -558,10 +261,10 @@ impl AppService {
     /// with the events, so events reach observers in commit order even under
     /// concurrent commands; the state lock itself is never held while
     /// observers run. On failure nothing is persisted or committed; failure
-    /// events (e.g. `DesignConflict`) still emit. Persist + commit + emission
-    /// hand-off run in a spawned completion task, so dropping the caller's
-    /// future mid-call either aborts BEFORE any side effect or changes
-    /// nothing about the mutation completing, committing, and emitting.
+    /// events still emit. Persist + commit + emission hand-off run in a
+    /// spawned completion task, so dropping the caller's future mid-call
+    /// either aborts BEFORE any side effect or changes nothing about the
+    /// mutation completing, committing, and emitting.
     ///
     /// Only documents that actually changed are rewritten — the load-time
     /// repair contract depends on the ORDER of the writes that happen, not on
@@ -698,10 +401,10 @@ impl AppService {
     ///   so dying (or stopping) mid-rollback still leaves new content in a
     ///   canonical prefix: the mirror (last in forward order) is reverted
     ///   FIRST, meaning mirror-wins repair adopts the OLD record and any
-    ///   still-new earlier documents are exactly the evidence shapes the
-    ///   repair table already handles. A FORWARD rollback dying mid-way
-    ///   would instead leave old-prefix/new-suffix — the mirror still ahead
-    ///   over already-reverted documents — a hybrid repair has no arm for (a
+    ///   still-new earlier documents are exactly the shapes the repair
+    ///   already handles. A FORWARD rollback dying mid-way would instead
+    ///   leave old-prefix/new-suffix — the mirror still ahead over
+    ///   already-reverted documents — a hybrid repair has no arm for (a
     ///   durable wedge).
     /// - Stopping at the first rollback failure preserves the same prefix
     ///   property; continuing past it could revert an EARLIER document while
@@ -732,18 +435,12 @@ impl AppService {
     /// differ between `committed` and `working` — the only writes a mutation
     /// needs (relative order preserved; see [`Self::with_app`]).
     ///
-    /// DELIBERATE tradeoffs, not oversights:
-    /// - The full-aggregate clone in `with_app` is LOAD-BEARING (the
-    ///   compensating rollback needs the pristine original), and this
-    ///   structural equality is bounded by the service input caps; dirty
-    ///   flags or copy-on-write would buy speed at the cost of a second
-    ///   source of truth for "what changed" inside the crash-repair
-    ///   contract.
-    /// - Draft edits bump `record.updated_at_ms`, so every edit rewrites the
-    ///   mirror AND the index. Skipping the index would make mirror/index
-    ///   divergence the STEADY state, turning every load into a spurious
-    ///   torn-commit repair (and its rewrite) — costlier than the write it
-    ///   saves.
+    /// DELIBERATE tradeoff, not an oversight: the full-aggregate clone in
+    /// `with_app` is LOAD-BEARING (the compensating rollback needs the
+    /// pristine original), and this structural equality is bounded by the
+    /// service input caps; dirty flags or copy-on-write would buy speed at
+    /// the cost of a second source of truth for "what changed" inside the
+    /// crash-repair contract.
     fn changed_doc_steps(
         committed: &AppState,
         working: &AppState,
@@ -752,26 +449,10 @@ impl AppService {
             .iter()
             .copied()
             .filter(|step| match step {
-                storage::AppDocWriteStep::DesignSpec => committed.draft != working.draft,
-                storage::AppDocWriteStep::Interactions => {
-                    committed.interactions != working.interactions
-                }
                 storage::AppDocWriteStep::Runtime => committed.runtime != working.runtime,
                 storage::AppDocWriteStep::MetadataMirror => committed.record != working.record,
             })
             .collect()
-    }
-
-    fn conflict_events(app_id: &str, error: &AppError) -> Vec<AppEvent> {
-        if let AppError::RevisionConflict { expected, actual } = error {
-            vec![AppEvent::DesignConflict {
-                app_id: app_id.to_string(),
-                expected_revision: *expected,
-                actual_revision: *actual,
-            }]
-        } else {
-            Vec::new()
-        }
     }
 
     /// Every app record, in stored order.
@@ -820,30 +501,6 @@ impl AppService {
             .collect()
     }
 
-    /// The design draft of one app.
-    pub async fn draft(&self, app_id: &str) -> Result<AppDesignDraft, AppError> {
-        let apps = self.state.lock().await;
-        let idx = Self::position(&apps, app_id)?;
-        Ok(apps[idx].draft.clone())
-    }
-
-    /// The pending human gate of one app, if any.
-    pub async fn pending_interaction(
-        &self,
-        app_id: &str,
-    ) -> Result<Option<AppInteractionRequest>, AppError> {
-        let apps = self.state.lock().await;
-        let idx = Self::position(&apps, app_id)?;
-        Ok(apps[idx].interactions.pending.clone())
-    }
-
-    /// The interaction + continuation store of one app.
-    pub async fn interactions(&self, app_id: &str) -> Result<AppInteractions, AppError> {
-        let apps = self.state.lock().await;
-        let idx = Self::position(&apps, app_id)?;
-        Ok(apps[idx].interactions.clone())
-    }
-
     /// The runtime record of one app.
     pub async fn runtime_record(&self, app_id: &str) -> Result<AppRuntimeRecord, AppError> {
         let apps = self.state.lock().await;
@@ -863,6 +520,63 @@ impl AppService {
     /// Whether this app opted into Git-backed source version control.
     pub async fn git_version_control_enabled(&self, app_id: &str) -> Result<bool, AppError> {
         Ok(self.record(app_id).await?.git_enabled)
+    }
+
+    /// Pin the app's init session (bare uuid). Set-once: the anchor is the
+    /// app's durable "set-up conversation" identity, so a second call with a
+    /// DIFFERENT id is rejected (idempotent for the same id). The engine
+    /// calls this right after minting the session (create) or backfilling a
+    /// missing anchor at boot. Announces `AppsChanged` so clients learn the
+    /// pin without a details round-trip.
+    pub async fn set_init_session(
+        &self,
+        app_id: &str,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        let session_id = session_id.to_string();
+        self.with_app(app_id, move |app, now| {
+            match &app.record.init_session_id {
+                Some(existing) if *existing == session_id => (Ok(()), Vec::new()),
+                Some(existing) => (
+                    Err(AppError::InvalidRequest(format!(
+                        "app {} already has init session {existing}",
+                        app.record.id
+                    ))),
+                    Vec::new(),
+                ),
+                None => {
+                    app.record.init_session_id = Some(session_id.clone());
+                    app.record.updated_at_ms = now;
+                    (Ok(()), Vec::new())
+                }
+            }
+        })
+        .await?;
+        self.announce_apps().await;
+        Ok(())
+    }
+
+    /// Stamp the app `ready` — the host calls this after a build that
+    /// produced servable output (v3: the objective "this app has runnable
+    /// output" signal; there is no preview-approval gate anymore).
+    /// Idempotent: an already-ready app is a no-op with no event.
+    pub async fn mark_ready(&self, app_id: &str) -> Result<(), AppError> {
+        self.with_app(app_id, |app, now| {
+            if app.record.workflow_state == AppWorkflowState::Ready {
+                return (Ok(()), Vec::new());
+            }
+            app.record.workflow_state = AppWorkflowState::Ready;
+            app.record.updated_at_ms = now;
+            (
+                Ok(()),
+                vec![AppEvent::WorkflowChanged {
+                    app_id: app.record.id.clone(),
+                    state: app.record.workflow_state,
+                    detail: None,
+                }],
+            )
+        })
+        .await
     }
 
     /// Commit the current workspace as a retained Git checkpoint and emit its
@@ -936,17 +650,15 @@ impl AppService {
         Ok(safety)
     }
 
-    /// Create a new app record (workflow starts in `authoring_questionnaire`)
-    /// and its on-disk layout, then announce the new list via `AppsChanged`.
+    /// Create a new app record (workflow starts in `draft`) and its on-disk
+    /// layout, then announce the new list via `AppsChanged`.
     ///
-    /// `name` is optional: the conversational designer creates an app from a
-    /// one-line `brief` alone, and lets the LLM propose the real name once it
-    /// authors the questionnaire (`Self::questionnaire_ready`'s `name`
-    /// param). A blank or absent `name` gets a PLACEHOLDER — the brief's
-    /// first 24 **chars**, not bytes: truncating a CJK brief on a byte
-    /// boundary would slice a multi-byte codepoint in half and produce
-    /// invalid UTF-8 — so the app always has a non-empty, presentable name
-    /// even before that round trip lands.
+    /// `name` is optional: an app can be created from a one-line `brief`
+    /// alone, with the conversation agent renaming it later. A blank or
+    /// absent `name` gets a PLACEHOLDER — the brief's first 24 **chars**,
+    /// not bytes: truncating a CJK brief on a byte boundary would slice a
+    /// multi-byte codepoint in half and produce invalid UTF-8 — so the app
+    /// always has a non-empty, presentable name.
     pub async fn create_app(
         &self,
         name: Option<&str>,
@@ -977,7 +689,10 @@ impl AppService {
             ));
         }
         ensure_within("app brief", trimmed_brief.len(), MAX_BRIEF_BYTES)?;
-        let name = match name.map(str::trim).filter(|candidate| !candidate.is_empty()) {
+        let name = match name
+            .map(str::trim)
+            .filter(|candidate| !candidate.is_empty())
+        {
             Some(candidate) => {
                 ensure_within("app name", candidate.len(), MAX_NAME_BYTES)?;
                 candidate.to_string()
@@ -1131,634 +846,18 @@ impl AppService {
             .map_err(|error| AppError::Io(format!("delete completion task failed: {error}")))?
     }
 
-    /// Store the LLM-authored questionnaire (`authoring_questionnaire ->
-    /// collecting_spec`). `name` is the LLM's suggested real name, replacing
-    /// the placeholder [`Self::create_app`] minted at create time; a blank or
-    /// absent `name` leaves the placeholder in place. Unlike every sibling
-    /// transition below (which reuse [`Self::workflow_step`] and so only ever
-    /// emit `WorkflowChanged`), this builds its event list by hand so it can
-    /// ALSO emit `QuestionnaireChanged` with the steps the client needs to
-    /// render — the same reason [`Self::plan_ready`] does not use
-    /// `workflow_step` either.
-    /// `epoch` MUST be the value the engine captured when it spawned the
-    /// task making this call — see [`AppState::questionnaire_ready`]. A
-    /// stale epoch is a silent no-op: `Ok(())` with no events, not an error.
-    pub async fn questionnaire_ready(
-        &self,
-        app_id: &str,
-        steps: Vec<AppDesignStep>,
-        name: Option<String>,
-        epoch: u64,
-    ) -> Result<(), AppError> {
-        self.with_app(app_id, move |app, now| {
-            match app.questionnaire_ready(steps.clone(), name.clone(), epoch, now) {
-                Ok(true) => {
-                    let events = vec![
-                        AppEvent::WorkflowChanged {
-                            app_id: app.record.id.clone(),
-                            state: app.record.workflow_state,
-                            detail: None,
-                        },
-                        AppEvent::QuestionnaireChanged {
-                            app_id: app.record.id.clone(),
-                            revision: app.draft.revision,
-                            steps: app.draft.questionnaire.clone(),
-                        },
-                    ];
-                    (Ok(()), events)
-                }
-                Ok(false) => (Ok(()), Vec::new()),
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Questionnaire authoring failed (`authoring_questionnaire ->
-    /// questionnaire_failed`). `reason` rides the `WorkflowChanged` detail for
-    /// display. `epoch` is gated the same way as [`Self::questionnaire_ready`]
-    /// — returns `Ok(false)` for a stale epoch (a silent no-op) so the
-    /// caller can tell "this round's failure was actually recorded" from
-    /// "a fresher round already superseded it" and skip notifying the
-    /// client of a failure that no longer describes the app's real state.
-    pub async fn questionnaire_failed(
-        &self,
-        app_id: &str,
-        reason: &str,
-        epoch: u64,
-    ) -> Result<bool, AppError> {
-        let reason = reason.to_string();
-        self.with_app(app_id, move |app, now| {
-            match app.questionnaire_failed(epoch, now) {
-                Ok(true) => (
-                    Ok(true),
-                    vec![AppEvent::WorkflowChanged {
-                        app_id: app.record.id.clone(),
-                        state: app.record.workflow_state,
-                        detail: Some(reason.clone()),
-                    }],
-                ),
-                Ok(false) => (Ok(false), Vec::new()),
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Retry questionnaire authoring (`questionnaire_failed ->
-    /// authoring_questionnaire`), or re-fire it from `authoring_questionnaire`
-    /// itself — the manual escape for an app stuck there with no live task
-    /// behind it (see [`AppState::retry_questionnaire`]). Returns the NEW
-    /// `llm_round` epoch — the caller (the engine's trigger) passes this to
-    /// the freshly spawned task.
-    pub async fn retry_questionnaire(&self, app_id: &str) -> Result<u64, AppError> {
-        self.workflow_step(app_id, None, AppState::retry_questionnaire)
-            .await
-    }
-
-    /// Change the brief and re-author from scratch (`collecting_spec |
-    /// questionnaire_failed | plan_failed | authoring_questionnaire |
-    /// planning -> authoring_questionnaire`).
-    /// Discards the questionnaire, every answer, and any plan — a new brief
-    /// can invalidate all three. Unlike every OTHER plain transition (which
-    /// reuses [`Self::workflow_step`] and so only ever emits
-    /// `WorkflowChanged`), this builds its event list by hand so it can ALSO
-    /// announce the questionnaire/plan clears `AppState::update_brief`
-    /// performs — `events.rs`'s own docs on `QuestionnaireChanged`/
-    /// `PlanChanged` promise `steps: []`/`plan: None` for exactly this
-    /// "invalidated" case, and a client that never hears about the clear
-    /// keeps rendering data the server already deleted. Gated on whether
-    /// there was anything to invalidate: a brief change with no prior
-    /// questionnaire/plan (e.g. straight from `questionnaire_failed`, which
-    /// never got that far) announces neither.
-    /// Returns the NEW `llm_round` epoch — the caller (the engine's trigger)
-    /// passes this to the freshly spawned authoring task.
-    pub async fn update_brief(&self, app_id: &str, brief: &str) -> Result<u64, AppError> {
-        ensure_within("brief", brief.len(), MAX_BRIEF_BYTES)?;
-        let brief = brief.to_string();
-        self.with_app(app_id, move |app, now| {
-            let had_questionnaire = !app.draft.questionnaire.is_empty();
-            let had_plan = app.draft.plan.is_some();
-            match app.update_brief(brief.clone(), now) {
-                Ok(epoch) => {
-                    let mut events = vec![AppEvent::WorkflowChanged {
-                        app_id: app.record.id.clone(),
-                        state: app.record.workflow_state,
-                        detail: None,
-                    }];
-                    if had_questionnaire {
-                        events.push(AppEvent::QuestionnaireChanged {
-                            app_id: app.record.id.clone(),
-                            revision: app.draft.revision,
-                            steps: Vec::new(),
-                        });
-                    }
-                    if had_plan {
-                        events.push(AppEvent::PlanChanged {
-                            app_id: app.record.id.clone(),
-                            revision: app.draft.revision,
-                            plan: None,
-                        });
-                    }
-                    (Ok(epoch), events)
-                }
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// `collecting_spec -> planning`. Returns the NEW `llm_round` epoch —
-    /// the caller (the engine's trigger) passes this to the freshly spawned
-    /// planning task.
-    pub async fn begin_planning(&self, app_id: &str) -> Result<u64, AppError> {
-        self.workflow_step(app_id, None, AppState::begin_planning)
-            .await
-    }
-
-    /// Store the LLM-authored plan and open the designer confirmation gate
-    /// (`planning -> awaiting_spec_confirmation`). Mirrors
-    /// [`Self::open_designer`]'s event shape exactly (state-change-first,
-    /// then the gate announcement via [`Self::gate_announcement`] — NOT a
-    /// separately invented event) with `PlanChanged` inserted between the
-    /// two so the client also learns the plan content that gated the
-    /// confirmation.
-    /// `epoch` is gated the same way as [`Self::questionnaire_ready`]. A
-    /// stale round returns `Ok(None)` — a no-op, not an error.
-    pub async fn plan_ready(
-        &self,
-        app_id: &str,
-        plan: AppPlan,
-        epoch: u64,
-    ) -> Result<Option<AppInteractionRequest>, AppError> {
-        let interaction_id = ids::generate_interaction_id();
-        self.with_app(app_id, move |app, now| {
-            match app.plan_ready(plan.clone(), interaction_id.clone(), epoch, now) {
-                Ok(Some(interaction)) => {
-                    let events = vec![
-                        AppEvent::WorkflowChanged {
-                            app_id: app.record.id.clone(),
-                            state: app.record.workflow_state,
-                            detail: None,
-                        },
-                        AppEvent::PlanChanged {
-                            app_id: app.record.id.clone(),
-                            revision: app.draft.revision,
-                            plan: app.draft.plan.clone(),
-                        },
-                        Self::gate_announcement(&interaction),
-                    ];
-                    (Ok(Some(interaction)), events)
-                }
-                Ok(None) => (Ok(None), Vec::new()),
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Planning failed (`planning -> plan_failed`). `reason` rides the
-    /// `WorkflowChanged` detail for display. `epoch` is gated the same way
-    /// as [`Self::questionnaire_failed`] — returns `Ok(false)` for a stale
-    /// epoch (a silent no-op), for the identical reason.
-    pub async fn plan_failed(&self, app_id: &str, reason: &str, epoch: u64) -> Result<bool, AppError> {
-        let reason = reason.to_string();
-        self.with_app(app_id, move |app, now| {
-            match app.plan_failed(epoch, now) {
-                Ok(true) => (
-                    Ok(true),
-                    vec![AppEvent::WorkflowChanged {
-                        app_id: app.record.id.clone(),
-                        state: app.record.workflow_state,
-                        detail: Some(reason.clone()),
-                    }],
-                ),
-                Ok(false) => (Ok(false), Vec::new()),
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Retry planning with the SAME answers (`plan_failed -> planning`) —
-    /// useful when the failure was transient (e.g. an LLM hiccup) — or
-    /// re-fire it from `planning` itself, the manual escape for an app stuck
-    /// there with no live task behind it (see [`AppState::retry_plan`]).
-    /// Returns the NEW `llm_round` epoch — the caller (the engine's trigger)
-    /// passes this to the freshly spawned task.
-    pub async fn retry_plan(&self, app_id: &str) -> Result<u64, AppError> {
-        self.workflow_step(app_id, None, AppState::retry_plan).await
-    }
-
-    /// Reopen the answers instead of retrying blindly (`plan_failed ->
-    /// collecting_spec`) — the other escape from `plan_failed`, for when the
-    /// answers themselves are unsatisfiable rather than the LLM call being
-    /// transient. Preserves the questionnaire and every answer (unlike
-    /// [`Self::update_brief`], which clears both); see
-    /// [`AppState::reopen_answers`] for why `plan_failed` would otherwise be
-    /// a dead end.
-    pub async fn reopen_answers(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, AppState::reopen_answers)
-            .await
-    }
-
-    /// Open the designer gate (`collecting_spec | generation_failed ->
-    /// awaiting_spec_confirmation`). The returned interaction carries the id
-    /// the UI must echo back to [`Self::confirm_design`]. Gate-opening event
-    /// pairs are state-change-first everywhere: `WorkflowChanged`, then the
-    /// gate announcement (here `DesignerRequested`; `PreviewReady` for
-    /// [`Self::validation_passed`]).
-    pub async fn open_designer(&self, app_id: &str) -> Result<AppInteractionRequest, AppError> {
-        let interaction_id = ids::generate_interaction_id();
-        self.with_app(app_id, move |app, now| {
-            match app.open_designer(interaction_id, now) {
-                Ok(interaction) => {
-                    let events = vec![
-                        AppEvent::WorkflowChanged {
-                            app_id: interaction.app_id.clone(),
-                            state: app.record.workflow_state,
-                            detail: None,
-                        },
-                        Self::gate_announcement(&interaction),
-                    ];
-                    (Ok(interaction), events)
-                }
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Apply a user edit at `expected_revision`. A stale revision fails with
-    /// `revision_conflict` AND emits `DesignConflict`; the user value is
-    /// never silently overwritten.
+    /// Update the runtime record (spec §C transition table). Emits
+    /// `RuntimeChanged` and persists `runtime.json`. A port, once assigned,
+    /// is never reassigned. An oversized `last_error` is TRUNCATED, not
+    /// rejected (see [`truncate_last_error`]).
     ///
-    /// `AppState::update_draft` also clears `draft.plan`/`plan_for_revision`
-    /// on every successful edit (the plan was computed against the answers
-    /// that just changed, so it's stale the instant they do) — when there
-    /// was a plan to invalidate, this ALSO emits `PlanChanged { plan: None
-    /// }` after `DesignDraftChanged`, so the client learns the plan it may
-    /// still be showing (e.g. during `awaiting_spec_confirmation`, reached
-    /// via `cancel_design` back to an editable state) is gone, instead of
-    /// discovering it only as an unexplained staleness error at
-    /// `confirm_design`'s freshness gate. No plan to invalidate (most edits,
-    /// made before `plan_ready` ever ran) announces nothing extra.
-    pub async fn update_draft(
-        &self,
-        app_id: &str,
-        expected_revision: u64,
-        patch: &AppDesignPatch,
-    ) -> Result<u64, AppError> {
-        validate_patch(patch)?;
-        self.with_app(app_id, |app, now| {
-            let had_plan = app.draft.plan.is_some();
-            match app.update_draft(expected_revision, patch, now) {
-                Ok(revision) => {
-                    if let Err(error) = ensure_draft_field_count(&app.draft) {
-                        return (Err(error), Vec::new());
-                    }
-                    let mut events = vec![AppEvent::DesignDraftChanged {
-                        app_id: app.record.id.clone(),
-                        revision,
-                        fields: app.draft.fields.clone(),
-                    }];
-                    if had_plan {
-                        events.push(AppEvent::PlanChanged {
-                            app_id: app.record.id.clone(),
-                            revision,
-                            plan: None,
-                        });
-                    }
-                    (Ok(revision), events)
-                }
-                Err(error) => {
-                    let events = Self::conflict_events(&app.record.id, &error);
-                    (Err(error), events)
-                }
-            }
-        })
-        .await
-    }
-
-    /// Store an agent suggestion (does not touch fields or revision) and
-    /// announce it via `DesignSuggestionAvailable`.
-    pub async fn store_suggestion(
-        &self,
-        app_id: &str,
-        patch: AppDesignPatch,
-    ) -> Result<AppDesignSuggestion, AppError> {
-        validate_patch(&patch)?;
-        let suggestion_id = ids::generate_suggestion_id();
-        self.with_app(app_id, move |app, now| {
-            match app.store_suggestion(suggestion_id, patch, now) {
-                Ok(suggestion) => {
-                    let event = AppEvent::DesignSuggestionAvailable {
-                        app_id: app.record.id.clone(),
-                        suggestion_id: suggestion.suggestion_id.clone(),
-                        based_on_revision: suggestion.based_on_revision,
-                        patch: suggestion.patch.clone(),
-                    };
-                    (Ok(suggestion), vec![event])
-                }
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Dismiss the pending suggestion without mutating the draft revision.
-    pub async fn dismiss_suggestion(
-        &self,
-        app_id: &str,
-        suggestion_id: &str,
-    ) -> Result<(), AppError> {
-        self.with_app(app_id, |app, now| {
-            match app.dismiss_suggestion(suggestion_id, now) {
-                Ok(()) => (
-                    Ok(()),
-                    vec![AppEvent::DesignDraftChanged {
-                        app_id: app.record.id.clone(),
-                        revision: app.draft.revision,
-                        fields: app.draft.fields.clone(),
-                    }],
-                ),
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// Apply the stored suggestion at `expected_revision`. Same conflict
-    /// semantics as [`Self::update_draft`]; a wrong `suggestion_id` fails
-    /// with `interaction_invalid`. Also mirrors `update_draft`'s plan
-    /// invalidation announcement: an applied suggestion is the OTHER door
-    /// that changes `draft.fields` (alongside a manual edit), and
-    /// `AppState::apply_suggestion` clears a stale plan exactly the same way
-    /// `AppState::update_draft` does — so this emits `PlanChanged { plan:
-    /// None }` under the same `had_plan` guard when one was cleared.
-    ///
-    /// `based_on_revision` is load-bearing (finding 8): a suggestion whose
-    /// `based_on_revision` is not the CURRENT draft revision is refused with
-    /// typed `revision_conflict { expected: based_on, actual: current }`,
-    /// CONSUMED (the clear is persisted — revisions only grow, so the stale
-    /// suggestion could never become applicable), and announced via
-    /// `DesignConflict`; the user's newer edits are never overwritten.
-    ///
-    /// The STORED patch is re-validated against the byte caps before it is
-    /// applied: a suggestion planted through a hand-edited store never went
-    /// through [`Self::store_suggestion`]'s gate and must not bypass the caps
-    /// here. An over-cap suggestion fails typed `invalid_request` AND is
-    /// consumed (the clear is persisted) — a poisoned suggestion left pending
-    /// would wedge the draft behind the same error forever. The cap check
-    /// runs as soon as the addressed suggestion is the pending one,
-    /// deliberately ahead of the state/revision gates: poison is disposed of
-    /// at first touch.
-    pub async fn apply_suggestion(
-        &self,
-        app_id: &str,
-        suggestion_id: &str,
-        expected_revision: u64,
-    ) -> Result<u64, AppError> {
-        let outcome = self
-            .with_app(app_id, |app, now| {
-                if let Some(pending) = &app.draft.pending_suggestion {
-                    if pending.suggestion_id == suggestion_id {
-                        if let Err(error) = validate_patch(&pending.patch) {
-                            app.draft.pending_suggestion = None;
-                            return (Ok(SuggestionOutcome::RejectedConsumed(error)), Vec::new());
-                        }
-                    }
-                }
-                let had_pending = app.draft.pending_suggestion.is_some();
-                let had_plan = app.draft.plan.is_some();
-                match app.apply_suggestion(suggestion_id, expected_revision, now) {
-                    Ok(revision) => {
-                        if let Err(error) = ensure_draft_field_count(&app.draft) {
-                            return (Err(error), Vec::new());
-                        }
-                        let mut events = vec![AppEvent::DesignDraftChanged {
-                            app_id: app.record.id.clone(),
-                            revision,
-                            fields: app.draft.fields.clone(),
-                        }];
-                        if had_plan {
-                            events.push(AppEvent::PlanChanged {
-                                app_id: app.record.id.clone(),
-                                revision,
-                                plan: None,
-                            });
-                        }
-                        (Ok(SuggestionOutcome::Applied(revision)), events)
-                    }
-                    Err(error) => {
-                        let events = Self::conflict_events(&app.record.id, &error);
-                        // The stale-`based_on_revision` arm is the only Err
-                        // that CONSUMES the suggestion (finding 8); the
-                        // consumption must commit while the caller still
-                        // sees the typed conflict.
-                        if had_pending && app.draft.pending_suggestion.is_none() {
-                            return (Ok(SuggestionOutcome::RejectedConsumed(error)), events);
-                        }
-                        (Err(error), events)
-                    }
-                }
-            })
-            .await?;
-        match outcome {
-            SuggestionOutcome::Applied(revision) => Ok(revision),
-            SuggestionOutcome::RejectedConsumed(error) => Err(error),
-        }
-    }
-
-    /// Confirm the design spec (`awaiting_spec_confirmation -> generating`).
-    /// Requires the exact pending designer `interaction_id` and the CURRENT
-    /// draft revision; enqueues and (best-effort) delivers a
-    /// `design_confirmed` continuation.
-    pub async fn confirm_design(
-        &self,
-        app_id: &str,
-        interaction_id: &str,
-        revision: u64,
-    ) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, |app, now| {
-            app.confirm_design(interaction_id, revision, now)
-                .map(|_continuation| ())
-        })
-        .await?;
-        self.drain_after_gate(app_id).await;
-        Ok(())
-    }
-
-    /// Cancel out of the design gate (`awaiting_spec_confirmation ->
-    /// collecting_spec`); enqueues a `design_cancelled` continuation.
-    pub async fn cancel_design(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, |app, now| {
-            app.cancel_design(now).map(|_continuation| ())
-        })
-        .await?;
-        self.drain_after_gate(app_id).await;
-        Ok(())
-    }
-
-    /// `generating -> validating` (driven by the phase-3 generator; exposed
-    /// for tests now).
-    pub async fn generation_complete(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, AppState::generation_complete)
-            .await
-    }
-
-    /// `generating -> generation_failed`, with an optional failure detail
-    /// surfaced on the `WorkflowChanged` event.
-    pub async fn generation_failed(
-        &self,
-        app_id: &str,
-        detail: Option<String>,
-    ) -> Result<(), AppError> {
-        self.workflow_step(app_id, detail, AppState::generation_failed)
-            .await
-    }
-
-    /// `generation_failed -> generating`; refused unless the confirmed
-    /// revision is still current.
-    pub async fn retry_generation(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, AppState::retry_generation)
-            .await
-    }
-
-    /// `validating -> awaiting_preview_confirmation`; opens the preview gate
-    /// and announces it via `PreviewReady` (`url` is `None` until phase 4).
-    pub async fn validation_passed(&self, app_id: &str) -> Result<AppInteractionRequest, AppError> {
-        let interaction_id = ids::generate_interaction_id();
-        self.with_app(app_id, move |app, now| {
-            match app.validation_passed(interaction_id, now) {
-                Ok(interaction) => {
-                    let events = vec![
-                        AppEvent::WorkflowChanged {
-                            app_id: app.record.id.clone(),
-                            state: app.record.workflow_state,
-                            detail: None,
-                        },
-                        Self::gate_announcement(&interaction),
-                    ];
-                    (Ok(interaction), events)
-                }
-                Err(error) => (Err(error), Vec::new()),
-            }
-        })
-        .await
-    }
-
-    /// `validating -> validation_failed`, with an optional failure detail.
-    pub async fn validation_failed(
-        &self,
-        app_id: &str,
-        detail: Option<String>,
-    ) -> Result<(), AppError> {
-        self.workflow_step(app_id, detail, AppState::validation_failed)
-            .await
-    }
-
-    /// `validation_failed -> revising`.
-    pub async fn begin_revision(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, AppState::begin_revision)
-            .await
-    }
-
-    /// Confirm the preview (`awaiting_preview_confirmation -> ready`).
-    /// Requires the exact pending preview `interaction_id` and the CURRENT
-    /// draft revision; enqueues a `preview_confirmed` continuation.
-    pub async fn confirm_preview(
-        &self,
-        app_id: &str,
-        interaction_id: &str,
-        revision: u64,
-    ) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, |app, now| {
-            app.confirm_preview(interaction_id, revision, now)
-                .map(|_continuation| ())
-        })
-        .await?;
-        self.drain_after_gate(app_id).await;
-        Ok(())
-    }
-
-    /// Ask for a revision from the preview gate or a ready app
-    /// (`-> revising`); enqueues a `revision_requested` continuation carrying
-    /// the prompt.
-    pub async fn request_revision(&self, app_id: &str, prompt: &str) -> Result<(), AppError> {
-        ensure_within("revision prompt", prompt.len(), MAX_PROMPT_BYTES)?;
-        self.workflow_step(app_id, None, |app, now| {
-            app.request_revision(prompt, now).map(|_continuation| ())
-        })
-        .await?;
-        self.drain_after_gate(app_id).await;
-        Ok(())
-    }
-
-    /// `revising -> validating`.
-    pub async fn revision_ready(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, AppState::revision_ready)
-            .await
-    }
-
-    /// `ready -> revising` for an automatic post-restore validation/build.
-    /// Unlike [`Self::request_revision`], this does not enqueue a source-
-    /// generation continuation; the coordinator queues a restore build.
-    pub async fn begin_restore_rebuild(&self, app_id: &str) -> Result<(), AppError> {
-        self.workflow_step(app_id, None, AppState::begin_restore_rebuild)
-            .await
-    }
-
-    /// THE workflow-transition scaffold: run `step`, emit one
-    /// `WorkflowChanged { detail }` on success, nothing on failure. Every
-    /// plain transition AND every gate confirmation/cancellation routes
-    /// through here (gate methods discard their continuation and follow up
-    /// with `drain_after_gate`), so the event shape can never drift between
-    /// them.
-    /// Generic over the step's return value `T` (almost always `()`; the
-    /// four LLM-round starters — `retry_questionnaire`/`update_brief`/
-    /// `begin_planning`/`retry_plan` — return the new `llm_round` epoch
-    /// instead, so their caller can hand it straight to the freshly spawned
-    /// task without a second read). Every call here is a plain, unambiguous
-    /// transition (never epoch-gated itself — only the background-task
-    /// completions `questionnaire_ready`/`questionnaire_failed`/
-    /// `plan_ready`/`plan_failed` are, and those write their OWN `with_app`
-    /// bodies instead of using this, since they need to skip emitting
-    /// `WorkflowChanged` entirely on a stale/no-op epoch), so `Ok(_)` always
-    /// emits the event.
-    async fn workflow_step<T: Send + 'static>(
-        &self,
-        app_id: &str,
-        detail: Option<String>,
-        step: impl FnOnce(&mut AppState, u64) -> Result<T, AppError>,
-    ) -> Result<T, AppError> {
-        self.with_app(app_id, move |app, now| match step(app, now) {
-            Ok(value) => (
-                Ok(value),
-                vec![AppEvent::WorkflowChanged {
-                    app_id: app.record.id.clone(),
-                    state: app.record.workflow_state,
-                    detail,
-                }],
-            ),
-            Err(error) => (Err(error), Vec::new()),
-        })
-        .await
-    }
-
-    /// Update the runtime record (spec §C transition table; the phase-4
-    /// runtime drives this). Emits `RuntimeChanged` and persists
-    /// `runtime.json`. A port, once assigned, is never reassigned. An
-    /// oversized `last_error` is TRUNCATED, not rejected (see
-    /// [`truncate_last_error`]).
-    ///
-    /// ⚠️ PHASE-4 GATE: before wiring a live process manager onto this
-    /// method, replace [`crate::storage`]'s unconditional load-time
-    /// reconciliation (`reconcile_runtime_at_load` — it assumes NO runtime
-    /// survives a restart and stamps every busy record failed/stopped).
-    /// With dev servers that outlive the engine process it would mis-fail
-    /// live runtimes, unpin their ports, and let `delete_app` pull a
-    /// workspace out from under a running server.
+    /// ⚠️ GATE: before wiring a live process manager onto this method,
+    /// replace [`crate::storage`]'s unconditional load-time reconciliation
+    /// (`reconcile_runtime_at_load` — it assumes NO runtime survives a
+    /// restart and stamps every busy record failed/stopped). With dev
+    /// servers that outlive the engine process it would mis-fail live
+    /// runtimes, unpin their ports, and let `delete_app` pull a workspace
+    /// out from under a running server.
     pub async fn update_runtime_record(
         &self,
         app_id: &str,
@@ -1804,264 +903,26 @@ impl AppService {
         })
         .await
     }
-
-    /// Emit a `GenerationProgress` event for an existing app (phase-3
-    /// generator seam; nothing is persisted). `stage`/`detail` are capped
-    /// like every sibling text input (rejection loses nothing here — nothing
-    /// is persisted) and `percent` must be within 0–100.
-    pub async fn report_generation_progress(
-        &self,
-        progress: AppGenerationProgress,
-    ) -> Result<(), AppError> {
-        ensure_within(
-            "generation progress stage",
-            progress.stage.len(),
-            MAX_TEXT_VALUE_BYTES,
-        )?;
-        if let Some(detail) = &progress.detail {
-            ensure_within(
-                "generation progress detail",
-                detail.len(),
-                MAX_TEXT_VALUE_BYTES,
-            )?;
-        }
-        if let Some(percent) = progress.percent {
-            if percent > 100 {
-                return Err(AppError::InvalidRequest(format!(
-                    "generation progress percent is {percent} (limit 100)"
-                )));
-            }
-        }
-        let order = self.acquire_emit_order().await;
-        {
-            let apps = self.state.lock().await;
-            Self::position(&apps, &progress.app_id)?;
-        }
-        Self::spawn_emission(
-            Arc::clone(&self.observer),
-            order,
-            vec![AppEvent::GenerationProgress(progress)],
-        );
-        Ok(())
-    }
-
-    /// Deliver queued continuations for one app in seq order.
-    ///
-    /// Continuations with `seq <= last_delivered_seq` (already delivered
-    /// before a crash) are dropped WITHOUT redelivery — the store-side seq
-    /// dedup. Each successful delivery advances `last_delivered_seq` and is
-    /// persisted before the next attempt, so a crash between deliveries
-    /// redelivers at most one continuation (at-least-once). A sink failure
-    /// stops the drain, keeps the remainder queued, and surfaces the error.
-    /// Returns how many continuations were delivered.
-    ///
-    /// An in-flight `deliver` holds no locks, so it can RACE `delete_app`
-    /// and land after the deletion was announced — the sink contract
-    /// requires consumers to treat continuations for unknown/deleted apps
-    /// as a no-op (see [`ContinuationSink`]).
-    ///
-    /// EVERY persist in this loop — the pre-delivery one AND the
-    /// post-delivery one — first re-reads the on-disk `interactions.json`
-    /// and MERGES it (union by seq) with memory: a continuation that reached
-    /// disk but was rolled back out of memory by a failed index write (see
-    /// [`Self::with_app`]'s residual window), or that landed on disk while a
-    /// delivery was in flight, must be delivered, never clobbered by
-    /// persisting a memory-derived view. After every merge, a gate-vs-
-    /// evidence contradiction (disk proves memory's armed gate was consumed)
-    /// is resolved by the SAME rule table load-time repair uses (see
-    /// [`Self::merge_resolve_persist`]).
-    pub async fn redeliver_undelivered(&self, app_id: &str) -> Result<usize, AppError> {
-        let mut delivered = 0usize;
-        loop {
-            let next = self.merge_step(app_id, None).await?;
-            let Some(continuation) = next else {
-                return Ok(delivered);
-            };
-            self.sink.deliver(app_id, &continuation).await?;
-            self.merge_step(app_id, Some(continuation.seq)).await?;
-            delivered += 1;
-        }
-    }
-
-    /// One locked merge-resolve-persist round of the redelivery loop
-    /// (`delivered_seq: None` = pre-delivery, `Some(seq)` = post-delivery
-    /// bookkeeping for a just-delivered seq). Returns the next continuation
-    /// to deliver, if any. Blocking disk I/O runs on the blocking pool over
-    /// an owned clone; the merged aggregate is committed back to memory
-    /// under the still-held state lock.
-    async fn merge_step(
-        &self,
-        app_id: &str,
-        delivered_seq: Option<u64>,
-    ) -> Result<Option<AppContinuation>, AppError> {
-        let mut apps = self.state.lock().await;
-        let idx = Self::position(&apps, app_id)?;
-        let root = self.root.clone();
-        let working = apps[idx].clone();
-        let (merged, next) =
-            Self::run_blocking(move || Self::merge_resolve_persist(&root, working, delivered_seq))
-                .await?;
-        apps[idx] = merged;
-        Ok(next)
-    }
-
-    /// Merge one app's on-disk `interactions.json` into `app` (union by
-    /// seq), fold in an optional just-delivered seq, resolve gate-vs-
-    /// evidence contradictions, persist what changed, and return the updated
-    /// aggregate plus the next continuation to deliver.
-    ///
-    /// Contradiction rule (finding 3): `pending` normally follows MEMORY —
-    /// the in-process service is authoritative for the gate protocol. But
-    /// when disk's `pending` is `None` AND disk has minted seqs memory never
-    /// saw (`disk.next_seq > memory.next_seq`), the disk document was
-    /// written by a gate-consuming transition that was rolled back out of
-    /// memory: the SAME atomic write that minted those seqs also cleared the
-    /// gate, so memory's still-armed gate is provably consumed. The merged
-    /// aggregate then adopts `pending = None` and runs
-    /// [`storage::resolve_gate_evidence`] — the exact rule table load-time
-    /// repair uses — so the workflow state follows the evidence
-    /// (e.g. `design_confirmed` → `generating`) instead of persisting an
-    /// armed-gate + consumption-evidence hybrid that would invite a second,
-    /// duplicate confirmation. The changed documents (interactions, and the
-    /// record mirror when resolution moved the state) are persisted in
-    /// canonical order; the index copy of a resolved record intentionally
-    /// waits for the next index write or load-time mirror-wins repair, like
-    /// every mirror-ahead window.
-    fn merge_resolve_persist(
-        root: &std::path::Path,
-        mut app: AppState,
-        delivered_seq: Option<u64>,
-    ) -> Result<(AppState, Option<AppContinuation>), AppError> {
-        let app_id = app.record.id.clone();
-        let disk = storage::load_interactions(root, &app_id)?;
-        let memory_gate_armed = app.interactions.pending.is_some();
-        let memory_next_seq = app.interactions.next_seq;
-        let record_before = app.record.clone();
-        let mut merged = Self::merge_interactions(&app.interactions, &disk);
-        if let Some(seq) = delivered_seq {
-            if merged.last_delivered_seq < seq {
-                merged.last_delivered_seq = seq;
-            }
-            let last = merged.last_delivered_seq;
-            merged.undelivered.retain(|c| c.seq > last);
-        }
-        state::enforce_undelivered_cap(&app_id, &mut merged);
-        app.interactions = merged;
-        let disk_proves_gate_consumed =
-            memory_gate_armed && disk.pending.is_none() && disk.next_seq > memory_next_seq;
-        if disk_proves_gate_consumed {
-            app.interactions.pending = None;
-            storage::resolve_gate_evidence(&mut app);
-        }
-        let mut steps = Vec::new();
-        if app.interactions != disk {
-            steps.push(storage::AppDocWriteStep::Interactions);
-        }
-        if app.record != record_before {
-            steps.push(storage::AppDocWriteStep::MetadataMirror);
-        }
-        storage::save_app_files_steps(root, &app, &steps)
-            .map_err(storage::AppBatchWriteFailure::into_error)?;
-        let next = app.interactions.undelivered.first().cloned();
-        Ok((app, next))
-    }
-
-    /// Union `memory` and `disk` interaction stores by continuation seq: the
-    /// queue keeps every seq present on either side (sorted, deduped), both
-    /// counters advance to their max, and already-delivered seqs are pruned.
-    /// `pending` follows MEMORY — the in-process service is authoritative for
-    /// the gate protocol — except when disk PROVES the armed gate was
-    /// consumed, which [`Self::merge_resolve_persist`] resolves after the
-    /// merge; the merge itself exists so disk-only SEQS survive (see
-    /// [`Self::redeliver_undelivered`]).
-    fn merge_interactions(memory: &AppInteractions, disk: &AppInteractions) -> AppInteractions {
-        let mut merged = memory.clone();
-        merged.next_seq = memory.next_seq.max(disk.next_seq);
-        merged.last_delivered_seq = memory.last_delivered_seq.max(disk.last_delivered_seq);
-        for continuation in &disk.undelivered {
-            if !merged.undelivered.iter().any(|c| c.seq == continuation.seq) {
-                merged.undelivered.push(continuation.clone());
-            }
-        }
-        merged.undelivered.sort_by_key(|c| c.seq);
-        let last = merged.last_delivered_seq;
-        merged.undelivered.retain(|c| c.seq > last);
-        merged
-    }
-
-    /// Deliver queued continuations for EVERY app (engine startup sweep).
-    /// Apps deleted mid-sweep are skipped.
-    ///
-    /// One app's failure must never starve the others: a per-app error is
-    /// logged and the sweep CONTINUES through the remaining apps (their
-    /// queued continuations still deliver); the failed app's remainder stays
-    /// queued for the next sweep. After every app has been visited, the first
-    /// error (if any) is returned, else the total delivered count.
-    pub async fn redeliver_all_undelivered(&self) -> Result<usize, AppError> {
-        let app_ids: Vec<String> = {
-            let apps = self.state.lock().await;
-            apps.iter().map(|app| app.record.id.clone()).collect()
-        };
-        let mut delivered = 0usize;
-        let mut first_error: Option<AppError> = None;
-        for app_id in app_ids {
-            match self.redeliver_undelivered(&app_id).await {
-                Ok(count) => delivered += count,
-                Err(AppError::NotFound(_)) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        app_id,
-                        error = %error,
-                        "continuation redelivery failed for one app; sweep continues"
-                    );
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(delivered),
-        }
-    }
-
-    /// Best-effort drain right after a gate enqueued a continuation; failures
-    /// stay queued for [`Self::redeliver_undelivered`] (at-least-once).
-    async fn drain_after_gate(&self, app_id: &str) {
-        if let Err(error) = self.redeliver_undelivered(app_id).await {
-            tracing::debug!(
-                app_id,
-                error = %error,
-                "continuation delivery deferred; queued for redelivery"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{advance_to_collecting_spec, stamp_fresh_plan};
-    use crate::continuation::{NoopContinuationSink, RecordingContinuationSink};
     use crate::error::AppErrorCode;
     use crate::events::{NoopAppEventObserver, RecordingAppEventObserver};
-    use crate::manifest::{DataFieldKind, DataFieldSchema};
-    use crate::questionnaire::{AppDesignField, AppDesignFieldOption, AppDesignFieldType};
     use crate::test_support::FixedClock;
-    use crate::types::{
-        AppContinuation, AppContinuationKind, AppDesignPatchOp, AppWorkflowState, DesignValue,
-    };
+    use crate::types::AppWorkflowState;
     use std::path::Path;
 
     struct Harness {
         service: AppService,
-        sink: Arc<RecordingContinuationSink>,
         observer: Arc<RecordingAppEventObserver>,
     }
 
     impl Harness {
         /// Flush the async emission queue, then drain the observed events.
-        /// Event delivery runs in spawned emission tasks (finding 11), so
-        /// every take must wait for completed deliveries first.
+        /// Event delivery runs in spawned emission tasks, so every take must
+        /// wait for completed deliveries first.
         async fn take_events(&self) -> Vec<AppEvent> {
             self.service.flush_events().await;
             self.observer.take()
@@ -2069,25 +930,19 @@ mod tests {
     }
 
     async fn harness(root: &Path) -> Harness {
-        let sink = Arc::new(RecordingContinuationSink::new());
         let observer = Arc::new(RecordingAppEventObserver::new());
         let service = AppService::load(
             root,
             Arc::new(FixedClock::new(1_700_000_000_000)),
-            Arc::clone(&sink) as Arc<dyn ContinuationSink>,
             Arc::clone(&observer) as Arc<dyn AppEventObserver>,
         )
         .await
         .unwrap();
-        Harness {
-            service,
-            sink,
-            observer,
-        }
+        Harness { service, observer }
     }
 
     /// A ready [`AppService`] over its own throwaway directory, for tests
-    /// that only need `service.*` calls and don't care about sink/observer
+    /// that only need `service.*` calls and don't care about the observer
     /// (see [`harness`] for those). The directory is leaked (never cleaned
     /// up — `TempDir::into_path` disarms its drop-time removal) so it stays
     /// alive for the rest of the test process; harmless in a test binary.
@@ -2103,53 +958,11 @@ mod tests {
         AppService::load(
             service.root.clone(),
             Arc::new(FixedClock::new(1_700_000_000_000)),
-            Arc::new(NoopContinuationSink) as Arc<dyn ContinuationSink>,
             Arc::new(NoopAppEventObserver) as Arc<dyn AppEventObserver>,
         )
         .await
         .unwrap()
     }
-
-    /// A single design step named `id` at position `order`, with one
-    /// non-empty-options `SingleChoice` field whose id is `{id}_f`.
-    fn step_named(id: &str, order: u32) -> AppDesignStep {
-        AppDesignStep {
-            id: id.to_string(),
-            order,
-            title: id.to_string(),
-            description: None,
-            fields: vec![AppDesignField {
-                id: format!("{id}_f"),
-                label: "field".into(),
-                description: None,
-                field_type: AppDesignFieldType::SingleChoice,
-                required: false,
-                allows_custom: false,
-                allows_defer: false,
-                default_value: None,
-                options: vec![AppDesignFieldOption {
-                    value: "a".into(),
-                    label: "A".into(),
-                }],
-            }],
-        }
-    }
-
-    /// A minimal one-step questionnaire.
-    fn one_step() -> Vec<AppDesignStep> {
-        vec![step_named("basics", 0)]
-    }
-
-    fn patch(field: &str, text: &str) -> AppDesignPatch {
-        AppDesignPatch {
-            ops: vec![AppDesignPatchOp::Set {
-                field_id: field.into(),
-                value: DesignValue::ShortText(text.into()),
-            }],
-            note: None,
-        }
-    }
-
 
     #[tokio::test]
     async fn create_list_and_reload_from_disk() {
@@ -2157,17 +970,15 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app(Some("  Habit Tracker  "),
+            .create_app(
+                Some("  Habit Tracker  "),
                 "a test app",
                 Some("conv-1".into()),
             )
             .await
             .unwrap();
         assert_eq!(record.name, "Habit Tracker", "name is trimmed");
-        assert_eq!(
-            record.workflow_state,
-            AppWorkflowState::AuthoringQuestionnaire
-        );
+        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
         assert_eq!(
             record.workspace_rel,
             format!("apps/{}/workspace", record.id)
@@ -2177,170 +988,21 @@ mod tests {
         let events = h.take_events().await;
         assert!(matches!(&events[..], [AppEvent::AppsChanged { apps }] if apps.len() == 1));
 
-        // Rebuild from disk alone. The app never left `authoring_questionnaire`
-        // (no engine-owned background task ever ran for it in this test, and
-        // NOTHING besides that task can carry it forward) — `AppService::load`
-        // fails it closed on this exact reload rather than resurrecting a
-        // record whose questionnaire round trip is provably gone (the task
-        // that would have finished it died with the process). This is the
-        // load-time half of the local-apps#questionnaire Task 11 fix: the
-        // OTHER half admits `authoring_questionnaire` itself as a
-        // `retry_questionnaire` source, so the client is never trapped even
-        // if this sweep ever missed a case.
+        // Rebuild from disk alone: everything survives byte-identically.
         drop(h);
         let h2 = harness(dir.path()).await;
-        let reloaded = h2.service.list_apps().await;
-        assert_eq!(reloaded.len(), 1);
-        let reloaded = &reloaded[0];
-        // Field-wise, not a whole-struct equality against `record`:
-        // `workflow_state` is the ONE field this load-time sweep legitimately
-        // changes (that's the fix under test), and `llm_round` is
-        // `#[serde(skip)]` (process-lifetime only — see its doc), so neither
-        // belongs in an "everything else survived the reload untouched"
-        // check. Every OTHER field is asserted individually so a future
-        // regression in trimming/brief/conversation/workspace/timestamps
-        // survival is still caught here, same as before this fix narrowed
-        // the original whole-struct comparison.
-        assert_eq!(reloaded.id, record.id);
-        assert_eq!(reloaded.name, record.name);
-        assert_eq!(reloaded.brief, record.brief);
-        assert_eq!(reloaded.created_at_ms, record.created_at_ms);
-        assert_eq!(reloaded.updated_at_ms, record.updated_at_ms);
-        assert_eq!(reloaded.conversation_id, record.conversation_id);
-        assert_eq!(reloaded.workspace_rel, record.workspace_rel);
-        assert_eq!(
-            reloaded.workflow_state,
-            AppWorkflowState::QuestionnaireFailed,
-            "authoring_questionnaire with no live task behind it fails closed at load"
-        );
-        assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 0);
+        assert_eq!(h2.service.list_apps().await, vec![record.clone()]);
         assert_eq!(
             h2.service.runtime_record(&record.id).await.unwrap().state,
             AppRuntimeState::Stopped
         );
     }
 
-    /// The `planning` half of `create_list_and_reload_from_disk`'s fix:
-    /// `planning` is driven by the SAME kind of engine-owned background task
-    /// as `authoring_questionnaire` (`spawn_planning`, not this service), so
-    /// it fails closed at load exactly the same way.
-    #[tokio::test]
-    async fn planning_left_stuck_fails_closed_at_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Stuck"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service.begin_planning(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Planning
-        );
-
-        // Rebuild from disk alone — no task ever finishes this `planning`.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::PlanFailed,
-            "planning with no live task behind it fails closed at load"
-        );
-        // The questionnaire survives — `plan_failed` (unlike `update_brief`)
-        // never touches it. (The fixture questionnaire's one field is
-        // optional and never answered here, so `fields` staying empty is
-        // expected, not evidence of anything being cleared.)
-        let draft = h2.service.draft(&record.id).await.unwrap();
-        assert!(!draft.questionnaire.is_empty());
-    }
-
-    /// The manual escape hatch for a stuck app WITHIN the same running
-    /// process (no restart, so the load-time sweep above never runs): both
-    /// `retry_questionnaire` and `update_brief` now admit
-    /// `authoring_questionnaire` itself as a source, not just
-    /// `questionnaire_failed`.
-    #[tokio::test]
-    async fn retry_questionnaire_and_update_brief_escape_a_stuck_authoring_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Stuck"), "a test app", None)
-            .await
-            .unwrap();
-        assert_eq!(record.workflow_state, AppWorkflowState::AuthoringQuestionnaire);
-
-        // `retry_questionnaire` from `authoring_questionnaire` itself is a
-        // valid self-transition (re-fires the trigger on the engine side;
-        // here it just proves the state guard admits it).
-        h.service.retry_questionnaire(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AuthoringQuestionnaire
-        );
-
-        // `update_brief` from `authoring_questionnaire` is ALSO valid — the
-        // other escape, for a user who would rather change the brief than
-        // retry the same one.
-        h.service
-            .update_brief(&record.id, "a completely different app")
-            .await
-            .unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AuthoringQuestionnaire
-        );
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().brief,
-            "a completely different app"
-        );
-    }
-
-    /// As above, for the `planning` side: `retry_plan` and `update_brief`
-    /// both admit `planning` itself as a source.
-    #[tokio::test]
-    async fn retry_plan_and_update_brief_escape_a_stuck_planning_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Stuck"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service.begin_planning(&record.id).await.unwrap();
-
-        h.service.retry_plan(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Planning
-        );
-
-        h.service
-            .update_brief(&record.id, "a completely different app")
-            .await
-            .unwrap();
-        let after = h.service.record(&record.id).await.unwrap();
-        assert_eq!(after.workflow_state, AppWorkflowState::AuthoringQuestionnaire);
-        assert_eq!(after.brief, "a completely different app");
-        // `update_brief` clears the questionnaire/answers/plan whenever
-        // there was one to clear — same as escaping from `plan_failed`.
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert!(draft.questionnaire.is_empty());
-        assert!(draft.fields.is_empty());
-        assert!(draft.plan.is_none());
-    }
-
     #[tokio::test]
     async fn create_treats_a_blank_name_as_absent_and_uses_a_placeholder() {
-        // A blank `name` is no longer an error (Task 4): the conversational
-        // designer can create an app from a brief alone, so a whitespace-only
-        // `name` is filtered exactly like `None` and falls back to the
-        // brief-derived placeholder, same as `create_app_without_a_name_...`
-        // below but exercised through the `Some("   ")` shape instead of
-        // `None`.
+        // A blank `name` is not an error: an app can be created from a brief
+        // alone, so a whitespace-only `name` is filtered exactly like `None`
+        // and falls back to the brief-derived placeholder.
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
@@ -2362,12 +1024,12 @@ mod tests {
             AppErrorCode::NotFound
         );
         assert_eq!(
-            h.service.open_designer(missing).await.unwrap_err().code(),
+            h.service.mark_ready(missing).await.unwrap_err().code(),
             AppErrorCode::NotFound
         );
         assert_eq!(
             h.service
-                .update_draft(missing, 0, &patch("t", "x"))
+                .update_runtime_record(missing, AppRuntimeState::Starting, None, None, None)
                 .await
                 .unwrap_err()
                 .code(),
@@ -2385,232 +1047,44 @@ mod tests {
                 .code(),
             AppErrorCode::NotFound
         );
-        assert_eq!(
-            h.service
-                .redeliver_undelivered(missing)
-                .await
-                .unwrap_err()
-                .code(),
-            AppErrorCode::NotFound
-        );
     }
 
     #[tokio::test]
-    async fn conflicting_update_emits_design_conflict_and_keeps_value() {
+    async fn mark_ready_stamps_ready_emits_once_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app(Some("A"), "a test app", None)
+            .create_app(Some("Ready"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service
-            .update_draft(&record.id, 0, &patch("title", "Mine"))
-            .await
-            .unwrap();
-        let _ = h.take_events().await;
-        let err = h
-            .service
-            .update_draft(&record.id, 0, &patch("title", "Stale"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::RevisionConflict);
-        let events = h.take_events().await;
-        assert_eq!(
-            events,
-            vec![AppEvent::DesignConflict {
-                app_id: record.id.clone(),
-                expected_revision: 0,
-                actual_revision: 1,
-            }]
-        );
-        // Value stays; nothing was silently overwritten (also true on disk).
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 1);
-        assert_eq!(
-            draft.fields.get("title"),
-            Some(&DesignValue::ShortText("Mine".into()))
-        );
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 1);
-    }
-
-    /// `AppState::update_draft` clears `draft.plan`/`plan_for_revision` on
-    /// EVERY edit (state.rs:431-432) — the plan was computed against the old
-    /// answers, so it's stale the instant an answer changes. Before this
-    /// test's fix, the service wrapper only emitted `DesignDraftChanged`:
-    /// the client kept rendering a plan the server had already deleted, then
-    /// hit an unexplained staleness error at `confirm_design`'s freshness
-    /// gate. `events.rs`'s own doc on `AppEvent::PlanChanged` promises `plan:
-    /// None` for exactly this "invalidated" case; this asserts the EVENT
-    /// fires, not merely that `draft.plan` reads `None` afterward (a client
-    /// only ever learns about the invalidation through the wire).
-    #[tokio::test]
-    async fn update_draft_announces_the_plan_it_invalidates() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Invalidate"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        stamp_fresh_plan(&h.service, &record.id).await;
+        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
         let _ = h.take_events().await;
 
-        let revision = h
-            .service
-            .update_draft(&record.id, 0, &patch("title", "Mine"))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::DesignDraftChanged {
-                    app_id: record.id.clone(),
-                    revision,
-                    fields: h.service.draft(&record.id).await.unwrap().fields.clone(),
-                },
-                AppEvent::PlanChanged {
-                    app_id: record.id.clone(),
-                    revision,
-                    plan: None,
-                },
-            ],
-            "the edit's own event comes first, the invalidation it causes second"
-        );
-        assert!(h.service.draft(&record.id).await.unwrap().plan.is_none());
-    }
-
-    /// The other half of the same fix, gated the other way: when there is no
-    /// plan to invalidate (never planned yet), `update_draft` must not
-    /// announce a phantom `PlanChanged` on every routine edit.
-    #[tokio::test]
-    async fn update_draft_without_a_plan_does_not_announce_a_phantom_invalidation() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("NoPlanYet"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let _ = h.take_events().await;
-
-        h.service
-            .update_draft(&record.id, 0, &patch("title", "Mine"))
-            .await
-            .unwrap();
-
-        let events = h.take_events().await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, AppEvent::PlanChanged { .. })),
-            "no plan existed yet, so nothing was invalidated: {events:?}"
-        );
-    }
-
-    /// `DesignValue::Deferred` ("let the model decide") is a legal draft
-    /// patch value — `validate_design_value` no longer rejects it (Task 5
-    /// lifted the write-side gate alongside the load-side one in
-    /// `storage.rs`). The full round trip a client relies on: patch → draft →
-    /// disk → reload must preserve it exactly.
-    #[tokio::test]
-    async fn a_deferred_answer_is_accepted_and_survives_a_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("A"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let deferred_patch = AppDesignPatch {
-            ops: vec![AppDesignPatchOp::Set {
-                field_id: "title".into(),
-                value: DesignValue::Deferred,
-            }],
-            note: None,
-        };
-        h.service
-            .update_draft(&record.id, 0, &deferred_patch)
-            .await
-            .expect("a deferred answer is a legal patch value");
-
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.fields.get("title"), Some(&DesignValue::Deferred));
-
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        let reloaded = h2.service.draft(&record.id).await.unwrap();
-        assert_eq!(
-            reloaded.fields.get("title"),
-            Some(&DesignValue::Deferred),
-            "the deferred answer must survive disk reload"
-        );
-    }
-
-    #[tokio::test]
-    async fn confirm_requires_exact_interaction_id_and_current_revision() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("A"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let interaction = h.service.open_designer(&record.id).await.unwrap();
-        h.service
-            .update_draft(&record.id, 0, &patch("title", "T"))
-            .await
-            .unwrap();
-        // Guessed interaction id fails.
-        let err = h
-            .service
-            .confirm_design(&record.id, "int-guessed", 1)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InteractionInvalid);
-        // Right id, stale revision fails.
-        let err = h
-            .service
-            .confirm_design(&record.id, &interaction.interaction_id, 0)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::RevisionConflict);
-        // Nothing was consumed or delivered by the failures.
-        assert!(h
-            .service
-            .pending_interaction(&record.id)
-            .await
-            .unwrap()
-            .is_some());
-        assert!(h.sink.calls().is_empty());
-        stamp_fresh_plan(&h.service, &record.id).await;
-        // Exact id + current revision succeeds and delivers the continuation.
-        h.service
-            .confirm_design(&record.id, &interaction.interaction_id, 1)
-            .await
-            .unwrap();
+        h.service.mark_ready(&record.id).await.unwrap();
         assert_eq!(
             h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating
+            AppWorkflowState::Ready
         );
-        let calls = h.sink.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1.seq, 1);
-        assert!(h
-            .service
-            .interactions(&record.id)
-            .await
-            .unwrap()
-            .undelivered
-            .is_empty());
+        assert_eq!(
+            h.take_events().await,
+            vec![AppEvent::WorkflowChanged {
+                app_id: record.id.clone(),
+                state: AppWorkflowState::Ready,
+                detail: None,
+            }]
+        );
+
+        // Idempotent: a second call is Ok with NO event.
+        h.service.mark_ready(&record.id).await.unwrap();
+        assert!(h.take_events().await.is_empty());
+
+        // The stamp is persisted: a fresh process still sees `ready`.
+        let reloaded = reload_service(&h.service).await;
+        assert_eq!(
+            reloaded.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Ready
+        );
     }
 
     #[tokio::test]
@@ -2622,13 +1096,11 @@ mod tests {
             .create_app(Some("Keep"), "a test app", None)
             .await
             .unwrap();
-        let keep = advance_to_collecting_spec(&h.service, &keep.id).await;
         let gone = h
             .service
             .create_app(Some("Gone"), "a test app", None)
             .await
             .unwrap();
-        let gone = advance_to_collecting_spec(&h.service, &gone.id).await;
         let _ = h.take_events().await;
         h.service.delete_app(&gone.id).await.unwrap();
         assert_eq!(h.service.list_apps().await, vec![keep.clone()]);
@@ -2639,13 +1111,6 @@ mod tests {
         // Survives reload.
         drop(h);
         let h2 = harness(dir.path()).await;
-        // `llm_round` is `#[serde(skip)]` (process-lifetime only) — `keep`
-        // was captured before this reload with whatever value was live
-        // then; a real reload always comes back `0`. Zero it here so this
-        // assertion pins what it means to (every OTHER field survives
-        // reload), not this deliberately-non-persisted one.
-        let mut keep = keep;
-        keep.llm_round = 0;
         assert_eq!(h2.service.list_apps().await, vec![keep]);
     }
 
@@ -2661,7 +1126,6 @@ mod tests {
             .create_app(Some("Busy"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         h.service
             .update_runtime_record(
                 &record.id,
@@ -2677,11 +1141,11 @@ mod tests {
         assert_eq!(h.service.list_apps().await.len(), 1);
     }
 
-    /// Finding 13 injection mechanism: plant a DIRECTORY at a document's
-    /// final path. `atomic_write` refuses to rename onto a non-regular file
-    /// for EVERY uid (root included — unlike the old chmod probes, which
-    /// were vacuous under root/CI), so the write fails deterministically.
-    /// Returns the displaced document body for [`unsquat_document`].
+    /// Injection mechanism: plant a DIRECTORY at a document's final path.
+    /// `atomic_write` refuses to rename onto a non-regular file for EVERY
+    /// uid (root included — unlike the old chmod probes, which were vacuous
+    /// under root/CI), so the write fails deterministically. Returns the
+    /// displaced document body for [`unsquat_document`].
     fn squat_document(path: &std::path::Path) -> String {
         let original = std::fs::read_to_string(path).unwrap();
         std::fs::remove_file(path).unwrap();
@@ -2706,14 +1170,12 @@ mod tests {
             .create_app(Some("Stuck"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let app_dir = dir.path().join("apps").join(&record.id);
-        // Finding 13 mechanism, inverted for the rename seam: a regular FILE
-        // squatting on `apps/.trash` makes the commit-point rename of the
-        // trash-based removal fail for EVERY uid (creating/renaming through
-        // a file path is impossible even for root) — no chmod probe, no
-        // vacuous early return.
+        // A regular FILE squatting on `apps/.trash` makes the commit-point
+        // rename of the trash-based removal fail for EVERY uid
+        // (creating/renaming through a file path is impossible even for
+        // root) — no chmod probe, no vacuous early return.
         std::fs::write(dir.path().join("apps/.trash"), b"squat").unwrap();
 
         // The deletion still succeeds — the index rewrite is the commit
@@ -2731,55 +1193,49 @@ mod tests {
         assert!(storage::app_id_present_on_disk(dir.path(), &record.id));
     }
 
+    /// The emission-order lock spans every snapshot AND its delivery, so
+    /// under concurrent creates a delivered `AppsChanged` can never show
+    /// FEWER apps than one delivered before it (events arrive in commit
+    /// order).
     #[tokio::test]
-    async fn concurrent_snapshot_never_delivers_stale_state_after_a_commit() {
+    async fn concurrent_snapshots_are_delivered_in_commit_order() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Race"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let _ = h.take_events().await;
         let service = Arc::new(h.service);
-        // Race `AppsChanged` snapshots against workflow toggles; the
-        // emission-order lock must make every delivered snapshot agree with
-        // the last `WorkflowChanged` delivered before it.
-        for _ in 0..25 {
+        for _ in 0..10 {
             let snapshotter = {
                 let service = Arc::clone(&service);
                 tokio::spawn(async move {
                     service.announce_apps().await;
                 })
             };
-            let toggler = {
+            let creator = {
                 let service = Arc::clone(&service);
-                let app_id = record.id.clone();
                 tokio::spawn(async move {
-                    service.open_designer(&app_id).await.unwrap();
-                    service.cancel_design(&app_id).await.unwrap();
+                    service
+                        .create_app(Some("Race"), "a test app", None)
+                        .await
+                        .unwrap();
                 })
             };
-            let (a, b) = tokio::join!(snapshotter, toggler);
+            let (a, b) = tokio::join!(snapshotter, creator);
             a.unwrap();
             b.unwrap();
         }
         service.flush_events().await;
-        let mut committed = AppWorkflowState::CollectingSpec;
+        let mut last_len = 0usize;
         for event in h.observer.take() {
-            match event {
-                AppEvent::WorkflowChanged { state, .. } => committed = state,
-                AppEvent::AppsChanged { apps } => {
-                    assert_eq!(apps.len(), 1);
-                    assert_eq!(
-                        apps[0].workflow_state, committed,
-                        "a snapshot must agree with the last committed event delivered before it"
-                    );
-                }
-                _ => {}
+            if let AppEvent::AppsChanged { apps } = event {
+                assert!(
+                    apps.len() >= last_len,
+                    "a snapshot delivered after a commit must not show fewer apps \
+                     ({} after {last_len})",
+                    apps.len()
+                );
+                last_len = apps.len();
             }
         }
+        assert_eq!(last_len, 10, "every create's announcement was delivered");
     }
 
     #[tokio::test]
@@ -2791,7 +1247,6 @@ mod tests {
             .create_app(Some("R"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let runtime = h
             .service
@@ -2822,9 +1277,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         drop(h);
-        // A reload is a fresh process: phase 1 has no process manager, so a
-        // busy state found at load is a crash leftover and is reconciled
-        // (finding 8) — it must NOT survive as `starting`.
+        // A reload is a fresh process: no runtime process outlives the
+        // engine, so a busy state found at load is a crash leftover and is
+        // reconciled — it must NOT survive as `starting`.
         let h2 = harness(dir.path()).await;
         let reloaded = h2.service.runtime_record(&record.id).await.unwrap();
         assert_eq!(reloaded.state, AppRuntimeState::Failed);
@@ -2840,153 +1295,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_delivery_stays_queued_and_redelivers_once() {
+    async fn set_runtime_mode_persists_and_emits() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
-        h.sink.set_fail(true);
         let record = h
             .service
-            .create_app(Some("Q"), "a test app", None)
+            .create_app(Some("Mode"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let interaction = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        // confirm_design succeeds even though delivery fails (at-least-once).
-        h.service
-            .confirm_design(&record.id, &interaction.interaction_id, 0)
-            .await
-            .unwrap();
-        let interactions = h.service.interactions(&record.id).await.unwrap();
-        assert_eq!(interactions.undelivered.len(), 1);
-        assert_eq!(interactions.last_delivered_seq, 0);
-        assert!(h.sink.accepted().is_empty());
-
-        // Rebuild from disk with a working sink: exactly one delivery.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        let queued = h2.service.interactions(&record.id).await.unwrap();
-        assert_eq!(queued.undelivered.len(), 1, "undelivered survives restart");
-        assert_eq!(
-            h2.service.redeliver_undelivered(&record.id).await.unwrap(),
-            1
-        );
-        assert_eq!(h2.sink.accepted().len(), 1);
-        assert_eq!(
-            h2.service.redeliver_undelivered(&record.id).await.unwrap(),
-            0
-        );
-        assert_eq!(h2.sink.calls().len(), 1, "second sweep delivers nothing");
-        let drained = h2.service.interactions(&record.id).await.unwrap();
-        assert!(drained.undelivered.is_empty());
-        assert_eq!(drained.last_delivered_seq, 1);
-    }
-
-    /// The store persists a delivery (queue removal + `last_delivered_seq`
-    /// advance) in ONE atomic write, so "seq both delivered and still queued"
-    /// is a state no legal writer produces — since finding 6 it fails the
-    /// load-time invariant validation as `storage_corrupt` instead of being
-    /// silently pruned.
-    #[tokio::test]
-    async fn delivered_seq_still_queued_on_disk_is_storage_corrupt_at_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        h.sink.set_fail(true);
-        let record = h
+        let _ = h.take_events().await;
+        let runtime = h
             .service
-            .create_app(Some("D"), "a test app", None)
+            .set_runtime_mode(&record.id, AppRuntimeMode::StaticExport)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let interaction = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service
-            .confirm_design(&record.id, &interaction.interaction_id, 0)
-            .await
-            .unwrap();
-        drop(h);
-
-        // Hand-tamper: seq 1 both marked delivered and still queued.
-        let mut interactions: AppInteractions = serde_json::from_str(
-            &std::fs::read_to_string(
-                dir.path()
-                    .join("apps")
-                    .join(&record.id)
-                    .join("interactions.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(interactions.undelivered.len(), 1);
-        interactions.last_delivered_seq = 1;
-        storage::save_interactions(dir.path(), &record.id, &interactions).unwrap();
-
-        let Err(err) = AppService::load(
-            dir.path(),
-            Arc::new(FixedClock::new(1_700_000_000_000)),
-            Arc::new(RecordingContinuationSink::new()) as Arc<dyn ContinuationSink>,
-            Arc::new(RecordingAppEventObserver::new()) as Arc<dyn AppEventObserver>,
-        )
-        .await
-        else {
-            panic!("a store with a delivered seq still queued must fail to load");
-        };
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-        assert!(
-            err.to_string().contains("violates continuation invariants"),
-            "{err}"
+        assert_eq!(runtime.mode, Some(AppRuntimeMode::StaticExport));
+        assert_eq!(
+            h.take_events().await,
+            vec![AppEvent::RuntimeChanged {
+                app_id: record.id.clone(),
+                runtime,
+            }]
+        );
+        let reloaded = reload_service(&h.service).await;
+        assert_eq!(
+            reloaded.runtime_record(&record.id).await.unwrap().mode,
+            Some(AppRuntimeMode::StaticExport)
         );
     }
 
-    #[tokio::test]
-    async fn sink_failure_mid_sweep_keeps_remainder_queued() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        h.sink.set_fail(true);
-        let record = h
-            .service
-            .create_app(Some("M"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        // Two continuations: cancel then confirm.
-        let i1 = h.service.open_designer(&record.id).await.unwrap();
-        assert!(i1.interaction_id.starts_with("int-"));
-        h.service.cancel_design(&record.id).await.unwrap();
-        let i2 = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service
-            .confirm_design(&record.id, &i2.interaction_id, 0)
-            .await
-            .unwrap();
-        assert_eq!(
-            h.service
-                .interactions(&record.id)
-                .await
-                .unwrap()
-                .undelivered
-                .len(),
-            2
-        );
-        let err = h
-            .service
-            .redeliver_undelivered(&record.id)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::Io);
-        // Working sink drains both, in order, exactly once.
-        h.sink.set_fail(false);
-        assert_eq!(
-            h.service.redeliver_undelivered(&record.id).await.unwrap(),
-            2
-        );
-        let seqs: Vec<u64> = h.sink.accepted().iter().map(|(_, c)| c.seq).collect();
-        assert_eq!(seqs, vec![1, 2]);
-        assert_eq!(h.service.redeliver_all_undelivered().await.unwrap(), 0);
-    }
-
-    /// Cleanup: the data root itself is owner-only on unix, matching the
-    /// repo's private-state convention (the interior was already 0o700 via
+    /// The data root itself is owner-only on unix, matching the repo's
+    /// private-state convention (the interior was already 0o700 via
     /// `rooted_fs`; `create_dir_all` alone left the root at the umask
     /// default).
     #[cfg(unix)]
@@ -3001,7 +1340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoints_are_empty_in_phase_one() {
+    async fn checkpoints_are_empty_for_a_new_app() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
@@ -3009,7 +1348,6 @@ mod tests {
             .create_app(Some("C"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         assert!(h
             .service
             .list_checkpoints(&record.id)
@@ -3055,14 +1393,15 @@ mod tests {
         assert!(!reloaded.record(&record.id).await.unwrap().git_enabled);
     }
 
-    /// The store's own documents live inside `apps/<id>/workspace`, which is
-    /// exactly the tree a checkpoint restore hard-resets. Nothing rewrites
-    /// the design draft after a restore — persistence compares in-memory
-    /// `committed` against in-memory `working`, so a draft rewound ON DISK is
-    /// invisible to it — which is why the restore must not be able to rewind
-    /// it in the first place. Asserted through a real reload from disk.
+    /// The store's own record mirror lives inside `apps/<id>/workspace`,
+    /// which is exactly the tree a checkpoint restore hard-resets. Nothing
+    /// rewrites the mirror after a restore — persistence compares in-memory
+    /// `committed` against in-memory `working`, so a mirror rewound ON DISK
+    /// is invisible to it — which is why the restore must not be able to
+    /// rewind it in the first place. Asserted through a real reload from
+    /// disk (mirror-wins repair would adopt a rewound mirror).
     #[tokio::test]
-    async fn restore_checkpoint_does_not_rewind_the_design_draft_on_disk() {
+    async fn restore_checkpoint_does_not_rewind_the_record_mirror_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
@@ -3070,25 +1409,18 @@ mod tests {
             .create_app(Some("Restorable"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service
-            .update_draft(&record.id, 0, &patch("title", "v1"))
-            .await
-            .unwrap();
+        // Checkpoint while the app is still `draft`…
         let first = h
             .service
             .create_checkpoint(
                 &record.id,
-                crate::types::AppCheckpointKind::ScaffoldCreated,
+                AppCheckpointKind::ScaffoldCreated,
                 "Scaffold created",
             )
             .await
             .unwrap();
-        h.service
-            .update_draft(&record.id, 1, &patch("title", "v2"))
-            .await
-            .unwrap();
-        assert_eq!(h.service.draft(&record.id).await.unwrap().revision, 2);
+        // …then advance the record past the checkpoint.
+        h.service.mark_ready(&record.id).await.unwrap();
 
         h.service
             .restore_checkpoint(&record.id, &first.id)
@@ -3097,24 +1429,22 @@ mod tests {
 
         drop(h);
         let h2 = harness(dir.path()).await;
-        let draft = h2.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 2);
         assert_eq!(
-            draft.fields.get("title"),
-            Some(&DesignValue::ShortText("v2".into()))
+            h2.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Ready,
+            "the restore must not rewind the record mirror to its checkpoint-era state"
         );
     }
 
     /// The same contract for the population that actually has data: an app
-    /// whose checkpoint history was written before the service documents were
-    /// excluded. Its checkpoint tree still carries `design-spec.json`, so the
-    /// restore's hard reset checks that blob back out — and nothing rewrites
-    /// the draft afterwards, so the loss is silent and permanent. The fixture
-    /// commits the documents with the pre-fix `add_all(["*"])` semantics,
-    /// which is the only way to reach the state; a store that builds its own
-    /// repository cannot.
+    /// whose checkpoint history was written before the service documents
+    /// were excluded. Its checkpoint tree still carries `.lingxi/app.json`,
+    /// so the restore's hard reset would check that blob back out — and
+    /// nothing rewrites the mirror afterwards, so the loss would be silent
+    /// and permanent. The fixture commits the documents with the pre-fix
+    /// `add_all(["*"])` semantics, which is the only way to reach the state.
     #[tokio::test]
-    async fn restoring_a_legacy_checkpoint_does_not_rewind_the_design_draft_on_disk() {
+    async fn restoring_a_legacy_checkpoint_does_not_rewind_the_record_mirror() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
@@ -3122,19 +1452,10 @@ mod tests {
             .create_app(Some("Legacy"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service
-            .update_draft(&record.id, 0, &patch("title", "v1"))
-            .await
-            .unwrap();
         let workspace = dir.path().join(&record.workspace_rel);
         let legacy = crate::checkpoints::seed_legacy_checkpoint(&workspace, 1_000);
 
-        h.service
-            .update_draft(&record.id, 1, &patch("title", "v2"))
-            .await
-            .unwrap();
-        assert_eq!(h.service.draft(&record.id).await.unwrap().revision, 2);
+        h.service.mark_ready(&record.id).await.unwrap();
 
         h.service
             .restore_checkpoint(&record.id, &legacy)
@@ -3143,159 +1464,10 @@ mod tests {
 
         drop(h);
         let h2 = harness(dir.path()).await;
-        let draft = h2.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 2);
         assert_eq!(
-            draft.fields.get("title"),
-            Some(&DesignValue::ShortText("v2".into()))
-        );
-    }
-
-    #[tokio::test]
-    async fn generation_progress_requires_existing_app() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("P"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let _ = h.take_events().await;
-        let progress = AppGenerationProgress {
-            app_id: record.id.clone(),
-            stage: "scaffold".into(),
-            percent: Some(10),
-            detail: None,
-        };
-        h.service
-            .report_generation_progress(progress.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            h.take_events().await,
-            vec![AppEvent::GenerationProgress(progress)]
-        );
-        let err = h
-            .service
-            .report_generation_progress(AppGenerationProgress {
-                app_id: "beadfeed".into(),
-                stage: "scaffold".into(),
-                percent: None,
-                detail: None,
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::NotFound);
-    }
-
-    #[tokio::test]
-    async fn sweep_continues_past_one_apps_failing_sink() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        // Queue one undelivered continuation per app (sink down for both).
-        h.sink.set_fail(true);
-        let a = h
-            .service
-            .create_app(Some("A"), "a test app", None)
-            .await
-            .unwrap();
-        let a = advance_to_collecting_spec(&h.service, &a.id).await;
-        let b = h
-            .service
-            .create_app(Some("B"), "a test app", None)
-            .await
-            .unwrap();
-        let b = advance_to_collecting_spec(&h.service, &b.id).await;
-        for record in [&a, &b] {
-            h.service.open_designer(&record.id).await.unwrap();
-            h.service.cancel_design(&record.id).await.unwrap();
-        }
-        // A (first in stored order) keeps failing; B is healthy again.
-        h.sink.set_fail(false);
-        h.sink.set_fail_for(&a.id, true);
-        let err = h.service.redeliver_all_undelivered().await.unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::Io, "A's failure is surfaced");
-        // B was NOT starved by A's persistent failure.
-        let b_ints = h.service.interactions(&b.id).await.unwrap();
-        assert!(b_ints.undelivered.is_empty(), "B's continuation delivered");
-        assert_eq!(b_ints.last_delivered_seq, 1);
-        assert_eq!(
-            h.sink
-                .accepted()
-                .iter()
-                .map(|(app_id, _)| app_id.clone())
-                .collect::<Vec<_>>(),
-            vec![b.id.clone()]
-        );
-        // A's continuation stays queued and delivers once A recovers.
-        assert_eq!(
-            h.service
-                .interactions(&a.id)
-                .await
-                .unwrap()
-                .undelivered
-                .len(),
-            1
-        );
-        h.sink.set_fail_for(&a.id, false);
-        assert_eq!(h.service.redeliver_all_undelivered().await.unwrap(), 1);
-        assert!(h
-            .service
-            .interactions(&a.id)
-            .await
-            .unwrap()
-            .undelivered
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn failure_details_ride_workflow_changed_events() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("F"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
-        let _ = h.take_events().await;
-
-        h.service
-            .generation_failed(&record.id, Some("npm install failed".into()))
-            .await
-            .unwrap();
-        assert_eq!(
-            h.take_events().await,
-            vec![AppEvent::WorkflowChanged {
-                app_id: record.id.clone(),
-                state: AppWorkflowState::GenerationFailed,
-                detail: Some("npm install failed".into()),
-            }],
-            "generation_failed must surface the caller's detail"
-        );
-
-        h.service.retry_generation(&record.id).await.unwrap();
-        h.service.generation_complete(&record.id).await.unwrap();
-        let _ = h.take_events().await;
-        h.service
-            .validation_failed(&record.id, Some("tsc: 3 errors".into()))
-            .await
-            .unwrap();
-        assert_eq!(
-            h.take_events().await,
-            vec![AppEvent::WorkflowChanged {
-                app_id: record.id.clone(),
-                state: AppWorkflowState::ValidationFailed,
-                detail: Some("tsc: 3 errors".into()),
-            }],
-            "validation_failed must surface the caller's detail"
+            h2.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Ready,
+            "a legacy checkpoint's tracked .lingxi blobs must not rewind the mirror"
         );
     }
 
@@ -3305,16 +1477,14 @@ mod tests {
         let h = harness(dir.path()).await;
         let err = h
             .service
-            .create_app(Some(&"x".repeat(MAX_NAME_BYTES + 1)),
-                "a test app",
-                None,
-            )
+            .create_app(Some(&"x".repeat(MAX_NAME_BYTES + 1)), "a test app", None)
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         let err = h
             .service
-            .create_app(Some("A"),
+            .create_app(
+                Some("A"),
                 "a test app",
                 Some("c".repeat(MAX_CONVERSATION_ID_BYTES + 1)),
             )
@@ -3327,7 +1497,8 @@ mod tests {
         );
         // Exactly at the cap is fine.
         h.service
-            .create_app(Some(&"x".repeat(MAX_NAME_BYTES)),
+            .create_app(
+                Some(&"x".repeat(MAX_NAME_BYTES)),
                 "a test app",
                 Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
             )
@@ -3337,13 +1508,7 @@ mod tests {
 
     /// Direct coverage for `brief`'s validation (empty-after-trim rejected,
     /// `MAX_BRIEF_BYTES` enforced, exactly-at-cap accepted, and the trimmed
-    /// value is what's persisted) — finding from Task 2 review: every WIRE
-    /// path (`host.rs::handle_create_app`, `local_apps_mcp.rs`'s `create`
-    /// tool) currently passes an already-trimmed, non-empty, ≤200-byte
-    /// `name` as `brief` (Tasks 10/11 have not wired a real `brief` input
-    /// yet), so this validation was otherwise unreachable from any live
-    /// caller and shipped with no test. Mirrors
-    /// `create_app_enforces_name_and_conversation_caps` immediately above.
+    /// value is what's persisted).
     #[tokio::test]
     async fn create_app_enforces_brief_caps() {
         let dir = tempfile::tempdir().unwrap();
@@ -3370,15 +1535,18 @@ mod tests {
         // trimmed the same way `name` is before persisting.
         let record = h
             .service
-            .create_app(Some("A"), &format!("  {}  ", "x".repeat(MAX_BRIEF_BYTES)), None)
+            .create_app(
+                Some("A"),
+                &format!("  {}  ", "x".repeat(MAX_BRIEF_BYTES)),
+                None,
+            )
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         assert_eq!(record.brief, "x".repeat(MAX_BRIEF_BYTES));
     }
 
     #[tokio::test]
-    async fn create_app_without_a_name_uses_a_placeholder_until_the_llm_suggests_one() {
+    async fn create_app_without_a_name_uses_a_placeholder() {
         let service = test_service().await;
         let record = service
             .create_app(None, "一个记事本 app", None)
@@ -3389,10 +1557,7 @@ mod tests {
             !record.name.trim().is_empty(),
             "a placeholder name is always present"
         );
-        assert_eq!(
-            record.workflow_state,
-            AppWorkflowState::AuthoringQuestionnaire
-        );
+        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
     }
 
     /// The placeholder-name rule cuts at 24 CHARS, not 24 bytes — a byte
@@ -3429,303 +1594,7 @@ mod tests {
         service
             .create_app(Some("Notes"), "   ", None)
             .await
-            .expect_err("an empty brief cannot drive authoring");
-    }
-
-    #[tokio::test]
-    async fn a_stored_questionnaire_survives_a_reload() {
-        // Uses `harness` (not `test_service`) so `take_events` can pin that
-        // `questionnaire_ready` actually CONSTRUCTS `QuestionnaireChanged` —
-        // `service.rs`'s only construction site for that variant. Without
-        // this, a future refactor collapsing `questionnaire_ready` back onto
-        // the plain `workflow_step` wrapper the brief originally specified
-        // (the shape all seven sibling methods use) would make the event
-        // permanently dead again with every other test in this file green,
-        // and Tasks 13/14's iOS designer would never receive the
-        // questionnaire it exists to deliver.
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(None, "一个记事本", None)
-            .await
-            .expect("create");
-        let _ = h.take_events().await;
-        h.service
-            .questionnaire_ready(&record.id, one_step(), Some("记事本".into()), record.llm_round)
-            .await
-            .expect("authoring succeeds");
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::WorkflowChanged {
-                    app_id: record.id.clone(),
-                    state: AppWorkflowState::CollectingSpec,
-                    detail: None,
-                },
-                AppEvent::QuestionnaireChanged {
-                    app_id: record.id.clone(),
-                    revision: 0,
-                    steps: one_step(),
-                },
-            ]
-        );
-
-        let reloaded = reload_service(&h.service).await;
-        let draft = reloaded.draft(&record.id).await.expect("draft is readable");
-        assert_eq!(draft.questionnaire.len(), 1);
-        assert_eq!(
-            reloaded.record(&record.id).await.expect("record").name,
-            "记事本"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_rejected_questionnaire_leaves_the_app_in_authoring() {
-        let service = test_service().await;
-        let record = service
-            .create_app(None, "一个记事本", None)
-            .await
-            .expect("create");
-
-        // 6 steps is over MAX_STEPS; the validator must reject it and the
-        // workflow must not advance.
-        let too_many: Vec<_> = (0..6).map(|i| step_named(&format!("s{i}"), i)).collect();
-        service
-            .questionnaire_ready(&record.id, too_many, None, record.llm_round)
-            .await
-            .expect_err("an over-limit questionnaire is rejected");
-
-        assert_eq!(
-            service.record(&record.id).await.expect("record").workflow_state,
-            AppWorkflowState::AuthoringQuestionnaire,
-            "a rejected questionnaire must not advance the workflow"
-        );
-    }
-
-    #[tokio::test]
-    async fn changing_the_brief_after_a_failure_reauthors_from_scratch() {
-        let service = test_service().await;
-        let record = service
-            .create_app(None, "一个记事本", None)
-            .await
-            .expect("create");
-        service
-            .questionnaire_failed(&record.id, "model offline", record.llm_round)
-            .await
-            .expect("fail");
-        service
-            .update_brief(&record.id, "改成一个待办清单")
-            .await
-            .expect("brief is editable");
-
-        let refreshed = service.record(&record.id).await.expect("record");
-        assert_eq!(refreshed.brief, "改成一个待办清单");
-        assert_eq!(
-            refreshed.workflow_state,
-            AppWorkflowState::AuthoringQuestionnaire
-        );
-    }
-
-    /// `AppState::update_brief` clears BOTH `draft.questionnaire` and
-    /// `draft.plan` (state.rs:313/315) — a new brief invalidates the old
-    /// questions and whatever plan was computed against the old answers.
-    /// Before this test's fix the service wrapper emitted only
-    /// `WorkflowChanged`, same silent-invalidation hole as `update_draft`'s
-    /// (see `update_draft_announces_the_plan_it_invalidates`): the client
-    /// never learned either clear happened.
-    #[tokio::test]
-    async fn update_brief_announces_the_questionnaire_and_plan_it_invalidates() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Rebrief"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        stamp_fresh_plan(&h.service, &record.id).await;
-        let _ = h.take_events().await;
-
-        h.service
-            .update_brief(&record.id, "改成一个待办清单")
-            .await
-            .unwrap();
-
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::WorkflowChanged {
-                    app_id: record.id.clone(),
-                    state: AppWorkflowState::AuthoringQuestionnaire,
-                    detail: None,
-                },
-                AppEvent::QuestionnaireChanged {
-                    app_id: record.id.clone(),
-                    revision: draft.revision,
-                    steps: Vec::new(),
-                },
-                AppEvent::PlanChanged {
-                    app_id: record.id.clone(),
-                    revision: draft.revision,
-                    plan: None,
-                },
-            ],
-            "state change first, then the two invalidations it caused"
-        );
-        assert!(draft.questionnaire.is_empty());
-        assert!(draft.plan.is_none());
-    }
-
-    /// The gated half of the same fix: a brief change while there is no
-    /// questionnaire/plan yet to invalidate (e.g. escaping straight from
-    /// `questionnaire_failed`) must not announce phantom invalidations.
-    #[tokio::test]
-    async fn update_brief_without_a_questionnaire_or_plan_announces_neither() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("FreshFail"), "a test app", None)
-            .await
-            .unwrap();
-        h.service
-            .questionnaire_failed(&record.id, "model offline", record.llm_round)
-            .await
-            .unwrap();
-        let _ = h.take_events().await;
-
-        h.service
-            .update_brief(&record.id, "改成一个待办清单")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            h.take_events().await,
-            vec![AppEvent::WorkflowChanged {
-                app_id: record.id.clone(),
-                state: AppWorkflowState::AuthoringQuestionnaire,
-                detail: None,
-            }],
-            "nothing existed yet, so nothing was invalidated"
-        );
-    }
-
-    fn plan_stub() -> AppPlan {
-        AppPlan {
-            collections: Vec::new(),
-            capabilities: Vec::new(),
-            domains: Vec::new(),
-            summary: "s".into(),
-        }
-    }
-
-    /// `begin_planning` then `plan_ready` end to end: unlike every OTHER
-    /// `stamp_fresh_plan` call site in this file (which reach
-    /// `awaiting_spec_confirmation` via `open_designer`, skipping `planning`
-    /// entirely — see `test_support::stamp_fresh_plan`'s doc), this is the
-    /// ONE path that drives the real `planning -> awaiting_spec_confirmation`
-    /// transition, so it's the only place `plan_ready`'s own event shape
-    /// (`WorkflowChanged`, `PlanChanged`, then the gate announcement) is
-    /// exercised directly.
-    #[tokio::test]
-    async fn begin_planning_then_plan_ready_opens_the_designer_gate() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Plan"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let epoch = h.service.begin_planning(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Planning
-        );
-        let _ = h.take_events().await;
-
-        let interaction = h
-            .service
-            .plan_ready(&record.id, plan_stub(), epoch)
-            .await
-            .unwrap()
-            .expect("fresh epoch must not be rejected as stale");
-        assert_eq!(interaction.kind, AppInteractionKind::Designer);
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AwaitingSpecConfirmation
-        );
-        assert_eq!(
-            h.service.draft(&record.id).await.unwrap().plan,
-            Some(plan_stub())
-        );
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::WorkflowChanged {
-                    app_id: record.id.clone(),
-                    state: AppWorkflowState::AwaitingSpecConfirmation,
-                    detail: None,
-                },
-                AppEvent::PlanChanged {
-                    app_id: record.id.clone(),
-                    revision: 0,
-                    plan: Some(plan_stub()),
-                },
-                AppEvent::DesignerRequested {
-                    app_id: record.id.clone(),
-                    interaction_id: interaction.interaction_id,
-                    revision: 0,
-                },
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_failed_can_retry_or_reopen_answers() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Retry"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let epoch = h.service.begin_planning(&record.id).await.unwrap();
-        h.service
-            .plan_failed(&record.id, "model offline", epoch)
-            .await
-            .unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::PlanFailed
-        );
-
-        // `retry_plan` returns to `planning` with the same answers.
-        let epoch = h.service.retry_plan(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Planning
-        );
-        h.service
-            .plan_failed(&record.id, "again", epoch)
-            .await
-            .unwrap();
-
-        // `reopen_answers` is the other escape: back to `collecting_spec`,
-        // preserving the questionnaire and every answer (unlike
-        // `update_brief`, which clears both).
-        let draft_before = h.service.draft(&record.id).await.unwrap();
-        h.service.reopen_answers(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::CollectingSpec
-        );
-        let draft_after = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft_after.questionnaire, draft_before.questionnaire);
-        assert_eq!(draft_after.fields, draft_before.fields);
+            .expect_err("an empty brief is rejected");
     }
 
     #[tokio::test]
@@ -3741,434 +1610,12 @@ mod tests {
         assert_eq!(h.service.list_apps().await.len(), 101);
     }
 
-    #[tokio::test]
-    async fn dismiss_suggestion_persists_without_changing_revision_and_refreshes_draft() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Suggestion"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.take_events().await;
-        let suggestion = h
-            .service
-            .store_suggestion(&record.id, patch("accent", "#3366ff"))
-            .await
-            .unwrap();
-        h.take_events().await;
-        let wrong = h
-            .service
-            .dismiss_suggestion(&record.id, "wrong")
-            .await
-            .unwrap_err();
-        assert_eq!(wrong.code(), AppErrorCode::InteractionInvalid);
-        h.service
-            .dismiss_suggestion(&record.id, &suggestion.suggestion_id)
-            .await
-            .unwrap();
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 0);
-        assert!(draft.pending_suggestion.is_none());
-        assert!(matches!(
-            h.take_events().await.as_slice(),
-            [AppEvent::DesignDraftChanged { revision: 0, .. }]
-        ));
-        drop(h);
-        let reloaded = harness(dir.path()).await;
-        assert!(reloaded
-            .service
-            .draft(&record.id)
-            .await
-            .unwrap()
-            .pending_suggestion
-            .is_none());
-    }
-
-    /// `apply_suggestion` is the OTHER door that changes `draft.fields`
-    /// (alongside `update_draft`'s manual edit) — `AppState::apply_suggestion`
-    /// clears a stale plan the same way `AppState::update_draft` does
-    /// (review finding on this task: an applied suggestion silently nulled
-    /// the plan with no announcement, exactly like the manual-edit hole
-    /// `update_draft_announces_the_plan_it_invalidates` covers). Reachable
-    /// with a live plan on screen: `awaiting_spec_confirmation` — reached via
-    /// `plan_ready` — is itself in `DRAFT_EDITABLE_STATES`, so an agent
-    /// suggestion can be proposed and applied while the confirmation gate is
-    /// still open, without any `cancel_design` round trip.
-    #[tokio::test]
-    async fn apply_suggestion_announces_the_plan_it_invalidates() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("SuggestInvalidate"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        stamp_fresh_plan(&h.service, &record.id).await;
-        let suggestion = h
-            .service
-            .store_suggestion(&record.id, patch("accent", "#3366ff"))
-            .await
-            .unwrap();
-        let _ = h.take_events().await;
-
-        let revision = h
-            .service
-            .apply_suggestion(&record.id, &suggestion.suggestion_id, 0)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::DesignDraftChanged {
-                    app_id: record.id.clone(),
-                    revision,
-                    fields: h.service.draft(&record.id).await.unwrap().fields.clone(),
-                },
-                AppEvent::PlanChanged {
-                    app_id: record.id.clone(),
-                    revision,
-                    plan: None,
-                },
-            ],
-            "the applied suggestion's own event first, the invalidation it causes second"
-        );
-        assert!(h.service.draft(&record.id).await.unwrap().plan.is_none());
-    }
-
-    #[tokio::test]
-    async fn draft_patches_enforce_size_caps() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Caps"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let set_op = |field: &str, text: &str| AppDesignPatchOp::Set {
-            field_id: field.into(),
-            value: DesignValue::ShortText(text.into()),
-        };
-        let oversized: Vec<AppDesignPatch> = vec![
-            // Too many ops.
-            AppDesignPatch {
-                ops: (0..=MAX_PATCH_OPS)
-                    .map(|i| set_op(&format!("f{i}"), "v"))
-                    .collect(),
-                note: None,
-            },
-            // Oversized field id (set + remove).
-            patch(&"f".repeat(MAX_FIELD_ID_BYTES + 1), "v"),
-            AppDesignPatch {
-                ops: vec![AppDesignPatchOp::Remove {
-                    field_id: "f".repeat(MAX_FIELD_ID_BYTES + 1),
-                }],
-                note: None,
-            },
-            // Oversized text value.
-            patch("big", &"v".repeat(MAX_TEXT_VALUE_BYTES + 1)),
-            // Oversized list (item count, then item size).
-            AppDesignPatch {
-                ops: vec![AppDesignPatchOp::Set {
-                    field_id: "screens".into(),
-                    value: DesignValue::ScreenList(vec!["s".into(); MAX_LIST_ITEMS + 1]),
-                }],
-                note: None,
-            },
-            AppDesignPatch {
-                ops: vec![AppDesignPatchOp::Set {
-                    field_id: "screens".into(),
-                    value: DesignValue::ScreenList(vec!["s".repeat(MAX_LIST_ITEM_BYTES + 1)]),
-                }],
-                note: None,
-            },
-            // Oversized note.
-            AppDesignPatch {
-                ops: vec![set_op("t", "v")],
-                note: Some("n".repeat(MAX_NOTE_BYTES + 1)),
-            },
-        ];
-        for (i, bad) in oversized.iter().enumerate() {
-            let err = h
-                .service
-                .update_draft(&record.id, 0, bad)
-                .await
-                .expect_err("oversized patch must be rejected");
-            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "patch #{i}");
-            let err = h
-                .service
-                .store_suggestion(&record.id, bad.clone())
-                .await
-                .expect_err("oversized suggestion must be rejected");
-            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "suggestion #{i}");
-        }
-        // Nothing was applied, emitted, or persisted.
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 0);
-        assert!(draft.fields.is_empty());
-        assert!(draft.pending_suggestion.is_none());
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        assert_eq!(h2.service.draft(&record.id).await.unwrap().revision, 0);
-    }
-
-    /// Data-field ids and HTTPS domains are copied verbatim onto the manifest
-    /// by the scaffold, which validates them while the app is already
-    /// `generating` — a state whose only exit replays the same input. The
-    /// draft gate must therefore reject them here, where the revision and the
-    /// workflow state both survive. Both clients mint hyphenated field ids
-    /// (`UUID().uuidString.lowercased()` / `field-$index`), so this is the
-    /// ordinary "add a data field" path, not an exotic one.
-    #[tokio::test]
-    async fn draft_gate_rejects_values_the_manifest_contract_forbids() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Contract"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let data_fields = |id: &str| AppDesignPatch {
-            ops: vec![AppDesignPatchOp::Set {
-                field_id: "collection_fields".into(),
-                value: DesignValue::DataFieldList(vec![DataFieldSchema {
-                    id: id.into(),
-                    label: "Title".into(),
-                    kind: DataFieldKind::Text,
-                    required: false,
-                    enum_options: Vec::new(),
-                }]),
-            }],
-            note: None,
-        };
-        let domains = |domain: &str| AppDesignPatch {
-            ops: vec![AppDesignPatchOp::Set {
-                field_id: "network_domains".into(),
-                value: DesignValue::DomainList(vec![domain.into()]),
-            }],
-            note: None,
-        };
-        let rejected: Vec<AppDesignPatch> = vec![
-            // The iOS mint: a lowercased UUID (hyphens, digit-initial).
-            data_fields("6f0b62b9-5d4a-4d33-9c56-2c9c8a1c2f21"),
-            // The Android mint.
-            data_fields("field-1"),
-            // A pasted URL and a host typed with capitals.
-            domains("https://api.example.com"),
-            domains("API.Example.com"),
-        ];
-        for (i, bad) in rejected.iter().enumerate() {
-            let err = h
-                .service
-                .update_draft(&record.id, 0, bad)
-                .await
-                .expect_err("patch violating the manifest contract must be rejected");
-            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "patch #{i}");
-            let err = h
-                .service
-                .store_suggestion(&record.id, bad.clone())
-                .await
-                .expect_err("suggestion violating the manifest contract must be rejected");
-            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "suggestion #{i}");
-        }
-        // The rejection is revision- and state-preserving, so the next edit
-        // resubmits at the same `expected_revision`.
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 0);
-        assert!(draft.fields.is_empty());
-        // Contract-valid values still pass (no over-rejection).
-        assert_eq!(
-            h.service
-                .update_draft(&record.id, 0, &data_fields("recorded_at"))
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            h.service
-                .update_draft(&record.id, 1, &domains("api.example.com"))
-                .await
-                .unwrap(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn draft_field_count_accumulation_is_capped() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Fields"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        // Fill to the cap across several max-size patches.
-        assert_eq!(
-            MAX_DRAFT_FIELDS % MAX_PATCH_OPS,
-            0,
-            "test assumes even split"
-        );
-        let mut revision = 0;
-        for chunk in 0..(MAX_DRAFT_FIELDS / MAX_PATCH_OPS) {
-            let ops = (0..MAX_PATCH_OPS)
-                .map(|i| AppDesignPatchOp::Set {
-                    field_id: format!("f{}", chunk * MAX_PATCH_OPS + i),
-                    value: DesignValue::Boolean(true),
-                })
-                .collect();
-            revision = h
-                .service
-                .update_draft(&record.id, revision, &AppDesignPatch { ops, note: None })
-                .await
-                .unwrap();
-        }
-        // One more NEW field crosses the cap and is rejected un-persisted.
-        let err = h
-            .service
-            .update_draft(&record.id, revision, &patch("f-one-more", "v"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, revision, "rejected patch must not commit");
-        assert_eq!(draft.fields.len(), MAX_DRAFT_FIELDS);
-        // Overwriting an EXISTING field at the cap is still fine.
-        h.service
-            .update_draft(&record.id, revision, &patch("f0", "updated"))
-            .await
-            .unwrap();
-        // The cap also applies through apply_suggestion.
-        let suggestion = h
-            .service
-            .store_suggestion(&record.id, patch("f-via-suggestion", "v"))
-            .await
-            .unwrap();
-        let err = h
-            .service
-            .apply_suggestion(&record.id, &suggestion.suggestion_id, revision + 1)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        assert_eq!(
-            h.service.draft(&record.id).await.unwrap().fields.len(),
-            MAX_DRAFT_FIELDS
-        );
-    }
-
-    #[tokio::test]
-    async fn request_revision_prompt_is_capped_before_state_gating() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Prompt"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        // Oversized prompt: rejected as invalid_request even though the state
-        // gate would also refuse — the cap runs first.
-        let err = h
-            .service
-            .request_revision(&record.id, &"p".repeat(MAX_PROMPT_BYTES + 1))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        // A within-cap prompt in the wrong state hits the state gate instead.
-        let err = h
-            .service
-            .request_revision(&record.id, "make it blue")
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::WorkflowStateInvalid);
-    }
-
-    #[tokio::test]
-    async fn noop_sink_marks_continuations_delivered() {
-        let dir = tempfile::tempdir().unwrap();
-        let observer = Arc::new(RecordingAppEventObserver::new());
-        let service = AppService::load(
-            dir.path(),
-            Arc::new(FixedClock::new(7)),
-            Arc::new(NoopContinuationSink),
-            observer as Arc<dyn AppEventObserver>,
-        )
-        .await
-        .unwrap();
-        let record = service
-            .create_app(Some("N"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&service, &record.id).await;
-        service.open_designer(&record.id).await.unwrap();
-        service.cancel_design(&record.id).await.unwrap();
-        let interactions = service.interactions(&record.id).await.unwrap();
-        assert!(interactions.undelivered.is_empty());
-        assert_eq!(interactions.last_delivered_seq, 1);
-    }
-
-    /// Finding 1: a mutation whose serialized document would exceed
-    /// [`storage::MAX_DOC_BYTES`] fails typed BEFORE anything reaches disk —
-    /// each patch below is within every service input cap, yet the
-    /// accumulated draft (JSON escaping expands every control char to six
-    /// bytes) would out-grow the load limit and brick the store.
-    #[tokio::test]
-    async fn over_cap_draft_mutation_fails_typed_and_the_store_still_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Big"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let value = "\u{1}".repeat(MAX_TEXT_VALUE_BYTES); // in caps; escapes 6x
-        let chunk = |chunk: usize| AppDesignPatch {
-            ops: (0..MAX_PATCH_OPS)
-                .map(|i| AppDesignPatchOp::Set {
-                    field_id: format!("f{}", chunk * MAX_PATCH_OPS + i),
-                    value: DesignValue::LongText(value.clone()),
-                })
-                .collect(),
-            note: None,
-        };
-        // The first in-caps patch lands (~7.7 MiB serialized draft)…
-        let revision = h
-            .service
-            .update_draft(&record.id, 0, &chunk(0))
-            .await
-            .unwrap();
-        // …the second would push the persisted document past 8 MiB.
-        let err = h
-            .service
-            .update_draft(&record.id, revision, &chunk(1))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        assert!(err.to_string().contains("durable size limit"), "{err}");
-        // Memory rolled back with disk: the failed patch never committed.
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, revision);
-        assert_eq!(draft.fields.len(), MAX_PATCH_OPS);
-        // The store on disk still loads cleanly afterwards.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        let reloaded = h2.service.draft(&record.id).await.unwrap();
-        assert_eq!(reloaded.revision, revision);
-        assert_eq!(reloaded.fields.len(), MAX_PATCH_OPS);
-    }
-
-    /// Finding 3(a): when the per-app batch lands but the index write fails,
-    /// the compensating rollback rewrites the ORIGINAL documents so a reload
+    /// When the per-app batch lands but the index write fails, the
+    /// compensating rollback rewrites the ORIGINAL documents so a reload
     /// agrees with the failure the caller saw — the mirror-wins repair must
     /// NOT commit the transition the user was told failed. Injection is a
-    /// directory squat on `apps/index.json` (finding 13): it defeats root,
-    /// where the old chmod probe returned vacuously.
+    /// directory squat on `apps/index.json`: it defeats root, where the old
+    /// chmod probe returned vacuously.
     #[tokio::test]
     async fn failed_index_write_rolls_back_disk_so_reload_agrees_with_the_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -4178,9 +1625,6 @@ mod tests {
             .create_app(Some("Roll"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
         let _ = h.take_events().await;
 
         // Make ONLY the index write fail: a directory squatting on
@@ -4188,464 +1632,158 @@ mod tests {
         // the subdirectories stay writable.
         let index_path = dir.path().join("apps/index.json");
         let index_before = squat_document(&index_path);
-        let per_app_docs = [
-            dir.path()
-                .join("apps")
-                .join(&record.id)
-                .join("interactions.json"),
-            dir.path()
-                .join("apps")
-                .join(&record.id)
-                .join("workspace/.lingxi/design-spec.json"),
-            dir.path()
-                .join("apps")
-                .join(&record.id)
-                .join("workspace/.lingxi/app.json"),
-        ];
-        let per_app_before: Vec<String> = per_app_docs
-            .iter()
-            .map(|path| std::fs::read_to_string(path).unwrap())
-            .collect();
+        let mirror_path = dir
+            .path()
+            .join("apps")
+            .join(&record.id)
+            .join("workspace/.lingxi/app.json");
+        let mirror_before = std::fs::read_to_string(&mirror_path).unwrap();
 
-        let err = h
-            .service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap_err();
+        let err = h.service.mark_ready(&record.id).await.unwrap_err();
         // A squatted document path is store tampering, typed storage_corrupt
         // (the write-side twin of the load-side squat contract).
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-        // Memory rolled back: the gate is still pending, nothing was queued,
-        // and no success event leaked out.
+        // Memory rolled back: the record still reads `draft`, and no success
+        // event leaked out.
         assert_eq!(
             h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AwaitingSpecConfirmation
-        );
-        let interactions = h.service.interactions(&record.id).await.unwrap();
-        assert!(
-            interactions.undelivered.is_empty(),
-            "no phantom continuation"
-        );
-        assert_eq!(
-            interactions
-                .pending
-                .as_ref()
-                .map(|p| p.interaction_id.as_str()),
-            Some(gate.interaction_id.as_str())
+            AppWorkflowState::Draft
         );
         assert!(
             h.take_events().await.is_empty(),
             "a failed mutation emits nothing"
         );
-        // DISK rolled back too: the compensating rollback restored every
-        // per-app document byte-for-byte.
-        for (path, before) in per_app_docs.iter().zip(&per_app_before) {
-            assert_eq!(
-                &std::fs::read_to_string(path).unwrap(),
-                before,
-                "{} must be rolled back to its pre-transition bytes",
-                path.display()
-            );
-        }
+        // DISK rolled back too: the compensating rollback restored the
+        // mirror byte-for-byte.
+        assert_eq!(
+            std::fs::read_to_string(&mirror_path).unwrap(),
+            mirror_before,
+            "the mirror must be rolled back to its pre-transition bytes"
+        );
 
         unsquat_document(&index_path, &index_before);
 
         // Disk agrees with the reported failure: the reload does NOT
-        // resurrect the confirm, and the surviving gate is re-announced and
-        // still satisfiable.
+        // resurrect the mark_ready, and the mutation succeeds when retried.
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(
             h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AwaitingSpecConfirmation
+            AppWorkflowState::Draft
         );
-        assert!(h2
-            .service
-            .interactions(&record.id)
-            .await
-            .unwrap()
-            .undelivered
-            .is_empty());
-        let announced = h2.take_events().await;
-        assert!(
-            announced.iter().any(|event| matches!(
-                event,
-                AppEvent::DesignerRequested { interaction_id, .. }
-                    if *interaction_id == gate.interaction_id
-            )),
-            "the surviving gate is re-announced at load: {announced:?}"
-        );
-        h2.service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
+        h2.service.mark_ready(&record.id).await.unwrap();
         assert_eq!(
             h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating
+            AppWorkflowState::Ready
         );
-        assert_eq!(h2.sink.accepted().len(), 1);
     }
 
-    /// Finding 1: a MID-BATCH write failure (not just the index seam) now
-    /// triggers the compensating rollback — the succeeded prefix's ORIGINAL
-    /// documents are rewritten, so disk never keeps a committed prefix of a
-    /// transition the caller was told failed (which the next load would have
-    /// rolled FORWARD). Injection: directory squat on `interactions.json`
-    /// (finding 13's mechanism — works under any uid), which fails
-    /// `confirm_design`'s batch after `design-spec.json` already landed.
+    /// A mutation only rewrites the documents it changed — a runtime-only
+    /// update must succeed even when the record mirror cannot be written,
+    /// and must not rewrite the index. Injection is a directory squat on
+    /// `app.json`: it blocks that document for EVERY uid, so the test
+    /// asserts under root too.
     #[tokio::test]
-    async fn failed_mid_batch_write_rolls_back_the_succeeded_prefix() {
+    async fn runtime_only_mutation_skips_untouched_documents() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app(Some("MidBatch"), "a test app", None)
+            .create_app(Some("Lean"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        let _ = h.take_events().await;
-        let app_dir = dir.path().join("apps").join(&record.id);
-        let draft_path = app_dir.join("workspace/.lingxi/design-spec.json");
-        let draft_before = std::fs::read_to_string(&draft_path).unwrap();
-        assert!(
-            !draft_before.contains("confirmedRevision"),
-            "precondition: the confirm has not happened yet"
-        );
+        let index_path = dir.path().join("apps/index.json");
+        let index_before = std::fs::read_to_string(&index_path).unwrap();
 
-        // confirm_design changes draft (confirmedRevision), interactions and
-        // the record — the canonical batch writes design-spec FIRST, then
-        // fails at the squatted interactions.json mid-batch.
-        let interactions_path = app_dir.join("interactions.json");
-        let interactions_before = squat_document(&interactions_path);
-        let err = h
-            .service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-
-        // The succeeded prefix (design-spec.json) was rolled back to its
-        // ORIGINAL bytes — no committed prefix of the failed transition.
-        assert_eq!(std::fs::read_to_string(&draft_path).unwrap(), draft_before);
-        // Memory agrees: gate still armed, nothing queued, nothing emitted.
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AwaitingSpecConfirmation
-        );
-        let interactions = h.service.interactions(&record.id).await.unwrap();
-        assert!(
-            interactions.undelivered.is_empty(),
-            "no phantom continuation"
-        );
-        assert_eq!(
-            interactions
-                .pending
-                .as_ref()
-                .map(|p| p.interaction_id.as_str()),
-            Some(gate.interaction_id.as_str())
-        );
-        assert!(
-            h.take_events().await.is_empty(),
-            "a failed mutation emits nothing"
-        );
-
-        unsquat_document(&interactions_path, &interactions_before);
-
-        // Reload shows the ORIGINAL state — the gate is re-announced, still
-        // armed, and satisfiable; no phantom continuation ever surfaces.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AwaitingSpecConfirmation
-        );
-        let reloaded = h2.service.interactions(&record.id).await.unwrap();
-        assert!(reloaded.undelivered.is_empty(), "no phantom continuation");
-        assert_eq!(
-            reloaded.pending.as_ref().map(|p| p.interaction_id.as_str()),
-            Some(gate.interaction_id.as_str()),
-            "the gate is still armed after reload"
-        );
-        assert!(
-            h2.service
-                .draft(&record.id)
-                .await
-                .unwrap()
-                .confirmed_revision
-                .is_none(),
-            "the failed confirm left no committed residue"
-        );
-        let announced = h2.take_events().await;
-        assert!(
-            announced.iter().any(|event| matches!(
-                event,
-                AppEvent::DesignerRequested { interaction_id, .. }
-                    if *interaction_id == gate.interaction_id
-            )),
-            "the surviving gate is re-announced at load: {announced:?}"
-        );
-        h2.service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
-        assert_eq!(
-            h2.sink.accepted().len(),
-            1,
-            "exactly one delivery after re-confirm"
-        );
-    }
-
-    /// Finding 3(b): redelivery merges the on-disk queue (union by seq) with
-    /// memory, so a continuation that reached disk but was rolled back out of
-    /// memory is delivered instead of being clobbered by a memory-derived
-    /// persist.
-    #[tokio::test]
-    async fn redelivery_merges_disk_only_continuations_instead_of_clobbering() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        h.sink.set_fail(true);
-        let record = h
-            .service
-            .create_app(Some("Merge"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service.open_designer(&record.id).await.unwrap();
-        h.service.cancel_design(&record.id).await.unwrap(); // seq 1 queued
-
-        // Simulate the residual window: seq 2 reached DISK while memory
-        // rolled back and never learned about it.
-        let path = dir
+        // Block app.json with a squatting directory: atomic writes onto it
+        // become impossible (for any uid).
+        let mirror_path = dir
             .path()
             .join("apps")
             .join(&record.id)
-            .join("interactions.json");
-        let mut on_disk: AppInteractions =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        on_disk.undelivered.push(AppContinuation {
-            seq: 2,
-            app_id: record.id.clone(),
-            kind: AppContinuationKind::DesignConfirmed,
-            payload: serde_json::json!({ "revision": 0 }),
-            created_at_ms: 9,
-        });
-        on_disk.next_seq = 3;
-        storage::save_interactions(dir.path(), &record.id, &on_disk).unwrap();
+            .join("workspace/.lingxi/app.json");
+        let mirror_before = squat_document(&mirror_path);
 
-        h.sink.set_fail(false);
-        assert_eq!(
-            h.service.redeliver_undelivered(&record.id).await.unwrap(),
-            2,
-            "the disk-only seq must be delivered, not erased"
-        );
-        let seqs: Vec<u64> = h.sink.accepted().iter().map(|(_, c)| c.seq).collect();
-        assert_eq!(seqs, vec![1, 2]);
-        let drained = h.service.interactions(&record.id).await.unwrap();
-        assert!(drained.undelivered.is_empty());
-        assert_eq!(drained.last_delivered_seq, 2);
-        assert_eq!(drained.next_seq, 3, "the counter is adopted from disk");
-        // The merged outcome is what a fresh process sees.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        let reloaded = h2.service.interactions(&record.id).await.unwrap();
-        assert_eq!(reloaded.last_delivered_seq, 2);
-        assert_eq!(reloaded.next_seq, 3);
-        assert!(reloaded.undelivered.is_empty());
-    }
-
-    /// Sink that, on its first delivery, plants an extra continuation
-    /// straight onto DISK — modelling a racing commit whose interactions
-    /// write landed while the delivery was in flight (and whose memory copy
-    /// was rolled back). Wraps a [`RecordingContinuationSink`] for the
-    /// assertion surface.
-    struct PlantingSink {
-        inner: Arc<RecordingContinuationSink>,
-        root: std::path::PathBuf,
-        plant_for: std::sync::Mutex<Option<String>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ContinuationSink for PlantingSink {
-        async fn deliver(
-            &self,
-            app_id: &str,
-            continuation: &AppContinuation,
-        ) -> Result<(), AppError> {
-            self.inner.deliver(app_id, continuation).await?;
-            let target = self.plant_for.lock().expect("planting sink lock").take();
-            if let Some(planted_app) = target {
-                let mut disk = storage::load_interactions(&self.root, &planted_app)
-                    .expect("planting sink reads a valid store");
-                let seq = disk.next_seq;
-                disk.undelivered.push(AppContinuation {
-                    seq,
-                    app_id: planted_app.clone(),
-                    kind: AppContinuationKind::RevisionRequested,
-                    payload: serde_json::json!({ "prompt": "raced in mid-delivery" }),
-                    created_at_ms: 9,
-                });
-                disk.next_seq += 1;
-                storage::save_interactions(&self.root, &planted_app, &disk)
-                    .expect("planting sink writes a valid store");
-            }
-            Ok(())
-        }
-    }
-
-    /// Redelivery horn A regression (the review's finding 4, verified for
-    /// real): a continuation that lands on DISK while a delivery is IN
-    /// FLIGHT must survive the post-delivery bookkeeping — the old code
-    /// persisted a memory-derived view there, erasing the disk-only seq and
-    /// rewinding `nextSeq`; the merge-on-both-sides loop must deliver it in
-    /// the same drain instead.
-    #[tokio::test]
-    async fn in_flight_disk_continuation_survives_post_delivery_bookkeeping() {
-        let dir = tempfile::tempdir().unwrap();
-        let recording = Arc::new(RecordingContinuationSink::new());
-        let sink = Arc::new(PlantingSink {
-            inner: Arc::clone(&recording),
-            root: dir.path().to_path_buf(),
-            plant_for: std::sync::Mutex::new(None),
-        });
-        let observer = Arc::new(RecordingAppEventObserver::new());
-        let service = AppService::load(
-            dir.path(),
-            Arc::new(FixedClock::new(1_700_000_000_000)),
-            Arc::clone(&sink) as Arc<dyn ContinuationSink>,
-            observer as Arc<dyn AppEventObserver>,
-        )
-        .await
-        .unwrap();
-        recording.set_fail(true);
-        let record = service
-            .create_app(Some("Race"), "a test app", None)
+        // The runtime-only mutation does not touch that file: it must
+        // SUCCEED and persist runtime.json.
+        h.service
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3020),
+                Some(7),
+                None,
+            )
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&service, &record.id).await;
-        service.open_designer(&record.id).await.unwrap();
-        service.cancel_design(&record.id).await.unwrap(); // seq 1 queued
-        recording.set_fail(false);
+        let runtime_body = std::fs::read_to_string(
+            dir.path()
+                .join("apps")
+                .join(&record.id)
+                .join("runtime.json"),
+        )
+        .unwrap();
+        assert!(runtime_body.contains("\"starting\""), "{runtime_body}");
+        assert!(runtime_body.contains("3020"), "{runtime_body}");
+        // The record did not change, so the index was not rewritten either.
+        assert_eq!(std::fs::read_to_string(&index_path).unwrap(), index_before);
 
-        // Arm the plant: the NEXT deliver (seq 1) gets seq 2 written to disk
-        // mid-flight.
-        *sink.plant_for.lock().unwrap() = Some(record.id.clone());
+        // Control probe: a mutation that DOES touch app.json fails, proving
+        // the squat actually blocks that document.
+        let err = h.service.mark_ready(&record.id).await.unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
+
+        unsquat_document(&mirror_path, &mirror_before);
+
+        // The runtime change survives a reload (reconciled at load, the
+        // pinned port proves the write landed).
+        drop(h);
+        let h2 = harness(dir.path()).await;
+        let reloaded = h2.service.runtime_record(&record.id).await.unwrap();
+        assert_eq!(reloaded.port, Some(3020));
         assert_eq!(
-            service.redeliver_undelivered(&record.id).await.unwrap(),
-            2,
-            "the mid-flight disk continuation must be delivered in the same drain"
-        );
-        let seqs: Vec<u64> = recording.accepted().iter().map(|(_, c)| c.seq).collect();
-        assert_eq!(seqs, vec![1, 2], "both seqs delivered, in order");
-        let drained = service.interactions(&record.id).await.unwrap();
-        assert!(
-            drained.undelivered.is_empty(),
-            "nothing clobbered, nothing left"
-        );
-        assert_eq!(drained.last_delivered_seq, 2);
-        assert_eq!(
-            drained.next_seq, 3,
-            "the counter adopted the mid-flight mint — never rewound"
+            reloaded.state,
+            AppRuntimeState::Failed,
+            "reconciled at load"
         );
     }
 
-    /// Redelivery horn B regression (the review's finding 4, verified for
-    /// real): when DISK proves memory's armed gate was consumed (pending
-    /// cleared + a seq memory never minted), the merge must resolve the
-    /// state FORWARD through the shared repair table instead of persisting
-    /// an armed-gate + consumption-evidence hybrid — and a second user
-    /// confirm must be refused rather than minting a duplicate
-    /// `design_confirmed`.
+    /// A crash while the runtime was busy no longer wedges `delete_app` —
+    /// the busy state is reconciled at the next load.
     #[tokio::test]
-    async fn disk_proof_of_consumed_gate_resolves_forward_not_double_confirm() {
+    async fn delete_app_works_after_a_crash_left_the_runtime_busy() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app(Some("Proof"), "a test app", None)
+            .create_app(Some("Busy2"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-
-        // Residual window by hand: on DISK the confirm committed (gate
-        // cleared + design_confirmed minted) while MEMORY still holds the
-        // armed gate.
-        let mut on_disk = storage::load_interactions(dir.path(), &record.id).unwrap();
-        assert!(
-            on_disk.pending.is_some(),
-            "precondition: gate armed on disk too"
-        );
-        on_disk.pending = None;
-        on_disk.undelivered.push(AppContinuation {
-            seq: 1,
-            app_id: record.id.clone(),
-            kind: AppContinuationKind::DesignConfirmed,
-            payload: serde_json::json!({ "revision": 0 }),
-            created_at_ms: 9,
-        });
-        on_disk.next_seq = 2;
-        storage::save_interactions(dir.path(), &record.id, &on_disk).unwrap();
-
-        assert_eq!(
-            h.service.redeliver_undelivered(&record.id).await.unwrap(),
-            1,
-            "the proven confirm is delivered exactly once"
-        );
-        assert_eq!(
-            h.sink
-                .accepted()
-                .iter()
-                .map(|(_, c)| c.kind)
-                .collect::<Vec<_>>(),
-            vec![AppContinuationKind::DesignConfirmed]
-        );
-        // The contradiction resolved FORWARD: gate gone, state follows the
-        // evidence, and the mirror was persisted with it.
-        assert!(h
-            .service
-            .pending_interaction(&record.id)
+        h.service
+            .update_runtime_record(
+                &record.id,
+                AppRuntimeState::Starting,
+                Some(3005),
+                Some(1),
+                None,
+            )
             .await
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating
-        );
-        let mirror = std::fs::read_to_string(
-            dir.path()
-                .join("apps")
-                .join(&record.id)
-                .join("workspace/.lingxi/app.json"),
-        )
-        .unwrap();
-        assert!(mirror.contains("\"generating\""), "{mirror}");
-        // No hybrid on disk: the persisted store passes its own invariants
-        // and holds no armed gate alongside the evidence.
-        let persisted = storage::load_interactions(dir.path(), &record.id).unwrap();
-        assert!(persisted.pending.is_none());
-        assert!(persisted.undelivered.is_empty());
-        assert_eq!(persisted.last_delivered_seq, 1);
-        // A second confirm of the stale gate is REFUSED — no duplicate
-        // design_confirmed at a fresh seq.
-        let err = h
-            .service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::WorkflowStateInvalid);
-        let after = h.service.interactions(&record.id).await.unwrap();
-        assert_eq!(after.next_seq, 2, "no second continuation was minted");
-        assert!(after.undelivered.is_empty());
-        // The rolled-forward state is live: the generator's completion is
-        // accepted.
-        h.service.generation_complete(&record.id).await.unwrap();
+            .unwrap();
+        // While the process lives, the busy runtime still blocks deletion.
+        let err = h.service.delete_app(&record.id).await.unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::RuntimeBusy);
+        drop(h); // crash
+
+        let h2 = harness(dir.path()).await;
+        let reconciled = h2.service.runtime_record(&record.id).await.unwrap();
+        assert_eq!(reconciled.state, AppRuntimeState::Failed);
+        h2.service.delete_app(&record.id).await.unwrap();
+        assert!(h2.service.list_apps().await.is_empty());
     }
 
-    /// Finding 4: `last_error` is the one persisted string that TRUNCATES
-    /// instead of rejecting — refusing a runtime failure report would lose
-    /// the evidence entirely.
+    /// `last_error` is the one persisted string that TRUNCATES instead of
+    /// rejecting — refusing a runtime failure report would lose the evidence
+    /// entirely.
     #[tokio::test]
     async fn oversized_runtime_last_error_is_truncated_not_rejected() {
         let dir = tempfile::tempdir().unwrap();
@@ -4655,7 +1793,6 @@ mod tests {
             .create_app(Some("Err"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
 
         let huge = "e".repeat(MAX_TEXT_VALUE_BYTES + 500);
@@ -4720,837 +1857,10 @@ mod tests {
         assert_eq!(runtime.last_error.as_deref(), Some(exact.as_str()));
     }
 
-    /// Finding 9: a pending suggestion planted straight into the store (never
-    /// gated by `store_suggestion`) is re-validated at apply time; an
-    /// over-cap one fails typed AND is consumed so it cannot wedge the draft.
-    #[tokio::test]
-    async fn disk_planted_over_cap_suggestion_is_rejected_and_consumed() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Sugg"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service
-            .update_draft(&record.id, 0, &patch("title", "T"))
-            .await
-            .unwrap();
-        drop(h);
-
-        // Plant the poisoned suggestion via a direct storage write.
-        let mut draft: AppDesignDraft = serde_json::from_str(
-            &std::fs::read_to_string(
-                dir.path()
-                    .join("apps")
-                    .join(&record.id)
-                    .join("workspace/.lingxi/design-spec.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        draft.pending_suggestion = Some(AppDesignSuggestion {
-            suggestion_id: "sugg-planted".into(),
-            patch: AppDesignPatch {
-                ops: vec![AppDesignPatchOp::Set {
-                    field_id: "poison".into(),
-                    value: DesignValue::LongText("p".repeat(MAX_TEXT_VALUE_BYTES + 1)),
-                }],
-                note: None,
-            },
-            based_on_revision: 1,
-        });
-        storage::save_draft(dir.path(), &record.id, &draft).unwrap();
-
-        let h2 = harness(dir.path()).await;
-        let err = h2
-            .service
-            .apply_suggestion(&record.id, "sugg-planted", 1)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        let after = h2.service.draft(&record.id).await.unwrap();
-        assert!(after.pending_suggestion.is_none(), "poison is consumed");
-        assert_eq!(after.revision, 1, "nothing was applied");
-        assert!(!after.fields.contains_key("poison"));
-        assert!(
-            !h2.observer
-                .take()
-                .iter()
-                .any(|event| matches!(event, AppEvent::DesignDraftChanged { .. })),
-            "a rejected apply announces no draft change"
-        );
-        // The consumption is persisted, not just in memory.
-        drop(h2);
-        let h3 = harness(dir.path()).await;
-        assert!(h3
-            .service
-            .draft(&record.id)
-            .await
-            .unwrap()
-            .pending_suggestion
-            .is_none());
-    }
-
-    /// Finding 15: progress reports cap `stage`/`detail` like every sibling
-    /// input (rejection loses nothing — the report is not persisted) and
-    /// range-check `percent`.
-    #[tokio::test]
-    async fn generation_progress_rejects_oversized_and_out_of_range_input() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("P"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let _ = h.take_events().await;
-        let base = AppGenerationProgress {
-            app_id: record.id.clone(),
-            stage: "scaffold".into(),
-            percent: Some(100),
-            detail: Some("d".repeat(MAX_TEXT_VALUE_BYTES)),
-        };
-        // At the caps everything is accepted.
-        h.service
-            .report_generation_progress(base.clone())
-            .await
-            .unwrap();
-        assert_eq!(h.take_events().await.len(), 1);
-
-        let oversized_stage = AppGenerationProgress {
-            stage: "s".repeat(MAX_TEXT_VALUE_BYTES + 1),
-            ..base.clone()
-        };
-        let oversized_detail = AppGenerationProgress {
-            detail: Some("d".repeat(MAX_TEXT_VALUE_BYTES + 1)),
-            ..base.clone()
-        };
-        let out_of_range_percent = AppGenerationProgress {
-            percent: Some(101),
-            ..base
-        };
-        for (label, bad) in [
-            ("stage", oversized_stage),
-            ("detail", oversized_detail),
-            ("percent", out_of_range_percent),
-        ] {
-            let err = h.service.report_generation_progress(bad).await.unwrap_err();
-            assert_eq!(err.code(), AppErrorCode::InvalidRequest, "{label}");
-        }
-        assert!(
-            h.take_events().await.is_empty(),
-            "rejected reports emit nothing"
-        );
-    }
-
-    /// Finding 5: a load re-announces the pending gate of EVERY app through
-    /// the observer, so a persisted `interaction_id` whose announcement was
-    /// lost to a crash still reaches the client.
-    #[tokio::test]
-    async fn load_reannounces_every_pending_gate() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let a = h
-            .service
-            .create_app(Some("GateA"), "a test app", None)
-            .await
-            .unwrap();
-        let a = advance_to_collecting_spec(&h.service, &a.id).await;
-        let designer_gate = h.service.open_designer(&a.id).await.unwrap();
-        let b = h
-            .service
-            .create_app(Some("GateB"), "a test app", None)
-            .await
-            .unwrap();
-        let b = advance_to_collecting_spec(&h.service, &b.id).await;
-        let gate = h.service.open_designer(&b.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &b.id).await;
-        h.service
-            .confirm_design(&b.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
-        h.service.generation_complete(&b.id).await.unwrap();
-        let preview_gate = h.service.validation_passed(&b.id).await.unwrap();
-        drop(h);
-
-        let h2 = harness(dir.path()).await;
-        assert_eq!(
-            h2.take_events().await,
-            vec![
-                AppEvent::DesignerRequested {
-                    app_id: a.id.clone(),
-                    interaction_id: designer_gate.interaction_id.clone(),
-                    revision: 0,
-                },
-                AppEvent::PreviewReady {
-                    app_id: b.id.clone(),
-                    interaction_id: preview_gate.interaction_id.clone(),
-                    revision: 0,
-                    url: None,
-                },
-            ],
-            "both pending gates are announced at load, in stored order"
-        );
-    }
-
-    /// The host subscribes its observers AFTER `load` returns, so the load-time
-    /// announcement lands in a fanout with no subscribers and is dropped. A
-    /// relaunched client is then left without the pending `interaction_id` that
-    /// gates `confirm_design`, and the UI — seeing no id — tries
-    /// `open_designer`, which is illegal from `awaiting_spec_confirmation`.
-    /// `resync_pending_gates` is what re-delivers it to a late subscriber.
-    #[tokio::test]
-    async fn resync_reannounces_pending_gates_to_a_late_subscriber() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let a = h
-            .service
-            .create_app(Some("LateSub"), "a test app", None)
-            .await
-            .unwrap();
-        let a = advance_to_collecting_spec(&h.service, &a.id).await;
-        let gate = h.service.open_designer(&a.id).await.unwrap();
-        drop(h);
-
-        let h2 = harness(dir.path()).await;
-        // Drain the load-time announcement: this stands in for the events the
-        // real host never sees, because it has not subscribed yet.
-        let _ = h2.take_events().await;
-
-        h2.service.resync_pending_gates().await;
-
-        assert_eq!(
-            h2.take_events().await,
-            vec![AppEvent::DesignerRequested {
-                app_id: a.id.clone(),
-                interaction_id: gate.interaction_id.clone(),
-                revision: 0,
-            }],
-            "resync must re-deliver the armed gate to an observer that attached after load"
-        );
-    }
-
-    /// Finding 13: BOTH gate-opening event pairs are state-change-first —
-    /// `WorkflowChanged`, then the gate announcement. Order-sensitive on
-    /// purpose.
-    #[tokio::test]
-    async fn gate_opening_event_pairs_are_state_change_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Order"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let _ = h.take_events().await;
-
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::WorkflowChanged {
-                    app_id: record.id.clone(),
-                    state: AppWorkflowState::AwaitingSpecConfirmation,
-                    detail: None,
-                },
-                AppEvent::DesignerRequested {
-                    app_id: record.id.clone(),
-                    interaction_id: gate.interaction_id.clone(),
-                    revision: 0,
-                },
-            ],
-            "open_designer must announce the state change BEFORE the gate"
-        );
-
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
-        h.service.generation_complete(&record.id).await.unwrap();
-        let _ = h.take_events().await;
-        let preview = h.service.validation_passed(&record.id).await.unwrap();
-        assert_eq!(
-            h.take_events().await,
-            vec![
-                AppEvent::WorkflowChanged {
-                    app_id: record.id.clone(),
-                    state: AppWorkflowState::AwaitingPreviewConfirmation,
-                    detail: None,
-                },
-                AppEvent::PreviewReady {
-                    app_id: record.id.clone(),
-                    interaction_id: preview.interaction_id.clone(),
-                    revision: 0,
-                    url: None,
-                },
-            ],
-            "validation_passed must announce the state change BEFORE the gate"
-        );
-    }
-
-    /// Finding 8: a crash while the runtime was busy no longer wedges
-    /// `delete_app` — the busy state is reconciled at the next load.
-    #[tokio::test]
-    async fn delete_app_works_after_a_crash_left_the_runtime_busy() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Busy2"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        h.service
-            .update_runtime_record(
-                &record.id,
-                AppRuntimeState::Starting,
-                Some(3005),
-                Some(1),
-                None,
-            )
-            .await
-            .unwrap();
-        // While the process lives, the busy runtime still blocks deletion.
-        let err = h.service.delete_app(&record.id).await.unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::RuntimeBusy);
-        drop(h); // crash
-
-        let h2 = harness(dir.path()).await;
-        let reconciled = h2.service.runtime_record(&record.id).await.unwrap();
-        assert_eq!(reconciled.state, AppRuntimeState::Failed);
-        h2.service.delete_app(&record.id).await.unwrap();
-        assert!(h2.service.list_apps().await.is_empty());
-    }
-
-    /// Finding 14: a mutation only rewrites the documents it changed — a
-    /// runtime-only update must succeed even when the design-spec document
-    /// cannot be written, and must not rewrite the index. Injection is a
-    /// directory squat on `design-spec.json` (finding 13): it blocks that
-    /// document for EVERY uid, so the test asserts under root too.
-    #[tokio::test]
-    async fn runtime_only_mutation_skips_untouched_documents() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Lean"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let index_path = dir.path().join("apps/index.json");
-        let index_before = std::fs::read_to_string(&index_path).unwrap();
-
-        // Block design-spec.json with a squatting directory: atomic writes
-        // onto it become impossible (for any uid).
-        let draft_path = dir
-            .path()
-            .join("apps")
-            .join(&record.id)
-            .join("workspace/.lingxi/design-spec.json");
-        let draft_before = squat_document(&draft_path);
-
-        // The runtime-only mutation no longer touches that file: it must
-        // SUCCEED and persist runtime.json.
-        h.service
-            .update_runtime_record(
-                &record.id,
-                AppRuntimeState::Starting,
-                Some(3020),
-                Some(7),
-                None,
-            )
-            .await
-            .unwrap();
-        let runtime_body = std::fs::read_to_string(
-            dir.path()
-                .join("apps")
-                .join(&record.id)
-                .join("runtime.json"),
-        )
-        .unwrap();
-        assert!(runtime_body.contains("\"starting\""), "{runtime_body}");
-        assert!(runtime_body.contains("3020"), "{runtime_body}");
-        // The record did not change, so the index was not rewritten either.
-        assert_eq!(std::fs::read_to_string(&index_path).unwrap(), index_before);
-
-        // Control probe: a mutation that DOES touch design-spec.json fails,
-        // proving the squat actually blocks that document.
-        let err = h
-            .service
-            .update_draft(&record.id, 0, &patch("t", "v"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-
-        unsquat_document(&draft_path, &draft_before);
-
-        // The runtime change survives a reload (reconciled per finding 8, the
-        // pinned port proves the write landed).
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        let reloaded = h2.service.runtime_record(&record.id).await.unwrap();
-        assert_eq!(reloaded.port, Some(3020));
-        assert_eq!(
-            reloaded.state,
-            AppRuntimeState::Failed,
-            "reconciled at load"
-        );
-    }
-
-    /// Finding 2 (prefix property): the compensating rollback restores
-    /// originals in REVERSE canonical order, so dying right after the
-    /// mirror-only restore leaves BY CONSTRUCTION the byte-identical state a
-    /// forward mid-batch crash leaves (new design-spec + interactions, old
-    /// mirror + index) — a state the existing evidence rules repair without
-    /// any new arm: the transition rolls forward, the continuation delivers
-    /// exactly once, nothing wedges.
-    #[tokio::test]
-    async fn rollback_death_after_mirror_restore_is_a_forward_crash_shape() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Hybrid"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service.flush_events().await;
-        drop(h);
-
-        // Write the hybrid directly via storage helpers: the confirm's full
-        // batch landed, the index write failed, the reverse rollback
-        // restored the MIRROR and then died — design-spec + interactions
-        // hold the NEW documents, mirror + index the OLD ones. This is
-        // exactly `write_order_prefix_through(Interactions)`, i.e. the
-        // forward-crash prefix shape.
-        let committed = storage::load_all(dir.path()).unwrap();
-        let mut confirmed = committed[0].clone();
-        confirmed.draft.plan_for_revision = Some(confirmed.draft.revision);
-        confirmed
-            .confirm_design(&gate.interaction_id, 0, 1_700_000_000_100)
-            .unwrap();
-        storage::save_app_files_steps(
-            dir.path(),
-            &confirmed,
-            storage::write_order_prefix_through(storage::AppDocWriteStep::Interactions),
-        )
-        .unwrap();
-
-        // The load repairs it exactly like a forward mid-batch crash: the
-        // transition rolls FORWARD, the queued continuation is truthful and
-        // delivers exactly once, and the workflow continues.
-        let h2 = harness(dir.path()).await;
-        assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating
-        );
-        assert!(h2
-            .service
-            .pending_interaction(&record.id)
-            .await
-            .unwrap()
-            .is_none());
-        assert_eq!(h2.service.redeliver_all_undelivered().await.unwrap(), 1);
-        let accepted = h2.sink.accepted();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].1.kind, AppContinuationKind::DesignConfirmed);
-        h2.service.generation_complete(&record.id).await.unwrap();
-    }
-
-    /// Finding 2 (deeper rollback death): dying AFTER the mirror and
-    /// interactions were already restored (only the design spec still new)
-    /// leaves the pre-transition state on disk — the load must come up with
-    /// the ORIGINAL gate still armed and NO committed transition; the
-    /// leftover new design-spec (a `confirmedRevision` residue) is inert and
-    /// is overwritten by the eventual real confirm.
-    #[tokio::test]
-    async fn rollback_death_before_draft_restore_keeps_the_gate_armed() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Hybrid2"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service.flush_events().await;
-        drop(h);
-
-        let committed = storage::load_all(dir.path()).unwrap();
-        let mut confirmed = committed[0].clone();
-        confirmed.draft.plan_for_revision = Some(confirmed.draft.revision);
-        confirmed
-            .confirm_design(&gate.interaction_id, 0, 1_700_000_000_100)
-            .unwrap();
-        // Only the FIRST canonical step still holds the new document.
-        storage::save_app_files_steps(
-            dir.path(),
-            &confirmed,
-            storage::write_order_prefix_through(storage::AppDocWriteStep::DesignSpec),
-        )
-        .unwrap();
-
-        let h2 = harness(dir.path()).await;
-        assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::AwaitingSpecConfirmation,
-            "no committed transition"
-        );
-        let reloaded = h2.service.interactions(&record.id).await.unwrap();
-        assert_eq!(
-            reloaded.pending.as_ref().map(|p| p.interaction_id.as_str()),
-            Some(gate.interaction_id.as_str()),
-            "the original gate is still armed"
-        );
-        assert!(reloaded.undelivered.is_empty(), "no phantom continuation");
-        // The armed gate is satisfiable and completes the flow normally.
-        h2.service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
-        assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating
-        );
-        assert_eq!(h2.sink.accepted().len(), 1);
-    }
-
-    /// Finding 3 Horn A: the POST-delivery persist re-reads disk and merges,
-    /// so a continuation another writer landed on disk while a delivery was
-    /// in flight survives (and is then delivered) instead of being erased by
-    /// a memory-derived rewrite.
-    #[tokio::test]
-    async fn post_delivery_persist_merges_continuations_landed_mid_delivery() {
-        use async_trait::async_trait;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        /// Sink that, on its FIRST delivery, plants an extra continuation
-        /// straight onto disk — modelling a concurrent writer landing
-        /// between the pre- and post-delivery persists.
-        struct PlantingSink {
-            inner: RecordingContinuationSink,
-            root: PathBuf,
-            planted: AtomicBool,
-        }
-        #[async_trait]
-        impl ContinuationSink for PlantingSink {
-            async fn deliver(
-                &self,
-                app_id: &str,
-                continuation: &AppContinuation,
-            ) -> Result<(), AppError> {
-                if !self.planted.swap(true, Ordering::SeqCst) {
-                    let mut disk = storage::load_interactions(&self.root, app_id).unwrap();
-                    disk.undelivered.push(AppContinuation {
-                        seq: disk.next_seq,
-                        app_id: app_id.to_string(),
-                        kind: AppContinuationKind::DesignCancelled,
-                        payload: serde_json::json!({}),
-                        created_at_ms: 77,
-                    });
-                    disk.next_seq += 1;
-                    storage::save_interactions(&self.root, app_id, &disk).unwrap();
-                }
-                self.inner.deliver(app_id, continuation).await
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let sink = Arc::new(PlantingSink {
-            inner: RecordingContinuationSink::new(),
-            root: dir.path().to_path_buf(),
-            planted: AtomicBool::new(false),
-        });
-        let observer = Arc::new(RecordingAppEventObserver::new());
-        let service = AppService::load(
-            dir.path(),
-            Arc::new(FixedClock::new(1_700_000_000_000)),
-            Arc::clone(&sink) as Arc<dyn ContinuationSink>,
-            observer as Arc<dyn AppEventObserver>,
-        )
-        .await
-        .unwrap();
-        let record = service
-            .create_app(Some("Plant"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&service, &record.id).await;
-        service.open_designer(&record.id).await.unwrap();
-        // cancel_design queues seq 1 and drains: delivering seq 1 plants
-        // seq 2 on disk mid-flight; the post-delivery merge must keep it and
-        // the drain loop must then deliver it too.
-        service.cancel_design(&record.id).await.unwrap();
-
-        let seqs: Vec<u64> = sink.inner.accepted().iter().map(|(_, c)| c.seq).collect();
-        assert_eq!(
-            seqs,
-            vec![1, 2],
-            "the mid-delivery disk-only seq must survive and deliver"
-        );
-        let drained = service.interactions(&record.id).await.unwrap();
-        assert!(drained.undelivered.is_empty());
-        assert_eq!(drained.last_delivered_seq, 2);
-        assert_eq!(drained.next_seq, 3, "the planted mint is adopted");
-        // A fresh process agrees — nothing was clobbered on disk.
-        drop(service);
-        let reloaded = storage::load_all(dir.path()).unwrap();
-        assert_eq!(reloaded[0].interactions.last_delivered_seq, 2);
-        assert!(reloaded[0].interactions.undelivered.is_empty());
-    }
-
-    /// Finding 3 Horn B: a merge that would produce an armed-gate +
-    /// queued-consumption hybrid (memory's gate armed, disk's atomic write
-    /// cleared it and minted the consumption continuation) resolves through
-    /// the SAME evidence rules load-time repair uses: the gate is consumed,
-    /// the state follows the evidence, and a re-confirm cannot mint a
-    /// duplicate confirmation.
-    #[tokio::test]
-    async fn merged_armed_gate_with_queued_consumption_resolves_per_the_repair_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("HornB"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        h.service.flush_events().await;
-
-        // Residual window on disk: the confirm's interactions write landed
-        // (gate cleared + design_confirmed minted) but was rolled back out
-        // of memory — memory still holds the armed gate.
-        let mut disk = storage::load_interactions(dir.path(), &record.id).unwrap();
-        disk.pending = None;
-        disk.undelivered.push(AppContinuation {
-            seq: disk.next_seq,
-            app_id: record.id.clone(),
-            kind: AppContinuationKind::DesignConfirmed,
-            payload: serde_json::json!({ "revision": 0 }),
-            created_at_ms: 88,
-        });
-        disk.next_seq += 1;
-        storage::save_interactions(dir.path(), &record.id, &disk).unwrap();
-
-        // The merge resolves the contradiction: evidence wins, exactly like
-        // the load-time repair table (design_confirmed → generating).
-        assert_eq!(
-            h.service.redeliver_undelivered(&record.id).await.unwrap(),
-            1
-        );
-        let accepted = h.sink.accepted();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].1.kind, AppContinuationKind::DesignConfirmed);
-        assert!(
-            h.service
-                .pending_interaction(&record.id)
-                .await
-                .unwrap()
-                .is_none(),
-            "the provably-consumed gate must not stay armed"
-        );
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating,
-            "the state follows the consumption evidence"
-        );
-        // No double delivery: the stale gate id cannot re-confirm.
-        let err = h
-            .service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::WorkflowStateInvalid);
-        assert_eq!(
-            h.sink.accepted().len(),
-            1,
-            "exactly one confirmation ever delivered"
-        );
-        // The resolution was persisted coherently: a fresh load agrees.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Generating
-        );
-        assert!(h2
-            .service
-            .pending_interaction(&record.id)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    /// Finding 4: the undelivered queue is byte-capped (4 MiB serialized) —
-    /// legal maximum-size prompts can no longer grow `interactions.json`
-    /// toward the 8 MiB document bound where every gate op would wedge as
-    /// `invalid_request`; the oldest entries drop instead and the store
-    /// stays loadable. (Before the byte cap NOTHING would drop here — the
-    /// count cap of 256 is never reached.)
-    #[tokio::test]
-    async fn legal_max_size_prompts_never_wedge_gate_ops() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        h.sink.set_fail(true); // continuations stay queued
-        let record = h
-            .service
-            .create_app(Some("Big"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        let gate = h.service.open_designer(&record.id).await.unwrap();
-        stamp_fresh_plan(&h.service, &record.id).await;
-        h.service
-            .confirm_design(&record.id, &gate.interaction_id, 0)
-            .await
-            .unwrap();
-        h.service.generation_complete(&record.id).await.unwrap();
-        h.service.validation_passed(&record.id).await.unwrap();
-        // A legal prompt at the cap whose JSON escaping expands 6× — each
-        // queued continuation serializes to ~120 KB, so ~35 of them hit the
-        // 4 MiB budget (and ~68 would have crossed the 8 MiB doc bound).
-        let prompt = "\u{1}".repeat(MAX_PROMPT_BYTES);
-        for _ in 0..45 {
-            h.service
-                .request_revision(&record.id, &prompt)
-                .await
-                .unwrap();
-            h.service.revision_ready(&record.id).await.unwrap();
-            h.service.validation_passed(&record.id).await.unwrap();
-        }
-        let interactions = h.service.interactions(&record.id).await.unwrap();
-        assert!(
-            interactions.undelivered.first().map(|c| c.seq) > Some(1),
-            "the oldest entries must have been dropped (byte cap engaged): first {:?}",
-            interactions.undelivered.first().map(|c| c.seq)
-        );
-        assert!(
-            interactions.undelivered.len() < 45,
-            "{} entries retained — the byte cap never engaged",
-            interactions.undelivered.len()
-        );
-        // The persisted document stays comfortably inside the load bound.
-        let doc_len = std::fs::metadata(
-            dir.path()
-                .join("apps")
-                .join(&record.id)
-                .join("interactions.json"),
-        )
-        .unwrap()
-        .len();
-        assert!(doc_len <= storage::MAX_DOC_BYTES, "{doc_len} bytes");
-        // And the store reloads cleanly with the capped queue intact.
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        let reloaded = h2.service.interactions(&record.id).await.unwrap();
-        assert_eq!(reloaded.undelivered.len(), interactions.undelivered.len());
-    }
-
-    /// Finding 8: a stale suggestion (based_on_revision behind the current
-    /// draft revision) is rejected with a typed `revision_conflict`,
-    /// CONSUMED (persisted), announced via `DesignConflict`, and the user's
-    /// newer fields are untouched.
-    #[tokio::test]
-    async fn stale_suggestion_is_rejected_consumed_and_announced() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Stale"), "a test app", None)
-            .await
-            .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
-        // Suggestion computed against revision 0…
-        let suggestion = h
-            .service
-            .store_suggestion(&record.id, patch("accent", "#old"))
-            .await
-            .unwrap();
-        assert_eq!(suggestion.based_on_revision, 0);
-        // …then the user edits on to a much newer revision.
-        let mut revision = 0;
-        for i in 0..3 {
-            revision = h
-                .service
-                .update_draft(&record.id, revision, &patch("title", &format!("v{i}")))
-                .await
-                .unwrap();
-        }
-        assert_eq!(revision, 3);
-        let _ = h.take_events().await;
-
-        let err = h
-            .service
-            .apply_suggestion(&record.id, &suggestion.suggestion_id, revision)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                AppError::RevisionConflict {
-                    expected: 0,
-                    actual: 3
-                }
-            ),
-            "typed conflict must carry based_on vs current: {err}"
-        );
-        let events = h.take_events().await;
-        assert_eq!(
-            events,
-            vec![AppEvent::DesignConflict {
-                app_id: record.id.clone(),
-                expected_revision: 0,
-                actual_revision: 3,
-            }],
-            "the rejection is announced, and no draft change is"
-        );
-        let draft = h.service.draft(&record.id).await.unwrap();
-        assert_eq!(draft.revision, 3, "nothing applied");
-        assert_eq!(
-            draft.fields.get("title"),
-            Some(&DesignValue::ShortText("v2".into())),
-            "the user's newer edit survives"
-        );
-        assert!(
-            !draft.fields.contains_key("accent"),
-            "the stale patch never landed"
-        );
-        assert!(
-            draft.pending_suggestion.is_none(),
-            "the stale suggestion is consumed"
-        );
-        // Consumption persisted: a fresh load agrees, and a replay fails as
-        // interaction_invalid (nothing pending).
-        drop(h);
-        let h2 = harness(dir.path()).await;
-        assert!(h2
-            .service
-            .draft(&record.id)
-            .await
-            .unwrap()
-            .pending_suggestion
-            .is_none());
-        let err = h2
-            .service
-            .apply_suggestion(&record.id, &suggestion.suggestion_id, 3)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InteractionInvalid);
-    }
-
-    /// Finding 9: two service instances over one root coordinate through the
-    /// locked, foreign-preserving index transactions — each instance's
-    /// creates survive the other's writes, and a delete stays authoritative
-    /// without resurrecting or touching the other instance's app.
+    /// Two service instances over one root coordinate through the locked,
+    /// foreign-preserving index transactions — each instance's creates
+    /// survive the other's writes, and a delete stays authoritative without
+    /// resurrecting or touching the other instance's app.
     #[tokio::test]
     async fn two_service_instances_preserve_each_others_index_entries() {
         let dir = tempfile::tempdir().unwrap();
@@ -5561,14 +1871,12 @@ mod tests {
             .create_app(Some("From A"), "a test app", None)
             .await
             .unwrap();
-        let app1 = advance_to_collecting_spec(&a.service, &app1.id).await;
         // B has never seen app1; its index write must preserve it.
         let app2 = b
             .service
             .create_app(Some("From B"), "a test app", None)
             .await
             .unwrap();
-        let app2 = advance_to_collecting_spec(&b.service, &app2.id).await;
         let on_disk = storage::load_all(dir.path()).unwrap();
         let mut ids_on_disk: Vec<&str> = on_disk.iter().map(|app| app.record.id.as_str()).collect();
         ids_on_disk.sort_unstable();
@@ -5588,7 +1896,6 @@ mod tests {
             .create_app(Some("A again"), "a test app", None)
             .await
             .unwrap();
-        let app3 = advance_to_collecting_spec(&a.service, &app3.id).await;
         let final_state = storage::load_all(dir.path()).unwrap();
         let mut final_ids: Vec<&str> = final_state
             .iter()
@@ -5625,9 +1932,9 @@ mod tests {
         .await
     }
 
-    /// Finding 11: an observer calling back into an emitting path PANICS
-    /// with a clear message (caught here inside the observer) instead of
-    /// silently deadlocking the emission queue forever.
+    /// An observer calling back into an emitting path PANICS with a clear
+    /// message (caught here inside the observer) instead of silently
+    /// deadlocking the emission queue forever.
     #[tokio::test]
     async fn reentrant_observer_panics_instead_of_deadlocking() {
         use async_trait::async_trait;
@@ -5666,7 +1973,6 @@ mod tests {
             AppService::load(
                 dir.path(),
                 Arc::new(FixedClock::new(1_700_000_000_000)),
-                Arc::new(RecordingContinuationSink::new()) as Arc<dyn ContinuationSink>,
                 Arc::clone(&observer) as Arc<dyn AppEventObserver>,
             )
             .await
@@ -5692,9 +1998,9 @@ mod tests {
         );
     }
 
-    /// Finding 11: a caller future dropped around a mutation can no longer
-    /// lose the mutation's events — whenever the mutation committed, its
-    /// FULL event sequence is delivered; when it did not commit, nothing is.
+    /// A caller future dropped around a mutation can no longer lose the
+    /// mutation's events — whenever the mutation committed, its event is
+    /// delivered; when it did not commit, nothing is.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropped_caller_never_loses_a_committed_mutations_events() {
         let dir = tempfile::tempdir().unwrap();
@@ -5704,15 +2010,26 @@ mod tests {
             .create_app(Some("Drop"), "a test app", None)
             .await
             .unwrap();
-        let record = advance_to_collecting_spec(&h.service, &record.id).await;
         let _ = h.take_events().await;
         let observer = Arc::clone(&h.observer);
         let service = Arc::new(h.service);
         for i in 0..20u32 {
+            // Current runtime state is always Stopped or Failed here, both
+            // legal sources for Starting.
             let call = {
                 let service = Arc::clone(&service);
                 let app_id = record.id.clone();
-                tokio::spawn(async move { service.open_designer(&app_id).await })
+                tokio::spawn(async move {
+                    service
+                        .update_runtime_record(
+                            &app_id,
+                            AppRuntimeState::Starting,
+                            Some(3999),
+                            Some(7),
+                            None,
+                        )
+                        .await
+                })
             };
             if i % 2 == 0 {
                 tokio::task::yield_now().await; // let some iterations commit
@@ -5720,24 +2037,29 @@ mod tests {
             call.abort();
             let _ = call.await;
             service.flush_events().await;
-            let committed = service.record(&record.id).await.unwrap().workflow_state
-                == AppWorkflowState::AwaitingSpecConfirmation;
+            let committed = service.runtime_record(&record.id).await.unwrap().state
+                == AppRuntimeState::Starting;
             let events = observer.take();
             if committed {
                 assert!(
                     events.iter().any(|event| matches!(
                         event,
-                        AppEvent::WorkflowChanged {
-                            state: AppWorkflowState::AwaitingSpecConfirmation,
-                            ..
-                        }
-                    )) && events
-                        .iter()
-                        .any(|event| matches!(event, AppEvent::DesignerRequested { .. })),
-                    "iteration {i}: committed mutation lost part of its event \
-                     sequence: {events:?}"
+                        AppEvent::RuntimeChanged { runtime, .. }
+                            if runtime.state == AppRuntimeState::Starting
+                    )),
+                    "iteration {i}: committed mutation lost its event: {events:?}"
                 );
-                service.cancel_design(&record.id).await.unwrap();
+                // Reset for the next iteration (Starting -> Failed is legal).
+                service
+                    .update_runtime_record(
+                        &record.id,
+                        AppRuntimeState::Failed,
+                        None,
+                        None,
+                        Some("reset".into()),
+                    )
+                    .await
+                    .unwrap();
                 service.flush_events().await;
                 let _ = observer.take();
             } else {

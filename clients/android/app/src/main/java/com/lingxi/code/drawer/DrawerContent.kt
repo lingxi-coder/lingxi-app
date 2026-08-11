@@ -71,6 +71,18 @@ data class DrawerProductionData(
 )
 
 /**
+ * The active local-app conversation scope, surfaced at the top of the 对话
+ * tab: the app's display name plus its workspace-scoped session catalog (the
+ * cached `ListAppSessions` reply, init session first). Non-null only while
+ * the engine source is bound to a local app's workspace.
+ */
+data class DrawerAppScope(
+    val appId: String,
+    val appName: String,
+    val sessions: List<SessionRow>,
+)
+
+/**
  * The 对话 / 项目 / 定时 drawer content — the Android analog of the iOS `Drawer`,
  * rendered as the `drawerContent` of a Material 3 `ModalNavigationDrawer` (the
  * gesture, scrim and slide are owned by the M3 component, so this is just the
@@ -113,6 +125,12 @@ fun DrawerContent(
     onCreateCron: () -> Unit = {},
     appsCount: Int = 0,
     onOpenApps: () -> Unit = {},
+    /** The active local-app scope's name + sessions, or null outside app scope. */
+    appScope: DrawerAppScope? = null,
+    /** Resume one of the active app's sessions (same engine scope). */
+    onSelectAppScopeSession: (SessionRef) -> Unit = {},
+    /** Start a fresh session in the active app's workspace. */
+    onNewAppScopeSession: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -174,11 +192,24 @@ fun DrawerContent(
                 .padding(top = 4.dp, bottom = 8.dp),
         ) {
             when (ui.section) {
-                DrawerSection.Chats -> EngineSessionsSection(
-                    state = engineSessions.copy(rows = filteredEngineSessions),
-                    activeSession = ui.activeSession,
-                    onSelectSession = { onResumeSession(it) },
-                )
+                DrawerSection.Chats -> Column(Modifier.fillMaxWidth()) {
+                    // The active app's sessions render ABOVE the global list
+                    // (the project-section pattern: name header, indented
+                    // session rows, a trailing 新会话 affordance).
+                    appScope?.let { scope ->
+                        AppScopeSection(
+                            scope = scope.copy(sessions = filterSessions(scope.sessions, query)),
+                            activeSession = ui.activeSession,
+                            onSelectSession = onSelectAppScopeSession,
+                            onNewSession = onNewAppScopeSession,
+                        )
+                    }
+                    EngineSessionsSection(
+                        state = engineSessions.copy(rows = filteredEngineSessions),
+                        activeSession = ui.activeSession,
+                        onSelectSession = { onResumeSession(it) },
+                    )
+                }
 
                 DrawerSection.Projects -> when {
                     projects == null -> DrawerCollectionState(stringResource(R.string.drawer_projects_unavailable))

@@ -122,9 +122,17 @@ fun ChatScreen(
     onDismissComputerUseSetup: () -> Unit = {},
     /** Opens the full-screen terminal with [initCommand] prefilled, not run. */
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
+    /** Submit the answers for the pending questionnaire card. */
+    onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
+    /** Dismiss the pending questionnaire card. */
+    onCancelQuestion: (requestId: ULong) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
+    // The ONE ordered transcript list. Every row the LazyColumn shows comes
+    // from this builder, so ordering and item keys live in a single testable
+    // place (see ChatRenderItem.kt).
+    val renderItems = buildChatRenderItems(state)
     val followsLatest by remember {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -143,12 +151,10 @@ fun ChatScreen(
         state.shellTools.size,
         state.agentRun?.revision,
         state.streaming,
+        state.pendingQuestions.size,
     ) {
         if (!followsLatest) return@LaunchedEffect
-        val streamingMessageRows = if (state.streamingMessage != null) 1 else 0
-        val activityRows = if (state.agentRun != null || state.streaming) 1 else 0
-        val count = state.messages.size + streamingMessageRows + state.shellTools.size + activityRows
-        if (count > 0) listState.scrollToItem(count - 1)
+        if (renderItems.isNotEmpty()) listState.scrollToItem(renderItems.size - 1)
     }
 
     Box(modifier = modifier.fillMaxSize().background(t.windowBg)) {
@@ -175,9 +181,12 @@ fun ChatScreen(
             )
             MessageList(
                 state = state,
+                items = renderItems,
                 listState = listState,
                 onShare = onShare,
                 onOpenTerminal = onOpenTerminal,
+                onAnswerQuestion = onAnswerQuestion,
+                onCancelQuestion = onCancelQuestion,
                 modifier = Modifier.weight(1f),
             )
             OfflineBanner(
@@ -349,9 +358,12 @@ private fun IconButton(
 @Composable
 private fun MessageList(
     state: ChatState,
+    items: List<ChatRenderItem>,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onShare: (String) -> Unit = {},
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
+    onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
+    onCancelQuestion: (requestId: ULong) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val currentOnShare by rememberUpdatedState(onShare)
@@ -381,46 +393,42 @@ private fun MessageList(
             start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp,
         ),
     ) {
-        if (state.isNew && state.messages.isEmpty() && !state.streaming) {
-            item(key = "empty") { EmptyState() }
-        }
+        // ONE list, ONE items() block: order and keys come from
+        // buildChatRenderItems, which preserves the exact visual order and
+        // stable keys of the old hand-stitched blocks.
         items(
-            items = state.messages,
-            key = { it.id },
-            contentType = { "message" },
-        ) { m ->
-            MessageBubble(
-                message = m,
-                onShare = stableOnShare,
-                onOpenLink = stableOnOpenLink,
-            )
-        }
-        state.streamingMessage?.let { message ->
-            item(key = message.id, contentType = "message") {
-                MessageBubble(
-                    message = message,
+            items = items,
+            key = { it.key },
+            contentType = { it.contentType },
+        ) { item ->
+            when (item) {
+                ChatRenderItem.Empty -> EmptyState()
+                is ChatRenderItem.Message -> MessageBubble(
+                    message = item.message,
                     onShare = stableOnShare,
                     onOpenLink = stableOnOpenLink,
                 )
-            }
-        }
-        items(state.shellTools, key = { "shell-${it.taskId}" }) { shell ->
-            ShellToolCard(
-                state = shell,
-                onOpenTerminal = onOpenTerminal,
-                modifier = Modifier.padding(vertical = 4.dp),
-            )
-        }
-        state.agentRun?.let { run ->
-            item(key = "agent-run-${run.turnId}") {
-                AgentRunTimeline(
-                    state = run,
+                is ChatRenderItem.Streaming -> MessageBubble(
+                    message = item.message,
+                    onShare = stableOnShare,
+                    onOpenLink = stableOnOpenLink,
+                )
+                is ChatRenderItem.Shell -> ShellToolCard(
+                    state = item.shell,
+                    onOpenTerminal = onOpenTerminal,
                     modifier = Modifier.padding(vertical = 4.dp),
                 )
+                is ChatRenderItem.AgentRun -> AgentRunTimeline(
+                    state = item.run,
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+                ChatRenderItem.StreamingIndicator -> StreamingRow()
+                is ChatRenderItem.Question -> AskUserQuestionCard(
+                    request = item.request,
+                    onSubmit = onAnswerQuestion,
+                    onCancel = onCancelQuestion,
+                )
             }
-        }
-        if (state.streaming && state.agentRun == null) {
-            item(key = "streaming") { StreamingRow() }
         }
     }
 }

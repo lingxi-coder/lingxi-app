@@ -35,6 +35,15 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn inspect_ui(&self, input: Value) -> Result<Value, String>;
     async fn act_on_ui(&self, input: Value) -> Result<Value, String>;
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String>;
+    /// Build the app workspace with the offline toolchain (v3 agent-driven
+    /// flow): replaces the build source, runs the fixed Vite/Next build under
+    /// the runtime's resource budget, and stamps the app `ready` on success.
+    async fn build_app(&self, input: Value) -> Result<Value, String>;
+    /// Update the app manifest's declared `collections` / `allowed_domains` /
+    /// `capabilities` (v3: the plan-derived reconciliation is gone; the agent
+    /// declares schema explicitly). Destructive data migrations still require
+    /// the user's approval through the host prompt.
+    async fn update_manifest(&self, input: Value) -> Result<Value, String>;
     /// Read (and by default consume) an app's mailbox.
     ///
     /// Goes through the host for the same reason `mutate_data` does: the
@@ -43,26 +52,37 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// `agent.post` — the app's own timer posting while the agent reads is
     /// the INTENDED usage, not an exotic interleaving.
     async fn read_app_events(&self, input: Value) -> Result<Value, String>;
-    /// Kick off background questionnaire authoring for `app_id`, fire-and-
-    /// forget — mirrors `host.rs`'s wire-client trigger exactly (same shared
-    /// `spawn_authoring`), so an MCP-created app does not sit in
-    /// `authoring_questionnaire` forever with the tool description's own
-    /// claim ("start[s] the LLM-authored design questionnaire") having been
-    /// false the whole time. Never fails the caller: the `create` tool call
-    /// already committed the record before this runs, and the app stays
-    /// recoverable (load-time sweep, `retry_questionnaire`) even if THIS
-    /// call is dropped entirely (host capability not yet attached). `epoch`
-    /// MUST be the `llm_round` the `create_app` call that produced `app_id`
-    /// returned — captured synchronously, never re-read later (see
-    /// [`local_apps::AppRecord::llm_round`]'s doc).
-    async fn trigger_authoring(&self, app_id: String, epoch: u64);
+    /// Lay down the fixed template workspace for a freshly created app
+    /// (v3: `create` scaffolds the workspace immediately — there is no
+    /// background pipeline anymore; the conversation agent edits the
+    /// scaffolded source in place and calls `build`).
+    async fn scaffold_app(&self, app_id: String) -> Result<(), String>;
 }
+
+/// Live source of the CURRENT conversation session uuid, attached by the
+/// engine host. `create` stamps the new app's `conversation_id` from THIS —
+/// never from model-supplied input — so an agent cannot bind an app to an
+/// arbitrary (or another user's) conversation.
+pub type SessionIdProvider = dyn Fn() -> Option<String> + Send + Sync;
+
+/// Connection-scoped init-session minter, attached by the engine host: forks
+/// the origin conversation into the app's workspace catalog (or anchors an
+/// empty session) and returns the minted bare uuid. Lives at the connection
+/// layer because ONLY it knows the source conversation's cwd.
+pub type InitSessionMinter = dyn Fn(
+        local_apps::AppRecord,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
+    > + Send
+    + Sync;
 
 /// Mobile-local implementation of the MCP transport boundary.
 pub struct LocalAppsMcpTransport {
     root: PathBuf,
     service: OnceLock<Arc<AppService>>,
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
+    session_id: OnceLock<Arc<SessionIdProvider>>,
+    init_session_minter: OnceLock<Arc<InitSessionMinter>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
 }
 
@@ -73,8 +93,26 @@ impl LocalAppsMcpTransport {
             root,
             service: OnceLock::new(),
             host: OnceLock::new(),
+            session_id: OnceLock::new(),
+            init_session_minter: OnceLock::new(),
             connections: StdMutex::new(HashSet::new()),
         }
+    }
+
+    /// Attach the connection-scoped init-session minter (engine host boot).
+    pub fn attach_init_session_minter(
+        &self,
+        minter: Arc<InitSessionMinter>,
+    ) -> Result<(), Arc<InitSessionMinter>> {
+        self.init_session_minter.set(minter)
+    }
+
+    /// Attach the live current-session-uuid source (engine host boot).
+    pub fn attach_session_provider(
+        &self,
+        provider: Arc<SessionIdProvider>,
+    ) -> Result<(), Arc<SessionIdProvider>> {
+        self.session_id.set(provider)
     }
 
     pub fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
@@ -285,35 +323,44 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "get",
-                "Get one local app's record, design draft, runtime and checkpoints. Read-only.",
+                "Get one local app's record, runtime and checkpoints. Read-only.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "create",
-                "Create a local app from a one-line description and start the LLM-authored design questionnaire. This never confirms the design or starts generation.",
+                "Create a local app record from a one-line description and scaffold its Vite workspace immediately. Then edit the source under app/ components/ lib/ styles/ public/, call build, and preview via manage_runtime.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
-                    "name":{"type":"string","minLength":1,"maxLength":200},
-                    "conversation_id":{"type":"string","maxLength":128}
+                    "name":{"type":"string","minLength":1,"maxLength":200}
                 },"required":["brief"],"additionalProperties":false}),
-            ),
-            Self::tool(
-                "revise",
-                "Ask for a revision of a generated app in the user's own words. The app rebuilds and re-opens the preview gate; the user still approves it.",
-                json!({"type":"object","properties":{
-                    "app_id":app_id.clone(),
-                    "prompt":{"type":"string","minLength":1,"maxLength":4000}
-                },"required":["app_id","prompt"],"additionalProperties":false}),
-            ),
-            Self::tool(
-                "propose_design",
-                "Propose a structured design patch for explicit user review. The patch is stored but not applied.",
-                json!({"type":"object","properties":{"app_id":app_id.clone(),"patch":{"type":"object","properties":{"ops":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"op":{"enum":["set","remove"]},"field_id":{"type":"string","maxLength":64},"value":{"type":"object"}},"required":["op","field_id"]}},"note":{"type":"string","maxLength":2000}},"required":["ops"]}},"required":["app_id","patch"],"additionalProperties":false}),
             ),
             Self::tool(
                 "manage_runtime",
                 "Start, stop, restart, open, suspend or resume a generated app through the host runtime manager.",
                 json!({"type":"object","properties":{"app_id":app_id.clone(),"action":{"enum":["start","stop","restart","open","suspend","resume"]}},"required":["app_id","action"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "build",
+                "Build the app workspace with the offline toolchain (30-minute budget). On success the app is marked ready; start or restart the runtime afterwards to serve the new build. On failure the error summary names what to fix; build logs are under read_logs.",
+                json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "create_checkpoint",
+                "Record a restorable Git checkpoint of the app workspace with a short label. Use after the user confirms a working state.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "label":{"type":"string","minLength":1,"maxLength":200}
+                },"required":["app_id","label"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "update_manifest",
+                "Declare the app's data collections, allowed network domains and capabilities in its manifest. Destructive schema migrations against existing data require the user's approval.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "collections":{"type":"array","maxItems":8},
+                    "allowed_domains":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":200}},
+                    "capabilities":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":64}}
+                },"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "query_data",
@@ -402,7 +449,7 @@ impl LocalAppsMcpTransport {
             Self::tool(
                 "read_logs",
                 "Read a bounded tail of an app-owned log file. Paths cannot escape the app logs directory.",
-                json!({"type":"object","properties":{"app_id":app_id.clone(),"log":{"enum":["generation","build","runtime"]},"max_bytes":{"type":"integer","minimum":1,"maximum":65536}},"required":["app_id"],"additionalProperties":false}),
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"log":{"enum":["build","runtime"]},"max_bytes":{"type":"integer","minimum":1,"maximum":65536}},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "read_app_events",
@@ -464,9 +511,6 @@ impl LocalAppsMcpTransport {
                     Ok(value) => value,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
-                let draft = service.draft(app_id).await.map_err(|error| {
-                    McpError::Internal(format!("failed to read design draft: {error}"))
-                })?;
                 let runtime = service.runtime_record(app_id).await.map_err(|error| {
                     McpError::Internal(format!("failed to read runtime: {error}"))
                 })?;
@@ -475,82 +519,117 @@ impl LocalAppsMcpTransport {
                 })?;
                 Self::result(json!({
                     "app": record,
-                    "design": draft,
                     "runtime": runtime,
                     "checkpoints": checkpoints
                 }))
             }
             "create" => {
                 let brief = Self::required_string(&input, "brief")?;
-                // A fresh app starts in `authoring_questionnaire` (Task 3),
-                // not `collecting_spec` — `open_designer` requires
-                // `collecting_spec | generation_failed` and would refuse it.
-                // This tool does not open the designer gate itself; the
-                // questionnaire-authoring LLM round trip (Task 4/8) carries
-                // the app to `collecting_spec` on its own.
                 let name = input.get("name").and_then(Value::as_str);
-                let conversation_id = input
-                    .get("conversation_id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
+                // The origin conversation is ENGINE-injected (the live session
+                // uuid at call time), never read from the model's input — see
+                // `SessionIdProvider`. `None` (provider unattached, e.g. a
+                // bare test transport) simply records no origin.
+                let conversation_id = self.session_id.get().and_then(|provider| provider());
                 let record = match service.create_app(name, brief, conversation_id).await {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
-                // Fire-and-forget, same as the wire-client `CreateApp` path
-                // (`host.rs`'s `handle_create_app` — both call the SAME
-                // shared `spawn_authoring`): the record already committed
-                // above, so a missing/unattached host capability here does
-                // NOT fail this call — `retry_questionnaire` and the
-                // load-time sweep both still recover the app if this is
-                // dropped.
+                // Best-effort scaffold, mirroring the old trigger-authoring
+                // semantics: the record already committed above, so a
+                // missing host capability (or a scaffold failure) does NOT
+                // fail this call — it is reported in the result instead,
+                // and the agent can retry by calling `build` (whose
+                // scaffold-dependent failure names the gap) or recreating.
+                let mut scaffolded = false;
+                let mut warning: Option<String> = None;
                 if let Ok(host) = self.host() {
-                    host.trigger_authoring(record.id.clone(), record.llm_round)
-                        .await;
+                    match host.scaffold_app(record.id.clone()).await {
+                        Ok(()) => scaffolded = true,
+                        Err(error) => {
+                            tracing::warn!(
+                                app_id = %record.id,
+                                error = %error,
+                                "local-apps MCP create: workspace scaffold failed"
+                            );
+                            warning = Some(format!("workspace scaffold failed: {error}"));
+                        }
+                    }
                 } else {
                     tracing::warn!(
                         app_id = %record.id,
-                        "local-apps host capability unavailable; questionnaire authoring was \
-                         not triggered from MCP create — retry_questionnaire can still recover it"
+                        "local-apps host capability unavailable; workspace was not \
+                         scaffolded from MCP create"
                     );
+                    warning =
+                        Some("host capability unavailable; workspace was not scaffolded".into());
                 }
-                Self::result(json!({
+                // v3 Phase 4: pin the init session through the connection-
+                // scoped minter (fork of the origin chat, or an empty
+                // anchor). Best-effort like the scaffold: the boot backfill
+                // repairs a missing pin.
+                let mut init_session_id: Option<String> = None;
+                if let Some(minter) = self.init_session_minter.get() {
+                    match minter(record.clone()).await {
+                        Ok(init_id) => {
+                            match service.set_init_session(&record.id, &init_id).await {
+                                Ok(()) => init_session_id = Some(init_id),
+                                Err(error) => tracing::warn!(
+                                    app_id = %record.id,
+                                    error = %error,
+                                    "local-apps MCP create: init-session pin failed"
+                                ),
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            app_id = %record.id,
+                            error = %error,
+                            "local-apps MCP create: init-session mint failed"
+                        ),
+                    }
+                }
+                let mut result = json!({
                     "app": record,
-                    "next_step": "The app is being set up; wait for its questionnaire before designing."
-                }))
-            }
-            "revise" => {
-                let app_id = Self::required_string(&input, "app_id")?;
-                let prompt = Self::required_string(&input, "prompt")?;
-                match service.request_revision(app_id, prompt).await {
-                    Ok(()) => Self::result(json!({ "app_id": app_id, "state": "revising" })),
-                    Err(error) => Self::app_error(error),
+                    "scaffolded": scaffolded,
+                    "next_step": "Edit the scaffolded source under app/ components/ lib/ styles/ public/, then call build and preview via manage_runtime."
+                });
+                if let (Some(object), Some(warning)) = (result.as_object_mut(), warning) {
+                    object.insert("warning".into(), Value::String(warning));
                 }
-            }
-            "propose_design" => {
-                let app_id = Self::required_string(&input, "app_id")?;
-                // Patch ops cross the seam through `raise_patch`: this wire is
-                // protocol snake_case `field_id`, the core persists camelCase
-                // `fieldId` (client-protocol/src/local_apps.rs module doc).
-                let patch: client_protocol::local_apps::AppDesignPatchDto =
-                    serde_json::from_value(input.get("patch").cloned().unwrap_or(Value::Null))
-                        .map_err(|error| {
-                            McpError::Internal(format!("invalid design patch: {error}"))
-                        })?;
-                let patch = match crate::local_apps_bridge::raise_patch(patch) {
-                    Ok(patch) => patch,
-                    Err(error) => return Ok(Self::app_error(error)),
-                };
-                match service.store_suggestion(app_id, patch).await {
-                    Ok(suggestion) => Self::result(json!({
-                        "suggestion": suggestion,
-                        "applied": false,
-                        "next_step": "The user must explicitly apply or dismiss this suggestion."
-                    })),
-                    Err(error) => Self::app_error(error),
+                if let (Some(object), Some(init_id)) = (result.as_object_mut(), init_session_id) {
+                    object.insert("init_session_id".into(), Value::String(init_id));
                 }
+                Self::result(result)
             }
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "build" => match self.host()?.build_app(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "create_checkpoint" => {
+                let app_id = Self::required_string(&input, "app_id")?;
+                let label = Self::required_string(&input, "label")?;
+                match self
+                    .service()?
+                    .create_checkpoint(
+                        app_id,
+                        local_apps::AppCheckpointKind::UserApproved,
+                        label,
+                    )
+                    .await
+                {
+                    Ok(checkpoint) => Self::result(serde_json::json!({
+                        "ok": true,
+                        "checkpoint": serde_json::to_value(&checkpoint)
+                            .unwrap_or(Value::Null),
+                    })),
+                    Err(error) => Self::tool_error(error.to_string()),
+                }
+            }
+            "update_manifest" => match self.host()?.update_manifest(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -592,10 +671,8 @@ impl LocalAppsMcpTransport {
                     .get("log")
                     .and_then(Value::as_str)
                     .unwrap_or("runtime");
-                if !matches!(log, "generation" | "build" | "runtime") {
-                    return Ok(Self::tool_error(
-                        "log must be generation, build, or runtime",
-                    ));
+                if !matches!(log, "build" | "runtime") {
+                    return Ok(Self::tool_error("log must be build or runtime"));
                 }
                 let max_bytes = input
                     .get("max_bytes")
@@ -753,7 +830,7 @@ mod tests {
     use super::*;
     use local_apps::mailbox::{load_mailbox, save_mailbox, AppMailbox};
     use local_apps::test_support::FixedClock;
-    use local_apps::{AppLayout, NoopAppEventObserver, NoopContinuationSink};
+    use local_apps::{AppLayout, NoopAppEventObserver};
     use tempfile::TempDir;
 
     /// A transport over a real store with one app whose mailbox holds
@@ -764,7 +841,6 @@ mod tests {
             local_apps::AppService::load(
                 root.path(),
                 Arc::new(FixedClock::new(1_700_000_000_000)),
-                Arc::new(NoopContinuationSink),
                 Arc::new(NoopAppEventObserver),
             )
             .await
@@ -911,9 +987,10 @@ mod tests {
                 "list",
                 "get",
                 "create",
-                "revise",
-                "propose_design",
                 "manage_runtime",
+                "build",
+                "create_checkpoint",
+                "update_manifest",
                 "query_data",
                 "mutate_data",
                 "inspect_ui",
@@ -1044,7 +1121,6 @@ mod tests {
             AppService::load(
                 root,
                 Arc::new(local_apps::test_support::FixedClock::new(1)),
-                Arc::new(local_apps::NoopContinuationSink),
                 Arc::new(local_apps::NoopAppEventObserver),
             )
             .await
@@ -1114,14 +1190,14 @@ mod tests {
     }
 
     /// A minimal [`LocalAppsMcpHost`] double that only records
-    /// `trigger_authoring` calls — every other method is unreachable from
+    /// `scaffold_app` calls — every other method is unreachable from
     /// the `create` tool and panics if ever called.
-    struct RecordingAuthoringHost {
-        calls: StdMutex<Vec<(String, u64)>>,
+    struct RecordingScaffoldHost {
+        calls: StdMutex<Vec<String>>,
     }
 
     #[async_trait]
-    impl LocalAppsMcpHost for RecordingAuthoringHost {
+    impl LocalAppsMcpHost for RecordingScaffoldHost {
         async fn manage_runtime(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
@@ -1140,25 +1216,30 @@ mod tests {
         async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
+        async fn build_app(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn update_manifest(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
-        async fn trigger_authoring(&self, app_id: String, epoch: u64) {
-            self.calls.lock().expect("lock").push((app_id, epoch));
+        async fn scaffold_app(&self, app_id: String) -> Result<(), String> {
+            self.calls.lock().expect("lock").push(app_id);
+            Ok(())
         }
     }
 
-    /// PINS the Critical-1 fix from the Task 11 review: `create` used to
-    /// persist a record and stop — nothing ever started the questionnaire
-    /// authoring the tool's own `next_step` text claims is happening, so an
-    /// agent that believed it and polled `get` would poll forever. `create`
-    /// must reach the attached host's `trigger_authoring` with the NEW app's
-    /// id, the same way `host.rs`'s wire-client `CreateApp` path does.
+    /// `create` must reach the attached host's `scaffold_app` with the NEW
+    /// app's id — the tool's own description claims the workspace exists
+    /// afterwards, so an agent that believed it and started editing files
+    /// would otherwise write into a directory nothing scaffolded.
     #[tokio::test]
-    async fn create_triggers_background_authoring_via_the_attached_host() {
+    async fn create_scaffolds_via_the_attached_host() {
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
-        let host = Arc::new(RecordingAuthoringHost {
+        let host = Arc::new(RecordingScaffoldHost {
             calls: StdMutex::new(Vec::new()),
         });
         assert!(transport
@@ -1169,38 +1250,43 @@ mod tests {
             .call("create", json!({ "brief": "一个记事本 app" }))
             .await
             .expect("create");
-        let app = &result.structured_content.expect("structured")["app"];
-        let app_id = app["id"].as_str().expect("id").to_string();
+        let structured = result.structured_content.expect("structured");
+        let app_id = structured["app"]["id"].as_str().expect("id").to_string();
+        assert_eq!(structured["scaffolded"], true);
 
         assert_eq!(
             host.calls.lock().expect("lock").as_slice(),
-            &[(app_id, 1)],
-            "create must trigger background authoring for the app it just persisted, \
-             with the fresh app's first llm_round epoch"
+            &[app_id],
+            "create must scaffold the workspace for the app it just persisted"
         );
     }
 
     /// A `create` call still succeeds and returns the persisted record even
     /// when NO host capability is attached (e.g. a build wiring gap) — the
-    /// record is real and recoverable (`retry_questionnaire`, the load-time
-    /// sweep) even though authoring did not start yet.
+    /// record is real; the missing scaffold is reported in the result
+    /// instead of failing the call.
     #[tokio::test]
-    async fn create_still_succeeds_when_no_host_is_attached_to_trigger_authoring() {
+    async fn create_still_succeeds_when_no_host_is_attached_to_scaffold() {
         let root = tempfile::tempdir().unwrap();
         let (transport, service) = attached_transport(root.path()).await;
         let result = transport
             .call("create", json!({ "brief": "一个记事本 app" }))
             .await
-            .expect("create must not fail just because authoring couldn't be triggered");
-        let app = &result.structured_content.expect("structured")["app"];
-        let app_id = app["id"].as_str().expect("id").to_string();
+            .expect("create must not fail just because the scaffold couldn't run");
+        let structured = result.structured_content.expect("structured");
+        let app_id = structured["app"]["id"].as_str().expect("id").to_string();
+        assert_eq!(structured["scaffolded"], false);
+        assert!(
+            structured["warning"].as_str().is_some(),
+            "a missed scaffold must be reported, not silent: {structured}"
+        );
         assert_eq!(
             service
                 .record(&app_id)
                 .await
                 .expect("record")
                 .workflow_state,
-            local_apps::AppWorkflowState::AuthoringQuestionnaire
+            local_apps::AppWorkflowState::Draft
         );
     }
 
@@ -1219,119 +1305,6 @@ mod tests {
             message.contains("brief"),
             "the rejection should name the missing brief: {message}"
         );
-    }
-
-    /// Drives a freshly created app all the way to `ready`, matching
-    /// `AppState::request_revision`'s `awaiting_preview_confirmation | ready`
-    /// precondition (`local-apps/src/state.rs`), by calling the same
-    /// `AppService` steps the coordinator/generator drive in production
-    /// (`questionnaire_ready` via the shared `advance_to_collecting_spec`
-    /// test helper, then `begin_planning` -> `plan_ready` -> `confirm_design`
-    /// -> `generation_complete` -> `validation_passed` -> `confirm_preview`).
-    async fn drive_to_ready(service: &AppService, app_id: &str) {
-        local_apps::test_support::advance_to_collecting_spec(service, app_id).await;
-        let epoch = service
-            .begin_planning(app_id)
-            .await
-            .expect("begin_planning");
-        let plan = local_apps::AppPlan {
-            collections: Vec::new(),
-            capabilities: Vec::new(),
-            domains: Vec::new(),
-            summary: "a test plan".into(),
-        };
-        let designer = service
-            .plan_ready(app_id, plan, epoch)
-            .await
-            .expect("plan_ready")
-            .expect("fresh epoch must not be rejected as stale");
-        service
-            .confirm_design(app_id, &designer.interaction_id, designer.revision)
-            .await
-            .expect("confirm_design");
-        service
-            .generation_complete(app_id)
-            .await
-            .expect("generation_complete");
-        let preview = service
-            .validation_passed(app_id)
-            .await
-            .expect("validation_passed");
-        service
-            .confirm_preview(app_id, &preview.interaction_id, preview.revision)
-            .await
-            .expect("confirm_preview");
-    }
-
-    #[tokio::test]
-    async fn revise_is_exposed_and_reaches_the_service() {
-        let root = tempfile::tempdir().unwrap();
-        let (transport, service) = attached_transport(root.path()).await;
-        let created = transport
-            .call("create", json!({ "brief": "一个记事本" }))
-            .await
-            .expect("create");
-        let app_id = created.structured_content.expect("structured")["app"]["id"]
-            .as_str()
-            .expect("app id")
-            .to_string();
-        drive_to_ready(&service, &app_id).await;
-
-        let result = transport
-            .call(
-                "revise",
-                json!({ "app_id": app_id, "prompt": "把搜索框挪到顶部" }),
-            )
-            .await
-            .expect("revise is callable on a ready app");
-        assert!(!result.is_error, "got {result:?}");
-        assert_eq!(
-            service
-                .record(&app_id)
-                .await
-                .expect("record")
-                .workflow_state,
-            local_apps::AppWorkflowState::Revising,
-            "revise must actually reach AppService::request_revision, not just accept the call"
-        );
-    }
-
-    #[tokio::test]
-    async fn propose_design_accepts_the_protocol_snake_case_patch_wire() {
-        let root = tempfile::tempdir().unwrap();
-        let (transport, service) = attached_transport(root.path()).await;
-        let created = transport
-            .call(
-                "create",
-                json!({"name": "Habits", "brief": "habit tracker"}),
-            )
-            .await
-            .expect("create");
-        let app_id = created.structured_content.expect("structured")["app"]["id"]
-            .as_str()
-            .expect("app id")
-            .to_string();
-        // `store_suggestion` needs a draft-editable state; a fresh app
-        // starts in `authoring_questionnaire` (Task 3) until Task 4/8 wire
-        // the real questionnaire-authoring round trip.
-        local_apps::test_support::advance_to_collecting_spec(&service, &app_id).await;
-
-        let result = transport
-            .call(
-                "propose_design",
-                json!({
-                    "app_id": app_id,
-                    "patch": {"ops": [{
-                        "op": "set",
-                        "field_id": "pages",
-                        "value": {"kind": "screen_list", "value": ["Home"]}
-                    }]}
-                }),
-            )
-            .await
-            .expect("propose_design accepts the protocol wire");
-        assert!(!result.is_error);
-        assert!(result.structured_content.expect("structured")["suggestion"].is_object());
     }
 
     #[tokio::test]

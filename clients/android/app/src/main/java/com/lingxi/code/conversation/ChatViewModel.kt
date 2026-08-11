@@ -4,11 +4,16 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.R
+import com.lingxi.code.bindings.AskUserQuestionRequestDto
+import com.lingxi.code.bindings.ClientCommand
+import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.bindings.MobileLinuxEventFfi
 import com.lingxi.code.bindings.MobileLinuxEventKindFfi
 import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
 import com.lingxi.code.bindings.MobileLinuxTaskStateFfi
+import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
@@ -88,6 +93,15 @@ data class ChatState(
      * banner.
      */
     val error: ChatError? = null,
+    /**
+     * Interactive `AskUserQuestion` requests awaiting the user, oldest first.
+     * The FIRST one renders as a card at the transcript tail
+     * ([buildChatRenderItems]); entries leave only on answer/cancel, on the
+     * engine's `AskUserQuestionResolved`, on `SessionEnded`, or when the
+     * engine connection itself is replaced — a question can outlive its
+     * turn's stream, so `TurnEnded` deliberately does NOT clear it.
+     */
+    val pendingQuestions: List<AskUserQuestionRequestDto> = emptyList(),
 ) {
     /** True while a turn is in flight — gates the composer (Stop vs Send). */
     val isStreaming: Boolean get() = streaming
@@ -211,6 +225,15 @@ class ChatViewModel(
     val sourceProjectId: StateFlow<String?> = _sourceProjectId.asStateFlow()
 
     /**
+     * The conversation scope the CURRENT engine source is bound to — Global,
+     * a Project workspace, or a LocalApp workspace. The generalization of
+     * [sourceProjectId] (which stays for the project-only flows): the drawer
+     * and the scope-restore effects branch on this.
+     */
+    private val _sourceScope = MutableStateFlow<ConversationScope>(ConversationScope.Global)
+    val sourceScope: StateFlow<ConversationScope> = _sourceScope.asStateFlow()
+
+    /**
      * Current engine connection for profile-global feature stores.
      *
      * Local Apps collects this flow with `collectLatest`; switching Project or
@@ -330,6 +353,78 @@ class ChatViewModel(
                     if (sourceGeneration == generation) _mcpServers.value = servers
                 }
             }
+            launch {
+                // The generic out-of-band event stream: interactive questions
+                // and background-task transitions ride here, NOT the per-turn
+                // reply stream — a question can outlive its turn's stream and
+                // a task can finish with no turn in flight at all.
+                boundSource.clientEvents.collect { event ->
+                    if (sourceGeneration == generation) reduceClientEvent(event)
+                }
+            }
+        }
+    }
+
+    /**
+     * Fold one out-of-band engine [ClientEvent] into [ChatState]. Extracted
+     * (internal) so the pending-question queue semantics are unit-testable
+     * with no engine:
+     *
+     *  - `AskUserQuestion` enqueues, deduped by `request_id` (an engine
+     *    re-emit while parked must not duplicate the card).
+     *  - `AskUserQuestionResolved` drops that id (answered elsewhere,
+     *    cancelled, or auto-continued engine-side).
+     *  - `SessionEnded` clears the queue — and ONLY it does among lifecycle
+     *    events: a question deliberately survives `TurnEnded`, because the
+     *    engine keeps the questionnaire parked across the turn boundary.
+     *  - `TaskStatusChanged` surfaces as the transient status line.
+     */
+    internal fun reduceClientEvent(event: ClientEvent) {
+        when (event) {
+            is ClientEvent.AskUserQuestion -> _state.update { s ->
+                if (s.pendingQuestions.any { it.requestId == event.request.requestId }) {
+                    s
+                } else {
+                    s.copy(pendingQuestions = s.pendingQuestions + event.request)
+                }
+            }
+            is ClientEvent.AskUserQuestionResolved -> _state.update { s ->
+                s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == event.requestId })
+            }
+            is ClientEvent.SessionEnded -> _state.update { it.copy(pendingQuestions = emptyList()) }
+            is ClientEvent.TaskStatusChanged -> _state.update {
+                it.copy(statusLine = taskStatusLine(event.taskId, event.status, strings))
+            }
+            else -> Unit
+        }
+    }
+
+    /**
+     * Submit the answers for the parked questionnaire [requestId] and drop its
+     * card immediately (the engine's `AskUserQuestionResolved` then no-ops).
+     * [answers] maps each question's full text to the selected label(s)
+     * comma-joined or the free-text entry — see `assembleAskAnswers`.
+     */
+    fun answerQuestion(requestId: ULong, answers: Map<String, String>) {
+        _state.update { s ->
+            s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == requestId })
+        }
+        viewModelScope.launch {
+            runCatching {
+                source.submitClientCommand(ClientCommand.AnswerAskUserQuestion(requestId, answers))
+            }.onFailure { reportHostError(it.message ?: it::class.simpleName.orEmpty()) }
+        }
+    }
+
+    /** Cancel the parked questionnaire [requestId] and drop its card. */
+    fun cancelQuestion(requestId: ULong) {
+        _state.update { s ->
+            s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == requestId })
+        }
+        viewModelScope.launch {
+            runCatching {
+                source.submitClientCommand(ClientCommand.CancelAskUserQuestion(requestId))
+            }.onFailure { reportHostError(it.message ?: it::class.simpleName.orEmpty()) }
         }
     }
 
@@ -382,6 +477,9 @@ class ChatViewModel(
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null
         _mcpServers.value = emptyList()
+        // A questionnaire's request_id is a CONNECTION-scoped correlator, so a
+        // replaced engine source invalidates every parked card.
+        _state.update { it.copy(pendingQuestions = emptyList()) }
         bindSource()
         previous.close()
 
@@ -412,6 +510,13 @@ class ChatViewModel(
         newSession: Boolean = target.id == "new",
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
+        /**
+         * The scope the replacement source is bound to. Defaults to the
+         * project/global split [projectId] already implies so existing project
+         * flows are untouched; local-app switches pass their scope explicitly.
+         */
+        scope: ConversationScope = projectId?.let { ConversationScope.Project(it) }
+            ?: ConversationScope.Global,
         createSource: () -> ConversationSource,
         persistSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
@@ -493,9 +598,12 @@ class ChatViewModel(
         source = replacement
         _engineSource.value = replacement
         _sourceProjectId.value = projectId
+        _sourceScope.value = scope
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null
         _mcpServers.value = emptyList()
+        // Parked questionnaires die with the connection they were parked on.
+        _state.update { it.copy(pendingQuestions = emptyList()) }
         bindSource()
         onCommitted()
         previous.close()
@@ -804,7 +912,12 @@ class ChatViewModel(
         // capture this turn's token so its own events are accepted.
         turnToken++
         val token = turnToken
-        savedState?.set(KEY_DRAFT, "") // the draft was just sent — clear the persisted copy
+        if (_sourceScope.value !is ConversationScope.LocalApp) {
+            // The draft was just sent — clear the persisted copy. App scopes
+            // keep their drafts in the per-scope store (RootScreen wires it),
+            // so an app-scope send must not clear the project/global slot.
+            savedState?.set(KEY_DRAFT, "")
+        }
         _state.update {
             it.copy(
                 isNew = false,
@@ -1235,4 +1348,27 @@ class ChatViewModel(
         const val KEY_SESSION_TITLE = "chat.session.title" // String
         const val KEY_IS_NEW = "chat.isNew" // Boolean — empty-state hero vs list
     }
+}
+
+/**
+ * The transient one-line notice for a background task transition (`/tasks`
+ * push events). Rides [ChatState.statusLine] — the same dim, auto-overwritten
+ * row tool activity uses — deliberately NOT the persistent error banner; a
+ * full task-progress surface is a later pass. PURE for JVM tests.
+ */
+internal fun taskStatusLine(
+    taskId: String,
+    status: TaskStatusDto,
+    strings: ConversationStrings = DefaultConversationStrings,
+): String = when (status) {
+    TaskStatusDto.PENDING ->
+        strings.resolve(R.string.chat_task_status_pending, "后台任务 %1\$s 已排队", taskId)
+    TaskStatusDto.RUNNING ->
+        strings.resolve(R.string.chat_task_status_running, "后台任务 %1\$s 运行中", taskId)
+    TaskStatusDto.COMPLETED ->
+        strings.resolve(R.string.chat_task_status_completed, "后台任务 %1\$s 已完成", taskId)
+    TaskStatusDto.FAILED ->
+        strings.resolve(R.string.chat_task_status_failed, "后台任务 %1\$s 已失败", taskId)
+    TaskStatusDto.CANCELLED ->
+        strings.resolve(R.string.chat_task_status_cancelled, "后台任务 %1\$s 已取消", taskId)
 }

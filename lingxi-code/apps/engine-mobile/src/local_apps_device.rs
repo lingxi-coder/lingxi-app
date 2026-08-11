@@ -118,10 +118,7 @@ impl SharedDeviceCapabilities {
 
     /// Swap in a fresh connection's handles.
     pub(crate) fn replace(&self, devices: DeviceCapabilities) {
-        *self
-            .0
-            .write()
-            .expect("shared device capabilities poisoned") = devices;
+        *self.0.write().expect("shared device capabilities poisoned") = devices;
     }
 }
 

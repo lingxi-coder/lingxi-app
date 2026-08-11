@@ -47,7 +47,8 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppEventDto};
+use client_protocol::listings::SlashCommandDto;
+use client_protocol::local_apps::{AppCreateOriginDto, AppEventDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -55,14 +56,16 @@ use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
 use cron::CronJobFirer;
-use local_apps::{AppError, AppGenerationCoordinator, AppService};
+use local_apps::{AppError, AppService};
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig};
 
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::OAuthHandle;
+use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use llm_client::oauth::openai as openai_oauth;
 use llm_client::LlmTransportBridge;
-use llm_client::{DefaultLlmClient, Transport};
+use llm_client::{Credential, CredentialProvider, CredentialScope, DefaultLlmClient, ProviderId, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::StaticMemoryProvider;
@@ -90,11 +93,10 @@ use traits::{
 };
 
 use crate::{
-    local_apps_generation::{lower_job, ClientGenerationJobObserver, MobileAppGenerationExecutor},
     local_apps_host::LocalAppsHostBroker,
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
-    local_apps_profile::{profile_apps, ProfileApps, SharedLlm},
+    local_apps_profile::{profile_apps, ProfileApps},
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
     mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
 };
@@ -175,8 +177,9 @@ impl HttpTransport for DynHttp {
 /// separately, through the `Arc<dyn Platform>` passed to [`build_mobile`].
 ///
 /// Mobile deliberately omits the desktop-only `mcp_paths` and
-/// `use_noop_permission_gate` knobs: there is no `.mcp.json` discovery on a
-/// device, and a mobile client ALWAYS binds the connection-scoped
+/// `use_noop_permission_gate` knobs: MCP discovery uses the app-private
+/// settings path plus the active project's `.mcp.json`, and a mobile client
+/// ALWAYS binds the connection-scoped
 /// [`AdapterPermissionGate`] (a phone has no always-allow CLI mode).
 // P0.2: `Clone` only — `Debug` is implemented manually below because the new
 // `memory_provider` field (`Arc<dyn MemoryHierarchyProvider>`) is not `Debug`.
@@ -381,6 +384,10 @@ pub struct MobileRuntime {
     pub dispatcher: RegistrySlashDispatcher,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
+    /// Native mobile OAuth coordinator. It owns the provider-specific handles
+    /// and the one pending PKCE callback, while the foreign UI only receives a
+    /// redacted session descriptor and returns the callback URL.
+    pub oauth: Arc<MobileOAuthManager>,
     /// The connection-scoped [`AdapterPermissionGate`] handle. Mobile ALWAYS
     /// binds the adapter gate (no always-allow mode), so unlike desktop this is
     /// never `None`: F3-05's `submit(ApprovePermission/DenyPermission)` calls
@@ -418,9 +425,9 @@ pub struct MobileRuntime {
     /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
     /// when the platform wires one. `None` preserves the pre-migration state.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
-    /// The sole mobile MCP registry. It contains exactly the built-in
-    /// `local_apps` in-process provider; mobile never discovers project/user
-    /// MCP configuration.
+    /// The mobile MCP registry. It always contains the built-in `local_apps`
+    /// provider and also loads the app-private `settings.json` plus project
+    /// `.mcp.json` entries using the shared MCP parser.
     pub mcp_registry: Arc<McpRegistry>,
     /// Every `(provider, model)` this connection can actually route to — the
     /// LIVE client config after `apply_mobile_profile_allowlist`.
@@ -445,6 +452,15 @@ pub struct MobileRuntime {
     /// function returns (the process-wide profile registry is loaded outside
     /// this per-connection builder).
     pub(crate) local_apps_llm: Arc<LocalAppsLlm>,
+    /// v3 Phase 1 (workflow-on-mobile): the connection's task registry —
+    /// backs the `Workflow` tool's `LocalWorkflow` tasks, the Task command
+    /// family (`TaskList`/`TaskOutput`/`TaskStop`), and the per-turn
+    /// `<task-notification>` drain.
+    pub(crate) task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// v3 Phase 3: the live current-session uuid the local-apps MCP `create`
+    /// reads as the app's origin conversation. Updated by
+    /// `retarget_session_writer` on every session change.
+    pub(crate) active_session_uuid: Arc<std::sync::Mutex<String>>,
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -476,6 +492,539 @@ pub struct ProviderConnectionTestDto {
     /// True when the credential came from the shared encrypted store; false for
     /// a one-off draft supplied by the settings form.
     pub used_stored_credential: bool,
+}
+
+/// Native OAuth authorization session returned to iOS/Android. The verifier
+/// and state never cross the FFI boundary.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobileOAuthSessionDto {
+    pub provider: String,
+    pub flow_id: String,
+    pub authorization_url: String,
+    pub callback_url_scheme: String,
+}
+
+/// Non-secret OAuth status for a provider.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobileOAuthStateDto {
+    pub provider: String,
+    pub signed_in: bool,
+    pub account_label: Option<String>,
+    pub account_id: Option<String>,
+    pub organization_id: Option<String>,
+    pub fedramp: bool,
+}
+
+const IOS_OAUTH_REDIRECT_URI: &str = "lingxi://oauth/callback";
+const IOS_OAUTH_CALLBACK_SCHEME: &str = "lingxi";
+const MOBILE_OAUTH_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const ANTHROPIC_OAUTH_API_BASE: &str = "https://api.anthropic.com";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobileOAuthProvider {
+    Anthropic,
+    OpenAi,
+}
+
+impl MobileOAuthProvider {
+    fn parse(value: &str) -> Result<Self, MobileEngineError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Ok(Self::Anthropic),
+            "openai" | "openai-chatgpt" => Ok(Self::OpenAi),
+            _ => Err(MobileEngineError::Internal(
+                "unsupported OAuth provider".to_string(),
+            )),
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai-chatgpt",
+        }
+    }
+}
+
+struct PendingMobileOAuthSession {
+    provider: MobileOAuthProvider,
+    flow_id: String,
+    verifier: String,
+    state: String,
+    redirect_uri: String,
+    expires_at: std::time::Instant,
+}
+
+fn parse_mobile_oauth_callback(callback_url: &str) -> Result<(String, String), MobileEngineError> {
+    let callback = url::Url::parse(callback_url)
+        .map_err(|_| MobileEngineError::Internal("invalid OAuth callback URL".to_string()))?;
+    if callback.scheme() != IOS_OAUTH_CALLBACK_SCHEME
+        || callback.host_str() != Some("oauth")
+        || callback.path() != "/callback"
+    {
+        return Err(MobileEngineError::Internal(
+            "invalid OAuth callback destination".to_string(),
+        ));
+    }
+    let params: std::collections::HashMap<_, _> = callback.query_pairs().into_owned().collect();
+    let code = params
+        .get("code")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| MobileEngineError::Internal("OAuth callback has no code".to_string()))?;
+    let state = params
+        .get("state")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| MobileEngineError::Internal("OAuth callback has no state".to_string()))?;
+    Ok((code, state))
+}
+
+fn validate_mobile_oauth_session(
+    session: &PendingMobileOAuthSession,
+    flow_id: &str,
+    returned_state: &str,
+) -> Result<(), MobileEngineError> {
+    if std::time::Instant::now() >= session.expires_at {
+        return Err(MobileEngineError::Internal(
+            "OAuth login session expired".to_string(),
+        ));
+    }
+    if session.flow_id != flow_id || session.state != returned_state {
+        return Err(MobileEngineError::Internal(
+            "OAuth callback state mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn take_mobile_oauth_session(
+    pending: &mut Option<PendingMobileOAuthSession>,
+    flow_id: &str,
+    returned_state: &str,
+) -> Result<PendingMobileOAuthSession, MobileEngineError> {
+    let session = pending.as_ref().ok_or_else(|| {
+        MobileEngineError::Internal("OAuth login session is no longer active".to_string())
+    })?;
+    if std::time::Instant::now() >= session.expires_at {
+        *pending = None;
+        return Err(MobileEngineError::Internal(
+            "OAuth login session expired".to_string(),
+        ));
+    }
+    validate_mobile_oauth_session(session, flow_id, returned_state)?;
+    let session = PendingMobileOAuthSession {
+        provider: session.provider,
+        flow_id: session.flow_id.clone(),
+        verifier: session.verifier.clone(),
+        state: session.state.clone(),
+        redirect_uri: session.redirect_uri.clone(),
+        expires_at: session.expires_at,
+    };
+    // Consume the flow before network I/O. A code exchange, profile lookup,
+    // or secure-store failure is terminal for this callback; leaving it
+    // pending would block every subsequent login until TTL.
+    *pending = None;
+    Ok(session)
+}
+
+#[cfg(test)]
+mod mobile_oauth_callback_tests {
+    use super::*;
+
+    #[test]
+    fn callback_requires_the_registered_destination_and_both_parameters() {
+        let (code, state) = parse_mobile_oauth_callback(
+            "lingxi://oauth/callback?code=auth-code&state=csrf-state",
+        )
+        .expect("valid callback");
+        assert_eq!(code, "auth-code");
+        assert_eq!(state, "csrf-state");
+
+        for callback in [
+            "https://oauth/callback?code=auth-code&state=csrf-state",
+            "lingxi://other/callback?code=auth-code&state=csrf-state",
+            "lingxi://oauth/other?code=auth-code&state=csrf-state",
+            "lingxi://oauth/callback?code=auth-code",
+            "lingxi://oauth/callback?state=csrf-state",
+        ] {
+            assert!(parse_mobile_oauth_callback(callback).is_err(), "accepted {callback}");
+        }
+    }
+
+    #[test]
+    fn callback_state_and_flow_id_are_bound_to_the_pending_provider_session() {
+        let session = PendingMobileOAuthSession {
+            provider: MobileOAuthProvider::Anthropic,
+            flow_id: "flow-1".to_string(),
+            verifier: "verifier-never-exposed".to_string(),
+            state: "state-1".to_string(),
+            redirect_uri: IOS_OAUTH_REDIRECT_URI.to_string(),
+            expires_at: std::time::Instant::now() + MOBILE_OAUTH_SESSION_TTL,
+        };
+        assert!(validate_mobile_oauth_session(&session, "flow-1", "state-1").is_ok());
+        assert!(validate_mobile_oauth_session(&session, "flow-2", "state-1").is_err());
+        assert!(validate_mobile_oauth_session(&session, "flow-1", "state-2").is_err());
+
+        let expired = PendingMobileOAuthSession {
+            expires_at: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            ..session
+        };
+        assert!(validate_mobile_oauth_session(&expired, "flow-1", "state-1").is_err());
+    }
+
+    #[test]
+    fn taking_a_valid_session_consumes_it_but_state_mismatch_does_not() {
+        let session = PendingMobileOAuthSession {
+            provider: MobileOAuthProvider::Anthropic,
+            flow_id: "flow-1".to_string(),
+            verifier: "verifier".to_string(),
+            state: "state-1".to_string(),
+            redirect_uri: IOS_OAUTH_REDIRECT_URI.to_string(),
+            expires_at: std::time::Instant::now() + MOBILE_OAUTH_SESSION_TTL,
+        };
+        let mut pending = Some(session);
+
+        assert!(take_mobile_oauth_session(&mut pending, "flow-1", "wrong-state").is_err());
+        assert!(pending.is_some());
+        assert!(take_mobile_oauth_session(&mut pending, "flow-1", "state-1").is_ok());
+        assert!(pending.is_none());
+        assert!(take_mobile_oauth_session(&mut pending, "flow-1", "state-1").is_err());
+    }
+
+    #[test]
+    fn taking_an_expired_session_clears_it() {
+        let session = PendingMobileOAuthSession {
+            provider: MobileOAuthProvider::OpenAi,
+            flow_id: "flow-1".to_string(),
+            verifier: "verifier".to_string(),
+            state: "state-1".to_string(),
+            redirect_uri: IOS_OAUTH_REDIRECT_URI.to_string(),
+            expires_at: std::time::Instant::now() - std::time::Duration::from_secs(1),
+        };
+        let mut pending = Some(session);
+
+        assert!(take_mobile_oauth_session(&mut pending, "flow-1", "state-1").is_err());
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn provider_aliases_lower_to_the_stable_credential_ids() {
+        assert_eq!(MobileOAuthProvider::parse("anthropic").unwrap().id(), "anthropic");
+        assert_eq!(MobileOAuthProvider::parse("openai").unwrap().id(), "openai-chatgpt");
+        assert_eq!(MobileOAuthProvider::parse("openai-chatgpt").unwrap().id(), "openai-chatgpt");
+        assert!(MobileOAuthProvider::parse("openai-api-key").is_err());
+    }
+}
+
+/// Mobile OAuth facade shared by iOS and Android. Provider-specific OAuth
+/// implementations stay in `llm-client`; this type only owns callback state,
+/// validates the custom-scheme return, and lowers identity metadata.
+pub struct MobileOAuthManager {
+    anthropic: Arc<OAuthHandle>,
+    openai: Arc<openai_oauth::OpenAiOAuthHandle>,
+    anthropic_refresh: Option<Arc<RefreshDriver>>,
+    openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
+    anthropic_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
+    openai_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
+    http: Arc<dyn HttpTransport>,
+    pending: Mutex<Option<PendingMobileOAuthSession>>,
+}
+
+impl MobileOAuthManager {
+    fn new(
+        anthropic: Arc<OAuthHandle>,
+        openai: Arc<openai_oauth::OpenAiOAuthHandle>,
+        anthropic_refresh: Option<Arc<RefreshDriver>>,
+        openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
+        anthropic_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
+        openai_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
+        http: Arc<dyn HttpTransport>,
+    ) -> Self {
+        Self {
+            anthropic,
+            openai,
+            anthropic_refresh,
+            openai_refresh,
+            anthropic_refresh_spawner,
+            openai_refresh_spawner,
+            http,
+            pending: Mutex::new(None),
+        }
+    }
+
+    async fn begin(
+        &self,
+        provider: String,
+        redirect_uri: String,
+    ) -> Result<MobileOAuthSessionDto, MobileEngineError> {
+        if redirect_uri != IOS_OAUTH_REDIRECT_URI {
+            return Err(MobileEngineError::Internal(
+                "invalid OAuth redirect URI".to_string(),
+            ));
+        }
+        let provider = MobileOAuthProvider::parse(&provider)?;
+        let mut pending = self.pending.lock().await;
+        if pending.is_some() {
+            return Err(MobileEngineError::Internal(
+                "another OAuth login is already in progress".to_string(),
+            ));
+        }
+        let (authorization_url, verifier, state) = match provider {
+            MobileOAuthProvider::Anthropic => {
+                self.anthropic.begin_mobile_browser_login(&redirect_uri)
+            }
+            MobileOAuthProvider::OpenAi => self.openai.begin_mobile_browser_login(&redirect_uri),
+        };
+        let flow_id = uuid::Uuid::new_v4().to_string();
+        *pending = Some(PendingMobileOAuthSession {
+            provider,
+            flow_id: flow_id.clone(),
+            verifier,
+            state,
+            redirect_uri,
+            expires_at: std::time::Instant::now() + MOBILE_OAUTH_SESSION_TTL,
+        });
+        Ok(MobileOAuthSessionDto {
+            provider: provider.id().to_string(),
+            flow_id,
+            authorization_url,
+            callback_url_scheme: IOS_OAUTH_CALLBACK_SCHEME.to_string(),
+        })
+    }
+
+    async fn complete(
+        &self,
+        flow_id: String,
+        callback_url: String,
+    ) -> Result<MobileOAuthStateDto, MobileEngineError> {
+        let (code, returned_state) = parse_mobile_oauth_callback(&callback_url)?;
+
+        let session = {
+            let mut pending = self.pending.lock().await;
+            take_mobile_oauth_session(&mut pending, &flow_id, &returned_state)?
+        };
+
+        match session.provider {
+            MobileOAuthProvider::Anthropic => self
+                .anthropic
+                .complete_mobile_browser_login(
+                    &code,
+                    &session.verifier,
+                    &session.state,
+                    &session.redirect_uri,
+                )
+                .await
+                .map(|info| MobileOAuthStateDto {
+                    provider: session.provider.id().to_string(),
+                    signed_in: true,
+                    account_label: Some(info.email),
+                    account_id: None,
+                    organization_id: Some(info.org_id),
+                    fedramp: false,
+                })
+                .map_err(|error| MobileEngineError::Internal(format!("OAuth login failed: {error}"))),
+            MobileOAuthProvider::OpenAi => self
+                .openai
+                .complete_mobile_browser_login(&code, &session.verifier, &session.redirect_uri)
+                .await
+                .map(|info| MobileOAuthStateDto {
+                    provider: session.provider.id().to_string(),
+                    signed_in: true,
+                    account_label: info.account_id.clone(),
+                    account_id: info.account_id,
+                    organization_id: None,
+                    fedramp: info.fedramp,
+                })
+                .map_err(|error| MobileEngineError::Internal(format!("OAuth login failed: {error}"))),
+        }
+    }
+
+    async fn cancel(&self, flow_id: String) {
+        let mut pending = self.pending.lock().await;
+        if pending.as_ref().is_some_and(|value| value.flow_id == flow_id) {
+            *pending = None;
+        }
+    }
+
+    async fn logout(&self, provider: String) -> Result<(), MobileEngineError> {
+        let provider = MobileOAuthProvider::parse(&provider)?;
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.as_ref().is_some_and(|value| value.provider == provider) {
+                *pending = None;
+            }
+        }
+        match provider {
+            MobileOAuthProvider::Anthropic => {
+                self.anthropic
+                    .logout()
+                    .await
+                    .map_err(|error| MobileEngineError::Internal(format!("OAuth logout failed: {error}")))?;
+                if let (Some(driver), Some(spawner)) = (
+                    &self.anthropic_refresh,
+                    &self.anthropic_refresh_spawner,
+                ) {
+                    driver.invalidate(spawner.as_ref()).await;
+                }
+                Ok(())
+            }
+            MobileOAuthProvider::OpenAi => {
+                self.openai
+                    .logout()
+                    .await
+                    .map_err(|error| MobileEngineError::Internal(format!("OAuth logout failed: {error}")))?;
+                if let (Some(driver), Some(spawner)) = (
+                    &self.openai_refresh,
+                    &self.openai_refresh_spawner,
+                ) {
+                    driver.invalidate(spawner.as_ref()).await;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn state(&self, provider: String) -> Result<MobileOAuthStateDto, MobileEngineError> {
+        match MobileOAuthProvider::parse(&provider)? {
+            MobileOAuthProvider::Anthropic => Ok(match self.anthropic.current_user().await {
+                Some(info) => MobileOAuthStateDto {
+                    provider: MobileOAuthProvider::Anthropic.id().to_string(),
+                    signed_in: true,
+                    account_label: Some(info.email),
+                    account_id: None,
+                    organization_id: Some(info.org_id),
+                    fedramp: false,
+                },
+                None => MobileOAuthStateDto {
+                    provider: MobileOAuthProvider::Anthropic.id().to_string(),
+                    signed_in: false,
+                    account_label: None,
+                    account_id: None,
+                    organization_id: None,
+                    fedramp: false,
+                },
+            }),
+            MobileOAuthProvider::OpenAi => Ok(match self.openai.current_user().await {
+                Some(info) => MobileOAuthStateDto {
+                    provider: MobileOAuthProvider::OpenAi.id().to_string(),
+                    signed_in: true,
+                    account_label: info.account_id.clone(),
+                    account_id: info.account_id,
+                    organization_id: None,
+                    fedramp: info.fedramp,
+                },
+                None => MobileOAuthStateDto {
+                    provider: MobileOAuthProvider::OpenAi.id().to_string(),
+                    signed_in: false,
+                    account_label: None,
+                    account_id: None,
+                    organization_id: None,
+                    fedramp: false,
+                },
+            }),
+        }
+    }
+
+    /// Probe OAuth-backed provider metadata without issuing an inference call.
+    async fn test(
+        &self,
+        provider: String,
+        api_base: String,
+        model: String,
+    ) -> ProviderConnectionTestDto {
+        let provider = match MobileOAuthProvider::parse(&provider) {
+            Ok(provider) => provider,
+            Err(_) => return provider_connection_failure("OAuth Provider 标识无效", false, false, None, 0, true),
+        };
+        let (token, account_id, fedramp) = match provider {
+            MobileOAuthProvider::Anthropic => {
+                let Some(driver) = &self.anthropic_refresh else {
+                    return provider_connection_failure("请先登录 Anthropic OAuth", false, false, None, 0, true);
+                };
+                let credential = OAuthCredentialProvider::new(driver.clone())
+                    .load(&CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic"))
+                    .await;
+                match credential {
+                    Ok(Credential::BearerToken(token)) => (token, None, false),
+                    _ => return provider_connection_failure("Anthropic OAuth 会话已失效，请重新登录", false, false, None, 0, true),
+                }
+            }
+            MobileOAuthProvider::OpenAi => {
+                let Some(driver) = &self.openai_refresh else {
+                    return provider_connection_failure("请先登录 ChatGPT OAuth", false, false, None, 0, true);
+                };
+                let credential = openai_oauth::OpenAiOAuthCredentialProvider::new(driver.clone())
+                    .load(&CredentialScope::new(
+                        ProviderId::OpenAICompatible {
+                            name: "openai-chatgpt".to_string(),
+                        },
+                        "openai-chatgpt",
+                    ))
+                    .await;
+                match credential {
+                    Ok(Credential::ChatGptOAuth { access_token, account_id, fedramp }) => {
+                        (access_token, account_id, fedramp)
+                    }
+                    _ => return provider_connection_failure("ChatGPT OAuth 会话已失效，请重新登录", false, false, None, 0, true),
+                }
+            }
+        };
+        let endpoint = match provider {
+            MobileOAuthProvider::Anthropic => {
+                let configured_base = api_base.trim().trim_end_matches('/');
+                if configured_base != ANTHROPIC_OAUTH_API_BASE {
+                    return provider_connection_failure(
+                        "Anthropic OAuth 仅支持官方 HTTPS API 地址",
+                        false,
+                        false,
+                        None,
+                        0,
+                        true,
+                    );
+                }
+                provider_models_endpoint(ANTHROPIC_OAUTH_API_BASE, "anthropic")
+            }
+            MobileOAuthProvider::OpenAi => Ok("https://chatgpt.com/backend-api/models".to_string()),
+        };
+        let endpoint = match endpoint {
+            Ok(endpoint) => endpoint,
+            Err(message) => return provider_connection_failure(message, false, false, None, 0, true),
+        };
+        let mut headers = vec![
+            ("accept".to_string(), "application/json".to_string()),
+            ("authorization".to_string(), format!("Bearer {token}")),
+        ];
+        match provider {
+            MobileOAuthProvider::Anthropic => {
+                headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
+                headers.push(("anthropic-beta".to_string(), "oauth-2025-04-20".to_string()));
+            }
+            MobileOAuthProvider::OpenAi => {
+                if let Some(account_id) = account_id {
+                    headers.push(("ChatGPT-Account-ID".to_string(), account_id));
+                }
+                if fedramp {
+                    headers.push(("X-OpenAI-Fedramp".to_string(), "true".to_string()));
+                }
+            }
+        }
+        let started = std::time::Instant::now();
+        let response = self
+            .http
+            .request(protocol::HttpRequest {
+                method: protocol::HttpMethod::Get,
+                url: endpoint,
+                headers,
+                body: None,
+                body_bytes: None,
+                timeout: Some(PROVIDER_CONNECTION_TIMEOUT),
+            })
+            .await;
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        classify_provider_connection_response(response, model.trim(), latency_ms, true)
+    }
 }
 
 /// Lowered rootfs lifecycle state for the foreign host.
@@ -1030,6 +1579,9 @@ async fn build_mobile_inner_with_ask(
     let mcp_registry = Arc::new(McpRegistry::new(
         local_apps_mcp.clone() as Arc<dyn traits::McpTransport>
     ));
+    // Subscribe before connecting so initialization-time catalog notifications
+    // are retained until the shared ToolRegistry is ready below.
+    let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
     mcp_registry
         .connect(McpServerConfig {
             name: LOCAL_APPS_REGISTRY_KEY.into(),
@@ -1046,6 +1598,19 @@ async fn build_mobile_inner_with_ask(
         .map_err(|error| {
             MobileBuildError::Orchestrator(format!("local apps MCP bootstrap failed: {error}"))
         })?;
+    // Keep iOS/Android MCP discovery on the same parser and precedence rules
+    // as desktop. The app-private settings file is the mobile equivalent of
+    // the user global config; `.mcp.json` remains project-scoped.
+    let configured_mcp = mcp::load_mcp_servers(
+        &cwd.join(".mcp.json"),
+        &cfg.lingxi_home.join("settings.json"),
+        &cwd,
+    );
+    for (name, result) in mcp_registry.connect_all(configured_mcp).await {
+        if let Err(error) = result {
+            tracing::debug!(server = %name, error = %error, "mobile MCP server is unavailable");
+        }
+    }
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
     //     the device supplies these; the host test supplies a portable shim).
@@ -1054,6 +1619,35 @@ async fn build_mobile_inner_with_ask(
     let fs = platform.filesystem();
     let main_session_id = protocol::SessionId::new();
     let main_session_uuid = main_session_id.as_uuid().to_string();
+    // v3 Phase 3 (MCP create 收权): the LIVE current-session uuid, updated on
+    // every New/Resume/Clear retarget. The local-apps MCP `create` stamps an
+    // app's origin `conversation_id` from THIS cell — model input is never
+    // trusted for it.
+    let active_session_uuid = Arc::new(std::sync::Mutex::new(main_session_uuid.clone()));
+    {
+        let cell = active_session_uuid.clone();
+        let _ = local_apps_mcp.attach_session_provider(Arc::new(move || {
+            cell.lock().ok().map(|guard| guard.clone())
+        }));
+    }
+    // v3 Phase 4: the connection-scoped init-session minter — forks the
+    // origin chat (this connection's cwd catalog) into the new app's
+    // workspace catalog, or anchors an empty session.
+    {
+        let minter_home = cfg.lingxi_home.clone();
+        let minter_source_cwd = cwd.to_string_lossy().to_string();
+        let minter_data_root = mobile_apps_data_root(&cfg);
+        let minter_fs = fs.clone();
+        let _ = local_apps_mcp.attach_init_session_minter(Arc::new(move |record| {
+            let lingxi_home = minter_home.clone();
+            let source_cwd = minter_source_cwd.clone();
+            let data_root = minter_data_root.clone();
+            let fs = minter_fs.clone();
+            Box::pin(async move {
+                mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record).await
+            })
+        }));
+    }
     let session_writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
         orchestrator::transcript_paths::main_transcript_path(
             &cfg.lingxi_home,
@@ -1081,6 +1675,83 @@ async fn build_mobile_inner_with_ask(
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
     let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
 
+    // Build the shared credential manager and provider-specific OAuth handles
+    // before assembling the client. This lets a native Keychain session restore
+    // into the live provider graph on every engine boot.
+    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    let anthropic_oauth_config = ClaudeAiOAuthConfig::default_with_port(0);
+    let anthropic_oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+        anthropic_oauth_config.clone(),
+        http.clone(),
+        credentials.clone(),
+    ));
+    let anthropic_oauth_handle = Arc::new(OAuthHandle::new(anthropic_oauth_client));
+    let openai_oauth_config = openai_oauth::OpenAiOAuthConfig::default();
+    let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
+        openai_oauth_config.clone(),
+        http.clone(),
+    ));
+    let openai_oauth_handle = Arc::new(openai_oauth::OpenAiOAuthHandle::new(
+        openai_oauth_client,
+        credentials.clone(),
+    ));
+    let anthropic_refresh_spawner: Arc<dyn traits::RuntimeSpawner> =
+        Arc::new(platform_posix_minimal::PosixRuntime::new());
+    let openai_refresh_spawner: Arc<dyn traits::RuntimeSpawner> =
+        Arc::new(platform_posix_minimal::PosixRuntime::new());
+
+    let anthropic_oauth_state = match credentials.get_oauth_tokens().await {
+        Ok(Some(tokens)) => match llm_client::oauth::anthropic::client::init_refresh_driver(
+            anthropic_oauth_config,
+            tokens.access_token,
+            tokens.refresh_token,
+            tokens.expires_at,
+            http.clone(),
+            clock.clone(),
+            None,
+            Some(credentials.clone()),
+            anthropic_refresh_spawner.clone(),
+        )
+        .await {
+            Ok(state) => Some(state),
+            Err(error) => {
+                tracing::warn!(%error, "failed to restore Anthropic OAuth session");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "could not read Anthropic OAuth session");
+            None
+        }
+    };
+    let openai_oauth_state = match credentials.get_openai_oauth_tokens().await {
+        Ok(Some(tokens)) => match openai_oauth::client::init_refresh_driver(
+            openai_oauth_config,
+            tokens.access_token,
+            tokens.refresh_token,
+            tokens.expires_at,
+            tokens.account_id,
+            tokens.fedramp,
+            http.clone(),
+            clock.clone(),
+            None,
+            Some(credentials.clone()),
+            openai_refresh_spawner.clone(),
+        )
+        .await {
+            Ok(state) => Some(state),
+            Err(error) => {
+                tracing::warn!(%error, "failed to restore OpenAI ChatGPT OAuth session");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "could not read OpenAI ChatGPT OAuth session");
+            None
+        }
+    };
     // Audit fix (telemetry parity): ONE shared AnalyticsBus drives the whole
     // pipeline — the `ApiService` (so `tengu_api_*` events are not dropped), the
     // tool context (`tool_ctx.bus`), and the orchestrator (`.with_analytics_bus`)
@@ -1095,20 +1766,24 @@ async fn build_mobile_inner_with_ask(
     //      Phase 2a-mobile: assemble the FULL multi-provider client config
     //      (Anthropic + builtin catalog presets + settings `providers`) + chains
     //      + credential sources + pricing catalog via `provider_config::assemble`,
-    //      mirroring `engine_desktop::build`. Mobile is api-key + env only (no
-    //      OAuth, no availability map, no CostTracker / picker), so
-    //      `anthropic_has_oauth = false` and there is no OAuth credential delegate
-    //      — the interactive `/connect` / picker is a §11 follow-up. A bad
-    //      settings entry only emits a warning; the engine still boots with every
-    //      well-formed profile (incl. the built-in Anthropic one).
+    //      mirroring `engine_desktop::build`. Restored OAuth sessions are wired
+    //      through the provider credential ids below. Anthropic's API-key flag
+    //      intentionally remains true when both credentials exist because the
+    //      shared assembler gives API Key precedence over OAuth.
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let has_api_key = !cfg.api_key.is_empty();
+    let stored_anthropic_key = credentials
+        .get_anthropic_api_key()
+        .await
+        .ok()
+        .flatten();
+    let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
+    let has_anthropic_oauth = anthropic_oauth_state.is_some();
     let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: cfg.api_base.clone(),
         anthropic_models: anthropic_models(&cfg.default_model),
         anthropic_has_api_key: has_api_key,
-        anthropic_has_oauth: false, // mobile inference is api-key-only (no OAuth)
+        anthropic_has_oauth: has_anthropic_oauth,
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
     });
@@ -1160,27 +1835,59 @@ async fn build_mobile_inner_with_ask(
         .cloned()
         .unwrap_or_else(|| "firstParty".to_string());
 
-    // (3) Credential manager — built BEFORE the client so the same `Arc` serves
-    //     BOTH the composite credential provider (below) and the OAuth client
-    //     (used by /login, /logout, step (3b)). One store, no second keychain.
-    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
-
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-client config: {e}")))?;
-    // §6.1: ONE composite credential slot for ALL providers — the Anthropic api
-    // key is served directly; every other provider resolves keychain → env. The
-    // composite preserves the env fallback, so api-key-via-`ANTHROPIC_API_KEY`
-    // still works exactly as before. Mobile has no OAuth delegate.
+    // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
+    // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
+    // Swift; API-key profiles retain the existing keychain → env fallback.
+    let mut oauth_delegates: std::collections::BTreeMap<
+        String,
+        Arc<dyn CredentialProvider>,
+    > = std::collections::BTreeMap::new();
+    let anthropic_refresh = anthropic_oauth_state
+        .clone()
+        .map(|state| Arc::new(RefreshDriver::new(state)));
+    let openai_refresh = openai_oauth_state
+        .clone()
+        .map(|state| Arc::new(openai_oauth::RefreshDriver::new(state)));
+    let oauth = Arc::new(MobileOAuthManager::new(
+        anthropic_oauth_handle.clone(),
+        openai_oauth_handle.clone(),
+        anthropic_refresh.clone(),
+        openai_refresh.clone(),
+        anthropic_oauth_state
+            .as_ref()
+            .map(|_| anthropic_refresh_spawner.clone()),
+        openai_oauth_state
+            .as_ref()
+            .map(|_| openai_refresh_spawner.clone()),
+        http.clone(),
+    ));
+    if !has_api_key {
+        if let Some(driver) = anthropic_refresh {
+            oauth_delegates.insert(
+                "anthropic-oauth".to_string(),
+                Arc::new(OAuthCredentialProvider::new(driver)) as Arc<dyn CredentialProvider>,
+            );
+        }
+    }
+    if let Some(driver) = openai_refresh {
+        oauth_delegates.insert(
+            "openai-chatgpt".to_string(),
+            Arc::new(openai_oauth::OpenAiOAuthCredentialProvider::new(driver))
+                as Arc<dyn CredentialProvider>,
+        );
+    }
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
         assembled.credential_sources.clone(),
-        if has_api_key {
+        if !cfg.api_key.trim().is_empty() {
             Some(cfg.api_key.clone())
         } else {
             None
         },
         None,
-        std::collections::BTreeMap::new(),
+        oauth_delegates,
     );
     client = client.with_credential_provider(Arc::new(composite));
     let llm_client = Arc::new(client);
@@ -1291,22 +1998,35 @@ async fn build_mobile_inner_with_ask(
             .with_mcp_token_counter(provider_adapter.clone()),
     );
 
-    // (3b) OAuth client (used by /login, /logout). Reuses the SAME `credentials`
-    //      manager built above for the composite credential provider — one
-    //      keychain-backed store, not a second one.
-    let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
-        oauth_cfg,
-        http.clone(),
-        credentials.clone(),
-    ));
-    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
+    // `/login` remains the Anthropic trait-shaped command. Provider settings
+    // use `oauth` above so ChatGPT's account-shaped identity stays separate.
+    let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
     let mut orch_cfg = OrchestratorConfig::default();
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/
     // prefix when present, passes through unchanged for bare ids).
     orch_cfg.model.clone_from(&default_model_id);
+    // Mobile hosts a live chat UI, so the session follows interactive
+    // semantics on BOTH axes the orchestrator distinguishes:
+    // - `interactive_permissions` feeds the main loop's per-tool-call
+    //   `is_non_interactive_session` (turn_loop's ToolUseContext options) —
+    //   the gate `AskUserQuestion` checks before forwarding to the mounted
+    //   questionnaire card. The default (`false`) made the tool refuse with
+    //   "no live prompt UI" even though the card was wired. Permission asks
+    //   themselves already forward through the adapter gate, which is exactly
+    //   what this flag asserts a host can do.
+    // - `interactive_session` is published by `ConversationOrchestrator::new`
+    //   to the PROCESS-global session flag prompt builders read. This one
+    //   constructor also serves the cron-fired throwaway runtime, and a
+    //   headless fire flipping the global would poison the live chat's next
+    //   AskUserQuestion.
+    // A session without a prompt transport stays safe regardless of both
+    // flags: its registry has no ask resolver (`ask_user_question_tx: None`
+    // ⇒ `DefaultTimeoutResolver` refuses) and cron's permission sink
+    // auto-denies.
+    orch_cfg.interactive_session = true;
+    orch_cfg.interactive_permissions = true;
 
     // (5) Connection-scoped sinks — the mobile transport's analog of the
     //     bridge-server's WS writer:
@@ -1687,6 +2407,136 @@ async fn build_mobile_inner_with_ask(
         .map(|m| std::path::PathBuf::from(&m.guest_path))
         .unwrap_or_else(|| cwd.clone());
     let session_cwd = SessionCwd::new(model_cwd, trusted_dirs);
+
+    // ── v3 Phase 1: workflow-on-mobile stack ─────────────────────────────
+    // (a) Task output spool + registry (mirror of the desktop composition,
+    // engine-desktop lib.rs (5.46)). The spool lives under the app-private
+    // lingxi home, keyed by the boot session so concurrent processes never
+    // share a spool dir.
+    let task_output_dir = cfg
+        .lingxi_home
+        .join("task-output")
+        .join(&main_session_uuid);
+    if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
+        tracing::warn!(
+            dir = %task_output_dir.display(),
+            error = %e,
+            "could not create the session task-output dir; task spools may fail to allocate"
+        );
+    }
+    let mut task_registry_inner = tasks::registry::TaskRegistry::new(
+        Arc::new(platform_posix_minimal::PosixRuntime::new()),
+        fs.clone(),
+        Arc::new(tasks::output_manager::TaskOutputManager::new(
+            task_output_dir,
+            fs.clone(),
+        )),
+    )
+    // Same blocking TaskCreated/TaskCompleted hook contract as desktop; the
+    // transcript path is unavailable before the session mounts (matches the
+    // `task_lifecycle_hooks` wiring below).
+    .with_task_completed_firer(Arc::new(orchestrator::OrchestratorTaskCompletedFirer::new(
+        hooks.clone(),
+        cwd.clone(),
+        std::path::PathBuf::new(),
+    )))
+    .with_task_created_firer(Arc::new(orchestrator::OrchestratorTaskCreatedFirer::new(
+        hooks.clone(),
+        cwd.clone(),
+        std::path::PathBuf::new(),
+    )));
+
+    // (b) The subagent pool + spawner (adapted from engine-desktop; no
+    // worktree/LSP/coordinator seams on mobile). The spawner's set-once cells
+    // (tool registry / agent catalog / hook executor / skill loader) are
+    // grabbed BEFORE boxing and filled once the tool registry exists below —
+    // the same construction-cycle break as desktop. Subagents keep upstream
+    // interactivity semantics: a one-shot spawn is `is_async=false`, so
+    // `AskUserQuestion` inside a workflow agent reaches the client through
+    // the SAME shared registry + `TuiBridgeResolver` channel as the main
+    // session.
+    let subagent_pool = Arc::new(agent::StateMachinePool::new(
+        Arc::new(platform_posix_minimal::PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+        traits::subagent_spawn::max_concurrent_subagents(),
+    ));
+    let subagent_hook_session_id = protocol::SessionId::new();
+    let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
+        &cfg.lingxi_home,
+        &cwd.to_string_lossy(),
+        &main_session_uuid,
+    );
+    let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
+        .with_default_model(agent::model_resolution::resolve_user_specified_model(
+            &orch_cfg.model,
+        ))
+        .with_permission_mode(PermissionMode::Default)
+        .with_model_setting(orch_cfg.model.clone())
+        .with_hook_context(
+            subagent_hook_session_id,
+            cwd.clone(),
+            Some(main_subagents_dir.clone()),
+        )
+        .with_transcript_fs(fs.clone())
+        .with_subagent_env_renderer(Arc::new(
+            orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
+        ));
+    let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
+    let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
+    let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
+    let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
+    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
+        subagent_spawner_arc.clone();
+
+    // (c) Budget enforcer over the session CostTracker (desktop parity —
+    // background subagents halt at the same session ceiling as the main loop;
+    // with no configured ceiling this stays unlimited).
+    let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
+        Arc::new(cost::BudgetEnforcer::new(
+            cost::BudgetConfig {
+                max_session_nano_usd: orch_cfg.max_budget_nano_usd,
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: Vec::new(),
+                on_exceed: cost::BudgetExceedPolicy::Halt,
+            },
+            cost_tracker.clone(),
+        ));
+
+    // (d) The LocalWorkflow handler. Its tool-dispatch seam is a deferred
+    // invoker (filled with the real `RegistryToolInvoker` once `tools`
+    // exists) and its terminal status writes through a deferred
+    // `RegistryStatusSink` (bound once the registry `Arc` exists) — without
+    // it a finished workflow is stuck `Running` forever. The output-pool
+    // cells are published after the orchestrator is built.
+    let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
+    let local_workflow_status_sink =
+        Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    let local_workflow_output_pool: Arc<
+        std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>,
+    > = Arc::new(std::sync::OnceLock::new());
+    let local_workflow_turn_baseline: Arc<
+        std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>,
+    > = Arc::new(std::sync::OnceLock::new());
+    task_registry_inner.register_handler(
+        tasks::TaskType::LocalWorkflow,
+        Arc::new(
+            tasks::handlers::LocalWorkflowHandler::new(
+                subagent_spawner.clone(),
+                local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+                budget_enforcer.clone(),
+                task_registry_inner.output_manager.clone(),
+            )
+            .with_token_budget(orch_cfg.token_budget)
+            .with_output_pool_cell(local_workflow_output_pool.clone())
+            .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+            .with_status_sink(
+                local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
+            ),
+        ),
+    );
+    let task_registry = Arc::new(task_registry_inner);
+
     let tool_ctx = BuiltinToolContext {
         // No session: this context never persists tool output.
         session_id: None,
@@ -1752,11 +2602,16 @@ async fn build_mobile_inner_with_ask(
         // built-in defaults here. `None` matches the tool-api test-support host.
         web_search_config: None,
         worktree,
-        subagent_spawner: None,
+        // v3 Phase 1 (workflow-on-mobile): the real subagent spawner + task
+        // registry + budget enforcer built above — the `Workflow` tool and
+        // the Task command family run for real now.
+        subagent_spawner: Some(subagent_spawner.clone()),
         agent_name_registry: None,
-        task_registry: None,
+        task_registry: Some(
+            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
+        ),
         mailbox_router: None,
-        budget_enforcer: None,
+        budget_enforcer: Some(budget_enforcer.clone()),
         // Mobile has no coordinator runtime; fork-subagent gate sees non-coordinator.
         coordinator_mode: None,
         // (3b) No subagent spawner on mobile → AgentTool never builds an
@@ -1853,12 +2708,130 @@ async fn build_mobile_inner_with_ask(
         mobile_tool_registry_with_skill_loader(tool_ctx.clone(), skill_loader)
     };
     register_android_ui_automation(&mut tools, platform.android_ui_automation());
+    // v3 Phase 1: register the Workflow tool (mirror of the desktop
+    // registration — after the base registry, because the launcher needs the
+    // sealed `task_registry` Arc). Mobile has no managed-settings tier, so
+    // `disableWorkflows` policy is absent (false) and the size guideline is
+    // the default; `LINGXI_DISABLE_WORKFLOWS` still works via
+    // `workflows_enabled`.
+    {
+        let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
+            Arc::new(crate::workflow_support::MobileWorkflowLauncher {
+                registry: task_registry.clone(),
+                cwd: cwd.clone(),
+                lingxi_home: cfg.lingxi_home.clone(),
+                session_uuid: active_session_uuid.clone(),
+            });
+        traits::session_flags::set_dynamic_workflows_enabled(tool_workflow::workflows_enabled(
+            false,
+        ));
+        tools.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
+            workflow_launcher,
+        ))));
+    }
+    let live_mcp_tool_ctx = tool_ctx.clone();
     for (connection_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
     {
         tools.register_mcp_tools(connection_id, mcp_tools);
     }
     let tools = Arc::new(tools);
+
+    // MCP servers may change their tool catalog after initialization. Keep the
+    // mobile ToolRegistry in sync with the same generation-checked refresh path
+    // used by desktop; otherwise settings changes and list_changed events only
+    // update the MCP registry while the model continues seeing stale tools.
+    {
+        let mcp_registry_weak = Arc::downgrade(&mcp_registry);
+        let live_tools = tools.clone();
+        tokio::spawn(async move {
+            let mut recovery = std::collections::VecDeque::new();
+            loop {
+                let change = if let Some(change) = recovery.pop_front() {
+                    change
+                } else {
+                    match mcp_catalog_changes.recv().await {
+                        Ok(change) => change,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            let Some(registry) = mcp_registry_weak.upgrade() else {
+                                break;
+                            };
+                            tracing::warn!(
+                                target: "lingxi_engine_mobile::mcp",
+                                skipped,
+                                "MCP catalog refresh receiver lagged; refreshing every connected catalog"
+                            );
+                            recovery.extend(registry.catalog_refresh_snapshot().await);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                };
+                let Some(registry) = mcp_registry_weak.upgrade() else {
+                    break;
+                };
+
+                if let Some(retired) = change.retired_connection_id {
+                    live_tools.unregister_mcp_tools(retired);
+                    live_tools.refresh_tool_search_view();
+                }
+
+                tracing::debug!(
+                    target: "lingxi_engine_mobile::mcp",
+                    server = %change.server_name,
+                    catalog = ?change.kind,
+                    "Received MCP list_changed notification, refreshing catalog"
+                );
+                match registry.refresh_catalog(&change).await {
+                    Ok(Some(connection_id)) if change.kind == mcp::McpCatalogKind::Tools => {
+                        let refreshed = tool_mcp::build_registered_mcp_tools(
+                            registry.as_ref(),
+                            live_mcp_tool_ctx.clone(),
+                        )
+                        .await;
+                        if let Some((_, handles)) =
+                            refreshed.into_iter().find(|(id, _)| *id == connection_id)
+                        {
+                            live_tools.register_mcp_tools(connection_id, handles);
+                            live_tools.refresh_tool_search_view();
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "lingxi_engine_mobile::mcp",
+                            server = %change.server_name,
+                            catalog = ?change.kind,
+                            %error,
+                            "Failed to refresh MCP catalog; keeping the previous catalog"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    // v3 Phase 1: fill the spawner's set-once cells now that the registry
+    // exists (desktop (5.46f) mirror): subagents dispatch through the SAME
+    // `Arc<ToolRegistry>` as the main loop, gated by the SAME permission
+    // gate; the agent catalog serves the builtin definitions (incl.
+    // `workflow-subagent`); the deferred workflow invoker + status sink bind
+    // to their real targets.
+    let _ = subagent_tool_registry_cell.set(tools.clone());
+    let _ = subagent_agent_catalog_cell.set(Arc::new(tokio::sync::RwLock::new(
+        agent::builtins::builtin_agent_definitions(),
+    )));
+    let _ = subagent_hook_executor_cell.set(hooks.clone());
+    // Skill-preload cell deliberately left unfilled: it serves a subagent's
+    // frontmatter `skills:` preload (desktop wires `AgentSkillLoader` over the
+    // shared command registry), and no mobile-reachable agent definition —
+    // incl. `workflow-subagent` — declares one. The Skill TOOL itself still
+    // works inside subagents via the shared registry.
+    local_workflow_invoker.set(Arc::new(
+        tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+    ));
+    local_workflow_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
     // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
@@ -1953,6 +2926,12 @@ async fn build_mobile_inner_with_ask(
     // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
     // TodoStore (tool_task IS registered on mobile) — mirror of desktop.
     .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    // v3 Phase 1: drain terminal-not-notified background tasks (workflows)
+    // into the per-turn `<task-notification>` reminder — the model learns a
+    // launched workflow finished on the next turn (desktop mirror).
+    .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
+        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    )))
     // P1-06: share the ONE `readFileState` map with the file tools (created
     // above) so post-compact file restore + staleness consumers see a tool's
     // `readFileState.set` — mirror of desktop.
@@ -1985,6 +2964,13 @@ async fn build_mobile_inner_with_ask(
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
     }
     let orch = Arc::new(orch_inner);
+
+    // v3 Phase 1: publish the shared output-token pool + turn baseline to the
+    // LocalWorkflow handler's cells now that the orchestrator exists — the
+    // workflow script's `budget.spent()` reads the SAME pool as the main loop
+    // (desktop (9014) mirror).
+    let _ = local_workflow_output_pool.set(orch.output_token_pool());
+    let _ = local_workflow_turn_baseline.set(orch.turn_start_output_baseline());
 
     // Fill the hook-attachment sink's cell now that the orchestrator (and its
     // JSONL writer) exists. The sink holds a `Weak`, so this does not create an
@@ -2113,6 +3099,7 @@ async fn build_mobile_inner_with_ask(
         orchestrator: orch,
         dispatcher,
         auth,
+        oauth,
         permission_gate: adapter_gate,
         listener,
         event_sink,
@@ -2124,6 +3111,8 @@ async fn build_mobile_inner_with_ask(
         routable_listings: default_listings.clone(),
         local_apps_mcp,
         local_apps_llm,
+        task_registry,
+        active_session_uuid,
     })
 }
 
@@ -2183,59 +3172,6 @@ pub enum MobileEngineError {
 /// listener) survive an in-place orchestrator swap on New / Resume (§0.5); F3-05
 /// adds the async `submit` that resolves the parked permission gate from inbound
 /// commands and drives the turn on the owned runtime.
-/// Test-only bookkeeping for the fire-and-forget authoring/planning tasks
-/// [`MobileEngineHandle::spawn_authoring`] / [`MobileEngineHandle::spawn_planning`]
-/// launch. Production drops their `JoinHandle` outright — the whole point of
-/// those triggers is that `submit(CreateApp)` etc. return before the LLM round
-/// trip lands — but a test needs a deterministic way to wait for that round
-/// trip to settle without sleeping (a poll loop would work but is exactly the
-/// kind of flake-prone timing dependency §0's ban on sleeps exists to avoid).
-/// Compiles to a true no-op outside `cfg(test)`, so this can never accumulate
-/// handles in a long-running process.
-#[cfg(test)]
-#[derive(Default)]
-struct LocalAppsBackgroundTracker(StdMutex<Vec<tokio::task::JoinHandle<()>>>);
-
-#[cfg(test)]
-impl LocalAppsBackgroundTracker {
-    fn track(&self, handle: tokio::task::JoinHandle<()>) {
-        self.0
-            .lock()
-            .expect("local-apps background tracker poisoned")
-            .push(handle);
-    }
-
-    /// Await every handle queued so far, INCLUDING ones a just-awaited task
-    /// itself queued (e.g. `update_brief` re-triggering authoring) — loops
-    /// until a full pass finds nothing new.
-    async fn settle(&self) {
-        loop {
-            let handles: Vec<_> = {
-                let mut guard = self
-                    .0
-                    .lock()
-                    .expect("local-apps background tracker poisoned");
-                std::mem::take(&mut *guard)
-            };
-            if handles.is_empty() {
-                break;
-            }
-            for handle in handles {
-                let _ = handle.await;
-            }
-        }
-    }
-}
-
-#[cfg(not(test))]
-#[derive(Default)]
-struct LocalAppsBackgroundTracker;
-
-#[cfg(not(test))]
-impl LocalAppsBackgroundTracker {
-    fn track(&self, _handle: tokio::task::JoinHandle<()>) {}
-}
-
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
@@ -2308,16 +3244,11 @@ pub struct MobileEngineHandle {
     /// structured WebView operations.  The MCP provider and native command
     /// surface share this exact broker.
     local_apps_host: Arc<LocalAppsHostBroker>,
-    /// Durable single-worker generation queue shared with the AppService
-    /// continuation sink.
-    app_generation: Arc<AppGenerationCoordinator>,
     /// Keeps the process-wide profile service and fanouts alive.
     profile_apps: Option<Arc<ProfileApps>>,
     app_client_subscription: Option<u64>,
     app_domain_subscription: Option<local_apps::AppEventSubscription>,
     app_domain_observer: Option<Arc<crate::local_apps_bridge::SinkAppEventObserver>>,
-    /// See [`LocalAppsBackgroundTracker`] — a true no-op outside `cfg(test)`.
-    local_apps_background: LocalAppsBackgroundTracker,
 }
 
 impl Drop for MobileEngineHandle {
@@ -2608,6 +3539,11 @@ impl MobileEngineHandle {
             &session_id.as_uuid().to_string(),
         );
         self.inner.session_writer.retarget(path).await;
+        // Keep the local-apps MCP origin-conversation source in lockstep with
+        // the session every retarget (New/Resume/Clear).
+        if let Ok(mut guard) = self.inner.active_session_uuid.lock() {
+            *guard = session_id.as_uuid().to_string();
+        }
     }
 
     async fn has_mobile_empty_session_anchor(&self, session_id: uuid::Uuid, cwd: &str) -> bool {
@@ -2670,7 +3606,14 @@ impl MobileEngineHandle {
             uuid::Uuid::parse_str(canonical_session_id).map_err(|error| ClientError::Rejected {
                 message: format!("resume: malformed session id {session_id:?}: {error}"),
             })?;
-        let cwd = cwd.unwrap_or_else(|| self.session_cwd.clone());
+        // Resolve the catalog key the same way the ResumeSession gate
+        // compared it: CANONICAL spelling, and an empty string treated as
+        // "unset" (the gate's own `filter(|c| !c.is_empty())` skips it, so a
+        // literal `""` must not become the project-dir key here either).
+        let cwd = match cwd.as_deref().filter(|c| !c.is_empty()) {
+            Some(requested) => canonical_cwd_string(std::path::Path::new(requested)),
+            None => self.session_cwd.clone(),
+        };
 
         match orchestrator::replay_session_state(&self.lingxi_home, &cwd, uuid, self.fs.clone())
             .await
@@ -2930,21 +3873,14 @@ impl MobileEngineHandle {
     }
 
     /// Test-only seam: swap the profile's [`LocalAppsLlm`] for a scripted
-    /// double, exercising the SAME [`SharedLlm::replace`] path a real
+    /// double, exercising the SAME `SharedLlm::replace` path a real
     /// reconnect / `/model` switch takes (Task 11's `profile_apps` fix), so
-    /// authoring/planning tests are deterministic without a network.
+    /// app-LLM tests are deterministic without a network.
     #[cfg(test)]
     fn set_local_apps_model(&self, model: Arc<dyn crate::local_apps_llm::LocalAppsModel>) {
         if let Some(profile) = &self.profile_apps {
             profile.llm.replace(Arc::new(LocalAppsLlm::new(model)));
         }
-    }
-
-    /// Test-only: await every authoring/planning task spawned so far. See
-    /// [`LocalAppsBackgroundTracker`].
-    #[cfg(test)]
-    async fn settle_local_apps(&self) {
-        self.local_apps_background.settle().await;
     }
 
     /// The live service, or emit the boot-time load failure and yield `None`.
@@ -2988,44 +3924,6 @@ impl MobileEngineHandle {
         service.announce_apps().await;
     }
 
-    /// Await one detached app-mutation task (the seven mutate-then-announce
-    /// handlers below). The body — service mutation AND its post-mutation
-    /// snapshot announce — runs in a task spawned on the engine runtime, so
-    /// dropping the `submit` future that awaits here abandons the AWAIT, not
-    /// the work: a mutation that commits always gets its `AppsChanged`
-    /// (contract C8), mirroring the core's dropped-caller completion-task
-    /// hardening. A panic inside the body is resumed on the caller (the same
-    /// observable behavior as running the body inline); a cancelled join can
-    /// only mean the runtime itself is shutting down, where nothing is left
-    /// to do.
-    async fn join_app_mutation(task: tokio::task::JoinHandle<()>) {
-        if let Err(error) = task.await {
-            if error.is_panic() {
-                std::panic::resume_unwind(error.into_panic());
-            }
-        }
-    }
-
-    /// As [`Self::join_app_mutation`], but the task also reports ITS OWN
-    /// mutation's outcome — used by the four handlers below that gate a
-    /// SEPARATE, un-joined background LLM round trip (authoring/planning) on
-    /// it. `T` is `Option<u64>` at every call site: `Some(epoch)` on success
-    /// (the `llm_round` the mutation just bumped to, handed straight to the
-    /// freshly spawned task), `None` on failure. A cancelled join (runtime
-    /// shutting down) reports `T::default()` (`None`): there is nothing left
-    /// to trigger.
-    async fn join_app_mutation_outcome<T: Default>(task: tokio::task::JoinHandle<T>) -> T {
-        match task.await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if error.is_panic() {
-                    std::panic::resume_unwind(error.into_panic());
-                }
-                T::default()
-            }
-        }
-    }
-
     async fn handle_list_apps(&self) {
         let Some(service) = self.local_apps_or_report(None).await else {
             return;
@@ -3040,24 +3938,9 @@ impl MobileEngineHandle {
         let root = mobile_apps_data_root(&self.firer_cfg);
         let result = async {
             let record = service.record(&app_id).await?;
-            let draft = service.draft(&app_id).await?;
             let runtime = service.runtime_record(&app_id).await?;
             let checkpoints = service.list_checkpoints(&app_id).await?;
-            let mut details = crate::local_apps_bridge::lower_details(
-                &root,
-                &record,
-                &draft,
-                &runtime,
-                &checkpoints,
-            )?;
-            details.generation_job = self
-                .app_generation
-                .jobs_for_app(&app_id)
-                .await?
-                .into_iter()
-                .next()
-                .map(lower_job);
-            Ok(details)
+            crate::local_apps_bridge::lower_details(&root, &record, &runtime, &checkpoints)
         }
         .await;
         match result {
@@ -3093,431 +3976,148 @@ impl MobileEngineHandle {
         // match — see `AppCreateOrigin::conversation_binding`).
         let conversation_id = origin.conversation_binding(conversation_id);
         // Success needs no extra emit: `create_app` announces the new record
-        // set via its own `AppsChanged` domain event. `brief` is the LLM's
-        // real seed now (Task 11) — `name` is a display label, never the
-        // spec the questionnaire gets authored from; see
-        // `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
+        // set via its own `AppsChanged` domain event. `brief` is stored for
+        // the agent's context — `name` is a display label, never the spec;
+        // see `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
         match service
             .create_app_with_git(Some(name), brief, conversation_id, git_enabled)
             .await
         {
             Ok(record) => {
-                let epoch = record.llm_round;
-                self.trigger_authoring(&service, record.id, epoch);
+                // Best-effort scaffold (v3): the record already committed, so
+                // a scaffold failure degrades to a warning — the agent can
+                // still lay files down itself and `build` names the gap.
+                if let Err(error) = self.local_apps_host.scaffold_app_value(&record.id).await {
+                    tracing::warn!(
+                        app_id = %record.id,
+                        error = %error,
+                        "CreateApp: workspace scaffold failed; the record stays usable"
+                    );
+                }
+                // v3 Phase 4: pin the init session (fork the source chat, or
+                // anchor an empty one). Best-effort like the scaffold — a
+                // missing pin is repaired by the boot backfill sweep.
+                match mint_app_init_session(
+                    &self.lingxi_home,
+                    &self.session_cwd,
+                    &mobile_apps_data_root(&self.firer_cfg),
+                    self.fs.clone(),
+                    &record,
+                )
+                .await
+                {
+                    Ok(init_id) => {
+                        if let Err(error) = service.set_init_session(&record.id, &init_id).await {
+                            // `set_init_session` is set-once, and it is the
+                            // ONLY arbiter between this path and the boot
+                            // backfill sweep: a create that lands while the
+                            // sweep is walking the same record makes both
+                            // mint an anchor. The loser must drop its file,
+                            // or the app's session list shows a phantom
+                            // conversation nobody opened.
+                            let removed = remove_app_session_file(
+                                &self.lingxi_home,
+                                &mobile_apps_data_root(&self.firer_cfg),
+                                &record,
+                                &init_id,
+                            );
+                            tracing::warn!(
+                                app_id = %record.id,
+                                error = %error,
+                                orphan_removed = removed,
+                                "CreateApp: init-session pin failed"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        app_id = %record.id,
+                        error = %error,
+                        "CreateApp: init-session mint failed; boot backfill will repair"
+                    ),
+                }
             }
             Err(error) => self.emit_app_failure(None, &error).await,
         }
     }
 
-    async fn handle_update_app_brief(&self, app_id: String, brief: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let task_service = service.clone();
-        let task_app_id = app_id.clone();
-        let epoch: Option<u64> =
-            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-                match task_service.update_brief(&task_app_id, &brief).await {
-                    Ok(epoch) => {
-                        Self::emit_apps_snapshot(&task_service).await;
-                        Some(epoch)
-                    }
-                    Err(error) => {
-                        emissions
-                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                            .await;
-                        None
-                    }
-                }
-            }))
-            .await;
-        if let Some(epoch) = epoch {
-            self.trigger_authoring(&service, app_id, epoch);
-        }
-    }
-
-    async fn handle_retry_app_questionnaire(&self, app_id: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let task_service = service.clone();
-        let task_app_id = app_id.clone();
-        let epoch: Option<u64> =
-            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-                match task_service.retry_questionnaire(&task_app_id).await {
-                    Ok(epoch) => {
-                        Self::emit_apps_snapshot(&task_service).await;
-                        Some(epoch)
-                    }
-                    Err(error) => {
-                        emissions
-                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                            .await;
-                        None
-                    }
-                }
-            }))
-            .await;
-        if let Some(epoch) = epoch {
-            self.trigger_authoring(&service, app_id, epoch);
-        }
-    }
-
-    async fn handle_begin_app_planning(&self, app_id: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let task_service = service.clone();
-        let task_app_id = app_id.clone();
-        // `begin_planning` validates the collected answers are self-consistent
-        // BEFORE flipping to `planning` — a failure here never starts the
-        // background plan round trip.
-        let epoch: Option<u64> =
-            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-                match task_service.begin_planning(&task_app_id).await {
-                    Ok(epoch) => {
-                        Self::emit_apps_snapshot(&task_service).await;
-                        Some(epoch)
-                    }
-                    Err(error) => {
-                        emissions
-                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                            .await;
-                        None
-                    }
-                }
-            }))
-            .await;
-        if let Some(epoch) = epoch {
-            self.trigger_planning(&service, app_id, epoch);
-        }
-    }
-
-    async fn handle_retry_app_plan(&self, app_id: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let task_service = service.clone();
-        let task_app_id = app_id.clone();
-        let epoch: Option<u64> =
-            Self::join_app_mutation_outcome(self.runtime.handle().spawn(async move {
-                match task_service.retry_plan(&task_app_id).await {
-                    Ok(epoch) => {
-                        Self::emit_apps_snapshot(&task_service).await;
-                        Some(epoch)
-                    }
-                    Err(error) => {
-                        emissions
-                            .emit_failure(Some(&task_service), Some(task_app_id), &error)
-                            .await;
-                        None
-                    }
-                }
-            }))
-            .await;
-        if let Some(epoch) = epoch {
-            self.trigger_planning(&service, app_id, epoch);
-        }
-    }
-
-    /// Kick off background questionnaire authoring for `app_id`, fire-and-
-    /// forget from the caller's perspective: `submit` has already returned
-    /// (or is about to) by the time the LLM round trip lands. The eventual
-    /// `questionnaire_ready` / `questionnaire_failed` transition and its
-    /// `AppsChanged` snapshot ride the same app-emission channel as every
-    /// other app event. Delegates to the shared
-    /// [`crate::local_apps_profile::spawn_authoring`] — see its doc for why
-    /// this is a free function and why it runs on
-    /// [`crate::local_apps_profile::worker_runtime`] rather than
-    /// `self.runtime`.
-    fn trigger_authoring(&self, service: &Arc<AppService>, app_id: String, epoch: u64) {
-        // `self.local_apps` was `Ok` (checked by every caller via
-        // `local_apps_or_report`) iff `self.profile_apps` is `Some` — both are
-        // set together from the same `loaded_profile` match at build time.
-        // `debug_assert!` because a violation here is the SAME permanent
-        // hang this whole task exists to close, just via a different door —
-        // cheap enough to check even in release (a `tracing::error!` fires
-        // there too), since silently returning is exactly the failure mode
-        // under review.
-        let Some(profile) = &self.profile_apps else {
-            debug_assert!(
-                false,
-                "trigger_authoring called with local_apps Ok but profile_apps None"
-            );
-            tracing::error!(
-                app_id,
-                "local-apps profile unavailable; authoring was not triggered — the app is \
-                 stuck in authoring_questionnaire with no recovery until an engine restart"
-            );
-            return;
-        };
-        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
-            Arc::new(self.app_emissions.clone());
-        let handle = crate::local_apps_profile::spawn_authoring(
-            service.clone(),
-            profile.llm.current(),
-            notifier,
-            app_id,
-            epoch,
-        );
-        self.local_apps_background.track(handle);
-    }
-
-    /// As [`Self::trigger_authoring`], for background plan derivation.
-    fn trigger_planning(&self, service: &Arc<AppService>, app_id: String, epoch: u64) {
-        let Some(profile) = &self.profile_apps else {
-            debug_assert!(
-                false,
-                "trigger_planning called with local_apps Ok but profile_apps None"
-            );
-            tracing::error!(
-                app_id,
-                "local-apps profile unavailable; planning was not triggered — the app is \
-                 stuck in planning with no recovery until an engine restart"
-            );
-            return;
-        };
-        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
-            Arc::new(self.app_emissions.clone());
-        let handle = crate::local_apps_profile::spawn_planning(
-            service.clone(),
-            profile.llm.current(),
-            notifier,
-            app_id,
-            epoch,
-        );
-        self.local_apps_background.track(handle);
-    }
-
-    // The seven mutate-then-announce handlers below are cancellation-atomic:
-    // each body runs in a detached task joined via `join_app_mutation`, so a
-    // caller dropped after the mutation commits cannot lose the mutation's
-    // only `AppsChanged` snapshot. (`CreateApp` / `DeleteApp` need no such
-    // wrap for their announce: it rides the core's own completion task.)
-
-    async fn handle_open_app_designer(&self, app_id: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.open_designer(&app_id).await {
-                Ok(_interaction) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_update_app_design_draft(
+    /// v3 Phase 4: one page of an app's workspace-scoped session catalog.
+    /// The catalog IS the ordinary per-cwd JSONL listing — an app's sessions
+    /// live under `projects/<sanitize(workspace)>/` exactly like a
+    /// project's; only the init pin is app-specific.
+    async fn handle_list_app_sessions(
         &self,
         app_id: String,
-        expected_revision: u64,
-        patch: AppDesignPatchDto,
+        offset: u64,
+        limit: Option<u32>,
     ) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        let patch = match crate::local_apps_bridge::raise_patch(patch) {
-            Ok(patch) => patch,
+        let record = match service.record(&app_id).await {
+            Ok(record) => record,
             Err(error) => {
                 self.emit_app_failure(Some(app_id), &error).await;
                 return;
             }
         };
-        let emissions = self.app_emissions.clone();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service
-                .update_draft(&app_id, expected_revision, &patch)
-                .await
-            {
-                Ok(_revision) => Self::emit_apps_snapshot(&service).await,
-                // A stale revision already emitted `AppDesignConflict` from
-                // the service; the typed failure rides BEHIND it on the
-                // ordered emission channel.
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_apply_agent_design_suggestion(
-        &self,
-        app_id: String,
-        suggestion_id: &str,
-        expected_revision: u64,
-    ) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let suggestion_id = suggestion_id.to_string();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service
-                .apply_suggestion(&app_id, &suggestion_id, expected_revision)
-                .await
-            {
-                Ok(_revision) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_request_app_design_suggestion(
-        &self,
-        app_id: String,
-        _expected_revision: u64,
-        _prompt: Option<String>,
-    ) {
-        // TODO(local-apps#questionnaire, Task 8): replace this retired static
-        // suggestion path with a real LLM-driven suggestion call. No existing test
-        // exercises this command (`RequestAppDesignSuggestion` is dispatched
-        // only from here; the design-suggestion tests in this file drive
-        // `AppService::store_suggestion` directly, bypassing this handler
-        // entirely), so failing loudly here is a pure gap-close, not a
-        // behavior regression.
-        if self.local_apps_or_report(Some(&app_id)).await.is_none() {
-            return;
-        }
-        self.emit_app_failure(
-            Some(app_id),
-            &AppError::NotYetAvailable(
-                "agent design suggestions are not yet wired to the LLM (Task 8 replaces the \
-                 template-driven suggester)"
-                    .into(),
-            ),
+        let workspace_cwd = canonical_cwd_string(
+            &mobile_apps_data_root(&self.firer_cfg).join(&record.workspace_rel),
+        );
+        let limit = limit.map_or(50usize, |l| (l as usize).clamp(1, 100));
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        // Fetch one row past the page so `next_offset` reflects reality
+        // instead of guessing from a full page.
+        let fetch = offset.saturating_add(limit).saturating_add(1);
+        let rows = match session::jsonl::list_recent_sessions(
+            &self.lingxi_home,
+            &workspace_cwd,
+            fetch,
+            self.fs.clone(),
         )
-        .await;
-    }
-
-    async fn handle_dismiss_app_design_suggestion(&self, app_id: String, suggestion_id: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.dismiss_suggestion(&app_id, &suggestion_id).await {
-                Ok(()) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
+        .await
+        {
+            Ok(rows) => rows,
+            // A fresh workspace has no catalog dir yet — that is an empty
+            // listing, not an error.
+            Err(session::jsonl::LoaderError::EmptyDirectory) => Vec::new(),
+            Err(error) => {
+                self.emit_app_failure(
+                    Some(app_id),
+                    &local_apps::AppError::Io(format!("list app sessions: {error}")),
+                )
+                .await;
+                return;
             }
-        }))
-        .await;
-    }
-
-    async fn handle_confirm_app_design(&self, app_id: String, interaction_id: &str, revision: u64) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
         };
-        let emissions = self.app_emissions.clone();
-        let interaction_id = interaction_id.to_string();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service
-                .confirm_design(&app_id, &interaction_id, revision)
-                .await
-            {
-                Ok(()) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
+        let has_more = rows.len() > offset.saturating_add(limit);
+        let init = record.init_session_id.clone();
+        let sessions: Vec<client_protocol::local_apps::AppSessionRowDto> = rows
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|meta| {
+                let lowered = client_adapter::lowering::lower_session_metadata(&meta);
+                let kind = if init.as_deref() == Some(lowered.uuid.as_str()) {
+                    client_protocol::local_apps::AppSessionKindDto::Init
+                } else {
+                    client_protocol::local_apps::AppSessionKindDto::Conversation
+                };
+                client_protocol::local_apps::AppSessionRowDto {
+                    uuid: lowered.uuid,
+                    title: lowered.title,
+                    modified_rfc3339: lowered.modified_rfc3339,
+                    message_count: lowered.message_count,
+                    kind,
                 }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_cancel_app_design(&self, app_id: String) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.cancel_design(&app_id).await {
-                Ok(()) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_confirm_app_preview(
-        &self,
-        app_id: String,
-        interaction_id: &str,
-        revision: u64,
-    ) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let interaction_id = interaction_id.to_string();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service
-                .confirm_preview(&app_id, &interaction_id, revision)
-                .await
-            {
-                Ok(()) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_request_app_revision(&self, app_id: String, prompt: &str) {
-        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        let emissions = self.app_emissions.clone();
-        let prompt = prompt.to_string();
-        Self::join_app_mutation(self.runtime.handle().spawn(async move {
-            match service.request_revision(&app_id, &prompt).await {
-                Ok(()) => Self::emit_apps_snapshot(&service).await,
-                Err(error) => {
-                    emissions
-                        .emit_failure(Some(&service), Some(app_id), &error)
-                        .await;
-                }
-            }
-        }))
-        .await;
-    }
-
-    async fn handle_retry_app_generation(&self, app_id: String, prompt: Option<String>) {
-        let Some(_service) = self.local_apps_or_report(Some(&app_id)).await else {
-            return;
-        };
-        if let Err(error) = self.app_generation.retry_app(&app_id, prompt).await {
-            self.emit_app_failure(Some(app_id), &error).await;
-        }
+            })
+            .collect();
+        self.event_sink
+            .emit(ClientEvent::AppSessionsChanged {
+                app_id,
+                sessions,
+                next_offset: has_more.then(|| (offset + limit) as u64),
+            })
+            .await;
     }
 
     async fn handle_list_app_checkpoints(&self, app_id: String) {
@@ -3608,6 +4208,59 @@ impl MobileEngineHandle {
 // SAME method body.
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
+    /// Start a native OAuth authorization-code flow. PKCE verifier/state stay
+    /// in the Rust-owned coordinator; the foreign host receives only the URL.
+    pub async fn begin_o_auth(
+        &self,
+        provider: String,
+        redirect_uri: String,
+    ) -> Result<MobileOAuthSessionDto, MobileEngineError> {
+        if !self.inner.oauth_supported {
+            return Err(MobileEngineError::Internal(
+                "OAuth requires an encrypted secure credential store".to_string(),
+            ));
+        }
+        self.inner.oauth.begin(provider, redirect_uri).await
+    }
+
+    /// Complete a native OAuth callback. The callback URL is validated and the
+    /// resulting tokens are persisted inside Rust; no token crosses FFI.
+    pub async fn complete_o_auth(
+        &self,
+        flow_id: String,
+        callback_url: String,
+    ) -> Result<MobileOAuthStateDto, MobileEngineError> {
+        self.inner.oauth.complete(flow_id, callback_url).await
+    }
+
+    /// Cancel one pending native OAuth flow.
+    pub async fn cancel_o_auth(&self, flow_id: String) {
+        self.inner.oauth.cancel(flow_id).await;
+    }
+
+    /// Remove persisted OAuth credentials for one provider.
+    pub async fn logout_o_auth(&self, provider: String) -> Result<(), MobileEngineError> {
+        self.inner.oauth.logout(provider).await
+    }
+
+    /// Return non-secret OAuth account state restored from the secure store.
+    pub async fn auth_state(
+        &self,
+        provider: String,
+    ) -> Result<MobileOAuthStateDto, MobileEngineError> {
+        self.inner.oauth.state(provider).await
+    }
+
+    /// Probe provider metadata with an OAuth token, without an inference call.
+    pub async fn test_o_auth_connection(
+        &self,
+        provider: String,
+        api_base: String,
+        model: String,
+    ) -> ProviderConnectionTestDto {
+        self.inner.oauth.test(provider, api_base, model).await
+    }
+
     /// Resume a confirmed zero-message mobile session without changing its UUID.
     ///
     /// Android persists `SessionStarted` immediately in its Project index. Older
@@ -4046,7 +4699,29 @@ impl MobileEngineHandle {
             // knob the live orchestrator can honor); a `cwd` override is NOT
             // honored — the orchestrator is rooted at construction, so a true cwd
             // re-root would need a fresh build (DEFERRED, out of scope here).
-            ClientCommand::NewSession { cwd: _, model } => {
+            ClientCommand::NewSession { cwd, model } => {
+                // v3 Phase 4: a non-empty cwd must NAME this source's cwd —
+                // the orchestrator is rooted at construction, so a cross-cwd
+                // new-session cannot be honored in place (the old behavior
+                // silently ignored it, which let clients believe a workspace
+                // switch happened). Switching cwd means rebuilding the source.
+                if let Some(requested) = cwd.as_deref().filter(|c| !c.is_empty()) {
+                    // Compare CANONICAL spellings: a client may say `/var/…`
+                    // where this source was rooted at `/private/var/…` (the
+                    // same directory through the platform symlink).
+                    let requested_canon =
+                        canonical_cwd_string(std::path::Path::new(requested));
+                    let source_canon =
+                        canonical_cwd_string(std::path::Path::new(&self.session_cwd));
+                    if requested_canon != source_canon {
+                        return Err(ClientError::Rejected {
+                            message: format!(
+                                "NewSession cwd {requested:?} does not match this source's cwd {:?}; rebuild the source to switch workspaces",
+                                self.session_cwd
+                            ),
+                        });
+                    }
+                }
                 // Reject mid-turn (same contract as `ClearSession`): a new session
                 // must not race an in-flight turn.
                 let mid_turn = self.active_cancel.lock().await.is_some();
@@ -4111,6 +4786,27 @@ impl MobileEngineHandle {
             // sessions are honestly `Rejected`, so we never emit a FALSE
             // `SessionResumed`.
             ClientCommand::ResumeSession { session_id, cwd } => {
+                // v3 Phase 4: same contract as NewSession — a non-empty cwd
+                // that names another workspace is rejected instead of being
+                // silently coerced onto this source's catalog (which would
+                // resume the WRONG project's session or fail confusingly).
+                if let Some(requested) = cwd.as_deref().filter(|c| !c.is_empty()) {
+                    // Compare CANONICAL spellings: a client may say `/var/…`
+                    // where this source was rooted at `/private/var/…` (the
+                    // same directory through the platform symlink).
+                    let requested_canon =
+                        canonical_cwd_string(std::path::Path::new(requested));
+                    let source_canon =
+                        canonical_cwd_string(std::path::Path::new(&self.session_cwd));
+                    if requested_canon != source_canon {
+                        return Err(ClientError::Rejected {
+                            message: format!(
+                                "ResumeSession cwd {requested:?} does not match this source's cwd {:?}; rebuild the source to switch workspaces",
+                                self.session_cwd
+                            ),
+                        });
+                    }
+                }
                 self.resume_session_impl(session_id, cwd, None).await
             }
 
@@ -4141,78 +4837,6 @@ impl MobileEngineHandle {
                     .await;
                 Ok(())
             }
-            ClientCommand::UpdateAppBrief { app_id, brief } => {
-                self.handle_update_app_brief(app_id, brief).await;
-                Ok(())
-            }
-            ClientCommand::RetryAppQuestionnaire { app_id } => {
-                self.handle_retry_app_questionnaire(app_id).await;
-                Ok(())
-            }
-            ClientCommand::BeginAppPlanning { app_id } => {
-                self.handle_begin_app_planning(app_id).await;
-                Ok(())
-            }
-            ClientCommand::RetryAppPlan { app_id } => {
-                self.handle_retry_app_plan(app_id).await;
-                Ok(())
-            }
-            ClientCommand::OpenAppDesigner { app_id } => {
-                self.handle_open_app_designer(app_id).await;
-                Ok(())
-            }
-            ClientCommand::UpdateAppDesignDraft {
-                app_id,
-                expected_revision,
-                patch,
-            } => {
-                self.handle_update_app_design_draft(app_id, expected_revision, patch)
-                    .await;
-                Ok(())
-            }
-            ClientCommand::ApplyAgentDesignSuggestion {
-                app_id,
-                suggestion_id,
-                expected_revision,
-            } => {
-                self.handle_apply_agent_design_suggestion(
-                    app_id,
-                    &suggestion_id,
-                    expected_revision,
-                )
-                .await;
-                Ok(())
-            }
-            ClientCommand::RequestAppDesignSuggestion {
-                app_id,
-                expected_revision,
-                prompt,
-            } => {
-                self.handle_request_app_design_suggestion(app_id, expected_revision, prompt)
-                    .await;
-                Ok(())
-            }
-            ClientCommand::DismissAppDesignSuggestion {
-                app_id,
-                suggestion_id,
-            } => {
-                self.handle_dismiss_app_design_suggestion(app_id, suggestion_id)
-                    .await;
-                Ok(())
-            }
-            ClientCommand::ConfirmAppDesign {
-                app_id,
-                revision,
-                interaction_id,
-            } => {
-                self.handle_confirm_app_design(app_id, &interaction_id, revision)
-                    .await;
-                Ok(())
-            }
-            ClientCommand::CancelAppDesign { app_id } => {
-                self.handle_cancel_app_design(app_id).await;
-                Ok(())
-            }
             ClientCommand::StartApp { app_id } => {
                 self.handle_app_runtime_action(app_id, "start").await;
                 Ok(())
@@ -4223,23 +4847,6 @@ impl MobileEngineHandle {
             }
             ClientCommand::RestartApp { app_id } => {
                 self.handle_app_runtime_action(app_id, "restart").await;
-                Ok(())
-            }
-            ClientCommand::ConfirmAppPreview {
-                app_id,
-                revision,
-                interaction_id,
-            } => {
-                self.handle_confirm_app_preview(app_id, &interaction_id, revision)
-                    .await;
-                Ok(())
-            }
-            ClientCommand::RequestAppRevision { app_id, prompt } => {
-                self.handle_request_app_revision(app_id, &prompt).await;
-                Ok(())
-            }
-            ClientCommand::RetryAppGeneration { app_id, prompt } => {
-                self.handle_retry_app_generation(app_id, prompt).await;
                 Ok(())
             }
             ClientCommand::ExecuteAppBridgeRequest { request } => {
@@ -4287,6 +4894,15 @@ impl MobileEngineHandle {
                 }
                 Ok(())
             }
+            ClientCommand::ListAppSessions {
+                app_id,
+                offset,
+                limit,
+            } => {
+                self.handle_list_app_sessions(app_id, offset.unwrap_or(0), limit)
+                    .await;
+                Ok(())
+            }
             ClientCommand::ListAppCheckpoints { app_id } => {
                 self.handle_list_app_checkpoints(app_id).await;
                 Ok(())
@@ -4304,12 +4920,89 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
+            // ── Background tasks (v3 Phase 1: workflow-on-mobile) ───────────
+            //
+            // The Task command family routes to the real mobile `TaskRegistry`
+            // now (it was a documented no-op while `task_registry: None`).
+            // Replies ride the pre-existing (previously emitter-less) DTOs:
+            // one `TaskRow` per record, one `TaskOutputChunk`, one
+            // `TaskStatusChanged` after a stop.
+            ClientCommand::TaskList { status_filter } => {
+                let filter = traits::task_registry::TaskListFilter {
+                    status: status_filter.map(|s| {
+                        match s {
+                            client_protocol::listings::TaskStatusDto::Pending => "pending",
+                            client_protocol::listings::TaskStatusDto::Running => "running",
+                            client_protocol::listings::TaskStatusDto::Completed => "completed",
+                            client_protocol::listings::TaskStatusDto::Failed => "failed",
+                            // The DTO's user-stop variant maps back to the
+                            // engine's terminal "killed" wire status (the same
+                            // reconciliation as `lower_task_status`).
+                            _ => "killed",
+                        }
+                        .to_string()
+                    }),
+                };
+                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                    &*self.inner.task_registry;
+                let records = registry
+                    .list(filter)
+                    .await
+                    .map_err(|e| ClientError::Internal {
+                        message: format!("task list failed: {e}"),
+                    })?;
+                for record in &records {
+                    self.event_sink
+                        .emit(ClientEvent::TaskRow {
+                            task: client_adapter::lowering::lower_task_record(record),
+                        })
+                        .await;
+                }
+                Ok(())
+            }
+            ClientCommand::TaskOutput { task_id, offset } => {
+                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                    &*self.inner.task_registry;
+                let chunk = registry
+                    .output(&task_id, Some(offset))
+                    .await
+                    .map_err(|e| ClientError::Internal {
+                        message: format!("task output failed: {e}"),
+                    })?;
+                let (task_id, content, total_lines, truncated) =
+                    client_adapter::lowering::lower_task_output_chunk(&chunk);
+                self.event_sink
+                    .emit(ClientEvent::TaskOutputChunk {
+                        task_id,
+                        content,
+                        total_lines,
+                        truncated,
+                    })
+                    .await;
+                Ok(())
+            }
+            ClientCommand::TaskStop { task_id } => {
+                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                    &*self.inner.task_registry;
+                let record = registry
+                    .kill(&task_id)
+                    .await
+                    .map_err(|e| ClientError::Internal {
+                        message: format!("task stop failed: {e}"),
+                    })?;
+                self.event_sink
+                    .emit(ClientEvent::TaskStatusChanged {
+                        task_id: record.task_id.clone(),
+                        status: client_adapter::lowering::lower_task_status(&record.status),
+                    })
+                    .await;
+                Ok(())
+            }
+
             // ── Host-driven / reserved in the foundation ────────────────────
             //
-            // The task commands have no engine handle on mobile (`build_mobile`
-            // binds `task_registry: None`). They are accepted and no-op'd here —
-            // lighting them up is additive and does not change this seam's shape.
-            // The `#[non_exhaustive]` enum also requires a catch-all.
+            // The `#[non_exhaustive]` enum requires a catch-all for commands
+            // this host does not route.
             other => {
                 tracing::debug!(
                     ?other,
@@ -4652,8 +5345,8 @@ impl MobileEngineHandle {
     /// Pull a single listing kind and emit its listing event through the
     /// connection's event sink, reusing the shared `client_adapter::lowering`
     /// parity fns (decision §0.2). Listing kinds with no engine handle on mobile
-    /// (`Sessions` / `Memory` / `Settings` / `SlashCommands` / `Tasks`) are
-    /// skipped — the same foundation reality as the bridge-server router.
+    /// (`Sessions` / `Memory` / `Settings` / `Tasks`) are skipped. Slash
+    /// commands are the engine's authoritative skill catalog on mobile.
     async fn emit_listing(&self, kind: ProtocolListingKind) {
         use client_adapter::lowering::{
             lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
@@ -4684,6 +5377,7 @@ impl MobileEngineHandle {
                     .await;
             }
             ProtocolListingKind::Mcp => {
+                self.reload_configured_mcp().await;
                 let servers = handle
                     .list_mcp_servers()
                     .await
@@ -4692,6 +5386,28 @@ impl MobileEngineHandle {
                     .collect();
                 self.event_sink
                     .emit(ClientEvent::McpServers { servers })
+                    .await;
+            }
+            ProtocolListingKind::SlashCommands => {
+                // `/reload-skills` reconciles project/user SKILL.md files into
+                // the same command registry that dispatches them. Ignore the
+                // display result; the following snapshot is the structured
+                // source of truth for the settings UI.
+                let _ = self.inner.dispatcher.dispatch("/reload-skills").await;
+                let commands = self
+                    .inner
+                    .dispatcher
+                    .list_commands()
+                    .await
+                    .into_iter()
+                    .map(|command| SlashCommandDto {
+                        name: command.name,
+                        description: command.description,
+                        source: command_source_string(command.source).to_string(),
+                    })
+                    .collect();
+                self.event_sink
+                    .emit(ClientEvent::SlashCommandCatalog { commands })
                     .await;
             }
             ProtocolListingKind::Hooks => {
@@ -4736,6 +5452,54 @@ impl MobileEngineHandle {
                 );
             }
         }
+    }
+
+    /// Re-read MCP config before a settings refresh so a save in the iOS UI
+    /// becomes visible without rebuilding the whole conversation engine.
+    /// The live catalog refresher below the initial tool registration observes
+    /// the registry changes and updates the model-facing tools asynchronously.
+    /// The listing and the next turn therefore use the same live registry.
+    async fn reload_configured_mcp(&self) {
+        let cwd = std::path::PathBuf::from(&self.session_cwd);
+        let configured = mcp::load_mcp_servers(
+            &cwd.join(".mcp.json"),
+            &self.lingxi_home.join("settings.json"),
+            &cwd,
+        );
+        let desired: std::collections::HashSet<&str> =
+            configured.iter().map(|config| config.name.as_str()).collect();
+        for name in self
+            .inner
+            .mcp_registry
+            .server_names()
+            .await
+            .into_iter()
+            .filter(|name| name != LOCAL_APPS_REGISTRY_KEY && !desired.contains(name.as_str()))
+        {
+            let _ = self.inner.mcp_registry.remove(&name).await;
+        }
+        for config in configured {
+            let name = config.name.clone();
+            let _ = self.inner.mcp_registry.remove(&name).await;
+            for (_, result) in self.inner.mcp_registry.connect_all(vec![config]).await {
+                if let Err(error) = result {
+                    tracing::debug!(server = %name, error = %error, "mobile MCP refresh failed");
+                }
+            }
+        }
+    }
+}
+
+fn command_source_string(source: command_api::model::CommandSource) -> &'static str {
+    match source {
+        command_api::model::CommandSource::Builtin => "builtin",
+        command_api::model::CommandSource::User => "user",
+        command_api::model::CommandSource::Project => "project",
+        command_api::model::CommandSource::Local => "local",
+        command_api::model::CommandSource::Plugin => "plugin",
+        command_api::model::CommandSource::Managed => "managed",
+        command_api::model::CommandSource::Mcp => "mcp",
+        command_api::model::CommandSource::Bundled => "bundled",
     }
 }
 
@@ -5810,6 +6574,96 @@ pub fn build_mobile_engine(
 /// profile-global capability. A degenerate `lingxi_home` (empty / no parent,
 /// only reachable through a hand-rolled `MobileConfig`) falls back to `cwd`,
 /// which equals the app-files root whenever no project workspace is selected.
+/// v3 Phase 4: mint an app's pinned init session (bare uuid) in the app's
+/// workspace-scoped catalog. Chat-origin creates (a `conversation_id` bound
+/// at create) FORK that conversation out of `source_cwd`'s catalog into the
+/// workspace — history follows the user, the source session stays put; a
+/// library create (or a fork that fails, e.g. an empty source) anchors an
+/// empty mobile session instead. Returns the minted uuid; the caller pins it
+/// via `AppService::set_init_session`.
+/// ONE canonical spelling for a session-catalog cwd key. `canonicalize`
+/// collapses the platform's symlink split (`/var` vs `/private/var` on
+/// iOS/macOS), so mint, listing, resume and the cwd gates all derive the
+/// SAME sanitized `projects/` directory — the on-device forensics showed the
+/// two spellings landing in TWO different catalog dirs, which made a freshly
+/// minted init session unresumable. Falls back to the raw string when the
+/// path does not exist (nothing to resume there anyway).
+fn canonical_cwd_string(path: &std::path::Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Delete a session file this host minted into an app's workspace catalog.
+/// Used by both mint sites when `set_init_session` refuses their id — the
+/// set-once pin is the arbiter, and the loser's file would otherwise linger
+/// as a phantom conversation row in the app's session list.
+fn remove_app_session_file(
+    lingxi_home: &std::path::Path,
+    data_root: &std::path::Path,
+    record: &local_apps::AppRecord,
+    session_id: &str,
+) -> bool {
+    let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    let path = lingxi_home
+        .join("projects")
+        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
+        .join(format!("{session_id}.jsonl"));
+    std::fs::remove_file(path).is_ok()
+}
+
+async fn mint_app_init_session(
+    lingxi_home: &std::path::Path,
+    source_cwd: &str,
+    data_root: &std::path::Path,
+    fs: Arc<dyn traits::FileSystem>,
+    record: &local_apps::AppRecord,
+) -> Result<String, String> {
+    let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    if let Some(source) = record.conversation_id.as_deref() {
+        if let Ok(source_uuid) = uuid::Uuid::parse_str(source) {
+            match session::branch::create_branch_to_cwd(
+                lingxi_home,
+                source_cwd,
+                &workspace_cwd,
+                source_uuid,
+                Some(&record.name),
+                fs.clone(),
+            )
+            .await
+            {
+                Ok(result) => return Ok(result.new_session_id.to_string()),
+                Err(error) => {
+                    // Degrade to an empty anchor — a brand-new conversation
+                    // has nothing to fork, and that must not fail the create.
+                    tracing::debug!(
+                        app_id = %record.id,
+                        %error,
+                        "init-session fork degraded to an empty anchor"
+                    );
+                }
+            }
+        }
+    }
+    let init_id = uuid::Uuid::new_v4().to_string();
+    let path = orchestrator::transcript_paths::main_transcript_path(
+        lingxi_home,
+        &workspace_cwd,
+        &init_id,
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create app session catalog dir: {error}"))?;
+    }
+    let writer = session::jsonl::writer::JsonlWriter::new(path, fs);
+    writer
+        .append_mobile_empty_session(&init_id, &record.name)
+        .await
+        .map_err(|error| format!("anchor app init session: {error}"))?;
+    Ok(init_id)
+}
+
 fn mobile_apps_data_root(cfg: &MobileConfig) -> std::path::PathBuf {
     cfg.lingxi_home
         .parent()
@@ -5909,7 +6763,6 @@ pub fn build_mobile_engine_inner(
     let (
         local_apps,
         local_apps_host,
-        app_generation,
         retained_profile,
         app_client_subscription,
         app_domain_subscription,
@@ -5921,15 +6774,9 @@ pub fn build_mobile_engine_inner(
                 app_emissions.clone(),
             ));
             let domain_subscription = profile.domain_events.subscribe(observer.clone());
-            // Only now do the observers exist. AppService::load already
-            // announced pending gates, but into a fanout nobody had subscribed
-            // to yet, so those events were dropped — leaving a relaunched
-            // client with no `interaction_id` for an armed designer gate.
-            runtime.block_on(profile.service.resync_pending_gates());
             (
                 Ok(profile.service.clone()),
                 profile.host.clone(),
-                profile.generation.clone(),
                 Some(profile),
                 Some(client_subscription),
                 Some(domain_subscription),
@@ -5939,7 +6786,7 @@ pub fn build_mobile_engine_inner(
         Err(error) => {
             // Preserve the established failure contract: a corrupt store does
             // not brick the conversation engine; every app command returns the
-            // typed load error. These unattached fallbacks can only report that
+            // typed load error. This unattached fallback can only report that
             // same unavailable state and never mutate data.
             let host = LocalAppsHostBroker::new_with_physical_memory(
                 mobile_apps_data_root(&firer_cfg),
@@ -5949,22 +6796,7 @@ pub fn build_mobile_engine_inner(
                 firer_cfg.local_apps_runtime_root.clone(),
                 firer_cfg.physical_memory_bytes,
             );
-            let executor = MobileAppGenerationExecutor::new(
-                inner.mobile_linux.clone(),
-                host.clone(),
-                Arc::new(SharedLlm::new(inner.local_apps_llm.clone())),
-            );
-            let generation = AppGenerationCoordinator::new_with_observer(
-                mobile_apps_data_root(&firer_cfg),
-                firer_platform.clock(),
-                executor,
-                ClientGenerationJobObserver::new(
-                    mobile_apps_data_root(&firer_cfg),
-                    event_sink.clone(),
-                ),
-            );
-            let _ = host.attach_generation(generation.clone());
-            (Err(error), host, generation, None, None, None, None)
+            (Err(error), host, None, None, None, None)
         }
     };
     if inner
@@ -5983,17 +6815,232 @@ pub fn build_mobile_engine_inner(
             {
                 tracing::warn!("local-apps MCP service was already attached");
             }
-            // Startup redelivery is idempotent; the generation coordinator
-            // deduplicates the durable continuation tuple.
-            let service = service.clone();
-            runtime.spawn(async move {
-                if let Err(error) = service.redeliver_all_undelivered().await {
-                    tracing::warn!(
-                        error = %error,
-                        "local-apps startup continuation sweep failed; entries stay queued"
-                    );
-                }
-            });
+            // v3 Phase 4: backfill missing init-session pins for apps that
+            // predate the anchor (chat-origin records even get their history
+            // forked in when the source still exists; anything else anchors
+            // empty). Runs as a background sweep on the shared worker
+            // runtime (this builder is sync); best-effort per app — a
+            // failure retries next boot.
+            {
+                let backfill_home = firer_cfg.lingxi_home.clone();
+                let backfill_cwd = firer_cfg.cwd.to_string_lossy().to_string();
+                let backfill_root = mobile_apps_data_root(&firer_cfg);
+                let backfill_fs = fs.clone();
+                let backfill_service = service.clone();
+                crate::local_apps_profile::worker_runtime().spawn(async move {
+                    for record in backfill_service.records().await {
+                        // Self-heal the app's catalog location FIRST. Two
+                        // real-world drifts strand it: (a) an app reinstall
+                        // changes the iOS data-container UUID, so the old
+                        // absolute-path key never matches again; (b) the
+                        // `/var` vs `/private/var` symlink split minted the
+                        // catalog under one spelling while resume looked
+                        // under the other. Expected dir = today's CANONICAL
+                        // spelling; any older dir whose name ends with this
+                        // app's workspace suffix is renamed onto it.
+                        {
+                            let workspace_cwd = canonical_cwd_string(
+                                &backfill_root.join(&record.workspace_rel),
+                            );
+                            let projects = backfill_home.join("projects");
+                            let expected = projects
+                                .join(session::jsonl::path::project_dir_name(&workspace_cwd));
+                            let suffix = format!(
+                                "-apps-{}-workspace",
+                                record.id
+                            );
+                            // There can be MORE than one drifted directory —
+                            // the two documented drifts compound (an old
+                            // container UUID AND the pre-canonical `/var`
+                            // spelling). Collect them all: migrating only the
+                            // first `read_dir` yields would orphan the rest
+                            // permanently, because the rename makes
+                            // `expected` exist and this block never runs
+                            // again.
+                            let mut drifted: Vec<std::path::PathBuf> =
+                                match std::fs::read_dir(&projects) {
+                                    Ok(entries) => entries
+                                        .flatten()
+                                        .filter(|entry| {
+                                            entry.file_name().to_string_lossy().ends_with(&suffix)
+                                                && entry.path() != expected
+                                                && entry.path().is_dir()
+                                        })
+                                        .map(|entry| entry.path())
+                                        .collect(),
+                                    Err(_) => Vec::new(),
+                                };
+                            let init_file_name = record
+                                .init_session_id
+                                .as_deref()
+                                .map(|id| format!("{id}.jsonl"));
+                            if !drifted.is_empty() && !expected.exists() {
+                                // Promote the candidate that actually HOLDS
+                                // the pinned init session: a chat-origin app
+                                // forked its whole transcript there, and an
+                                // arbitrary `read_dir` winner would bury it.
+                                let base_index = init_file_name
+                                    .as_deref()
+                                    .and_then(|file| {
+                                        drifted.iter().position(|dir| dir.join(file).exists())
+                                    })
+                                    .unwrap_or(0);
+                                let base = drifted.remove(base_index);
+                                match std::fs::rename(&base, &expected) {
+                                    Ok(()) => tracing::info!(
+                                        app_id = %record.id,
+                                        from = %base.display(),
+                                        "migrated drifted app session catalog"
+                                    ),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            app_id = %record.id,
+                                            error = %error,
+                                            "app catalog migration rename failed; merging instead"
+                                        );
+                                        // Keep it in the merge set rather than
+                                        // dropping it on the floor.
+                                        drifted.push(base);
+                                    }
+                                }
+                            }
+                            // Fold every remaining drifted catalog into the
+                            // expected one. Moves are per-file and NEVER
+                            // overwrite, so a name collision leaves both
+                            // copies on disk instead of destroying one.
+                            for dir in drifted {
+                                if std::fs::create_dir_all(&expected).is_err() {
+                                    break;
+                                }
+                                let Ok(entries) = std::fs::read_dir(&dir) else {
+                                    continue;
+                                };
+                                for entry in entries.flatten() {
+                                    let target = expected.join(entry.file_name());
+                                    if target.exists() {
+                                        continue;
+                                    }
+                                    if let Err(error) = std::fs::rename(entry.path(), &target) {
+                                        tracing::warn!(
+                                            app_id = %record.id,
+                                            error = %error,
+                                            "app catalog merge failed for one session"
+                                        );
+                                    }
+                                }
+                                // Only removes it when the merge emptied it.
+                                let _ = std::fs::remove_dir(&dir);
+                                tracing::info!(
+                                    app_id = %record.id,
+                                    from = %dir.display(),
+                                    "merged drifted app session catalog"
+                                );
+                            }
+                            // A pinned init session whose file is STILL
+                            // missing after migration (deleted container,
+                            // partial restore) gets re-anchored in place so
+                            // resume always has a target. This runs LAST, and
+                            // only on genuine absence: re-anchoring over a
+                            // catalog that still had the real transcript
+                            // would replace the user's history with an empty
+                            // session AND make the migration above
+                            // unreachable forever.
+                            if let Some(init_id) = record.init_session_id.as_deref() {
+                                let expected_file = expected.join(format!("{init_id}.jsonl"));
+                                if !expected_file.exists() {
+                                    if let Err(error) =
+                                        std::fs::create_dir_all(&expected)
+                                    {
+                                        tracing::warn!(
+                                            app_id = %record.id,
+                                            error = %error,
+                                            "app catalog dir create failed"
+                                        );
+                                    } else {
+                                        let writer = session::jsonl::writer::JsonlWriter::new(
+                                            expected_file,
+                                            backfill_fs.clone(),
+                                        );
+                                        if let Err(error) = writer
+                                            .append_mobile_empty_session(init_id, &record.name)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                app_id = %record.id,
+                                                error = %error,
+                                                "init-session re-anchor failed"
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                app_id = %record.id,
+                                                "re-anchored missing init session"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if record.init_session_id.is_some() {
+                            continue;
+                        }
+                        // Re-read before minting: `record` is a snapshot from
+                        // the list at the top of this sweep, and a CreateApp
+                        // landing in between commits its record BEFORE it
+                        // pins. Trusting the snapshot makes both paths mint an
+                        // anchor for the same app; the pin arbitrates and the
+                        // loser cleans up, but the app's session list would
+                        // still show the loser's row until it does.
+                        let record = match backfill_service.record(&record.id).await {
+                            Ok(fresh) if fresh.init_session_id.is_none() => fresh,
+                            _ => continue,
+                        };
+                        match mint_app_init_session(
+                            &backfill_home,
+                            &backfill_cwd,
+                            &backfill_root,
+                            backfill_fs.clone(),
+                            &record,
+                        )
+                        .await
+                        {
+                            Ok(init_id) => {
+                                if let Err(error) = backfill_service
+                                    .set_init_session(&record.id, &init_id)
+                                    .await
+                                {
+                                    // The mint is only half a transaction: an
+                                    // unpinned session file is unreachable
+                                    // (nothing references it) and this sweep
+                                    // would mint ANOTHER one — for a
+                                    // chat-origin app, a full transcript copy
+                                    // — on every single boot. Drop the orphan
+                                    // so the retry stays bounded. The same
+                                    // cleanup on the CreateApp path settles
+                                    // the race between the two: whoever loses
+                                    // `set_init_session` takes its file back.
+                                    let removed = remove_app_session_file(
+                                        &backfill_home,
+                                        &backfill_root,
+                                        &record,
+                                        &init_id,
+                                    );
+                                    tracing::warn!(
+                                        app_id = %record.id,
+                                        error = %error,
+                                        orphan_removed = removed,
+                                        "init-session backfill pin failed"
+                                    );
+                                }
+                            }
+                            Err(error) => tracing::warn!(
+                                app_id = %record.id,
+                                error = %error,
+                                "init-session backfill mint failed"
+                            ),
+                        }
+                    }
+                });
+            }
         }
         Err(error) => {
             tracing::warn!(
@@ -6019,12 +7066,10 @@ pub fn build_mobile_engine_inner(
         local_apps,
         app_emissions,
         local_apps_host,
-        app_generation,
         profile_apps: retained_profile,
         app_client_subscription,
         app_domain_subscription,
         app_domain_observer,
-        local_apps_background: LocalAppsBackgroundTracker::default(),
     }))
 }
 
@@ -6132,6 +7177,45 @@ mod tests {
         assert_eq!(Some(401), result.http_status);
         assert!(!result.message.contains("upstream"));
         assert!(!result.message.contains("secret"));
+    }
+
+    #[test]
+    fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
+        for (response, status, expected_fragment) in [
+            (
+                Err(traits::HttpError::Status {
+                    status: 403,
+                    body: "private upstream detail".to_string(),
+                }),
+                Some(403),
+                "拒绝访问",
+            ),
+            (
+                Err(traits::HttpError::Status {
+                    status: 429,
+                    body: "retry-after: 30".to_string(),
+                }),
+                Some(429),
+                "频率",
+            ),
+            (
+                Err(traits::HttpError::Timeout(std::time::Duration::from_secs(1))),
+                None,
+                "超时",
+            ),
+        ] {
+            let result = classify_provider_connection_response(
+                response,
+                "model",
+                20,
+                true,
+            );
+            assert!(!result.connected);
+            assert_eq!(result.http_status, status);
+            assert!(result.message.contains(expected_fragment));
+            assert!(!result.message.contains("private"));
+            assert!(!result.message.contains("secret"));
+        }
     }
 
     #[tokio::test]
@@ -6521,6 +7605,99 @@ mod tests {
         );
     }
 
+    /// v3 Phase 1: a workflow runs END TO END on mobile — launched through the
+    /// same `MobileWorkflowLauncher` the registered Workflow tool holds, the
+    /// QuickJS runtime executes the script on its own thread, the task
+    /// reaches a terminal status, the spool captures the phase/log output,
+    /// and the completion drains exactly once through the task-notification
+    /// path the orchestrator's per-turn reminder reads. The script makes no
+    /// `agent()` calls, so this exercises registry + launcher + runtime +
+    /// status sink without an LLM.
+    #[tokio::test]
+    async fn workflow_launches_and_completes_on_mobile() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile");
+
+        let launcher = crate::workflow_support::MobileWorkflowLauncher {
+            registry: rt.task_registry.clone(),
+            cwd: tmp.path().to_path_buf(),
+            lingxi_home: tmp.path().join(".claude"),
+            session_uuid: std::sync::Arc::new(std::sync::Mutex::new(
+                "00000000-0000-0000-0000-000000000000".to_string(),
+            )),
+        };
+        let launched = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                script: Some(
+                    "export const meta = { name: 'phase1-smoke', description: 'p1 smoke' }\n\
+                     phase('Only')\n\
+                     log('hello from quickjs')\n\
+                     return 41 + 1\n"
+                        .into(),
+                ),
+                name: None,
+                script_path: None,
+                args: None,
+                resume_from_run_id: None,
+            })
+            .await
+            .expect("launch succeeds");
+        assert!(
+            launched.run_id.as_deref().is_some_and(|r| r.starts_with("wf_")),
+            "{launched:?}"
+        );
+
+        // Poll to a terminal status (the script thread is fast; bound the wait).
+        let registry: &dyn traits::task_registry::TaskRegistryHandle = &*rt.task_registry;
+        let mut status = String::new();
+        for _ in 0..100 {
+            let record = registry
+                .get(&launched.task_id)
+                .await
+                .expect("get")
+                .expect("task exists");
+            status = record.status.clone();
+            if status != "pending" && status != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(status, "completed", "the QuickJS run must complete");
+
+        // The spool captured the phase header + the log line.
+        let chunk = registry
+            .output(&launched.task_id, None)
+            .await
+            .expect("output");
+        assert!(
+            chunk.content.contains("hello from quickjs"),
+            "spool must carry log() output: {}",
+            chunk.content
+        );
+
+        // Completion surfaces exactly once through the notification drain the
+        // orchestrator's `<task-notification>` reminder consumes.
+        let notes = rt.task_registry.take_pending_task_notifications().await;
+        assert!(
+            notes.iter().any(|n| n.task_id == launched.task_id),
+            "completed workflow must be drained as a task notification: {notes:?}"
+        );
+        let again = rt.task_registry.take_pending_task_notifications().await;
+        assert!(
+            !again.iter().any(|n| n.task_id == launched.task_id),
+            "consume-once: a second drain must not re-surface it"
+        );
+    }
+
     /// P0.2: the boot path fires `InstructionsLoaded` (load_reason=session_start)
     /// right after `SessionStart`, best-effort. We register an
     /// `InstructionsLoaded` command hook in the project settings; `build_mobile`
@@ -6676,7 +7853,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
-        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
+        handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
     }
 
@@ -6694,7 +7871,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(cfg, platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
-        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
+        handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
     }
 
@@ -6711,7 +7888,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
             .expect("build_mobile_engine failed");
-        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
+        handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
     }
 
@@ -8139,8 +9316,7 @@ mod tests {
     //    events out) over the real engine handle ─────────────────────────────
 
     use client_protocol::local_apps::{
-        AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
-        AppRuntimeStateDto, AppWorkflowStateDto, DesignValueDto,
+        AppCreateOriginDto, AppErrorCodeDto, AppEventDto, AppRuntimeStateDto,
     };
 
     /// Drain and return every event delivered to the fake listener so far.
@@ -8159,46 +9335,11 @@ mod tests {
         std::mem::take(&mut *listener.received.lock().await)
     }
 
-    fn title_patch(value: &str) -> AppDesignPatchDto {
-        AppDesignPatchDto {
-            ops: vec![AppDesignPatchOpDto::Set {
-                field_id: "title".into(),
-                value: DesignValueDto::ShortText {
-                    value: value.into(),
-                },
-            }],
-            note: None,
-        }
-    }
-
     fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client_protocol::local_apps::AppRecordDto>> {
         events.iter().rev().find_map(|event| match event {
             Ev::AppsChanged { apps } => Some(apps.clone()),
             _ => None,
         })
-    }
-
-    /// Task 11: `CreateApp` triggers a REAL background authoring round trip,
-    /// which `build_submit_handle`'s default test double fails immediately
-    /// (no scripted response) — deterministically, but concurrently with the
-    /// caller. Many tests below need `collecting_spec` for scaffolding
-    /// unrelated to authoring itself; this settles that background failure
-    /// FIRST (so nothing races the reset), resets to
-    /// `authoring_questionnaire` directly on the service (bypassing
-    /// `submit`, so no SECOND background round trip triggers), then splices
-    /// the fixture questionnaire exactly as `advance_to_collecting_spec`
-    /// always has.
-    async fn seed_collecting_spec(
-        handle: &MobileEngineHandle,
-        service: &local_apps::AppService,
-        app_id: &str,
-    ) -> local_apps::AppRecord {
-        handle.settle_local_apps().await;
-        service
-            .retry_questionnaire(app_id)
-            .await
-            .expect("reset to authoring_questionnaire for test scaffolding");
-        local_apps::test_support::advance_to_collecting_spec(service, app_id).await
     }
 
     /// This round trip covers the dynamic application list/details protocol;
@@ -8237,9 +9378,204 @@ mod tests {
                 Ev::AppEvent {
                     event: AppEventDto::AppDetailsChanged { details }
                 } if details.app.id == app_id
-                    && details.design_revision == 0
                     && matches!(details.runtime.state, AppRuntimeStateDto::Stopped)
             )));
+        });
+    }
+
+    /// v3 Phase 4: a library create pins an init session — the record gains
+    /// `init_session_id`, the anchor lands in the APP WORKSPACE's own
+    /// catalog, and `ListAppSessions` returns that row marked `Init`.
+    #[test]
+    fn create_app_pins_an_init_session_and_lists_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Tracker".into(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
+                    git_enabled: true,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let rows = apps_changed_rows(&events).expect("CreateApp announces AppsChanged");
+            let app_id = rows[0].id.clone();
+            // `set_init_session` re-announces with the pin; take the LAST
+            // AppsChanged row set.
+            let pinned = events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Ev::AppsChanged { apps } => apps.first().cloned(),
+                    _ => None,
+                })
+                .expect("a re-announce carries the pin");
+            let init_id = pinned
+                .init_session_id
+                .clone()
+                .expect("library create pins an empty init anchor");
+
+            handle
+                .submit(ClientCommand::ListAppSessions {
+                    app_id: app_id.clone(),
+                    offset: None,
+                    limit: None,
+                })
+                .await
+                .expect("submit(ListAppSessions)");
+            let events = drain_events(&handle, &listener).await;
+            let (sessions, next_offset) = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppSessionsChanged {
+                        app_id: got,
+                        sessions,
+                        next_offset,
+                    } if *got == app_id => Some((sessions.clone(), *next_offset)),
+                    _ => None,
+                })
+                .expect("ListAppSessions replies with AppSessionsChanged");
+            assert_eq!(next_offset, None, "one anchor row — no further pages");
+            assert_eq!(sessions.len(), 1, "{sessions:?}");
+            assert_eq!(sessions[0].uuid, init_id);
+            assert_eq!(
+                sessions[0].kind,
+                client_protocol::local_apps::AppSessionKindDto::Init
+            );
+            assert_eq!(sessions[0].message_count, 0, "an anchor is empty");
+        });
+    }
+
+    /// v3 Phase 4: a chat-origin create FORKS the source conversation into
+    /// the app workspace catalog — history follows, entries re-root on the
+    /// workspace cwd, and the source session file is untouched. Direct test
+    /// of `mint_app_init_session` (the submit path needs a live turn to put
+    /// messages in the source session; the fork mechanics are what matter).
+    #[tokio::test]
+    async fn chat_origin_mint_forks_the_source_conversation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lingxi_home = tmp.path().join(".claude");
+        let source_cwd = tmp.path().to_string_lossy().to_string();
+        let data_root = tmp.path().to_path_buf();
+        // Seed a two-message source session in the source cwd's catalog.
+        let source_uuid = uuid::Uuid::new_v4();
+        let src_path = orchestrator::transcript_paths::main_transcript_path(
+            &lingxi_home,
+            &source_cwd,
+            &source_uuid.to_string(),
+        );
+        std::fs::create_dir_all(src_path.parent().unwrap()).unwrap();
+        let line = |uuid: &str, parent: Option<&str>, text: &str| {
+            serde_json::json!({
+                "type": "user",
+                "uuid": uuid,
+                "parentUuid": parent,
+                "sessionId": source_uuid.to_string(),
+                "timestamp": "2026-08-09T12:00:00.000Z",
+                "cwd": source_cwd,
+                "version": "0.0.0",
+                "message": { "role": "user", "content": text },
+            })
+            .to_string()
+        };
+        std::fs::write(
+            &src_path,
+            format!(
+                "{}\n{}\n",
+                line("11111111-1111-1111-1111-111111111111", None, "make an app"),
+                line(
+                    "22222222-2222-2222-2222-222222222222",
+                    Some("11111111-1111-1111-1111-111111111111"),
+                    "it tracks habits",
+                ),
+            ),
+        )
+        .unwrap();
+        let source_before = std::fs::read_to_string(&src_path).unwrap();
+
+        let record = local_apps::AppState::create(
+            "zz9plural".into(),
+            "习惯".into(),
+            "track habits".into(),
+            Some(source_uuid.to_string()),
+            1,
+        )
+        .record;
+        let fs: Arc<dyn traits::FileSystem> =
+            Arc::new(platform_posix_minimal::PosixFileSystem::new(
+                tmp.path().to_path_buf(),
+            ));
+        let init_id = super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
+            .await
+            .expect("mint forks");
+
+        let workspace_cwd = data_root
+            .join(&record.workspace_rel)
+            .to_string_lossy()
+            .to_string();
+        let fork_path = orchestrator::transcript_paths::main_transcript_path(
+            &lingxi_home,
+            &workspace_cwd,
+            &init_id,
+        );
+        let forked = std::fs::read_to_string(&fork_path).expect("fork lives in the app catalog");
+        assert!(forked.contains("it tracks habits"), "history followed");
+        assert!(
+            forked.contains(&format!("\"cwd\":{}", serde_json::json!(workspace_cwd))),
+            "entries re-root on the workspace cwd: {forked}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&src_path).unwrap(),
+            source_before,
+            "the source session must be untouched"
+        );
+    }
+
+    /// v3 Phase 4: a cross-workspace `NewSession`/`ResumeSession` cwd is
+    /// REJECTED (the old behavior silently ignored it — a client could
+    /// believe a workspace switch happened). A matching cwd still works.
+    #[test]
+    fn new_session_rejects_a_foreign_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let err = handle
+                .submit(ClientCommand::NewSession {
+                    cwd: Some("/somewhere/else".into()),
+                    model: None,
+                })
+                .await
+                .expect_err("a foreign cwd must be rejected");
+            assert!(
+                matches!(err, ClientError::Rejected { ref message }
+                    if message.contains("does not match this source's cwd")),
+                "{err:?}"
+            );
+            let err = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: uuid::Uuid::new_v4().to_string(),
+                    cwd: Some("/somewhere/else".into()),
+                })
+                .await
+                .expect_err("resume with a foreign cwd must be rejected");
+            assert!(
+                matches!(err, ClientError::Rejected { ref message }
+                    if message.contains("does not match this source's cwd")),
+                "{err:?}"
+            );
+            // The matching cwd is still honored.
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: Some(tmp.path().to_string_lossy().to_string()),
+                    model: None,
+                })
+                .await
+                .expect("the source's own cwd is honored");
         });
     }
 
@@ -8307,271 +9643,6 @@ mod tests {
         });
     }
 
-    // ── Task 11: host-orchestrated authoring / planning triggers ────────────
-
-    /// A valid `emit_questionnaire` tool payload — one step, one deferrable
-    /// multiple-choice field, matching `local_apps_llm.rs`'s own fixture
-    /// shape (already exercised there against the real validator).
-    fn good_questionnaire() -> serde_json::Value {
-        serde_json::json!({
-            "suggestedName": "记事本",
-            "steps": [{
-                "id": "basics", "order": 0, "title": "功能",
-                "fields": [{
-                    "id": "features", "label": "需要哪些功能",
-                    "fieldType": "multiple_choice", "required": true,
-                    "allowsCustom": true, "allowsDefer": true,
-                    "options": [{"value": "list", "label": "笔记列表"}]
-                }]
-            }]
-        })
-    }
-
-    /// A second, DIFFERENT valid questionnaire (distinct step id) — proves a
-    /// re-authoring round trip actually replaced the old questionnaire
-    /// rather than coincidentally matching it.
-    fn other_questionnaire() -> serde_json::Value {
-        serde_json::json!({
-            "suggestedName": "待办清单",
-            "steps": [{
-                "id": "todo_basics", "order": 0, "title": "任务",
-                "fields": [{
-                    "id": "priority", "label": "需要区分优先级吗",
-                    "fieldType": "boolean", "required": true,
-                    "allowsCustom": false, "allowsDefer": true,
-                    "options": []
-                }]
-            }]
-        })
-    }
-
-    /// A valid `emit_plan` tool payload, matching `local_apps_llm.rs`'s own
-    /// fixture shape.
-    fn good_plan() -> serde_json::Value {
-        serde_json::json!({
-            "summary": "一个记事本，帮你记录日常想法。",
-            "collections": [{
-                "id": "notes", "name": "笔记",
-                "fields": [{"id": "title", "label": "标题", "kind": "text", "required": true}]
-            }],
-            "capabilities": ["data_mutation"],
-            "domains": []
-        })
-    }
-
-    /// `CreateApp` starts authoring in the background; once it settles, the
-    /// app has moved past `authoring_questionnaire` to `collecting_spec` and
-    /// the LLM's suggested name has replaced the create-time placeholder.
-    #[test]
-    fn creating_an_app_drives_authoring_to_collecting_spec() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-        handle.set_local_apps_model(ScriptedModel::new(vec![Ok(good_questionnaire())]));
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: String::new(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "一个记事本".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            handle.settle_local_apps().await;
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-
-            let service = handle.local_apps().expect("local-apps service");
-            let record = service.record(&app_id).await.expect("record");
-            assert_eq!(
-                record.workflow_state,
-                local_apps::AppWorkflowState::CollectingSpec
-            );
-            assert_eq!(
-                record.name, "记事本",
-                "the suggested name replaced the create-time placeholder"
-            );
-        });
-    }
-
-    /// A model failure during authoring fails closed — `questionnaire_failed`,
-    /// never a silent fallback — and `RetryAppQuestionnaire` recovers from
-    /// there once the model is available again.
-    #[test]
-    fn a_model_failure_lands_in_questionnaire_failed_and_stays_retryable() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-        handle.set_local_apps_model(ScriptedModel::new(vec![
-            Err(local_apps::AppError::LlmUnavailable("offline".into())),
-            Ok(good_questionnaire()),
-        ]));
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: String::new(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "一个记事本".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            handle.settle_local_apps().await;
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-
-            let service = handle.local_apps().expect("local-apps service");
-            assert_eq!(
-                service
-                    .record(&app_id)
-                    .await
-                    .expect("record")
-                    .workflow_state,
-                local_apps::AppWorkflowState::QuestionnaireFailed
-            );
-
-            handle
-                .submit(ClientCommand::RetryAppQuestionnaire {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(RetryAppQuestionnaire)");
-            handle.settle_local_apps().await;
-            assert_eq!(
-                service
-                    .record(&app_id)
-                    .await
-                    .expect("record")
-                    .workflow_state,
-                local_apps::AppWorkflowState::CollectingSpec
-            );
-        });
-    }
-
-    /// `BeginAppPlanning` validates the answers, starts planning in the
-    /// background, and — once it settles — opens the spec-confirmation gate
-    /// with a plan stamped against the current draft revision.
-    #[test]
-    fn beginning_planning_drives_through_to_the_confirmation_gate() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-        handle.set_local_apps_model(ScriptedModel::new(vec![
-            Ok(good_questionnaire()),
-            Ok(good_plan()),
-        ]));
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: String::new(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "一个记事本".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            handle.settle_local_apps().await;
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 0,
-                    patch: AppDesignPatchDto {
-                        ops: vec![AppDesignPatchOpDto::Set {
-                            field_id: "features".into(),
-                            value: DesignValueDto::MultipleChoice {
-                                value: vec!["list".into()],
-                            },
-                        }],
-                        note: None,
-                    },
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft)");
-
-            handle
-                .submit(ClientCommand::BeginAppPlanning {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(BeginAppPlanning)");
-            handle.settle_local_apps().await;
-
-            let service = handle.local_apps().expect("local-apps service");
-            let record = service.record(&app_id).await.expect("record");
-            assert_eq!(
-                record.workflow_state,
-                local_apps::AppWorkflowState::AwaitingSpecConfirmation
-            );
-            let draft = service.draft(&app_id).await.expect("draft");
-            assert_eq!(draft.plan_for_revision, Some(draft.revision));
-        });
-    }
-
-    /// `UpdateAppBrief` discards the old questionnaire/answers and
-    /// re-authors from scratch — once it settles, the draft carries the
-    /// FRESH questionnaire, not the one authored from the original brief.
-    #[test]
-    fn changing_the_brief_reauthors_the_questionnaire() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-        handle.set_local_apps_model(ScriptedModel::new(vec![
-            Ok(good_questionnaire()),
-            Ok(other_questionnaire()),
-        ]));
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: String::new(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "一个记事本".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            handle.settle_local_apps().await;
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-
-            handle
-                .submit(ClientCommand::UpdateAppBrief {
-                    app_id: app_id.clone(),
-                    brief: "改成一个待办清单".into(),
-                })
-                .await
-                .expect("submit(UpdateAppBrief)");
-            handle.settle_local_apps().await;
-
-            let service = handle.local_apps().expect("local-apps service");
-            let draft = service.draft(&app_id).await.expect("draft");
-            assert_eq!(
-                draft.questionnaire[0].id, "todo_basics",
-                "a fresh questionnaire replaced the old one"
-            );
-            assert!(draft.fields.is_empty());
-        });
-    }
-
     /// Index of the first event matching `pred`, or a panic naming what was
     /// expected and the whole batch. The app surface delivers through ONE
     /// ordered channel (channel order = commit order), so multi-event batches
@@ -8581,340 +9652,6 @@ mod tests {
             .iter()
             .position(pred)
             .unwrap_or_else(|| panic!("{what} not found in {events:?}"))
-    }
-
-    #[test]
-    fn local_apps_designer_flow_round_trips_through_submit() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            // Create (library origin ⇒ no conversation binding).
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: "Habit Tracker".into(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "a test app".into(),
-                    git_enabled: true,
-                    conversation_id: Some("conv-ignored".into()),
-                })
-                .await
-                .expect("submit(CreateApp)");
-            // Task 11: `CreateApp` triggers a background authoring round trip.
-            // `build_submit_handle`'s default model has no scripted response,
-            // so it fails immediately and deterministically —
-            // `settle_local_apps` waits for that to land BEFORE any event/
-            // state read below, so `workflow_state` is read once settled
-            // rather than raced against the still-running background task.
-            handle.settle_local_apps().await;
-            let events = drain_events(&handle, &listener).await;
-            let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
-            assert_eq!(apps.len(), 1);
-            assert_eq!(apps[0].name, "Habit Tracker");
-            assert_eq!(
-                apps[0].workflow_state,
-                AppWorkflowStateDto::QuestionnaireFailed,
-                "the default test double has no scripted response, so background \
-                 authoring fails immediately"
-            );
-            assert_eq!(
-                apps[0].conversation_id, None,
-                "a library-origin create binds no conversation"
-            );
-            let app_id = apps[0].id.clone();
-            assert_eq!(apps[0].workspace_rel, format!("apps/{app_id}/workspace"));
-
-            // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
-            // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
-            let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-
-            // Open the designer gate; the interaction id reaches the client
-            // ONLY through this event (spec §I gating).
-            handle
-                .submit(ClientCommand::OpenAppDesigner {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(OpenAppDesigner)");
-            let events = drain_events(&handle, &listener).await;
-            let (designer_interaction, designer_revision) = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppDesignerRequested {
-                        app_id: id,
-                        interaction_id,
-                        revision,
-                    } if *id == app_id => Some((interaction_id.clone(), *revision)),
-                    _ => None,
-                })
-                .expect("AppDesignerRequested must be emitted");
-            assert_eq!(designer_revision, 0);
-            // Order-sensitive (W5): the gate-opening batch is
-            // state-change-first (`WorkflowChanged` before the gate
-            // announcement), and domain events precede the trailing
-            // `AppsChanged` snapshot.
-            let workflow_at = position_of(&events, "AppWorkflowChanged(awaiting_spec)", |event| {
-                matches!(
-                    event,
-                    Ev::AppWorkflowChanged {
-                        state: AppWorkflowStateDto::AwaitingSpecConfirmation,
-                        ..
-                    }
-                )
-            });
-            let designer_at = position_of(&events, "AppDesignerRequested", |event| {
-                matches!(event, Ev::AppDesignerRequested { .. })
-            });
-            let snapshot_at = position_of(&events, "AppsChanged snapshot", |event| {
-                matches!(event, Ev::AppsChanged { .. })
-            });
-            assert!(
-                workflow_at < designer_at,
-                "state-change-first: WorkflowChanged must precede DesignerRequested \
-                 (got {events:?})"
-            );
-            assert!(
-                designer_at < snapshot_at,
-                "domain events must precede the trailing AppsChanged snapshot \
-                 (got {events:?})"
-            );
-
-            // A conflicting update is rejected: conflict event + typed
-            // failure, and the stale value is NOT applied.
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 7,
-                    patch: title_patch("Stale"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft stale)");
-            let events = drain_events(&handle, &listener).await;
-            // Order-sensitive (W5): the spec-required cause precedes the
-            // synthesized failure on the wire.
-            let conflict_at = position_of(&events, "AppDesignConflict", |event| {
-                matches!(
-                    event,
-                    Ev::AppDesignConflict {
-                        expected_revision: 7,
-                        actual_revision: 0,
-                        ..
-                    }
-                )
-            });
-            let failed_at =
-                position_of(&events, "AppOperationFailed(revision_conflict)", |event| {
-                    matches!(
-                        event,
-                        Ev::AppOperationFailed {
-                            code: AppErrorCodeDto::RevisionConflict,
-                            ..
-                        }
-                    )
-                });
-            assert!(
-                conflict_at < failed_at,
-                "AppDesignConflict (the cause) must precede AppOperationFailed \
-                 (got {events:?})"
-            );
-            assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, Ev::AppDesignDraftChanged { .. })),
-                "a conflicting edit must not change the draft"
-            );
-
-            // A valid update bumps the revision and carries the field map.
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 0,
-                    patch: title_patch("Mine"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft)");
-            let events = drain_events(&handle, &listener).await;
-            let fields = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppDesignDraftChanged {
-                        revision: 1,
-                        fields,
-                        ..
-                    } => Some(fields.clone()),
-                    _ => None,
-                })
-                .expect("AppDesignDraftChanged at revision 1");
-            assert!(matches!(
-                fields.get("title"),
-                Some(DesignValueDto::ShortText { value }) if value == "Mine"
-            ));
-
-            // Confirm gating (spec §I): a guessed interaction id fails…
-            handle
-                .submit(ClientCommand::ConfirmAppDesign {
-                    app_id: app_id.clone(),
-                    revision: 1,
-                    interaction_id: "int-guessed".into(),
-                })
-                .await
-                .expect("submit(ConfirmAppDesign guessed)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::InteractionInvalid,
-                    ..
-                }
-            )));
-            // …and the right id with a stale revision fails too.
-            handle
-                .submit(ClientCommand::ConfirmAppDesign {
-                    app_id: app_id.clone(),
-                    revision: 0,
-                    interaction_id: designer_interaction.clone(),
-                })
-                .await
-                .expect("submit(ConfirmAppDesign stale)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::RevisionConflict,
-                    ..
-                }
-            )));
-            let service = handle.local_apps().expect("local-apps service");
-            assert_eq!(
-                service.record(&app_id).await.unwrap().workflow_state,
-                local_apps::AppWorkflowState::AwaitingSpecConfirmation,
-                "failed confirms must not advance the workflow"
-            );
-
-            local_apps::test_support::stamp_fresh_plan(&service, &app_id).await;
-            // The exact pending id + the current revision confirms → generating.
-            handle
-                .submit(ClientCommand::ConfirmAppDesign {
-                    app_id: app_id.clone(),
-                    revision: 1,
-                    interaction_id: designer_interaction,
-                })
-                .await
-                .expect("submit(ConfirmAppDesign)");
-            let events = drain_events(&handle, &listener).await;
-            // Order-sensitive (W5): the workflow move precedes its trailing
-            // snapshot.
-            let generating_at = position_of(&events, "AppWorkflowChanged(generating)", |event| {
-                matches!(
-                    event,
-                    Ev::AppWorkflowChanged {
-                        state: AppWorkflowStateDto::Generating,
-                        ..
-                    }
-                )
-            });
-            let snapshot_at = position_of(&events, "AppsChanged snapshot", |event| {
-                matches!(event, Ev::AppsChanged { .. })
-            });
-            assert!(
-                generating_at < snapshot_at,
-                "WorkflowChanged(generating) must precede the AppsChanged snapshot \
-                 (got {events:?})"
-            );
-
-            // Generation/validation transitions are AppService seams (the
-            // phase-3 generator drives them); their domain events must ride
-            // the SAME outbound sink as the command replies — and in commit
-            // order: Validating first, then the gate-opening pair
-            // state-change-first (WorkflowChanged before PreviewReady).
-            service
-                .generation_complete(&app_id)
-                .await
-                .expect("generation_complete");
-            service
-                .validation_passed(&app_id)
-                .await
-                .expect("validation_passed");
-            let events = drain_events(&handle, &listener).await;
-            let validating_at = position_of(&events, "AppWorkflowChanged(validating)", |event| {
-                matches!(
-                    event,
-                    Ev::AppWorkflowChanged {
-                        state: AppWorkflowStateDto::Validating,
-                        ..
-                    }
-                )
-            });
-            let awaiting_preview_at = position_of(
-                &events,
-                "AppWorkflowChanged(awaiting_preview_confirmation)",
-                |event| {
-                    matches!(
-                        event,
-                        Ev::AppWorkflowChanged {
-                            state: AppWorkflowStateDto::AwaitingPreviewConfirmation,
-                            ..
-                        }
-                    )
-                },
-            );
-            let preview_at = position_of(&events, "AppPreviewReady", |event| {
-                matches!(event, Ev::AppPreviewReady { .. })
-            });
-            assert!(
-                validating_at < awaiting_preview_at && awaiting_preview_at < preview_at,
-                "seam events must arrive in commit order, state-change-first \
-                 (got {events:?})"
-            );
-            let (preview_interaction, preview_revision) = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppPreviewReady {
-                        interaction_id,
-                        revision,
-                        url: None,
-                        ..
-                    } => Some((interaction_id.clone(), *revision)),
-                    _ => None,
-                })
-                .expect("AppPreviewReady must be emitted with no url in phase 1");
-            assert_eq!(preview_revision, 1);
-
-            // Confirm the preview through the UI command path → ready.
-            handle
-                .submit(ClientCommand::ConfirmAppPreview {
-                    app_id: app_id.clone(),
-                    revision: preview_revision,
-                    interaction_id: preview_interaction,
-                })
-                .await
-                .expect("submit(ConfirmAppPreview)");
-            let events = drain_events(&handle, &listener).await;
-            // Order-sensitive (W5): the workflow move precedes its trailing
-            // snapshot.
-            let ready_at = position_of(&events, "AppWorkflowChanged(ready)", |event| {
-                matches!(
-                    event,
-                    Ev::AppWorkflowChanged {
-                        state: AppWorkflowStateDto::Ready,
-                        ..
-                    }
-                )
-            });
-            let snapshot_at = position_of(&events, "AppsChanged snapshot", |event| {
-                matches!(event, Ev::AppsChanged { .. })
-            });
-            assert!(
-                ready_at < snapshot_at,
-                "WorkflowChanged(ready) must precede the AppsChanged snapshot \
-                 (got {events:?})"
-            );
-            assert_eq!(
-                service.record(&app_id).await.unwrap().workflow_state,
-                local_apps::AppWorkflowState::Ready
-            );
-        });
     }
 
     #[test]
@@ -9047,15 +9784,9 @@ mod tests {
             let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
             let app_id = apps[0].id.clone();
             let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 0,
-                    patch: title_patch("Kept"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft)");
+            // v3 seeding: the only surviving workflow mutation is the ready
+            // stamp (the build tool's success path).
+            service.mark_ready(&app_id).await.expect("mark_ready");
             app_id
         });
         // The store lives at the per-profile data root (`<root>/apps/…`) —
@@ -9065,9 +9796,7 @@ mod tests {
             .path()
             .join("apps")
             .join(&app_id)
-            .join("workspace")
-            .join(branding::DOT_DIR)
-            .join("design-spec.json")
+            .join("runtime.json")
             .is_file());
         drop(handle);
 
@@ -9084,9 +9813,9 @@ mod tests {
             assert_eq!(apps[0].id, app_id);
             let service = handle.local_apps().expect("local-apps service");
             assert_eq!(
-                service.draft(&app_id).await.unwrap().revision,
-                1,
-                "the draft revision survives the engine rebuild"
+                service.record(&app_id).await.unwrap().workflow_state,
+                local_apps::AppWorkflowState::Ready,
+                "the ready stamp survives the engine rebuild"
             );
 
             handle
@@ -9106,665 +9835,11 @@ mod tests {
         );
     }
 
+    /// W4: the runtime seam (the broker's runtime manager drives it) must
+    /// reach the client through the same lowered wire path as command
+    /// replies — field-exact.
     #[test]
-    fn local_apps_suggestion_and_cancel_commands_round_trip_through_submit() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: "Moodboard".into(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "a test app".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-
-            // `OpenAppDesigner` needs `collecting_spec`; stand in for Task
-            // 4/8's not-yet-wired questionnaire-authoring LLM round trip.
-            let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-
-            // The designer gate opens at revision 0; its interaction id
-            // reaches the client only through this event.
-            handle
-                .submit(ClientCommand::OpenAppDesigner {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(OpenAppDesigner)");
-            let events = drain_events(&handle, &listener).await;
-            let (designer_interaction, designer_revision) = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppDesignerRequested {
-                        app_id: id,
-                        interaction_id,
-                        revision,
-                    } if *id == app_id => Some((interaction_id.clone(), *revision)),
-                    _ => None,
-                })
-                .expect("AppDesignerRequested must be emitted");
-            assert_eq!(designer_revision, 0);
-
-            // A user edit AFTER the confirmation request: the gate survives,
-            // the draft revision moves past the one the gate was opened at.
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 0,
-                    patch: title_patch("Mood"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events
-                .iter()
-                .any(|event| matches!(event, Ev::AppDesignDraftChanged { revision: 1, .. })));
-
-            // An agent-side suggestion (AppService seam — the phase-3 designer
-            // agent drives this) is announced with the id the apply command
-            // must echo.
-            let suggestion = service
-                .store_suggestion(
-                    &app_id,
-                    local_apps::AppDesignPatch {
-                        ops: vec![local_apps::AppDesignPatchOp::Set {
-                            field_id: "accent".into(),
-                            value: local_apps::DesignValue::Color("#3366ff".into()),
-                        }],
-                        note: None,
-                    },
-                )
-                .await
-                .expect("store_suggestion");
-            let events = drain_events(&handle, &listener).await;
-            let mut saw_suggestion = false;
-            for event in &events {
-                if let Ev::AppDesignSuggestionAvailable {
-                    app_id: id,
-                    suggestion_id,
-                    based_on_revision,
-                    patch,
-                } = event
-                {
-                    assert_eq!(id, &app_id);
-                    assert_eq!(suggestion_id, &suggestion.suggestion_id);
-                    assert_eq!(*based_on_revision, 1);
-                    assert!(matches!(
-                        &patch.ops[..],
-                        [AppDesignPatchOpDto::Set {
-                            field_id,
-                            value: DesignValueDto::Color { value },
-                        }] if field_id == "accent" && value == "#3366ff"
-                    ));
-                    saw_suggestion = true;
-                }
-            }
-            assert!(
-                saw_suggestion,
-                "AppDesignSuggestionAvailable must be emitted"
-            );
-
-            // A guessed suggestion id cannot apply…
-            handle
-                .submit(ClientCommand::ApplyAgentDesignSuggestion {
-                    app_id: app_id.clone(),
-                    suggestion_id: "sugg-guessed".into(),
-                    expected_revision: 1,
-                })
-                .await
-                .expect("submit(ApplyAgentDesignSuggestion guessed)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::InteractionInvalid,
-                    ..
-                }
-            )));
-            assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, Ev::AppDesignDraftChanged { .. })),
-                "a failed apply must not change the draft"
-            );
-
-            // …and a stale expected_revision conflicts (conflict event + typed
-            // failure, suggestion left pending).
-            handle
-                .submit(ClientCommand::ApplyAgentDesignSuggestion {
-                    app_id: app_id.clone(),
-                    suggestion_id: suggestion.suggestion_id.clone(),
-                    expected_revision: 0,
-                })
-                .await
-                .expect("submit(ApplyAgentDesignSuggestion stale)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppDesignConflict {
-                    expected_revision: 0,
-                    actual_revision: 1,
-                    ..
-                }
-            )));
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::RevisionConflict,
-                    ..
-                }
-            )));
-
-            // The exact id + current revision applies the patch (revision 2).
-            handle
-                .submit(ClientCommand::ApplyAgentDesignSuggestion {
-                    app_id: app_id.clone(),
-                    suggestion_id: suggestion.suggestion_id.clone(),
-                    expected_revision: 1,
-                })
-                .await
-                .expect("submit(ApplyAgentDesignSuggestion)");
-            let events = drain_events(&handle, &listener).await;
-            let fields = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppDesignDraftChanged {
-                        revision: 2,
-                        fields,
-                        ..
-                    } => Some(fields.clone()),
-                    _ => None,
-                })
-                .expect("AppDesignDraftChanged at revision 2");
-            assert!(matches!(
-                fields.get("accent"),
-                Some(DesignValueDto::Color { value }) if value == "#3366ff"
-            ));
-
-            // Confirming with the revision the gate was OPENED at — after the
-            // post-request edits — must fail with revision_conflict and leave
-            // the gate pending (spec §B: confirm requires the CURRENT
-            // revision).
-            handle
-                .submit(ClientCommand::ConfirmAppDesign {
-                    app_id: app_id.clone(),
-                    revision: designer_revision,
-                    interaction_id: designer_interaction.clone(),
-                })
-                .await
-                .expect("submit(ConfirmAppDesign post-edit stale)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::RevisionConflict,
-                    ..
-                }
-            )));
-            assert_eq!(
-                service.record(&app_id).await.unwrap().workflow_state,
-                local_apps::AppWorkflowState::AwaitingSpecConfirmation,
-                "the failed confirm must not consume the gate or move the workflow"
-            );
-
-            // Cancelling through the UI command voids the gate → collecting_spec…
-            handle
-                .submit(ClientCommand::CancelAppDesign {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(CancelAppDesign)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::CollectingSpec,
-                    ..
-                }
-            )));
-
-            // …and the voided gate can never confirm again, even with the
-            // current revision echoed correctly.
-            handle
-                .submit(ClientCommand::ConfirmAppDesign {
-                    app_id: app_id.clone(),
-                    revision: 2,
-                    interaction_id: designer_interaction,
-                })
-                .await
-                .expect("submit(ConfirmAppDesign voided)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::WorkflowStateInvalid,
-                    ..
-                }
-            )));
-        });
-    }
-
-    #[test]
-    fn local_apps_revision_requests_round_trip_through_submit() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: "Gallery".into(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "a test app".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-            let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-
-            handle
-                .submit(ClientCommand::OpenAppDesigner {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(OpenAppDesigner)");
-            let events = drain_events(&handle, &listener).await;
-            let designer_interaction = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppDesignerRequested { interaction_id, .. } => Some(interaction_id.clone()),
-                    _ => None,
-                })
-                .expect("AppDesignerRequested must be emitted");
-            local_apps::test_support::stamp_fresh_plan(&service, &app_id).await;
-            handle
-                .submit(ClientCommand::ConfirmAppDesign {
-                    app_id: app_id.clone(),
-                    revision: 0,
-                    interaction_id: designer_interaction,
-                })
-                .await
-                .expect("submit(ConfirmAppDesign)");
-            drain_events(&handle, &listener).await;
-
-            // The generation/validation seams (phase 3 drives them) open the
-            // preview gate.
-            service
-                .generation_complete(&app_id)
-                .await
-                .expect("generation_complete");
-            service
-                .validation_passed(&app_id)
-                .await
-                .expect("validation_passed");
-            let events = drain_events(&handle, &listener).await;
-            let first_preview = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppPreviewReady { interaction_id, .. } => Some(interaction_id.clone()),
-                    _ => None,
-                })
-                .expect("AppPreviewReady must be emitted");
-
-            // From the preview gate, feedback through the UI command voids the
-            // gate → revising, with no failure.
-            handle
-                .submit(ClientCommand::RequestAppRevision {
-                    app_id: app_id.clone(),
-                    prompt: "use a darker header".into(),
-                })
-                .await
-                .expect("submit(RequestAppRevision)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::Revising,
-                    ..
-                }
-            )));
-            assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, Ev::AppOperationFailed { .. })),
-                "a legal revision request must not fail"
-            );
-
-            // The voided preview gate can no longer confirm.
-            handle
-                .submit(ClientCommand::ConfirmAppPreview {
-                    app_id: app_id.clone(),
-                    revision: 0,
-                    interaction_id: first_preview.clone(),
-                })
-                .await
-                .expect("submit(ConfirmAppPreview voided)");
-            let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::WorkflowStateInvalid,
-                    ..
-                }
-            )));
-
-            // The persistent coordinator owns the revision pass now. By the
-            // time the UI event drain completes it may already have advanced
-            // from revising to validation (or a retryable validation failure
-            // in this off-device test, where no Node runtime is installed).
-            // The coordinator's own tests cover minting the fresh preview gate.
-            assert!(matches!(
-                service.record(&app_id).await.unwrap().workflow_state,
-                local_apps::AppWorkflowState::Revising
-                    | local_apps::AppWorkflowState::Validating
-                    | local_apps::AppWorkflowState::ValidationFailed
-            ));
-        });
-    }
-
-    /// W3 regression listener: reacts to `AppDesignerRequested` by driving
-    /// ANOTHER submit on the same engine handle from inside `on_event`,
-    /// hopping through the runtime the way a real Swift/Kotlin callback
-    /// would (a separate task the callback then awaits). Pre-W3 the observer
-    /// awaited the sink INSIDE the service's emission-order guard, so the
-    /// inner submit's emission-order acquisition waited (cross-task, so the
-    /// core's task-local reentrancy panic could not see it) on the very
-    /// guard whose release waited on this callback — a silent deadlock of
-    /// the whole app surface.
-    #[derive(Default)]
-    struct ResubmittingListener {
-        received: tokio::sync::Mutex<Vec<Ev>>,
-        engine: StdMutex<Option<Arc<MobileEngineHandle>>>,
-        resubmitted: std::sync::atomic::AtomicBool,
-    }
-
-    #[async_trait]
-    impl ClientEventListener for ResubmittingListener {
-        async fn on_event(&self, event: Ev) {
-            if let Ev::AppDesignerRequested { app_id, .. } = &event {
-                if !self
-                    .resubmitted
-                    .swap(true, std::sync::atomic::Ordering::SeqCst)
-                {
-                    let engine = self
-                        .engine
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .expect("engine registered before the designer opens");
-                    let app_id = app_id.clone();
-                    let inner = tokio::spawn(async move {
-                        engine
-                            .submit(ClientCommand::UpdateAppDesignDraft {
-                                app_id,
-                                expected_revision: 0,
-                                patch: title_patch("From listener"),
-                            })
-                            .await
-                    });
-                    inner
-                        .await
-                        .expect("inner submit task")
-                        .expect("inner submit");
-                }
-            }
-            self.received.lock().await.push(event);
-        }
-    }
-
-    /// `drain_events` twin for [`ResubmittingListener`] (same two-stage
-    /// barrier: commit → enqueue, then enqueue → deliver).
-    async fn drain_resubmitting(
-        handle: &MobileEngineHandle,
-        listener: &ResubmittingListener,
-    ) -> Vec<Ev> {
-        if let Ok(service) = handle.local_apps() {
-            service.flush_events().await;
-        }
-        handle.app_emissions.flush().await;
-        std::mem::take(&mut *listener.received.lock().await)
-    }
-
-    #[test]
-    fn local_apps_listener_driving_a_submit_from_on_event_cannot_deadlock() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
-            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
-        let listener = Arc::new(ResubmittingListener::default());
-        let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
-        let perm_sink: Arc<dyn PermissionRequestSink> =
-            Arc::new(RecordingPermissionSink::default());
-        let handle =
-            build_mobile_engine(test_config(tmp.path()), platform, listener_dyn, perm_sink)
-                .expect("build_mobile_engine failed");
-        // See `build_submit_handle`'s doc: a deterministic, no-network local-
-        // apps model so `seed_collecting_spec` below never races (or hangs
-        // on) a real `api.anthropic.com` request.
-        handle.set_local_apps_model(ScriptedModel::new(Vec::new()));
-        *listener.engine.lock().unwrap() = Some(handle.clone());
-
-        handle.runtime().block_on(async {
-            // Bounded so a reintroduced lock-across-listener-code regression
-            // FAILS fast instead of hanging CI.
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                handle
-                    .submit(ClientCommand::CreateApp {
-                        name: "Reentrant".into(),
-                        origin: AppCreateOriginDto::Library,
-                        brief: "a test app".into(),
-                        git_enabled: true,
-                        conversation_id: None,
-                    })
-                    .await
-                    .expect("submit(CreateApp)");
-                let events = drain_resubmitting(&handle, &listener).await;
-                let app_id = apps_changed_rows(&events)
-                    .expect("CreateApp must announce AppsChanged")[0]
-                    .id
-                    .clone();
-                let service = handle.local_apps().expect("local-apps service");
-                seed_collecting_spec(&handle, &service, &app_id).await;
-
-                // Delivering AppDesignerRequested makes the listener drive
-                // the draft edit from inside `on_event`; both the outer and
-                // the inner command must complete.
-                handle
-                    .submit(ClientCommand::OpenAppDesigner {
-                        app_id: app_id.clone(),
-                    })
-                    .await
-                    .expect("submit(OpenAppDesigner)");
-                let mut events = drain_resubmitting(&handle, &listener).await;
-                // The inner submit finished inside the designer event's
-                // delivery, so its own events land behind the first flush
-                // barrier; a second barrier round collects them.
-                events.extend(drain_resubmitting(&handle, &listener).await);
-                assert!(
-                    listener
-                        .resubmitted
-                        .load(std::sync::atomic::Ordering::SeqCst),
-                    "the listener never saw AppDesignerRequested"
-                );
-                assert!(
-                    events.iter().any(|event| matches!(
-                        event,
-                        Ev::AppDesignDraftChanged { revision: 1, .. }
-                    )),
-                    "the listener-driven draft edit must complete and deliver (got {events:?})"
-                );
-                let service = handle.local_apps().expect("local-apps service");
-                assert_eq!(
-                    service.draft(&app_id).await.expect("draft").revision,
-                    1,
-                    "the listener-driven edit must have committed"
-                );
-            })
-            .await
-            .expect(
-                "app surface deadlocked: a listener driving a submit from on_event \
-                 must complete now that no lock is held while listener code runs",
-            );
-        });
-        // Break the listener ↔ engine strong-reference cycle so the engine
-        // (and its runtime) can drop with the test.
-        *listener.engine.lock().unwrap() = None;
-    }
-
-    /// W2 regression, mirroring the core's dropped-caller completion-task
-    /// tests: abort the mutating `submit` at a sweep of yield offsets. Any
-    /// mutation that actually COMMITTED (probe: the draft revision bump)
-    /// must still deliver its `DesignDraftChanged` FOLLOWED by an
-    /// `AppsChanged` snapshot — the announce lives in a detached task, not
-    /// in the droppable caller future (contract C8).
-    #[test]
-    fn local_apps_dropped_submit_caller_never_loses_a_committed_mutations_snapshot() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: "Sweep".into(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "a test app".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-            let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-            handle
-                .submit(ClientCommand::OpenAppDesigner {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(OpenAppDesigner)");
-            drain_events(&handle, &listener).await;
-
-            /// Highest yield offset in the sweep; this one is the deterministic
-            /// anchor (see below) rather than another timing probe.
-            const LAST_SWEEP_YIELD: u32 = 15;
-
-            let mut committed_iterations = 0usize;
-            for yields in 0..=LAST_SWEEP_YIELD {
-                let revision = service.draft(&app_id).await.expect("draft").revision;
-                let submit_handle = Arc::clone(&handle);
-                let submit_app_id = app_id.clone();
-                let submit = tokio::spawn(async move {
-                    submit_handle
-                        .submit(ClientCommand::UpdateAppDesignDraft {
-                            app_id: submit_app_id,
-                            expected_revision: revision,
-                            patch: title_patch(&format!("v{revision}")),
-                        })
-                        .await
-                });
-                if yields == LAST_SWEEP_YIELD {
-                    // Determinism anchor. A fixed yield budget is only a PROXY
-                    // for "the spawned handler got far enough to commit"; under
-                    // load the runtime can starve that task for all 16 offsets,
-                    // and then the sweep reports "the probe is broken" when in
-                    // fact nothing ever ran. The final offset therefore waits
-                    // for the commit and THEN drops the caller — still exactly
-                    // the drop-after-commit case this test exists to pin, but
-                    // guaranteed to occur at least once on any machine.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                    while service.draft(&app_id).await.expect("draft").revision == revision
-                        && std::time::Instant::now() < deadline
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                    }
-                } else {
-                    for _ in 0..yields {
-                        tokio::task::yield_now().await;
-                    }
-                }
-                submit.abort();
-                let _ = submit.await;
-
-                // Classify by the committed-state probe: the detached
-                // mutation (if the handler reached its spawn) runs to
-                // completion regardless of the abort, so poll briefly.
-                let mut events: Vec<Ev> = Vec::new();
-                let settle = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                let committed = loop {
-                    events.extend(drain_events(&handle, &listener).await);
-                    if service.draft(&app_id).await.expect("draft").revision == revision + 1 {
-                        break true;
-                    }
-                    if std::time::Instant::now() > settle {
-                        break false;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                };
-                if !committed {
-                    continue;
-                }
-                committed_iterations += 1;
-                // The committed edit's domain event (which rides the core's
-                // own completion task) must be FOLLOWED by the announce-side
-                // AppsChanged — exactly the event a droppable caller future
-                // used to lose. Bounded poll: a regression fails loudly.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
-                    let draft_at = events.iter().position(|event| {
-                        matches!(
-                            event,
-                            Ev::AppDesignDraftChanged { revision: r, .. } if *r == revision + 1
-                        )
-                    });
-                    if draft_at.is_some_and(|at| {
-                        events[at..]
-                            .iter()
-                            .any(|event| matches!(event, Ev::AppsChanged { .. }))
-                    }) {
-                        break;
-                    }
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "committed draft revision {} lost its AppsChanged snapshot \
-                         (yields={yields}; got {events:?})",
-                        revision + 1
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                    events.extend(drain_events(&handle, &listener).await);
-                }
-            }
-            assert!(
-                committed_iterations > 0,
-                "the abort sweep never committed a mutation; the probe (or the \
-                 sweep width) is broken"
-            );
-        });
-    }
-
-    /// W4: the generation-progress and runtime seams (the phase-3 generator /
-    /// phase-4 runtime drive them) must reach the client through the same
-    /// lowered wire path as command replies — field-exact.
-    #[test]
-    fn local_apps_progress_and_runtime_seams_deliver_field_exact_events() {
+    fn local_apps_runtime_seam_delivers_field_exact_events() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
@@ -9785,29 +9860,6 @@ mod tests {
             .id
             .clone();
             let service = handle.local_apps().expect("local-apps service");
-
-            service
-                .report_generation_progress(local_apps::AppGenerationProgress {
-                    app_id: app_id.clone(),
-                    stage: "pages".into(),
-                    percent: Some(42),
-                    detail: Some("3/7 screens".into()),
-                })
-                .await
-                .expect("report_generation_progress");
-            let events = drain_events(&handle, &listener).await;
-            assert!(
-                events.iter().any(|event| matches!(
-                    event,
-                    Ev::AppGenerationProgress {
-                        app_id: id,
-                        stage,
-                        percent: Some(42),
-                        detail: Some(detail),
-                    } if *id == app_id && stage == "pages" && detail == "3/7 screens"
-                )),
-                "AppGenerationProgress must arrive field-exact (got {events:?})"
-            );
 
             // Runtime record: stopped -> starting (pins the port)…
             service
@@ -9858,266 +9910,6 @@ mod tests {
                 starting_at < failed_at,
                 "runtime transitions must arrive in commit order (got {events:?})"
             );
-        });
-    }
-
-    /// W5: failure-vs-cause order on the suggestion conflict path. The
-    /// suggestion announcement is consumed EARLIER; the stale apply's batch
-    /// must then deliver `AppDesignConflict` (the spec-required cause)
-    /// BEFORE the synthesized `AppOperationFailed { revision_conflict }`.
-    #[test]
-    fn local_apps_stale_suggestion_apply_orders_conflict_before_failure() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: "Conflicted".into(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "a test app".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-            let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-            handle
-                .submit(ClientCommand::OpenAppDesigner {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(OpenAppDesigner)");
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 0,
-                    patch: title_patch("Base"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft)");
-            let suggestion = service
-                .store_suggestion(
-                    &app_id,
-                    local_apps::AppDesignPatch {
-                        ops: vec![local_apps::AppDesignPatchOp::Set {
-                            field_id: "accent".into(),
-                            value: local_apps::DesignValue::Color("#3366ff".into()),
-                        }],
-                        note: None,
-                    },
-                )
-                .await
-                .expect("store_suggestion");
-            // Consume everything so far — the suggestion announcement rode an
-            // earlier batch by design.
-            let events = drain_events(&handle, &listener).await;
-            assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, Ev::AppDesignSuggestionAvailable { .. })),
-                "setup must have delivered the suggestion announcement"
-            );
-
-            // The stale apply: cause first, failure second — deterministic
-            // now that both ride the single ordered emission channel.
-            handle
-                .submit(ClientCommand::ApplyAgentDesignSuggestion {
-                    app_id: app_id.clone(),
-                    suggestion_id: suggestion.suggestion_id.clone(),
-                    expected_revision: 0,
-                })
-                .await
-                .expect("submit(ApplyAgentDesignSuggestion stale)");
-            let events = drain_events(&handle, &listener).await;
-            let conflict_at = position_of(&events, "AppDesignConflict", |event| {
-                matches!(
-                    event,
-                    Ev::AppDesignConflict {
-                        expected_revision: 0,
-                        actual_revision: 1,
-                        ..
-                    }
-                )
-            });
-            let failed_at =
-                position_of(&events, "AppOperationFailed(revision_conflict)", |event| {
-                    matches!(
-                        event,
-                        Ev::AppOperationFailed {
-                            code: AppErrorCodeDto::RevisionConflict,
-                            ..
-                        }
-                    )
-                });
-            assert!(
-                conflict_at < failed_at,
-                "AppDesignConflict (the cause) must precede AppOperationFailed \
-                 (got {events:?})"
-            );
-            assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, Ev::AppDesignDraftChanged { .. })),
-                "a stale apply must not change the draft"
-            );
-        });
-    }
-
-    /// W5: cross-batch FIFO. Two rapid mutations with no intermediate flush
-    /// must deliver the full interleaved sequence in commit order — each
-    /// batch's domain event, then ITS trailing snapshot, then the next
-    /// batch. Asserted as the EXACT sequence, so any reordering (or a
-    /// snapshot jumping its batch) fails.
-    #[test]
-    fn local_apps_two_rapid_mutations_deliver_the_exact_commit_ordered_sequence() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::CreateApp {
-                    name: "Fifo".into(),
-                    origin: AppCreateOriginDto::Library,
-                    brief: "a test app".into(),
-                    git_enabled: true,
-                    conversation_id: None,
-                })
-                .await
-                .expect("submit(CreateApp)");
-            let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
-            let service = handle.local_apps().expect("local-apps service");
-            seed_collecting_spec(&handle, &service, &app_id).await;
-            handle
-                .submit(ClientCommand::OpenAppDesigner {
-                    app_id: app_id.clone(),
-                })
-                .await
-                .expect("submit(OpenAppDesigner)");
-            drain_events(&handle, &listener).await;
-
-            // Two mutations, no flush in between.
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 0,
-                    patch: title_patch("One"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft #1)");
-            handle
-                .submit(ClientCommand::UpdateAppDesignDraft {
-                    app_id: app_id.clone(),
-                    expected_revision: 1,
-                    patch: title_patch("Two"),
-                })
-                .await
-                .expect("submit(UpdateAppDesignDraft #2)");
-
-            let events = drain_events(&handle, &listener).await;
-            let sequence: Vec<String> = events
-                .iter()
-                .map(|event| match event {
-                    Ev::AppDesignDraftChanged { revision, .. } => format!("draft@{revision}"),
-                    Ev::AppsChanged { .. } => "apps".into(),
-                    other => format!("unexpected({other:?})"),
-                })
-                .collect();
-            assert_eq!(
-                sequence,
-                vec!["draft@1", "apps", "draft@2", "apps"],
-                "the interleaved two-command sequence must be exactly commit-ordered"
-            );
-        });
-    }
-
-    #[test]
-    fn local_apps_startup_sweep_consumes_continuations_queued_by_a_previous_run() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-
-        // Seed the on-disk store (at the same `<root>/apps` the engine roots
-        // its service at) with a gate outcome whose delivery FAILED — the
-        // state a crash mid-delivery leaves behind.
-        let seeded_app_id = {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("seed runtime");
-            rt.block_on(async {
-                let sink = Arc::new(local_apps::RecordingContinuationSink::new());
-                sink.set_fail(true);
-                let service = local_apps::AppService::load(
-                    tmp.path(),
-                    Arc::new(local_apps::test_support::FixedClock::new(1_753_900_000_000)),
-                    Arc::clone(&sink) as Arc<dyn local_apps::ContinuationSink>,
-                    Arc::new(local_apps::NoopAppEventObserver),
-                )
-                .await
-                .expect("seed service");
-                let record = service
-                    .create_app(Some("Queued"), "a test app", None)
-                    .await
-                    .expect("create app");
-                local_apps::test_support::advance_to_collecting_spec(&service, &record.id).await;
-                let gate = service
-                    .open_designer(&record.id)
-                    .await
-                    .expect("open designer");
-                local_apps::test_support::stamp_fresh_plan(&service, &record.id).await;
-                service
-                    .confirm_design(&record.id, &gate.interaction_id, 0)
-                    .await
-                    .expect("confirm design");
-                let queued = service
-                    .interactions(&record.id)
-                    .await
-                    .expect("interactions");
-                assert_eq!(
-                    queued.undelivered.len(),
-                    1,
-                    "failed delivery must stay queued on disk"
-                );
-                assert_eq!(queued.last_delivered_seq, 0);
-                record.id
-            })
-        };
-
-        // A fresh engine over the same root spawns the startup redelivery
-        // sweep (spec §E at-least-once); with the phase-1 Noop sink the queued
-        // continuation is drained and marked delivered — never dropped with a
-        // stale `last_delivered_seq`.
-        let (handle, _listener) = build_submit_handle(tmp.path());
-        handle.runtime().block_on(async {
-            let service = handle.local_apps().expect("local-apps service");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                let interactions = service
-                    .interactions(&seeded_app_id)
-                    .await
-                    .expect("interactions");
-                if interactions.undelivered.is_empty() {
-                    assert_eq!(
-                        interactions.last_delivered_seq, 1,
-                        "the sweep must mark the continuation delivered"
-                    );
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "startup sweep did not consume the queued continuation in time"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
         });
     }
 

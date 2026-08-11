@@ -23,7 +23,6 @@
 //! uniffi-gated like the `host` module — it names the client-protocol DTO
 //! surface, which is pulled only under that feature.
 
-use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,19 +30,15 @@ use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
     AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
-    AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDesignFieldDto,
-    AppDesignFieldOptionDto, AppDesignFieldTypeDto, AppDesignFieldValueDto, AppDesignPatchDto,
-    AppDesignPatchOpDto, AppDesignStepDto, AppDetailsDto, AppErrorCodeDto, AppEventDto,
-    AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
-    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto, DensityLevelDto,
-    DesignValueDto,
+    AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto,
+    AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto,
 };
 use local_apps::{
-    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppDesignDraft, AppDesignField,
-    AppDesignFieldOption, AppDesignFieldType, AppDesignPatch, AppDesignPatchOp, AppDesignStep,
-    AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest, AppPlan, AppRecord,
-    AppRuntimeRecord, AppRuntimeState, AppService, AppWorkflowState, DataCollectionSchema,
-    DataFieldKind, DataFieldSchema, DensityLevel, DesignValue,
+    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppError, AppErrorCode,
+    AppEvent, AppEventObserver, AppLayout, AppManifest, AppRecord, AppRuntimeRecord,
+    AppRuntimeState, AppService, AppWorkflowState, DataCollectionSchema, DataFieldKind,
+    DataFieldSchema,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -133,8 +128,7 @@ impl AppEmissionQueue {
     /// AFTER every event its cause already committed: when the service is
     /// alive, `flush_events` first waits for the emission tasks of every
     /// previously completed call (whose `on_event` enqueues ran under the
-    /// emission-order guard), so a failure can never overtake its own cause
-    /// (e.g. `AppDesignConflict` before the `revision_conflict` failure).
+    /// emission-order guard), so a failure can never overtake its own cause.
     pub(crate) async fn emit_failure(
         &self,
         service: Option<&AppService>,
@@ -166,25 +160,10 @@ impl AppEmissionQueue {
     }
 }
 
-/// The wire-client's [`crate::local_apps_profile::AppFailureNotifier`]:
-/// `spawn_authoring`/`spawn_planning`'s synthesized-failure path rides the
-/// SAME ordered channel every other `host.rs` command reply does.
-#[async_trait]
-impl crate::local_apps_profile::AppFailureNotifier for AppEmissionQueue {
-    async fn notify_failure(
-        &self,
-        service: Option<&AppService>,
-        app_id: Option<String>,
-        error: &AppError,
-    ) {
-        self.emit_failure(service, app_id, error).await;
-    }
-}
-
 /// [`AppEventObserver`] that hands every domain event to the bridge's ordered
 /// emission channel. Installed on the engine-owned `AppService` at build time
-/// so service-driven events (including the phase-3 generator's, later) ride
-/// the same outbound channel as command replies.
+/// so service-driven events ride the same outbound channel as command
+/// replies.
 pub(crate) struct SinkAppEventObserver {
     queue: AppEmissionQueue,
 }
@@ -215,80 +194,18 @@ impl AppEventObserver for SinkAppEventObserver {
 /// Every variant maps to `Some` today, but the return type stays
 /// `Option<ClientEvent>` DELIBERATELY, not just as a historical leftover:
 /// the forwarder task that calls this function is spawned once, detached,
-/// with its `JoinHandle` discarded (`AppEmissionQueue::spawn` below), so a
+/// with its `JoinHandle` discarded (`AppEmissionQueue::spawn` above), so a
 /// `panic!`/`todo!()`/`unreachable!()` arm here would silently kill the
 /// ENTIRE app-event stream for every app, forever, with no crash and no log
 /// (the panicked task's `JoinError` is never awaited, and `enqueue`'s
 /// `let _ = self.tx.send(..)` swallows the resulting closed-channel error).
-/// `QuestionnaireChanged`/`PlanChanged` lived behind a logged `None` for
-/// exactly this reason between Task 4 (which added the domain events) and
-/// Task 6 (which gave them a wire DTO to lower onto, below) — keeping the
-/// `Option` signature means the NEXT domain event that outruns its DTO can
-/// degrade the same safe way instead of reintroducing that window.
+/// Keeping the `Option` signature means the NEXT domain event that outruns
+/// its DTO can degrade the same safe way instead of reintroducing that
+/// window.
 pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
     match event {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
-        }),
-        AppEvent::QuestionnaireChanged {
-            app_id,
-            revision,
-            steps,
-        } => Some(ClientEvent::AppEvent {
-            event: AppEventDto::AppQuestionnaireChanged {
-                app_id,
-                revision,
-                steps: steps.iter().map(lower_design_step).collect(),
-            },
-        }),
-        AppEvent::PlanChanged {
-            app_id,
-            revision,
-            plan,
-        } => Some(ClientEvent::AppEvent {
-            event: AppEventDto::AppPlanChanged {
-                app_id,
-                revision,
-                plan: plan.as_ref().map(lower_plan),
-            },
-        }),
-        AppEvent::DesignerRequested {
-            app_id,
-            interaction_id,
-            revision,
-        } => Some(ClientEvent::AppDesignerRequested {
-            app_id,
-            interaction_id,
-            revision,
-        }),
-        AppEvent::DesignDraftChanged {
-            app_id,
-            revision,
-            fields,
-        } => Some(ClientEvent::AppDesignDraftChanged {
-            app_id,
-            revision,
-            fields: lower_fields(fields),
-        }),
-        AppEvent::DesignSuggestionAvailable {
-            app_id,
-            suggestion_id,
-            based_on_revision,
-            patch,
-        } => Some(ClientEvent::AppDesignSuggestionAvailable {
-            app_id,
-            suggestion_id,
-            based_on_revision,
-            patch: lower_patch(patch),
-        }),
-        AppEvent::DesignConflict {
-            app_id,
-            expected_revision,
-            actual_revision,
-        } => Some(ClientEvent::AppDesignConflict {
-            app_id,
-            expected_revision,
-            actual_revision,
         }),
         AppEvent::WorkflowChanged {
             app_id,
@@ -299,28 +216,11 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
             state: lower_workflow_state(state),
             detail,
         }),
-        AppEvent::GenerationProgress(progress) => Some(ClientEvent::AppGenerationProgress {
-            app_id: progress.app_id,
-            stage: progress.stage,
-            percent: progress.percent,
-            detail: progress.detail,
-        }),
         AppEvent::RuntimeChanged { app_id, runtime } => Some(ClientEvent::AppRuntimeChanged {
             app_id,
             state: lower_runtime_state(runtime.state),
             details: Some(lower_runtime_details(&runtime)),
             last_error: runtime.last_error,
-        }),
-        AppEvent::PreviewReady {
-            app_id,
-            interaction_id,
-            revision,
-            url,
-        } => Some(ClientEvent::AppPreviewReady {
-            app_id,
-            interaction_id,
-            revision,
-            url,
         }),
         AppEvent::CheckpointCreated { app_id, checkpoint } => {
             Some(ClientEvent::AppCheckpointCreated {
@@ -347,6 +247,7 @@ pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
         updated_at_ms: record.updated_at_ms,
         workflow_state: lower_workflow_state(record.workflow_state),
         conversation_id: record.conversation_id.clone(),
+        init_session_id: record.init_session_id.clone(),
         workspace_rel: record.workspace_rel.clone(),
     }
 }
@@ -370,21 +271,8 @@ pub(crate) fn lower_error_code(code: AppErrorCode) -> AppErrorCodeDto {
 
 fn lower_workflow_state(state: AppWorkflowState) -> AppWorkflowStateDto {
     match state {
-        AppWorkflowState::AuthoringQuestionnaire => AppWorkflowStateDto::AuthoringQuestionnaire,
-        AppWorkflowState::QuestionnaireFailed => AppWorkflowStateDto::QuestionnaireFailed,
-        AppWorkflowState::CollectingSpec => AppWorkflowStateDto::CollectingSpec,
-        AppWorkflowState::Planning => AppWorkflowStateDto::Planning,
-        AppWorkflowState::PlanFailed => AppWorkflowStateDto::PlanFailed,
-        AppWorkflowState::AwaitingSpecConfirmation => AppWorkflowStateDto::AwaitingSpecConfirmation,
-        AppWorkflowState::Generating => AppWorkflowStateDto::Generating,
-        AppWorkflowState::Validating => AppWorkflowStateDto::Validating,
-        AppWorkflowState::AwaitingPreviewConfirmation => {
-            AppWorkflowStateDto::AwaitingPreviewConfirmation
-        }
-        AppWorkflowState::Revising => AppWorkflowStateDto::Revising,
+        AppWorkflowState::Draft => AppWorkflowStateDto::Draft,
         AppWorkflowState::Ready => AppWorkflowStateDto::Ready,
-        AppWorkflowState::GenerationFailed => AppWorkflowStateDto::GenerationFailed,
-        AppWorkflowState::ValidationFailed => AppWorkflowStateDto::ValidationFailed,
     }
 }
 
@@ -418,40 +306,6 @@ fn lower_checkpoint_kind(kind: AppCheckpointKind) -> AppCheckpointKindDto {
     }
 }
 
-fn lower_density(level: DensityLevel) -> DensityLevelDto {
-    match level {
-        DensityLevel::Compact => DensityLevelDto::Compact,
-        DensityLevel::Comfortable => DensityLevelDto::Comfortable,
-    }
-}
-
-fn lower_design_value(value: DesignValue) -> DesignValueDto {
-    match value {
-        DesignValue::ShortText(value) => DesignValueDto::ShortText { value },
-        DesignValue::LongText(value) => DesignValueDto::LongText { value },
-        DesignValue::SingleChoice(value) => DesignValueDto::SingleChoice { value },
-        DesignValue::MultipleChoice(value) => DesignValueDto::MultipleChoice { value },
-        DesignValue::Boolean(value) => DesignValueDto::Boolean { value },
-        DesignValue::Color(value) => DesignValueDto::Color { value },
-        DesignValue::Density(level) => DesignValueDto::Density {
-            value: lower_density(level),
-        },
-        DesignValue::ScreenList(value) => DesignValueDto::ScreenList { value },
-        DesignValue::FeatureList(value) => DesignValueDto::FeatureList { value },
-        DesignValue::DataFieldList(value) => DesignValueDto::DataFieldList {
-            value: value.into_iter().map(lower_data_field).collect(),
-        },
-        DesignValue::DomainList(value) => DesignValueDto::DomainList { value },
-        // The user explicitly chose to let the LLM decide this field. `Deferred`
-        // is a legitimate draft value (`local-apps`'s `validate_design_value` /
-        // `ensure_no_deferred_design_values` both accept it — see their docs),
-        // so it needs a real wire representation: client-protocol's
-        // `DesignValueDto::Deferred` carries the same "bare tag, no payload"
-        // shape as the core value.
-        DesignValue::Deferred => DesignValueDto::Deferred,
-    }
-}
-
 fn lower_data_field(value: DataFieldSchema) -> AppDataFieldDto {
     AppDataFieldDto {
         id: value.id,
@@ -480,62 +334,6 @@ fn lower_collection(value: DataCollectionSchema, enabled_by_default: bool) -> Ap
     }
 }
 
-fn lower_design_field_type(field_type: AppDesignFieldType) -> AppDesignFieldTypeDto {
-    match field_type {
-        AppDesignFieldType::ShortText => AppDesignFieldTypeDto::ShortText,
-        AppDesignFieldType::LongText => AppDesignFieldTypeDto::LongText,
-        AppDesignFieldType::SingleChoice => AppDesignFieldTypeDto::SingleChoice,
-        AppDesignFieldType::MultipleChoice => AppDesignFieldTypeDto::MultipleChoice,
-        AppDesignFieldType::Boolean => AppDesignFieldTypeDto::Boolean,
-        AppDesignFieldType::Color => AppDesignFieldTypeDto::Color,
-        AppDesignFieldType::Density => AppDesignFieldTypeDto::Density,
-        AppDesignFieldType::ScreenList => AppDesignFieldTypeDto::ScreenList,
-        AppDesignFieldType::FeatureList => AppDesignFieldTypeDto::FeatureList,
-        AppDesignFieldType::DataFieldList => AppDesignFieldTypeDto::DataFieldList,
-        AppDesignFieldType::DomainList => AppDesignFieldTypeDto::DomainList,
-    }
-}
-
-fn lower_design_field_option(option: &AppDesignFieldOption) -> AppDesignFieldOptionDto {
-    AppDesignFieldOptionDto {
-        value: option.value.clone(),
-        label: option.label.clone(),
-    }
-}
-
-/// Lower one dynamic questionnaire field. `default_value`/`options` are the
-/// same wire shape [`lower_design_value`]/[`AppDesignFieldOptionDto`] already
-/// use elsewhere — no new encoding invented here.
-fn lower_design_field(field: &AppDesignField) -> AppDesignFieldDto {
-    AppDesignFieldDto {
-        id: field.id.clone(),
-        label: field.label.clone(),
-        description: field.description.clone(),
-        field_type: lower_design_field_type(field.field_type),
-        required: field.required,
-        allows_custom: field.allows_custom,
-        allows_defer: field.allows_defer,
-        default_value: field.default_value.clone().map(lower_design_value),
-        options: field
-            .options
-            .iter()
-            .map(lower_design_field_option)
-            .collect(),
-    }
-}
-
-/// Lower one questionnaire step for `AppEventDto::AppQuestionnaireChanged`
-/// and [`AppDetailsDto::questionnaire`].
-pub(crate) fn lower_design_step(step: &AppDesignStep) -> AppDesignStepDto {
-    AppDesignStepDto {
-        id: step.id.clone(),
-        order: step.order,
-        title: step.title.clone(),
-        description: step.description.clone(),
-        fields: step.fields.iter().map(lower_design_field).collect(),
-    }
-}
-
 fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
     match capability {
         AppCapability::DataMutation => AppCapabilityKindDto::DataMutation,
@@ -547,30 +345,6 @@ fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
         AppCapability::Notifications => AppCapabilityKindDto::Notifications,
         AppCapability::Llm => AppCapabilityKindDto::Llm,
         AppCapability::AgentNotify => AppCapabilityKindDto::AgentNotify,
-    }
-}
-
-/// Lower the LLM-derived plan for `AppEventDto::AppPlanChanged` and
-/// [`AppDetailsDto::plan`]. Plan collections are declared by the design
-/// itself (not an optional add-on the user toggles later, unlike a
-/// manifest's post-hoc collection list), so `enabled_by_default` is always
-/// `true` here — same as [`lower_manifest`]'s call into [`lower_collection`].
-pub(crate) fn lower_plan(plan: &AppPlan) -> AppPlanDto {
-    AppPlanDto {
-        collections: plan
-            .collections
-            .iter()
-            .cloned()
-            .map(|collection| lower_collection(collection, true))
-            .collect(),
-        capabilities: plan
-            .capabilities
-            .iter()
-            .copied()
-            .map(lower_capability)
-            .collect(),
-        domains: plan.domains.clone(),
-        summary: plan.summary.clone(),
     }
 }
 
@@ -633,61 +407,21 @@ pub(crate) fn load_manifest_snapshot(
     }
 }
 
-pub(crate) fn lower_design_field_values(draft: &AppDesignDraft) -> Vec<AppDesignFieldValueDto> {
-    draft
-        .fields
-        .iter()
-        .map(|(field_id, value)| AppDesignFieldValueDto {
-            field_id: field_id.clone(),
-            value: lower_design_value(value.clone()),
-        })
-        .collect()
-}
-
+/// Assemble the trimmed detail snapshot (v3): record + manifest + runtime +
+/// checkpoints. The designer draft/questionnaire/plan/generation-job fields
+/// are gone with the pipeline.
 pub(crate) fn lower_details(
     root: &std::path::Path,
     record: &AppRecord,
-    draft: &AppDesignDraft,
     runtime: &AppRuntimeRecord,
     checkpoints: &[AppCheckpoint],
 ) -> Result<AppDetailsDto, AppError> {
     Ok(AppDetailsDto {
         app: lower_record(record),
-        design_revision: draft.revision,
-        design_fields: lower_design_field_values(draft),
-        questionnaire: draft.questionnaire.iter().map(lower_design_step).collect(),
-        plan: draft.plan.as_ref().map(lower_plan),
         manifest: load_manifest_snapshot(root, &record.id)?,
         runtime: lower_runtime_details(runtime),
-        generation_job: None,
         checkpoints: checkpoints.iter().map(lower_checkpoint).collect(),
     })
-}
-
-/// Lower a full draft field map for `AppDesignDraftChanged`.
-fn lower_fields(fields: BTreeMap<String, DesignValue>) -> HashMap<String, DesignValueDto> {
-    fields
-        .into_iter()
-        .map(|(field_id, value)| (field_id, lower_design_value(value)))
-        .collect()
-}
-
-/// Lower a core patch for `AppDesignSuggestionAvailable`.
-pub(crate) fn lower_patch(patch: AppDesignPatch) -> AppDesignPatchDto {
-    AppDesignPatchDto {
-        ops: patch
-            .ops
-            .into_iter()
-            .map(|op| match op {
-                AppDesignPatchOp::Set { field_id, value } => AppDesignPatchOpDto::Set {
-                    field_id,
-                    value: lower_design_value(value),
-                },
-                AppDesignPatchOp::Remove { field_id } => AppDesignPatchOpDto::Remove { field_id },
-            })
-            .collect(),
-        note: patch.note,
-    }
 }
 
 /// Engine-side raised form of [`AppCreateOriginDto`]. The core deliberately
@@ -736,282 +470,10 @@ pub(crate) fn raise_origin(origin: AppCreateOriginDto) -> Result<AppCreateOrigin
     })
 }
 
-/// Raise an inbound patch DTO to the core patch.
-///
-/// # Errors
-///
-/// `invalid_request` for a `#[non_exhaustive]` op / value / density variant
-/// this engine version does not know.
-pub(crate) fn raise_patch(patch: AppDesignPatchDto) -> Result<AppDesignPatch, AppError> {
-    let mut ops = Vec::with_capacity(patch.ops.len());
-    for op in patch.ops {
-        ops.push(match op {
-            AppDesignPatchOpDto::Set { field_id, value } => AppDesignPatchOp::Set {
-                field_id,
-                value: raise_design_value(value)?,
-            },
-            AppDesignPatchOpDto::Remove { field_id } => AppDesignPatchOp::Remove { field_id },
-            other => {
-                return Err(AppError::InvalidRequest(format!(
-                    "unsupported design patch op: {other:?}"
-                )))
-            }
-        });
-    }
-    Ok(AppDesignPatch {
-        ops,
-        note: patch.note,
-    })
-}
-
-fn raise_design_value(value: DesignValueDto) -> Result<DesignValue, AppError> {
-    Ok(match value {
-        DesignValueDto::ShortText { value } => DesignValue::ShortText(value),
-        DesignValueDto::LongText { value } => DesignValue::LongText(value),
-        DesignValueDto::SingleChoice { value } => DesignValue::SingleChoice(value),
-        DesignValueDto::MultipleChoice { value } => DesignValue::MultipleChoice(value),
-        DesignValueDto::Boolean { value } => DesignValue::Boolean(value),
-        DesignValueDto::Color { value } => DesignValue::Color(value),
-        DesignValueDto::Density { value } => DesignValue::Density(raise_density(value)?),
-        DesignValueDto::ScreenList { value } => DesignValue::ScreenList(value),
-        DesignValueDto::FeatureList { value } => DesignValue::FeatureList(value),
-        DesignValueDto::DataFieldList { value } => DesignValue::DataFieldList(
-            value
-                .into_iter()
-                .map(raise_data_field)
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        DesignValueDto::DomainList { value } => DesignValue::DomainList(value),
-        DesignValueDto::Deferred => DesignValue::Deferred,
-        other => {
-            return Err(AppError::InvalidRequest(format!(
-                "unsupported design value: {other:?}"
-            )))
-        }
-    })
-}
-
-fn raise_data_field(value: AppDataFieldDto) -> Result<DataFieldSchema, AppError> {
-    let kind = match value.field_type {
-        AppDataFieldTypeDto::Text => DataFieldKind::Text,
-        AppDataFieldTypeDto::LongText => DataFieldKind::LongText,
-        AppDataFieldTypeDto::Integer => DataFieldKind::Integer,
-        AppDataFieldTypeDto::Decimal => DataFieldKind::Decimal,
-        AppDataFieldTypeDto::Boolean => DataFieldKind::Boolean,
-        AppDataFieldTypeDto::DateTime => DataFieldKind::DateTime,
-        AppDataFieldTypeDto::Enum => DataFieldKind::Enum,
-        AppDataFieldTypeDto::ImageRef => DataFieldKind::ImageRef,
-        other => {
-            return Err(AppError::InvalidRequest(format!(
-                "unsupported data field type: {other:?}"
-            )))
-        }
-    };
-    Ok(DataFieldSchema {
-        id: value.id,
-        label: value.label,
-        kind,
-        required: value.required,
-        enum_options: value.options,
-    })
-}
-
-fn raise_density(level: DensityLevelDto) -> Result<DensityLevel, AppError> {
-    match level {
-        DensityLevelDto::Compact => Ok(DensityLevel::Compact),
-        DensityLevelDto::Comfortable => Ok(DensityLevel::Comfortable),
-        other => Err(AppError::InvalidRequest(format!(
-            "unsupported density level: {other:?}"
-        ))),
-    }
-}
-
-// The `raise_design_step`/`raise_plan` family below has no production
-// caller today: the questionnaire/plan DTOs only ever flow server -> client
-// (`AppDetailsDto`, `AppEventDto::{AppQuestionnaireChanged,AppPlanChanged}`)
-// — nothing raises one back from the wire, unlike `raise_patch`/
-// `raise_design_value`, which `ApplyDesignPatch` actually calls. They exist
-// so the round-trip tests below can pin that `lower_design_step`/`lower_plan`
-// are lossless, and so a future client->server use (if one is ever added)
-// starts from a real bidirectional mapping instead of a one-way one. Same
-// `#[cfg_attr(not(test), allow(dead_code))]` shape as
-// [`AppEmissionQueue::flush`] above, for the same reason: test-only callers
-// in a non-test build.
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_design_field_type(
-    field_type: AppDesignFieldTypeDto,
-) -> Result<AppDesignFieldType, AppError> {
-    Ok(match field_type {
-        AppDesignFieldTypeDto::ShortText => AppDesignFieldType::ShortText,
-        AppDesignFieldTypeDto::LongText => AppDesignFieldType::LongText,
-        AppDesignFieldTypeDto::SingleChoice => AppDesignFieldType::SingleChoice,
-        AppDesignFieldTypeDto::MultipleChoice => AppDesignFieldType::MultipleChoice,
-        AppDesignFieldTypeDto::Boolean => AppDesignFieldType::Boolean,
-        AppDesignFieldTypeDto::Color => AppDesignFieldType::Color,
-        AppDesignFieldTypeDto::Density => AppDesignFieldType::Density,
-        AppDesignFieldTypeDto::ScreenList => AppDesignFieldType::ScreenList,
-        AppDesignFieldTypeDto::FeatureList => AppDesignFieldType::FeatureList,
-        AppDesignFieldTypeDto::DataFieldList => AppDesignFieldType::DataFieldList,
-        AppDesignFieldTypeDto::DomainList => AppDesignFieldType::DomainList,
-        other => {
-            return Err(AppError::InvalidRequest(format!(
-                "unsupported design field type: {other:?}"
-            )))
-        }
-    })
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_design_field_option(dto: &AppDesignFieldOptionDto) -> AppDesignFieldOption {
-    AppDesignFieldOption {
-        value: dto.value.clone(),
-        label: dto.label.clone(),
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_design_field(dto: &AppDesignFieldDto) -> Result<AppDesignField, AppError> {
-    Ok(AppDesignField {
-        id: dto.id.clone(),
-        label: dto.label.clone(),
-        description: dto.description.clone(),
-        field_type: raise_design_field_type(dto.field_type)?,
-        required: dto.required,
-        allows_custom: dto.allows_custom,
-        allows_defer: dto.allows_defer,
-        default_value: dto
-            .default_value
-            .clone()
-            .map(raise_design_value)
-            .transpose()?,
-        options: dto.options.iter().map(raise_design_field_option).collect(),
-    })
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_design_step(dto: &AppDesignStepDto) -> Result<AppDesignStep, AppError> {
-    Ok(AppDesignStep {
-        id: dto.id.clone(),
-        order: dto.order,
-        title: dto.title.clone(),
-        description: dto.description.clone(),
-        fields: dto
-            .fields
-            .iter()
-            .map(raise_design_field)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_capability(dto: AppCapabilityKindDto) -> Result<AppCapability, AppError> {
-    Ok(match dto {
-        AppCapabilityKindDto::DataMutation => AppCapability::DataMutation,
-        AppCapabilityKindDto::UiControl => AppCapability::UiControl,
-        AppCapabilityKindDto::Camera => AppCapability::Camera,
-        AppCapabilityKindDto::PhotoLibrary => AppCapability::PhotoLibrary,
-        AppCapabilityKindDto::Microphone => AppCapability::Microphone,
-        AppCapabilityKindDto::Location => AppCapability::Location,
-        AppCapabilityKindDto::Notifications => AppCapability::Notifications,
-        AppCapabilityKindDto::Llm => AppCapability::Llm,
-        AppCapabilityKindDto::AgentNotify => AppCapability::AgentNotify,
-        other => {
-            return Err(AppError::InvalidRequest(format!(
-                "unsupported capability: {other:?}"
-            )))
-        }
-    })
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_collection(dto: AppDataCollectionDto) -> Result<DataCollectionSchema, AppError> {
-    Ok(DataCollectionSchema {
-        id: dto.id,
-        name: dto.label,
-        fields: dto
-            .fields
-            .into_iter()
-            .map(raise_data_field)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn raise_plan(dto: &AppPlanDto) -> Result<AppPlan, AppError> {
-    Ok(AppPlan {
-        collections: dto
-            .collections
-            .iter()
-            .cloned()
-            .map(raise_collection)
-            .collect::<Result<Vec<_>, _>>()?,
-        capabilities: dto
-            .capabilities
-            .iter()
-            .copied()
-            .map(raise_capability)
-            .collect::<Result<Vec<_>, _>>()?,
-        domains: dto.domains.clone(),
-        summary: dto.summary.clone(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use local_apps::AppWorkflowState;
-
-    // Hand-maintained, same honest weakness as `every_app_event_arm_lowers_field_exact`'s
-    // list further down (see its comment): a genuinely NEW `DesignValue`
-    // variant forces a compile error into `lower_design_value`/
-    // `raise_design_value`'s matches, but that compile error does NOT, by
-    // itself, force a new entry into this list — `patch_round_trips_through_dto_for_every_value_kind`
-    // below would silently stop covering the new variant. Whoever adds the
-    // next variant should add a case here too, but the compiler will not
-    // make them.
-    fn every_design_value() -> Vec<DesignValue> {
-        vec![
-            DesignValue::ShortText("t".into()),
-            DesignValue::LongText("body".into()),
-            DesignValue::SingleChoice("a".into()),
-            DesignValue::MultipleChoice(vec!["a".into(), "b".into()]),
-            DesignValue::Boolean(true),
-            DesignValue::Color("#aabbcc".into()),
-            DesignValue::Density(DensityLevel::Compact),
-            DesignValue::ScreenList(vec!["home".into()]),
-            DesignValue::FeatureList(vec!["export".into()]),
-            DesignValue::DataFieldList(vec![DataFieldSchema {
-                id: "title".into(),
-                label: "Title".into(),
-                kind: DataFieldKind::Text,
-                required: true,
-                enum_options: Vec::new(),
-            }]),
-            DesignValue::DomainList(vec!["api.example.com".into()]),
-            DesignValue::Deferred,
-        ]
-    }
-
-    #[test]
-    fn patch_round_trips_through_dto_for_every_value_kind() {
-        let patch = AppDesignPatch {
-            ops: every_design_value()
-                .into_iter()
-                .enumerate()
-                .map(|(i, value)| AppDesignPatchOp::Set {
-                    field_id: format!("f{i}"),
-                    value,
-                })
-                .chain(std::iter::once(AppDesignPatchOp::Remove {
-                    field_id: "gone".into(),
-                }))
-                .collect(),
-            note: Some("polish".into()),
-        };
-        let raised = raise_patch(lower_patch(patch.clone())).expect("round trip");
-        assert_eq!(raised, patch);
-    }
 
     #[test]
     fn dto_and_core_agree_on_the_wire_strings() {
@@ -1019,11 +481,12 @@ mod tests {
         // serde output guards against either side drifting.
         for (core, dto) in [
             (
-                serde_json::to_string(&AppWorkflowState::AwaitingPreviewConfirmation).unwrap(),
-                serde_json::to_string(&lower_workflow_state(
-                    AppWorkflowState::AwaitingPreviewConfirmation,
-                ))
-                .unwrap(),
+                serde_json::to_string(&AppWorkflowState::Ready).unwrap(),
+                serde_json::to_string(&lower_workflow_state(AppWorkflowState::Ready)).unwrap(),
+            ),
+            (
+                serde_json::to_string(&AppWorkflowState::Draft).unwrap(),
+                serde_json::to_string(&lower_workflow_state(AppWorkflowState::Draft)).unwrap(),
             ),
             (
                 serde_json::to_string(&AppRuntimeState::Stopping).unwrap(),
@@ -1069,8 +532,8 @@ mod tests {
     fn workflow_event_lowers_onto_the_client_event() {
         let event = lower_app_event(AppEvent::WorkflowChanged {
             app_id: "abcd1234".into(),
-            state: AppWorkflowState::Generating,
-            detail: Some("confirmed".into()),
+            state: AppWorkflowState::Ready,
+            detail: Some("built".into()),
         })
         .expect("WorkflowChanged always has a wire representation");
         match event {
@@ -1080,176 +543,11 @@ mod tests {
                 detail,
             } => {
                 assert_eq!(app_id, "abcd1234");
-                assert_eq!(state, AppWorkflowStateDto::Generating);
-                assert_eq!(detail.as_deref(), Some("confirmed"));
+                assert_eq!(state, AppWorkflowStateDto::Ready);
+                assert_eq!(detail.as_deref(), Some("built"));
             }
             other => panic!("expected AppWorkflowChanged, got {other:?}"),
         }
-    }
-
-    /// `a_questionnaire_round_trips_through_the_wire_types` and
-    /// `a_plan_round_trips_through_the_wire_types` below cover
-    /// `QuestionnaireChanged`/`PlanChanged` losslessly reaching their DTOs
-    /// (Task 6); `every_app_event_arm_lowers_field_exact` further down pins
-    /// the exact field mapping of both `lower_app_event` arms.
-
-    #[test]
-    fn a_questionnaire_round_trips_through_the_wire_types() {
-        let step = AppDesignStep {
-            id: "basics".into(),
-            order: 0,
-            title: "基础".into(),
-            description: Some("说明".into()),
-            fields: vec![AppDesignField {
-                id: "tone".into(),
-                label: "语气".into(),
-                description: None,
-                field_type: AppDesignFieldType::MultipleChoice,
-                // NOT all-identical (review finding): with only two possible
-                // `bool` states, three fields can never be fully pairwise
-                // distinct, but `required == allows_defer` here (the least
-                // risky pair — non-adjacent, dissimilar names) while
-                // `allows_custom` differs from both, so a transposition
-                // involving `allows_custom` (the likelier bug, given its
-                // adjacency to `allows_defer` in both the struct and this
-                // literal) still fails the assertions below.
-                required: true,
-                allows_custom: false,
-                allows_defer: true,
-                default_value: None,
-                options: vec![AppDesignFieldOption {
-                    value: "a".into(),
-                    label: "A".into(),
-                }],
-            }],
-        };
-        let dto = lower_design_step(&step);
-        assert!(
-            !dto.fields[0].allows_custom,
-            "allows_custom must survive the wire"
-        );
-        assert!(
-            dto.fields[0].allows_defer,
-            "allows_defer must survive the wire"
-        );
-        assert_eq!(raise_design_step(&dto).expect("round trip"), step);
-    }
-
-    #[test]
-    fn a_plan_round_trips_through_the_wire_types() {
-        let plan = AppPlan {
-            collections: vec![DataCollectionSchema {
-                id: "notes".into(),
-                name: "Notes".into(),
-                fields: vec![DataFieldSchema {
-                    id: "title".into(),
-                    label: "Title".into(),
-                    kind: DataFieldKind::Text,
-                    required: true,
-                    enum_options: Vec::new(),
-                }],
-            }],
-            capabilities: vec![AppCapability::DataMutation, AppCapability::UiControl],
-            domains: vec!["api.example.com".into()],
-            summary: "记事本".into(),
-        };
-        assert_eq!(raise_plan(&lower_plan(&plan)).expect("round trip"), plan);
-    }
-
-    /// `AppCapabilityKindDto` is `#[non_exhaustive]` and already carries two
-    /// variants (`NetworkDomain`, `RestoreCheckpoint`) with no domain
-    /// `AppCapability` twin — `raise_plan` must fail typed on them instead of
-    /// silently dropping the capability or defaulting it away.
-    #[test]
-    fn raise_plan_rejects_a_capability_with_no_domain_twin() {
-        let mut dto = lower_plan(&AppPlan {
-            collections: Vec::new(),
-            capabilities: Vec::new(),
-            domains: Vec::new(),
-            summary: "s".into(),
-        });
-        dto.capabilities = vec![AppCapabilityKindDto::NetworkDomain];
-        raise_plan(&dto).expect_err("NetworkDomain has no domain-side capability yet");
-    }
-
-    /// Review finding on this task: `lower_details`'s `.questionnaire`/`.plan`
-    /// wiring (`local_apps_bridge.rs`) had zero test coverage — reverting
-    /// both fields back to their old `Vec::new()`/`None` placeholders left
-    /// every other test in the crate green. `AppDetailsChanged`
-    /// (`host.rs:2769`) is how a reconnecting/late-subscribing client learns
-    /// the questionnaire/plan at all (Tasks 13-15/18-20's primary consumer),
-    /// so this pins both fields through `lower_details` directly with
-    /// POPULATED values — a regression back to the placeholders fails here
-    /// even though every event-shaped test elsewhere stays green.
-    #[test]
-    fn lower_details_wires_the_questionnaire_and_plan_through() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let record = AppRecord {
-            id: "app00001".into(),
-            name: "Habits".into(),
-            brief: "a habit tracker".into(),
-            git_enabled: true,
-            created_at_ms: 1,
-            updated_at_ms: 2,
-            workflow_state: AppWorkflowState::AwaitingSpecConfirmation,
-            conversation_id: None,
-            workspace_rel: "apps/app00001/workspace".into(),
-            llm_round: 0,
-        };
-        let step = AppDesignStep {
-            id: "basics".into(),
-            order: 0,
-            title: "Basics".into(),
-            description: None,
-            fields: vec![AppDesignField {
-                id: "tone".into(),
-                label: "Tone".into(),
-                description: None,
-                field_type: AppDesignFieldType::ShortText,
-                required: true,
-                allows_custom: false,
-                allows_defer: false,
-                default_value: None,
-                options: Vec::new(),
-            }],
-        };
-        let plan = AppPlan {
-            collections: Vec::new(),
-            capabilities: Vec::new(),
-            domains: vec!["api.example.com".into()],
-            summary: "记事本".into(),
-        };
-        let draft = AppDesignDraft {
-            schema_version: local_apps::APPS_SCHEMA_VERSION,
-            revision: 3,
-            questionnaire: vec![step.clone()],
-            fields: BTreeMap::new(),
-            plan: Some(plan.clone()),
-            plan_for_revision: Some(3),
-            pending_suggestion: None,
-            confirmed_revision: None,
-        };
-        let runtime = AppRuntimeRecord {
-            schema_version: local_apps::APPS_SCHEMA_VERSION,
-            app_id: "app00001".into(),
-            state: AppRuntimeState::Stopped,
-            mode: None,
-            port: None,
-            pid: None,
-            last_error: None,
-            updated_at_ms: 2,
-        };
-        let details = lower_details(root.path(), &record, &draft, &runtime, &[]).expect("lowers");
-        assert_eq!(
-            details.questionnaire,
-            vec![lower_design_step(&step)],
-            "the authored questionnaire must reach AppDetailsDto, not an empty placeholder"
-        );
-        assert_eq!(
-            details.plan,
-            Some(lower_plan(&plan)),
-            "the authored plan must reach AppDetailsDto, not a None placeholder"
-        );
     }
 
     #[test]
@@ -1274,17 +572,59 @@ mod tests {
         // laundering into a library create.
     }
 
+    /// The trimmed detail snapshot carries record + manifest + runtime +
+    /// checkpoints and nothing else — a regression that resurrects a
+    /// pipeline field fails to compile against `AppDetailsDto`, and a
+    /// regression that stops wiring one of the four surviving fields fails
+    /// here.
+    #[test]
+    fn lower_details_assembles_the_trimmed_snapshot() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let record = AppRecord {
+            id: "app00001".into(),
+            name: "Habits".into(),
+            brief: "a habit tracker".into(),
+            git_enabled: true,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            workflow_state: AppWorkflowState::Draft,
+            conversation_id: None,
+            init_session_id: None,
+            workspace_rel: "apps/app00001/workspace".into(),
+        };
+        let runtime = AppRuntimeRecord {
+            schema_version: local_apps::APPS_SCHEMA_VERSION,
+            app_id: "app00001".into(),
+            state: AppRuntimeState::Stopped,
+            mode: None,
+            port: None,
+            pid: None,
+            last_error: None,
+            updated_at_ms: 2,
+        };
+        let checkpoint = AppCheckpoint {
+            id: "cp-1".into(),
+            label: "scaffold".into(),
+            kind: AppCheckpointKind::ScaffoldCreated,
+            created_at_ms: 33,
+        };
+        let details = lower_details(root.path(), &record, &runtime, std::slice::from_ref(&checkpoint))
+            .expect("lowers");
+        assert_eq!(details.app, lower_record(&record));
+        assert_eq!(
+            details.manifest, None,
+            "no manifest on disk lowers to None, not an error"
+        );
+        assert_eq!(details.runtime, lower_runtime_details(&runtime));
+        assert_eq!(details.checkpoints, vec![lower_checkpoint(&checkpoint)]);
+    }
+
     /// W4: exact field mapping for EVERY `lower_app_event` arm (one pair per
     /// `AppEvent` variant). The expectation side uses exhaustive struct
     /// literals with a distinct value per field, so a transposed or dropped
     /// field fails here instead of shipping silently.
-    // One pair per variant is the point of the test; splitting it would lose
-    // the at-a-glance completeness of the arm list.
-    #[allow(clippy::too_many_lines)]
     #[test]
     fn every_app_event_arm_lowers_field_exact() {
-        use local_apps::AppGenerationProgress;
-
         let record = AppRecord {
             id: "app00001".into(),
             name: "Habits".into(),
@@ -1294,8 +634,8 @@ mod tests {
             updated_at_ms: 22,
             workflow_state: AppWorkflowState::Ready,
             conversation_id: Some("conv-9".into()),
+            init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
-            llm_round: 0,
         };
         let record_dto = AppRecordDto {
             id: "app00001".into(),
@@ -1306,6 +646,7 @@ mod tests {
             updated_at_ms: 22,
             workflow_state: AppWorkflowStateDto::Ready,
             conversation_id: Some("conv-9".into()),
+            init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
         };
         let checkpoint = AppCheckpoint {
@@ -1325,97 +666,15 @@ mod tests {
                 },
             ),
             (
-                AppEvent::DesignerRequested {
-                    app_id: "app00001".into(),
-                    interaction_id: "int-1".into(),
-                    revision: 4,
-                },
-                ClientEvent::AppDesignerRequested {
-                    app_id: "app00001".into(),
-                    interaction_id: "int-1".into(),
-                    revision: 4,
-                },
-            ),
-            (
-                AppEvent::DesignDraftChanged {
-                    app_id: "app00001".into(),
-                    revision: 5,
-                    fields: BTreeMap::from([(
-                        "title".to_string(),
-                        DesignValue::ShortText("Mine".into()),
-                    )]),
-                },
-                ClientEvent::AppDesignDraftChanged {
-                    app_id: "app00001".into(),
-                    revision: 5,
-                    fields: HashMap::from([(
-                        "title".to_string(),
-                        DesignValueDto::ShortText {
-                            value: "Mine".into(),
-                        },
-                    )]),
-                },
-            ),
-            (
-                AppEvent::DesignSuggestionAvailable {
-                    app_id: "app00001".into(),
-                    suggestion_id: "sugg-1".into(),
-                    based_on_revision: 6,
-                    patch: AppDesignPatch {
-                        ops: vec![AppDesignPatchOp::Remove {
-                            field_id: "gone".into(),
-                        }],
-                        note: Some("polish".into()),
-                    },
-                },
-                ClientEvent::AppDesignSuggestionAvailable {
-                    app_id: "app00001".into(),
-                    suggestion_id: "sugg-1".into(),
-                    based_on_revision: 6,
-                    patch: AppDesignPatchDto {
-                        ops: vec![AppDesignPatchOpDto::Remove {
-                            field_id: "gone".into(),
-                        }],
-                        note: Some("polish".into()),
-                    },
-                },
-            ),
-            (
-                AppEvent::DesignConflict {
-                    app_id: "app00001".into(),
-                    expected_revision: 7,
-                    actual_revision: 8,
-                },
-                ClientEvent::AppDesignConflict {
-                    app_id: "app00001".into(),
-                    expected_revision: 7,
-                    actual_revision: 8,
-                },
-            ),
-            (
                 AppEvent::WorkflowChanged {
                     app_id: "app00001".into(),
-                    state: AppWorkflowState::Validating,
-                    detail: Some("checking".into()),
+                    state: AppWorkflowState::Ready,
+                    detail: Some("built".into()),
                 },
                 ClientEvent::AppWorkflowChanged {
                     app_id: "app00001".into(),
-                    state: AppWorkflowStateDto::Validating,
-                    detail: Some("checking".into()),
-                },
-            ),
-            (
-                AppEvent::GenerationProgress(AppGenerationProgress {
-                    app_id: "app00001".into(),
-                    stage: "pages".into(),
-                    percent: Some(42),
-                    detail: Some("3/7".into()),
-                }),
-                ClientEvent::AppGenerationProgress {
-                    app_id: "app00001".into(),
-                    stage: "pages".into(),
-                    percent: Some(42),
-                    detail: Some("3/7".into()),
+                    state: AppWorkflowStateDto::Ready,
+                    detail: Some("built".into()),
                 },
             ),
             (
@@ -1447,20 +706,6 @@ mod tests {
                 },
             ),
             (
-                AppEvent::PreviewReady {
-                    app_id: "app00001".into(),
-                    interaction_id: "int-2".into(),
-                    revision: 9,
-                    url: Some("http://127.0.0.1:3001".into()),
-                },
-                ClientEvent::AppPreviewReady {
-                    app_id: "app00001".into(),
-                    interaction_id: "int-2".into(),
-                    revision: 9,
-                    url: Some("http://127.0.0.1:3001".into()),
-                },
-            ),
-            (
                 AppEvent::CheckpointCreated {
                     app_id: "app00001".into(),
                     checkpoint: checkpoint.clone(),
@@ -1475,119 +720,13 @@ mod tests {
                     },
                 },
             ),
-            (
-                AppEvent::QuestionnaireChanged {
-                    app_id: "app00001".into(),
-                    revision: 10,
-                    steps: vec![AppDesignStep {
-                        id: "basics".into(),
-                        order: 0,
-                        title: "Basics".into(),
-                        description: Some("first step".into()),
-                        fields: vec![AppDesignField {
-                            id: "tone".into(),
-                            label: "Tone".into(),
-                            description: Some("field desc".into()),
-                            field_type: AppDesignFieldType::SingleChoice,
-                            // Not all-identical — see the comment on the same
-                            // trio in `a_questionnaire_round_trips_through_
-                            // the_wire_types`.
-                            required: true,
-                            allows_custom: false,
-                            allows_defer: true,
-                            default_value: Some(DesignValue::SingleChoice("a".into())),
-                            options: vec![AppDesignFieldOption {
-                                value: "a".into(),
-                                label: "A".into(),
-                            }],
-                        }],
-                    }],
-                },
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppQuestionnaireChanged {
-                        app_id: "app00001".into(),
-                        revision: 10,
-                        steps: vec![AppDesignStepDto {
-                            id: "basics".into(),
-                            order: 0,
-                            title: "Basics".into(),
-                            description: Some("first step".into()),
-                            fields: vec![AppDesignFieldDto {
-                                id: "tone".into(),
-                                label: "Tone".into(),
-                                description: Some("field desc".into()),
-                                field_type: AppDesignFieldTypeDto::SingleChoice,
-                                required: true,
-                                allows_custom: false,
-                                allows_defer: true,
-                                default_value: Some(DesignValueDto::SingleChoice {
-                                    value: "a".into(),
-                                }),
-                                options: vec![AppDesignFieldOptionDto {
-                                    value: "a".into(),
-                                    label: "A".into(),
-                                }],
-                            }],
-                        }],
-                    },
-                },
-            ),
-            (
-                AppEvent::PlanChanged {
-                    app_id: "app00001".into(),
-                    revision: 11,
-                    plan: Some(AppPlan {
-                        collections: vec![DataCollectionSchema {
-                            id: "notes".into(),
-                            name: "Notes".into(),
-                            fields: vec![DataFieldSchema {
-                                id: "title".into(),
-                                label: "Title".into(),
-                                kind: DataFieldKind::Text,
-                                required: true,
-                                enum_options: Vec::new(),
-                            }],
-                        }],
-                        capabilities: vec![AppCapability::DataMutation],
-                        domains: vec!["api.example.com".into()],
-                        summary: "记事本".into(),
-                    }),
-                },
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppPlanChanged {
-                        app_id: "app00001".into(),
-                        revision: 11,
-                        plan: Some(AppPlanDto {
-                            collections: vec![AppDataCollectionDto {
-                                id: "notes".into(),
-                                label: "Notes".into(),
-                                fields: vec![AppDataFieldDto {
-                                    id: "title".into(),
-                                    label: "Title".into(),
-                                    field_type: AppDataFieldTypeDto::Text,
-                                    required: true,
-                                    options: Vec::new(),
-                                }],
-                                enabled_by_default: true,
-                            }],
-                            capabilities: vec![AppCapabilityKindDto::DataMutation],
-                            domains: vec!["api.example.com".into()],
-                            summary: "记事本".into(),
-                        }),
-                    },
-                },
-            ),
         ];
-        // Every `AppEvent` variant appears exactly once above (Task 6 closed
-        // the `QuestionnaireChanged`/`PlanChanged` gap this comment used to
-        // carve out — see the removed `events_with_no_wire_representation_
-        // yet_are_dropped_not_panicked` test). That completeness is
-        // hand-maintained, same honest weakness as `every_design_value()`
-        // above: a genuinely NEW `AppEvent` variant forces a compile error
-        // into `lower_app_event`'s match, but that compile error does NOT,
-        // by itself, force a new pair into this list. Whoever adds the next
-        // variant should add a case here too, but the compiler will not make
-        // them.
+        // Every `AppEvent` variant appears exactly once above. That
+        // completeness is hand-maintained: a genuinely NEW `AppEvent`
+        // variant forces a compile error into `lower_app_event`'s match, but
+        // that compile error does NOT, by itself, force a new pair into this
+        // list. Whoever adds the next variant should add a case here too,
+        // but the compiler will not make them.
         for (domain, expected) in cases {
             assert_eq!(lower_app_event(domain), Some(expected));
         }

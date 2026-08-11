@@ -1,13 +1,9 @@
 import SwiftUI
 
 enum LocalAppsRoute: Hashable {
-    /// The brief-input create screen (local-apps#questionnaire, Task 13:
-    /// replaces the deleted static template picker — there is no more
-    /// catalog to pick from, only a one-line brief to collect). Task 16
-    /// owns the real "创建入口" experience; this is the minimal working
-    /// replacement needed to keep the create flow functional.
+    /// The brief-input create screen — there is no template catalog to pick
+    /// from, only a one-line brief to collect.
     case create
-    case designer(String)
     case details(String)
     case preview(String)
 }
@@ -16,12 +12,28 @@ struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
     let onDismiss: () -> Void
+    /// Called with `(appID, sessionUUID)` when the user taps a row of the
+    /// app's session catalog. RootView dismisses this cover and switches the
+    /// conversation scope to the app, resuming that session.
+    var onOpenAppSession: (String, String) -> Void = { _, _ in }
+    /// The create-flow landing: like `onOpenAppSession`, but RootView also
+    /// queues the kickoff message that starts the create-local-app flow in
+    /// the (empty) init session.
+    var onOpenCreatedAppSession: (String, String, String) -> Void = { _, _, _ in }
+    /// Called with `appID` for「新会话」. RootView dismisses this cover and
+    /// starts a fresh conversation in the app's scope.
+    var onNewAppSession: (String) -> Void = { _ in }
 
     @State private var path: [LocalAppsRoute] = []
 
     var body: some View {
         NavigationStack(path: $path) {
-            LocalAppsLibraryScreen(store: store, path: $path, onDismiss: onDismiss)
+            LocalAppsLibraryScreen(
+                store: store,
+                path: $path,
+                onDismiss: onDismiss,
+                onOpenAppSession: onOpenCreatedAppSession
+            )
                 .navigationDestination(for: LocalAppsRoute.self) { route in
                     destination(route)
                 }
@@ -29,12 +41,9 @@ struct LocalAppsRootView: View {
         .task {
             await store.refresh()
             if let initialAppID {
-                // Either an inbound UI-automation request, or a preview gate
-                // this session's own generation just armed (review NEW-1) —
-                // both mean the user should land straight on the gate rather
-                // than one tap short at `.details`.
+                // An inbound UI-automation request should land straight on
+                // the live preview rather than one tap short at `.details`.
                 let shouldOpenPreview = store.hasPendingUIRequest(appID: initialAppID)
-                    || store.consumePendingPreviewRouteAppID(appID: initialAppID)
                 path = [shouldOpenPreview ? .preview(initialAppID) : .details(initialAppID)]
             }
         }
@@ -67,10 +76,14 @@ struct LocalAppsRootView: View {
         switch route {
         case .create:
             LocalAppCreateView(store: store, path: $path)
-        case let .designer(appID):
-            LocalAppDesignerView(store: store, appID: appID, path: $path)
         case let .details(appID):
-            LocalAppDetailView(store: store, appID: appID, path: $path)
+            LocalAppDetailView(
+                store: store,
+                appID: appID,
+                path: $path,
+                onOpenAppSession: onOpenAppSession,
+                onNewAppSession: onNewAppSession
+            )
         case let .preview(appID):
             LocalAppPreviewView(store: store, appID: appID)
         }
@@ -142,6 +155,10 @@ private struct LocalAppsLibraryScreen: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
     let onDismiss: () -> Void
+    /// Threaded from the root cover: `(appID, sessionUUID, brief)` →
+    /// dismiss + switch into the app scope (the create flow's init-chat
+    /// landing, kickoff seeded with the brief).
+    var onOpenAppSession: (String, String, String) -> Void = { _, _, _ in }
 
     @State private var pendingDelete: LocalAppSummary?
 
@@ -192,7 +209,9 @@ private struct LocalAppsLibraryScreen: View {
             .background(.bar)
         }
         .onAppear(perform: openCreatedAppIfNeeded)
-        .onChange(of: store.createdAppIDForDesigner) { _, _ in openCreatedAppIfNeeded() }
+        .onChange(of: store.createdAppID) { _, _ in openCreatedAppIfNeeded() }
+        .onChange(of: store.createdAppSession) { _, _ in openCreatedInitChatIfNeeded() }
+        .onAppear { openCreatedInitChatIfNeeded() }
         .confirmationDialog(
             "local_apps_delete_confirm \(pendingDelete?.name ?? String(localized: "local_apps_title"))",
             isPresented: Binding(
@@ -224,25 +243,22 @@ private struct LocalAppsLibraryScreen: View {
     }
 
     private func open(_ app: LocalAppSummary) {
-        switch app.workflow {
-        // `LocalAppDesignerView` owns all of these (local-apps#questionnaire,
-        // Task 14) — the busy/failure states get their own screen there
-        // instead of the generic details view, with retry actions for the
-        // two failure states wired to the store.
-        case .collectingSpec, .awaitingSpecConfirmation,
-             .authoringQuestionnaire, .questionnaireFailed,
-             .planning, .planFailed:
-            path.append(.designer(app.id))
-        case .awaitingPreviewConfirmation:
-            path.append(.preview(app.id))
-        default:
-            path.append(.details(app.id))
-        }
+        path.append(.details(app.id))
     }
 
     private func openCreatedAppIfNeeded() {
+        // Fallback landing only (init-session pin never arrived): show the
+        // app's details/sessions page instead of the init chat.
         guard let appID = store.consumeCreatedAppID() else { return }
-        path = [.designer(appID)]
+        path = [.details(appID)]
+    }
+
+    private func openCreatedInitChatIfNeeded() {
+        // v3 target behavior: a fresh create lands DIRECTLY in the app's
+        // init conversation — dismiss the cover and switch into the app
+        // scope resuming the pinned init session.
+        guard let created = store.consumeCreatedAppSession() else { return }
+        onOpenAppSession(created.appID, created.initSessionID, created.brief)
     }
 }
 

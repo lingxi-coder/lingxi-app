@@ -1,32 +1,30 @@
-//! Persisted-schema compatibility goldens (spec §D; T4).
+//! Persisted-schema compatibility goldens (spec §D).
 //!
 //! `tests/fixtures/v1/` holds a complete checked-in on-disk store —
-//! `apps/index.json` plus every per-app document (`interactions.json`,
-//! `runtime.json`, `permissions.json`, `workspace/.lingxi/app.json`,
-//! `workspace/.lingxi/app.manifest.json`,
-//! `workspace/.lingxi/design-spec.json`) — captured at `schemaVersion` 1.
+//! `apps/index.json` plus every per-app document (`runtime.json`,
+//! `permissions.json`, `workspace/.lingxi/app.json`,
+//! `workspace/.lingxi/app.manifest.json`) — captured at `schemaVersion` 1.
 //! The tree is produced by DRIVING A REAL [`AppService`] through a legal
-//! transition trace (deterministic [`FixedClock`], continuations queued
-//! legally via a failing sink), so every persisted shape is one a legal
-//! writer actually produces — gate/continuation coexistence, timestamps and
-//! counter invariants included (the tree must pass `load_all`'s invariant
-//! validation). Coverage: all nine [`DesignValue`] kinds, a pending
-//! suggestion, a pending preview gate, queued continuations of three kinds,
-//! a fully-populated runtime record, and a minimal app pinning every
-//! omitted-optional form. Two directions are pinned:
+//! trace (deterministic [`FixedClock`]), so every persisted shape is one a
+//! legal writer actually produces. Coverage: a `ready` app with a fully
+//! populated runtime record and a conversation id, and a minimal
+//! `git_enabled: false` draft app pinning every omitted-optional form. Two
+//! directions are pinned:
 //!
 //! - **read**: [`local_apps::storage::load_all`] over the fixture tree must
 //!   keep producing exactly the expected in-memory states (spelled out as
-//!   literals below; only the service-minted random interaction/suggestion
-//!   ids are spliced from the loaded store, after a grammar check). A renamed
-//!   field, a retyped value, or a changed enum tag would break loading real
-//!   user data — it fails here first.
+//!   literals below). A renamed field, a retyped value, or a changed enum
+//!   tag would break loading real user data — it fails here first.
 //! - **write**: re-persisting the loaded states through the real writers
 //!   ([`local_apps::storage::save_app_files`] /
 //!   [`local_apps::storage::save_index`]) must reproduce every fixture
 //!   document byte-for-byte. Key casing, enum tags, indentation, trailing
 //!   newline and optional-field omission are all part of the persisted
 //!   contract.
+//!
+//! A third test pins the LEGACY migration: a pipeline-era store (mid-pipeline
+//! `workflowState`, stale `interactions.json`/`design-spec.json`) loads with
+//! the state collapsed to `draft` and the stale documents left untouched.
 //!
 //! Regenerating the fixtures is only legitimate together with an INTENTIONAL
 //! schema change (which also means bumping
@@ -38,20 +36,15 @@
 //!
 //! (the same `BLESS=1` convention as the client-protocol wire snapshots),
 //! and review the diff before committing. Re-blessing re-drives the trace,
-//! so the random interaction/suggestion ids change — everything else is
-//! deterministic.
+//! which is fully deterministic.
 
 use local_apps::storage::{self, save_app_files, save_index};
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    save_manifest, save_permissions, AppContinuation, AppContinuationKind, AppDesignDraft,
-    AppDesignPatch, AppDesignPatchOp, AppDesignSuggestion, AppEventObserver, AppInteractionKind,
-    AppInteractionRequest, AppInteractions, AppLayout, AppManifest, AppPermissions, AppRecord,
-    AppRuntimeRecord, AppRuntimeState, AppService, AppState, AppWorkflowState, ContinuationSink,
-    DensityLevel, DesignValue, NoopAppEventObserver, RecordingContinuationSink,
-    APPS_SCHEMA_VERSION,
+    save_manifest, save_permissions, AppEventObserver, AppLayout, AppManifest, AppPermissions,
+    AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppService, AppState,
+    AppWorkflowState, NoopAppEventObserver, APPS_SCHEMA_VERSION,
 };
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -65,11 +58,11 @@ fn bless() -> bool {
     matches!(std::env::var("BLESS").as_deref(), Ok("1" | "true"))
 }
 
-/// Both tests operate on the ONE checked-in fixture store, and each scrubs
-/// the runtime lock artifact its load creates — an unlink racing the sibling
-/// test's lock ACQUISITION can surface as a spurious open failure, so the
-/// two tests serialize on this guard (a tokio mutex: the async test holds it
-/// across awaits, which a std guard must never do).
+/// The fixture tests operate on the ONE checked-in fixture store, and each
+/// scrubs the runtime lock artifact its load creates — an unlink racing the
+/// sibling test's lock ACQUISITION can surface as a spurious open failure,
+/// so the tests serialize on this guard (a tokio mutex: the async test holds
+/// it across awaits, which a std guard must never do).
 static FIXTURE_STORE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Best-effort removal of the runtime lock artifact `load_all` creates in
@@ -82,8 +75,9 @@ fn scrub_fixture_lock() {
 const T0: u64 = 1_753_000_000_000;
 
 /// Seed one brand-new app with a PINNED id — byte-for-byte the persistence
-/// `AppService::create_app` performs (per-app files first, index entry last);
-/// only the random id mint is bypassed so the fixture paths stay stable.
+/// `AppService::create_app_with_git` performs (per-app files first, index
+/// entry last); only the random id mint is bypassed so the fixture paths
+/// stay stable.
 fn seed_app(
     root: &Path,
     existing: &mut Vec<AppState>,
@@ -91,18 +85,21 @@ fn seed_app(
     name: &str,
     brief: &str,
     conversation_id: Option<String>,
+    git_enabled: bool,
 ) {
-    let app = AppState::create(
+    let app = AppState::create_with_git(
         id.to_string(),
         name.to_string(),
         brief.to_string(),
         conversation_id,
+        git_enabled,
         T0,
     );
     save_app_files(root, &app).expect("seed app files");
-    // `create_app` also mints the native contract and the permission
-    // document; both are pinned like the other five. Each writer creates the
-    // layout skeleton itself, so no separate `initialize` is needed.
+    // `create_app_with_git` also mints the native contract and the
+    // permission document; both are pinned like the other three. Each
+    // writer creates the layout skeleton itself, so no separate
+    // `initialize` is needed.
     let layout = AppLayout::new(root, id).expect("seed layout");
     save_manifest(&layout, &AppManifest::for_new_app(id, name)).expect("seed manifest");
     save_permissions(&layout, &AppPermissions::default()).expect("seed permissions");
@@ -111,73 +108,34 @@ fn seed_app(
     save_index(root, &records).expect("seed index");
 }
 
-/// The nine-kind draft patch the trace applies (one op per
-/// [`DesignValue`] kind; `BTreeMap` keeps the persisted field order stable).
-fn all_kinds_patch() -> AppDesignPatch {
-    let set = |field_id: &str, value: DesignValue| AppDesignPatchOp::Set {
-        field_id: field_id.to_string(),
-        value,
-    };
-    AppDesignPatch {
-        ops: vec![
-            set("accent", DesignValue::Color("#3366ff".to_string())),
-            set("compact_mode", DesignValue::Boolean(true)),
-            set("density", DesignValue::Density(DensityLevel::Comfortable)),
-            set(
-                "description",
-                DesignValue::LongText("Track daily habits\nwith streaks.".to_string()),
-            ),
-            set(
-                "features",
-                DesignValue::FeatureList(vec!["streaks".to_string(), "reminders".to_string()]),
-            ),
-            set("layout", DesignValue::SingleChoice("grid".to_string())),
-            set(
-                "screens",
-                DesignValue::ScreenList(vec!["today".to_string(), "history".to_string()]),
-            ),
-            set(
-                "tags",
-                DesignValue::MultipleChoice(vec!["health".to_string(), "daily".to_string()]),
-            ),
-            set("title", DesignValue::ShortText("Habit Tracker".to_string())),
-        ],
-        note: None,
-    }
-}
-
-/// Drive a REAL [`AppService`] through the legal transition trace that
-/// produces the fixture store under `root`. Deterministic except for the
-/// service-minted interaction/suggestion ids.
-// One deliberate straight-line trace: splitting it would obscure the exact
-// event order the fixture pins.
-#[allow(clippy::too_many_lines)]
+/// Drive a REAL [`AppService`] through the legal trace that produces the
+/// fixture store under `root`. Fully deterministic.
 async fn drive_canonical_store(root: &Path) {
     let mut seeded = Vec::new();
     seed_app(
         root,
         &mut seeded,
         "aaaa1111",
-        "Fixture Maximal",
-        "a fixture app with every design-value kind",
+        "Fixture Ready",
+        "a ready fixture app with a full runtime record",
         Some("conv-fixture-1".to_string()),
+        true,
     );
     seed_app(
         root,
         &mut seeded,
         "bbbb2222",
         "Fixture Minimal",
-        "a minimal fixture app",
+        "a minimal fixture app without git",
         None,
+        false,
     );
 
     let clock = Arc::new(FixedClock::new(T0));
     let service_clock: Arc<FixedClock> = Arc::clone(&clock);
-    let sink = Arc::new(RecordingContinuationSink::new());
     let service = AppService::load(
         root,
         service_clock,
-        Arc::clone(&sink) as Arc<dyn ContinuationSink>,
         Arc::new(NoopAppEventObserver) as Arc<dyn AppEventObserver>,
     )
     .await
@@ -189,76 +147,17 @@ async fn drive_canonical_store(root: &Path) {
         now = target;
     };
 
-    // ── aaaa1111: the maximal app ───────────────────────────────────────
-    // One delivered continuation (seq 1) so `lastDeliveredSeq` is nonzero…
+    // ── aaaa1111: the host stamps it ready after a successful build… ────
     advance_to(T0 + 100);
-    let d1 = service.open_designer("aaaa1111").await.expect("open d1");
-    assert!(d1.interaction_id.starts_with("int-"));
-    advance_to(T0 + 150);
-    service.cancel_design("aaaa1111").await.expect("cancel d1"); // seq 1 delivered
-                                                                 // …then a dead sink keeps every later continuation queued (legally).
-    sink.set_fail(true);
+    service.mark_ready("aaaa1111").await.expect("mark ready");
+    // …the distribution picks a runtime mode…
     advance_to(T0 + 200);
-    let _d2 = service.open_designer("aaaa1111").await.expect("open d2");
-    advance_to(T0 + 250);
-    service.cancel_design("aaaa1111").await.expect("cancel d2"); // seq 2 queued
+    service
+        .set_runtime_mode("aaaa1111", AppRuntimeMode::StaticExport)
+        .await
+        .expect("set runtime mode");
+    // …and a start/fail cycle populates every runtime field.
     advance_to(T0 + 300);
-    service
-        .update_draft("aaaa1111", 0, &all_kinds_patch())
-        .await
-        .expect("draft patch");
-    advance_to(T0 + 350);
-    let d3 = service.open_designer("aaaa1111").await.expect("open d3");
-    advance_to(T0 + 400);
-    service
-        .confirm_design("aaaa1111", &d3.interaction_id, 1)
-        .await
-        .expect("confirm design"); // seq 3 queued
-    advance_to(T0 + 450);
-    service
-        .generation_complete("aaaa1111")
-        .await
-        .expect("generated");
-    advance_to(T0 + 500);
-    service
-        .validation_passed("aaaa1111")
-        .await
-        .expect("preview 1");
-    advance_to(T0 + 550);
-    service
-        .request_revision("aaaa1111", "make the header darker")
-        .await
-        .expect("request revision"); // seq 4 queued
-    advance_to(T0 + 600);
-    service
-        .store_suggestion(
-            "aaaa1111",
-            AppDesignPatch {
-                ops: vec![
-                    AppDesignPatchOp::Set {
-                        field_id: "accent".to_string(),
-                        value: DesignValue::Color("#112233".to_string()),
-                    },
-                    AppDesignPatchOp::Remove {
-                        field_id: "tags".to_string(),
-                    },
-                ],
-                note: Some("tone down the accent".to_string()),
-            },
-        )
-        .await
-        .expect("store suggestion");
-    advance_to(T0 + 650);
-    service
-        .revision_ready("aaaa1111")
-        .await
-        .expect("revision ready");
-    advance_to(T0 + 700);
-    service
-        .validation_passed("aaaa1111")
-        .await
-        .expect("preview 2");
-    advance_to(T0 + 750);
     service
         .update_runtime_record(
             "aaaa1111",
@@ -269,7 +168,7 @@ async fn drive_canonical_store(root: &Path) {
         )
         .await
         .expect("runtime starting");
-    advance_to(T0 + 800);
+    advance_to(T0 + 400);
     service
         .update_runtime_record(
             "aaaa1111",
@@ -280,143 +179,35 @@ async fn drive_canonical_store(root: &Path) {
         )
         .await
         .expect("runtime failed");
-
-    // ── bbbb2222: the minimal app (every optional absent) ───────────────
-    advance_to(T0 + 850);
-    service
-        .open_designer("bbbb2222")
-        .await
-        .expect("open minimal");
-    advance_to(T0 + 900);
-    service
-        .cancel_design("bbbb2222")
-        .await
-        .expect("cancel minimal"); // seq 1 queued
+    service.flush_events().await;
 }
 
 /// The in-memory states the fixture tree must load to, spelled out as
-/// literals. Only the service-minted random ids (the pending preview gate's
-/// `interaction_id`, the pending suggestion's `suggestion_id`) are spliced
-/// from `loaded` — after asserting they match the id grammar — so everything
-/// else stays pinned independently of the loader.
-// One long literal on purpose: the golden must spell out every field of every
-// document — splitting it into builders would hide exactly what is pinned.
-#[allow(clippy::too_many_lines)]
-fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
-    assert_eq!(loaded.len(), 2, "fixture store holds exactly two apps");
-    let pending_gate = loaded[0]
-        .interactions
-        .pending
-        .as_ref()
-        .expect("the maximal app must hold its pending preview gate");
-    assert!(
-        pending_gate.interaction_id.starts_with("int-") && pending_gate.interaction_id.len() == 16,
-        "gate id must match the service mint grammar: {:?}",
-        pending_gate.interaction_id
-    );
-    let suggestion_id = &loaded[0]
-        .draft
-        .pending_suggestion
-        .as_ref()
-        .expect("the maximal app must hold its pending suggestion")
-        .suggestion_id;
-    assert!(
-        suggestion_id.starts_with("sugg-") && suggestion_id.len() == 17,
-        "suggestion id must match the service mint grammar: {suggestion_id:?}"
-    );
-
-    let maximal_fields: BTreeMap<String, DesignValue> = all_kinds_patch()
-        .ops
-        .into_iter()
-        .map(|op| match op {
-            AppDesignPatchOp::Set { field_id, value } => (field_id, value),
-            AppDesignPatchOp::Remove { .. } => unreachable!("patch only sets"),
-        })
-        .collect();
-
-    let maximal = AppState {
+/// literals — nothing is spliced from the loaded store, the whole shape is
+/// pinned independently of the loader.
+fn expected_states() -> Vec<AppState> {
+    let ready = AppState {
         record: AppRecord {
             id: "aaaa1111".to_string(),
-            name: "Fixture Maximal".to_string(),
-            brief: "a fixture app with every design-value kind".to_string(),
+            name: "Fixture Ready".to_string(),
+            brief: "a ready fixture app with a full runtime record".to_string(),
             git_enabled: true,
             created_at_ms: T0,
-            updated_at_ms: T0 + 700,
-            workflow_state: AppWorkflowState::AwaitingPreviewConfirmation,
+            updated_at_ms: T0 + 100,
+            workflow_state: AppWorkflowState::Ready,
             conversation_id: Some("conv-fixture-1".to_string()),
+            init_session_id: None,
             workspace_rel: "apps/aaaa1111/workspace".to_string(),
-            // `#[serde(skip)]` — never on disk, always `0` after a load.
-            llm_round: 0,
-        },
-        draft: AppDesignDraft {
-            schema_version: APPS_SCHEMA_VERSION,
-            revision: 1,
-            questionnaire: Vec::new(),
-            fields: maximal_fields,
-            plan: None,
-            plan_for_revision: None,
-            pending_suggestion: Some(AppDesignSuggestion {
-                suggestion_id: suggestion_id.clone(),
-                patch: AppDesignPatch {
-                    ops: vec![
-                        AppDesignPatchOp::Set {
-                            field_id: "accent".to_string(),
-                            value: DesignValue::Color("#112233".to_string()),
-                        },
-                        AppDesignPatchOp::Remove {
-                            field_id: "tags".to_string(),
-                        },
-                    ],
-                    note: Some("tone down the accent".to_string()),
-                },
-                based_on_revision: 1,
-            }),
-            confirmed_revision: Some(1),
-        },
-        interactions: AppInteractions {
-            schema_version: APPS_SCHEMA_VERSION,
-            pending: Some(AppInteractionRequest {
-                interaction_id: pending_gate.interaction_id.clone(),
-                app_id: "aaaa1111".to_string(),
-                kind: AppInteractionKind::Preview,
-                revision: 1,
-                created_at_ms: T0 + 700,
-            }),
-            next_seq: 5,
-            last_delivered_seq: 1,
-            undelivered: vec![
-                AppContinuation {
-                    seq: 2,
-                    app_id: "aaaa1111".to_string(),
-                    kind: AppContinuationKind::DesignCancelled,
-                    payload: serde_json::json!({}),
-                    created_at_ms: T0 + 250,
-                },
-                AppContinuation {
-                    seq: 3,
-                    app_id: "aaaa1111".to_string(),
-                    kind: AppContinuationKind::DesignConfirmed,
-                    payload: serde_json::json!({ "revision": 1 }),
-                    created_at_ms: T0 + 400,
-                },
-                AppContinuation {
-                    seq: 4,
-                    app_id: "aaaa1111".to_string(),
-                    kind: AppContinuationKind::RevisionRequested,
-                    payload: serde_json::json!({ "prompt": "make the header darker" }),
-                    created_at_ms: T0 + 550,
-                },
-            ],
         },
         runtime: AppRuntimeRecord {
             schema_version: APPS_SCHEMA_VERSION,
             app_id: "aaaa1111".to_string(),
             state: AppRuntimeState::Failed,
-            mode: None,
+            mode: Some(AppRuntimeMode::StaticExport),
             port: Some(3111),
             pid: Some(4242),
             last_error: Some("dev server exited with code 1".to_string()),
-            updated_at_ms: T0 + 800,
+            updated_at_ms: T0 + 400,
         },
     };
 
@@ -424,38 +215,14 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
         record: AppRecord {
             id: "bbbb2222".to_string(),
             name: "Fixture Minimal".to_string(),
-            brief: "a minimal fixture app".to_string(),
-            git_enabled: true,
+            brief: "a minimal fixture app without git".to_string(),
+            git_enabled: false,
             created_at_ms: T0,
-            updated_at_ms: T0 + 900,
-            workflow_state: AppWorkflowState::CollectingSpec,
+            updated_at_ms: T0,
+            workflow_state: AppWorkflowState::Draft,
             conversation_id: None,
+            init_session_id: None,
             workspace_rel: "apps/bbbb2222/workspace".to_string(),
-            // `#[serde(skip)]` — never on disk, always `0` after a load.
-            llm_round: 0,
-        },
-        draft: AppDesignDraft {
-            schema_version: APPS_SCHEMA_VERSION,
-            revision: 0,
-            questionnaire: Vec::new(),
-            fields: BTreeMap::new(),
-            plan: None,
-            plan_for_revision: None,
-            pending_suggestion: None,
-            confirmed_revision: None,
-        },
-        interactions: AppInteractions {
-            schema_version: APPS_SCHEMA_VERSION,
-            pending: None,
-            next_seq: 2,
-            last_delivered_seq: 0,
-            undelivered: vec![AppContinuation {
-                seq: 1,
-                app_id: "bbbb2222".to_string(),
-                kind: AppContinuationKind::DesignCancelled,
-                payload: serde_json::json!({}),
-                created_at_ms: T0 + 900,
-            }],
         },
         runtime: AppRuntimeRecord {
             schema_version: APPS_SCHEMA_VERSION,
@@ -469,15 +236,15 @@ fn expected_states(loaded: &[AppState]) -> Vec<AppState> {
         },
     };
 
-    vec![maximal, minimal]
+    vec![ready, minimal]
 }
 
 /// Persist `states` under `root` through the REAL writer path (per-app files
 /// first, index last — the same order the service commits in). The manifest
 /// and permission documents are not part of [`AppState`], so each is minted
-/// from the same PRODUCER `create_app` uses ([`seed_app`] does the same) —
-/// copying them out of the fixture instead would compare the fixture against
-/// a round-trip of itself for exactly the two documents this pins.
+/// from the same PRODUCER `create_app_with_git` uses ([`seed_app`] does the
+/// same) — copying them out of the fixture instead would compare the fixture
+/// against a round-trip of itself for exactly the two documents this pins.
 fn write_store(root: &Path, states: &[AppState]) {
     for app in states {
         save_app_files(root, app).expect("save app files");
@@ -495,8 +262,8 @@ fn write_store(root: &Path, states: &[AppState]) {
 
 /// Every file under `root`, as sorted root-relative paths. The advisory
 /// index lock (`apps/index.lock`) is excluded: it is a runtime artifact
-/// created by merely LOADING a store (finding 9), not part of the persisted
-/// document contract these goldens pin.
+/// created by merely LOADING a store, not part of the persisted document
+/// contract these goldens pin.
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
         let entries = std::fs::read_dir(dir)
@@ -523,9 +290,8 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
 
 /// READ direction: the checked-in v1 tree must keep loading to exactly the
 /// expected states through the loader [`local_apps::AppService`] uses —
-/// which also proves the fixture passes `load_all`'s continuation-invariant
-/// validation and needs neither torn-commit repair nor runtime
-/// reconciliation.
+/// which also proves the fixture needs neither torn-commit repair nor
+/// runtime reconciliation.
 #[test]
 fn fixture_store_loads_to_the_canonical_states() {
     if bless() {
@@ -535,9 +301,9 @@ fn fixture_store_loads_to_the_canonical_states() {
     let loaded = storage::load_all(&fixtures_root())
         .expect("the checked-in v1 fixture store must load without a migration");
     scrub_fixture_lock();
-    let expected = expected_states(&loaded);
     assert_eq!(
-        loaded, expected,
+        loaded,
+        expected_states(),
         "parsing the v1 fixtures drifted — old on-disk stores would load wrong"
     );
 }
@@ -565,7 +331,7 @@ async fn writers_reproduce_the_fixture_bytes_exactly() {
     let states = storage::load_all(&fixtures).expect("fixtures load");
     scrub_fixture_lock();
     // Belt and braces: the states we re-serialize are the pinned ones.
-    assert_eq!(states, expected_states(&states));
+    assert_eq!(states, expected_states());
 
     let tmp = tempfile::tempdir().expect("tempdir");
     write_store(tmp.path(), &states);
@@ -598,5 +364,166 @@ async fn writers_reproduce_the_fixture_bytes_exactly() {
         "{} persisted document(s) drifted:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+/// LEGACY migration: a pipeline-era store — a mid-pipeline `workflowState`
+/// plus the pipeline's own documents (`interactions.json`,
+/// `design-spec.json`) — must load with the state collapsed to `draft` (the
+/// serde aliases) and the stale documents left on disk untouched (the loader
+/// never reads them; nothing deletes them).
+#[test]
+fn a_legacy_pipeline_store_loads_as_draft_and_ignores_stale_docs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let app_dir = root.join("apps/legacy01");
+    std::fs::create_dir_all(app_dir.join("workspace/.lingxi")).expect("mkdir");
+
+    // A legacy record mid-pipeline, exactly as a pre-v3 build persisted it.
+    let legacy_record = r#"{
+    "id": "legacy01",
+    "name": "Legacy Habits",
+    "brief": "a legacy pipeline app",
+    "gitEnabled": true,
+    "createdAtMs": 1753000000000,
+    "updatedAtMs": 1753000000700,
+    "workflowState": "awaiting_preview_confirmation",
+    "conversationId": "conv-legacy-1",
+    "workspaceRel": "apps/legacy01/workspace"
+  }"#;
+    std::fs::write(
+        root.join("apps/index.json"),
+        format!(
+            "{{\n  \"schemaVersion\": 1,\n  \"apps\": [\n    {}\n  ]\n}}\n",
+            legacy_record.trim()
+        ),
+    )
+    .expect("write index");
+    std::fs::write(
+        app_dir.join("workspace/.lingxi/app.json"),
+        format!(
+            "{{\n  \"schemaVersion\": 1,\n  \"app\": {}\n}}\n",
+            legacy_record.trim()
+        ),
+    )
+    .expect("write mirror");
+    std::fs::write(
+        app_dir.join("runtime.json"),
+        "{\n  \"schemaVersion\": 1,\n  \"appId\": \"legacy01\",\n  \"state\": \"stopped\",\n  \"updatedAtMs\": 1753000000000\n}\n",
+    )
+    .expect("write runtime");
+
+    // Plausible legacy pipeline documents (shapes copied from the pre-v3
+    // fixture store): a pending preview gate + queued continuations, and a
+    // design draft with answers and a pending suggestion.
+    let stale_interactions = r#"{
+  "schemaVersion": 1,
+  "pending": {
+    "interactionId": "int-7df09b4cb739",
+    "appId": "legacy01",
+    "kind": "preview",
+    "revision": 1,
+    "createdAtMs": 1753000000700
+  },
+  "nextSeq": 5,
+  "lastDeliveredSeq": 1,
+  "undelivered": [
+    {
+      "seq": 3,
+      "appId": "legacy01",
+      "kind": "design_confirmed",
+      "payload": {
+        "revision": 1
+      },
+      "createdAtMs": 1753000000400
+    },
+    {
+      "seq": 4,
+      "appId": "legacy01",
+      "kind": "revision_requested",
+      "payload": {
+        "prompt": "make the header darker"
+      },
+      "createdAtMs": 1753000000550
+    }
+  ]
+}
+"#;
+    let stale_design_spec = r##"{
+  "schemaVersion": 1,
+  "revision": 1,
+  "questionnaire": [],
+  "fields": {
+    "accent": {
+      "kind": "color",
+      "value": "#3366ff"
+    },
+    "title": {
+      "kind": "short_text",
+      "value": "Habit Tracker"
+    }
+  },
+  "pendingSuggestion": {
+    "suggestionId": "sugg-a87290bde485",
+    "patch": {
+      "ops": [
+        {
+          "op": "set",
+          "fieldId": "accent",
+          "value": {
+            "kind": "color",
+            "value": "#112233"
+          }
+        }
+      ],
+      "note": "tone down the accent"
+    },
+    "basedOnRevision": 1
+  },
+  "confirmedRevision": 1
+}
+"##;
+    let interactions_path = app_dir.join("interactions.json");
+    let design_spec_path = app_dir.join("workspace/.lingxi/design-spec.json");
+    std::fs::write(&interactions_path, stale_interactions).expect("write interactions");
+    std::fs::write(&design_spec_path, stale_design_spec).expect("write design spec");
+
+    let index_before = std::fs::read_to_string(root.join("apps/index.json")).unwrap();
+    let mirror_before =
+        std::fs::read_to_string(app_dir.join("workspace/.lingxi/app.json")).unwrap();
+
+    let loaded = storage::load_all(root).expect("a legacy pipeline store must load");
+    assert_eq!(loaded.len(), 1);
+    let app = &loaded[0];
+    assert_eq!(app.record.id, "legacy01");
+    assert_eq!(
+        app.record.workflow_state,
+        AppWorkflowState::Draft,
+        "every mid-pipeline legacy state collapses to draft"
+    );
+    assert_eq!(app.record.conversation_id.as_deref(), Some("conv-legacy-1"));
+    assert!(app.record.git_enabled);
+    assert_eq!(app.runtime.state, AppRuntimeState::Stopped);
+
+    // The stale pipeline documents were neither read-repaired nor deleted.
+    assert_eq!(
+        std::fs::read_to_string(&interactions_path).unwrap(),
+        stale_interactions,
+        "interactions.json must be left byte-for-byte untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&design_spec_path).unwrap(),
+        stale_design_spec,
+        "design-spec.json must be left byte-for-byte untouched"
+    );
+    // And the load needed no repair rewrite either (index and mirror agree
+    // once both parse to `draft`), so even those stay untouched.
+    assert_eq!(
+        std::fs::read_to_string(root.join("apps/index.json")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(app_dir.join("workspace/.lingxi/app.json")).unwrap(),
+        mirror_before
     );
 }

@@ -24,7 +24,6 @@ pub mod model;
 pub mod oauth;
 pub mod prompt_format;
 pub mod protocol;
-pub mod stream_accumulator;
 pub mod provider_settings;
 #[allow(missing_docs)]
 pub mod providers;
@@ -38,6 +37,7 @@ pub mod service;
 pub mod sigv4;
 pub mod sse;
 pub mod ssl;
+pub mod stream_accumulator;
 pub mod strict_schema;
 pub mod transport;
 pub mod transport_bridge;

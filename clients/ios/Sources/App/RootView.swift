@@ -19,6 +19,10 @@ struct RootView: View {
     @State private var clientEventCenter: ClientEventCenter
     @State private var source: any ConversationSource
     @State private var sourceGeneration = UUID()
+    /// The workspace the conversation currently runs in: global, a managed
+    /// project, or a local app (v3 — each app is a conversation scope whose
+    /// workspace directory is the session cwd).
+    @State private var activeScope: ConversationScope
     @State private var activeSession: String
     /// Last session confirmed by SessionStarted/SessionResumed. Drawer taps may
     /// update `activeSession` optimistically, but only this value is persisted.
@@ -43,6 +47,9 @@ struct RootView: View {
 
         let snapshot = providers.makeLaunchSnapshot()
         let activeProject = projects.activeProject
+        settings.mcpServers = MCPConfigurationRepository.shared.loadServers(
+            projectCwd: activeProject?.workspace.hostURL.path
+        )
         let runtime = TerminalRuntimeDescriptor.make(
             appSandboxRoot: root,
             project: activeProject,
@@ -107,6 +114,7 @@ struct RootView: View {
         _localAppsStore = State(initialValue: localApps)
         _clientEventCenter = State(initialValue: eventCenter)
         _source = State(initialValue: conversation)
+        _activeScope = State(initialValue: ConversationScope(projectID: projectID))
         let storedSessionID = preferences.storedActiveSessionID(projectID: projectID)
             ?? projects.activeProject?.record.lastActiveSessionId
             ?? ""
@@ -162,7 +170,7 @@ struct RootView: View {
         .environment(\.locale, localization.effectiveLocale())
         .onChange(of: scenePhase, handleScenePhase)
         .onChange(of: draft) { _, value in
-            scopedPreferences.setDraft(value, projectID: projectStore.activeProjectId)
+            scopedPreferences.setDraft(value, scope: activeScope)
         }
         .onChange(of: providerRepository.syncRevision) { _, _ in
             settingsStore.llmProviders = providerRepository.legacyProviders()
@@ -197,7 +205,7 @@ struct RootView: View {
                 if !sessionToRestore.isEmpty, !current.model.sessionTransitionPending {
                     requestSessionResume(
                         sessionToRestore,
-                        projectID: projectStore.activeProjectId,
+                        scope: activeScope,
                         using: current
                     )
                 }
@@ -224,7 +232,17 @@ struct RootView: View {
             SettingsHost(
                 store: settingsStore,
                 convo: source.model,
+                projectCwd: projectStore.activeProject?.workspace.hostURL.path,
                 onRefreshMcp: { source.refreshMcpServers() },
+                onRefreshSkills: {
+                    #if canImport(engine_mobileFFI)
+                        Task {
+                            try? await source.submitEngineCommand(
+                                .refreshListings(which: [.slashCommands])
+                            )
+                        }
+                    #endif
+                },
                 openTerminal: {
                     navigation.closeSettings()
                     openCurrentWorkspaceTerminal()
@@ -261,6 +279,7 @@ struct RootView: View {
         Drawer(
             projectStore: projectStore,
             localAppsStore: localAppsStore,
+            activeScope: activeScope,
             activeSession: $activeSession,
             source: source,
             openSettings: { navigation.showSettings() },
@@ -268,7 +287,13 @@ struct RootView: View {
             openApps: { appID in navigation.openLocalApps(appID: appID) },
             onSelectProject: { switchProject(to: $0) },
             onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
-            onNewChat: { switchProject(to: $0, startNew: true) }
+            onNewChat: { switchProject(to: $0, startNew: true) },
+            onSelectAppSession: { appID, sessionID in
+                switchScope(to: .localApp(appID), resumeSessionID: sessionID)
+            },
+            onNewAppChat: { appID in
+                switchScope(to: .localApp(appID), startNew: true)
+            }
         )
         .id(sourceGeneration)
     }
@@ -298,7 +323,7 @@ struct RootView: View {
             ConversationProjectBridge(
                 model: source.model,
                 projectStore: projectStore,
-                projectID: projectStore.activeProjectId,
+                scope: activeScope,
                 pendingRestoreID: pendingSessionRestoreID,
                 onSessionChanged: adoptEngineSession,
                 onUnavailableSession: clearUnavailableSession,
@@ -353,7 +378,10 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
-                onDismiss: { navigation.closePresentedRoute() }
+                onDismiss: { navigation.closePresentedRoute() },
+                onOpenAppSession: openAppSession,
+                onOpenCreatedAppSession: openCreatedAppSession,
+                onNewAppSession: startNewAppSession
             )
         case .sessionDetails(let sessionID):
             SessionDetailsView(
@@ -387,18 +415,74 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
-                onDismiss: { navigation.closePresentedRoute() }
+                onDismiss: { navigation.closePresentedRoute() },
+                onOpenAppSession: openAppSession,
+                onOpenCreatedAppSession: openCreatedAppSession,
+                onNewAppSession: startNewAppSession
             )
         case .sessionDetails:
             EmptyView()
         }
     }
 
+    /// A tapped row of an app's session catalog: dismiss the local-apps cover
+    /// and continue that conversation inside the app's scope.
+    private func openAppSession(appID: String, sessionID: String) {
+        navigation.closePresentedRoute()
+        switchScope(to: .localApp(appID), resumeSessionID: sessionID)
+    }
+
+    /// The create-flow landing: same as `openAppSession`, plus the queued
+    /// kickoff message that starts the create-local-app flow once the empty
+    /// init session is live.
+    private func openCreatedAppSession(appID: String, sessionID: String, brief: String) {
+        navigation.closePresentedRoute()
+        // The library consumed its one-shot signal to call this, so a refused
+        // switch would lose the created app with nothing left to re-arm it.
+        // `switchScope` refuses only while another switch is in flight, so
+        // retry once that finishes.
+        guard switchScope(
+            to: .localApp(appID),
+            resumeSessionID: sessionID,
+            initialPrompt: String(localized: "local_apps_init_kickoff \(brief)")
+        ) else {
+            Task { @MainActor in
+                for _ in 0..<40 where projectSwitching {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                guard !projectSwitching else { return }
+                openCreatedAppSession(appID: appID, sessionID: sessionID, brief: brief)
+            }
+            return
+        }
+    }
+
+    /// 「新会话」in an app's session catalog: dismiss the cover and start a
+    /// fresh conversation in the app's scope.
+    private func startNewAppSession(appID: String) {
+        navigation.closePresentedRoute()
+        switchScope(to: .localApp(appID), startNew: true)
+    }
+
     private var currentWorkspaceGuestPath: String {
-        projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
+        if case let .localApp(appID) = activeScope,
+           (try? LocalAppWorkspacePath.validatedRoot(appID: appID)) != nil {
+            return ConversationSourceFactory.appSandboxRoot()
+                + "/" + LocalAppWorkspacePath.relativePath(appID: appID)
+        }
+        return projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
     }
 
     private func openCurrentWorkspaceTerminal() {
+        // A local app's workspace is a NATIVE sandbox directory with no guest
+        // mount (app scope runs without the mobile-linux runtime), so its
+        // host path is not a guest path and asking the terminal to start
+        // there fails the containment check every time. Open the default
+        // shell instead of a guaranteed error banner.
+        if activeScope.isLocalApp {
+            navigation.openTerminal(projectID: nil, requestedCwd: nil)
+            return
+        }
         navigation.openTerminal(
             projectID: projectStore.activeProjectId,
             requestedCwd: .guestPath(currentWorkspaceGuestPath)
@@ -435,6 +519,18 @@ struct RootView: View {
                 },
                 applyReconnect: { snapshot in
                     try await rebuildSource(snapshot: snapshot)
+                },
+                oauthLogin: { provider in
+                    try await current.loginOAuth(provider: provider)
+                },
+                oauthState: { provider in
+                    try await current.authState(provider: provider)
+                },
+                oauthLogout: { provider in
+                    try await current.logoutOAuth(provider: provider)
+                },
+                testOAuthConnection: { provider, profile in
+                    try await current.testOAuthConnection(provider: provider, profile: profile)
                 }
             )
         #else
@@ -442,17 +538,51 @@ struct RootView: View {
         #endif
     }
 
-    private func makeSource(projectID: String?, snapshot: ProviderLaunchSnapshot) -> any ConversationSource {
-        let project = projectID.flatMap { id in
-            projectStore.projects.first(where: { $0.record.id == id })
+    private func makeSource(scope: ConversationScope, snapshot: ProviderLaunchSnapshot) -> any ConversationSource {
+        let projectCwd: String?
+        let project: ProjectSnapshot?
+        switch scope {
+        case .global, .project:
+            project = scope.projectID.flatMap { id in
+                projectStore.projects.first(where: { $0.record.id == id })
+            }
+            projectCwd = project?.workspace.hostURL.path
+        case let .localApp(appID):
+            // The app's workspace directory is the session cwd, resolved via
+            // the SAME validated derivation the code browser uses
+            // (`LocalAppWorkspacePath`) — never a second hand-rolled path.
+            project = nil
+            // Validate via the shared derivation, but hand the ENGINE the
+            // raw `appSandboxRoot + rel` composition — `validatedRoot`'s
+            // symlink resolution can rewrite `/var/...` to `/private/var/...`
+            // on device, and a cwd string that differs from the engine's own
+            // composition by one byte lands the session catalog in a
+            // different sanitized directory (the canonical-cwd fork).
+            if (try? LocalAppWorkspacePath.validatedRoot(appID: appID)) != nil {
+                projectCwd = ConversationSourceFactory.appSandboxRoot()
+                    + "/" + LocalAppWorkspacePath.relativePath(appID: appID)
+            } else {
+                projectCwd = nil
+            }
         }
-        let runtime = TerminalRuntimeDescriptor.make(
-            appSandboxRoot: appSandboxRoot,
-            project: project,
-            linuxRuntime: settingsStore.linuxRuntime
-        ).config
+        // App scope runs WITHOUT the mobile-linux runtime: the app workspace
+        // is a native sandbox directory, and mounting the default guest
+        // workspace would override the engine's model-visible cwd (PathAtlas
+        // workspace-mount rule) — pointing the session catalog and every
+        // file tool at the WRONG root. Builds/previews go through the
+        // local-apps MCP runtime, which manages its own mounts.
+        let runtime: TerminalRuntimeConfig?
+        if scope.isLocalApp {
+            runtime = nil
+        } else {
+            runtime = TerminalRuntimeDescriptor.make(
+                appSandboxRoot: appSandboxRoot,
+                project: project,
+                linuxRuntime: settingsStore.linuxRuntime
+            ).config
+        }
         return ConversationSourceFactory.make(
-            projectCwd: project?.workspace.hostURL.path,
+            projectCwd: projectCwd,
             providerConfigured: !snapshot.enabledProfileIDs.isEmpty,
             providerProfilesJson: snapshot.providerProfilesJSON,
             providerRoutingJson: snapshot.routingJSON,
@@ -465,7 +595,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try await old.cancelAndWait()
-        let replacement = makeSource(projectID: projectStore.activeProjectId, snapshot: snapshot)
+        let replacement = makeSource(scope: activeScope, snapshot: snapshot)
         #if canImport(engine_mobileFFI)
             replacement.setExternalEventHandler { event in
                 Task { @MainActor in clientEventCenter.publish(event) }
@@ -479,30 +609,66 @@ struct RootView: View {
         if !confirmedSession.isEmpty {
             requestSessionResume(
                 confirmedSession,
-                projectID: projectStore.activeProjectId,
+                scope: activeScope,
                 using: replacement
             )
         }
         old.handleBackground()
     }
 
+    /// Thin project-flavored wrapper over `switchScope` — the drawer's
+    /// project callbacks keep their optional-projectID spelling (`nil` ==
+    /// global scope).
     private func switchProject(to projectID: String?, resumeSessionID: String? = nil, startNew: Bool = false) {
-        guard !projectSwitching else { return }
+        switchScope(
+            to: ConversationScope(projectID: projectID),
+            resumeSessionID: resumeSessionID,
+            startNew: startNew
+        )
+    }
+
+    /// A first message queued for a freshly-created app's init session: sent
+    /// once the engine confirms that session is live and the transcript is
+    /// empty — the kickoff that starts the create-local-app flow (an empty
+    /// anchor never runs a turn on its own).
+    private struct PendingInitKickoff {
+        let scope: ConversationScope
+        let sessionID: String
+        let text: String
+    }
+
+    @State private var pendingInitKickoff: PendingInitKickoff?
+
+    /// Returns `false` when the switch was refused because another one is
+    /// still in flight — callers holding a one-shot signal (the create-flow
+    /// landing) must retry rather than drop it.
+    @discardableResult
+    private func switchScope(
+        to scope: ConversationScope,
+        resumeSessionID: String? = nil,
+        startNew: Bool = false,
+        initialPrompt: String? = nil
+    ) -> Bool {
+        guard !projectSwitching else { return false }
         voiceInteraction.handleContextChange()
-        if projectID == projectStore.activeProjectId {
+        if let initialPrompt, let resumeSessionID {
+            pendingInitKickoff = PendingInitKickoff(
+                scope: scope, sessionID: resumeSessionID, text: initialPrompt)
+        }
+        if scope == activeScope {
             navigation.closeSidebar()
             if let resumeSessionID {
                 pendingSessionRestoreID = resumeSessionID
                 activeSession = resumeSessionID
-                requestSessionResume(resumeSessionID, projectID: projectID, using: source)
+                requestSessionResume(resumeSessionID, scope: scope, using: source)
             } else if startNew {
                 pendingSessionRestoreID = nil
                 activeSession = ""
                 confirmedSession = ""
-                scopedPreferences.setActiveSessionID("", projectID: projectID)
+                scopedPreferences.setActiveSessionID("", scope: scope)
                 source.startNewConversation()
             }
-            return
+            return true
         }
 
         persistConversationScope()
@@ -513,16 +679,22 @@ struct RootView: View {
             var rollback: ProjectActiveSelectionRollback?
             do {
                 try await previousSource.cancelAndWait()
-                rollback = try await projectStore.persistActiveForSwitch(projectId: projectID)
-                let replacement = makeSource(projectID: projectID, snapshot: providerRepository.makeLaunchSnapshot())
+                // Only a project/global switch moves the durable active-project
+                // selection. Entering a local-app scope leaves the project
+                // selection untouched — leaving the app returns to it.
+                if !scope.isLocalApp {
+                    rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
+                }
+                let replacement = makeSource(scope: scope, snapshot: providerRepository.makeLaunchSnapshot())
                 #if canImport(engine_mobileFFI)
                     replacement.setExternalEventHandler { event in
                         Task { @MainActor in clientEventCenter.publish(event) }
                     }
                 #endif
                 try await replacement.prepare()
-                draft = scopedPreferences.draft(projectID: projectID)
-                let restoredSession = restoredSessionID(projectID: projectID)
+                activeScope = scope
+                draft = scopedPreferences.draft(scope: scope)
+                let restoredSession = restoredSessionID(scope: scope)
                 confirmedSession = restoredSession
                 activeSession = resumeSessionID ?? restoredSession
                 pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
@@ -532,21 +704,26 @@ struct RootView: View {
                     pendingSessionRestoreID = nil
                     activeSession = ""
                     confirmedSession = ""
-                    scopedPreferences.setActiveSessionID("", projectID: projectID)
+                    scopedPreferences.setActiveSessionID("", scope: scope)
                     replacement.startNewConversation()
                 } else if !activeSession.isEmpty {
-                    requestSessionResume(activeSession, projectID: projectID, using: replacement)
+                    requestSessionResume(activeSession, scope: scope, using: replacement)
                 }
                 previousSource.handleBackground()
                 await cronRepository.refresh()
             } catch {
                 if let rollback { _ = try? await projectStore.rollbackActiveSwitch(rollback) }
                 projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
+                // The scope we armed the kickoff for is not the one we are in;
+                // leaving it armed would fire the create-flow opener into
+                // whatever session happens to match later.
+                if pendingInitKickoff?.scope == scope { pendingInitKickoff = nil }
                 previousSource.handleForeground()
                 previousSource.warmUp()
             }
             projectSwitching = false
         }
+        return true
     }
 
     @discardableResult
@@ -559,9 +736,18 @@ struct RootView: View {
         }
         activeSession = sessionID
         confirmedSession = sessionID
-        scopedPreferences.setActiveSessionID(sessionID, projectID: projectStore.activeProjectId)
+        scopedPreferences.setActiveSessionID(sessionID, scope: activeScope)
         if pendingSessionRestoreID == sessionID {
             pendingSessionRestoreID = nil
+        }
+        if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID,
+           kickoff.scope == activeScope {
+            pendingInitKickoff = nil
+            // Only an EMPTY init session gets the kickoff — re-entering one
+            // that already has a conversation must not re-trigger it.
+            if source.model.items.isEmpty {
+                _ = source.send(kickoff.text)
+            }
         }
         return true
     }
@@ -580,7 +766,18 @@ struct RootView: View {
         }
         pendingSessionRestoreID = nil
         activeSession = confirmedSession
-        scopedPreferences.setActiveSessionID(confirmedSession, projectID: projectStore.activeProjectId)
+        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope)
+        // The session the kickoff was waiting for does not exist (the engine
+        // replaced it with a fresh one). Fire into that replacement while the
+        // transcript is still empty — the user's brief is the whole point of
+        // the create flow — and drop the pending state either way so it can
+        // never fire into an unrelated session later.
+        if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID {
+            pendingInitKickoff = nil
+            if kickoff.scope == activeScope, source.model.items.isEmpty {
+                _ = source.send(kickoff.text)
+            }
+        }
         return true
     }
 
@@ -596,15 +793,17 @@ struct RootView: View {
         }
         pendingSessionRestoreID = nil
         activeSession = rollbackSelection
-        scopedPreferences.setActiveSessionID(confirmedSession, projectID: projectStore.activeProjectId)
+        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope)
         return true
     }
 
-    private func restoredSessionID(projectID: String?) -> String {
-        if let stored = scopedPreferences.storedActiveSessionID(projectID: projectID) {
+    private func restoredSessionID(scope: ConversationScope) -> String {
+        if let stored = scopedPreferences.storedActiveSessionID(scope: scope) {
             return stored
         }
-        return projectID.flatMap { id in
+        // Only managed projects carry a durable last-active-session record;
+        // app scopes fall back to a fresh conversation.
+        return scope.projectID.flatMap { id in
             projectStore.projects.first(where: { $0.record.id == id })?.record.lastActiveSessionId
         } ?? ""
     }
@@ -615,14 +814,19 @@ struct RootView: View {
     /// still restore legacy empty sessions before ListSessions replies.
     private func requestSessionResume(
         _ sessionID: String,
-        projectID: String?,
+        scope: ConversationScope,
         using conversation: any ConversationSource
     ) {
         let emptyTitle: String?
         if let live = conversation.model.engineSessions.first(where: { $0.id == sessionID }) {
             emptyTitle = live.messageCount == 0 ? live.title : nil
+        } else if scope.isLocalApp {
+            // App sessions have no cached project index to consult; the app's
+            // own catalog rows are engine-listed and need no legacy-empty
+            // migration hint.
+            emptyTitle = nil
         } else {
-            let cachedRows = projectID.flatMap { id in
+            let cachedRows = scope.projectID.flatMap { id in
                 projectStore.projects.first(where: { $0.record.id == id })?.sessions
             } ?? projectStore.globalSessions
             if let cached = cachedRows.first(where: { $0.sessionId == sessionID }),
@@ -636,8 +840,8 @@ struct RootView: View {
     }
 
     private func persistConversationScope() {
-        scopedPreferences.setDraft(draft, projectID: projectStore.activeProjectId)
-        scopedPreferences.setActiveSessionID(confirmedSession, projectID: projectStore.activeProjectId)
+        scopedPreferences.setDraft(draft, scope: activeScope)
+        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope)
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
@@ -693,6 +897,14 @@ struct RootView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
+        #if canImport(engine_mobileFFI)
+            if url.scheme?.lowercased() == "lingxi",
+               url.host?.lowercased() == "oauth",
+               url.path == "/callback" {
+                source.handleOAuthCallback(url)
+                return
+            }
+        #endif
         guard let action = LingxiDeepLink.action(from: url) else { return }
         applyAppAction(action)
     }
@@ -702,7 +914,7 @@ struct RootView: View {
         pendingSessionRestoreID = nil
         activeSession = ""
         confirmedSession = ""
-        scopedPreferences.setActiveSessionID("", projectID: projectStore.activeProjectId)
+        scopedPreferences.setActiveSessionID("", scope: activeScope)
         draft = draftText
         source.startNewConversation()
     }
@@ -764,13 +976,18 @@ enum ConversationSessionRestorePolicy {
 private struct ConversationProjectBridge: View {
     @ObservedObject var model: ConversationModel
     @Bindable var projectStore: ProjectStore
-    let projectID: String?
+    /// A `.localApp` scope still adopts/persists the engine session id via the
+    /// callbacks, but never writes into the PROJECT session index — an app's
+    /// catalog is engine-owned (`ListAppSessions`), not project state.
+    let scope: ConversationScope
     let pendingRestoreID: String?
     let onSessionChanged: (String) -> Bool
     let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
     let onRefreshSessions: () -> Void
     @State private var sessionSyncTask: Task<Void, Never>?
+
+    private var projectID: String? { scope.projectID }
 
     var body: some View {
         Color.clear
@@ -824,6 +1041,9 @@ private struct ConversationProjectBridge: View {
               !sessionID.isEmpty,
               onSessionChanged(sessionID)
         else { return }
+        // App-scope sessions are adopted (above) but never recorded into the
+        // project session index.
+        guard !scope.isLocalApp else { return }
         let isIndexed: Bool
         if let projectID {
             isIndexed = projectStore.projects
@@ -860,6 +1080,9 @@ private struct ConversationProjectBridge: View {
     }
 
     private func synchronizeSessions(_ rows: [EngineSession]) {
+        // An app scope's engine catalog must never replace a project's cached
+        // session index.
+        guard !scope.isLocalApp else { return }
         guard ConversationSessionIndexPolicy.shouldSynchronize(
             transitionPending: model.sessionTransitionPending,
             restorePending: pendingRestoreID != nil,

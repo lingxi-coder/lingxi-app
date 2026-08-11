@@ -83,6 +83,102 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
     assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
 }
 
+#[tokio::test]
+async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encoding() {
+    let client = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible {
+                name: "deepseek".to_string(),
+            },
+            profile_name: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "deepseek-v4-flash".to_string(),
+                request_model: "deepseek-v4-flash".to_string(),
+                billing_model: "deepseek-v4-flash".to_string(),
+                aliases: vec![],
+                description: None,
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    reasoning: true,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+        }],
+    })
+    .unwrap();
+
+    for profile in [None, Some("deepseek")] {
+        let mut request = LlmRequest::new("deepseek/deepseek-v4-flash");
+        if let Some(profile) = profile {
+            request = request.with_profile(profile);
+        }
+        let prepared = client
+            .prepare(&request)
+            .await
+            .expect("a known provider-qualified UI ref must remain routable");
+        assert_eq!(prepared.route.resolved_route.profile_name, "deepseek");
+        assert_eq!(
+            prepared.provider_request.body_json["model"], "deepseek-v4-flash",
+            "only the provider-native model id may reach the wire"
+        );
+    }
+}
+
+#[tokio::test]
+async fn slash_bearing_openrouter_wire_model_is_not_mistaken_for_a_ui_ref() {
+    let client = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            profile_name: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "openrouter/auto".to_string(),
+                request_model: "openrouter/auto".to_string(),
+                billing_model: "openrouter/auto".to_string(),
+                aliases: vec![],
+                description: None,
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+        }],
+    })
+    .unwrap();
+
+    let prepared = client
+        .prepare(&LlmRequest::new("openrouter/auto").with_profile("openrouter"))
+        .await
+        .expect("a slash-bearing provider-native model id must remain intact");
+    assert_eq!(
+        prepared.provider_request.body_json["model"],
+        "openrouter/auto"
+    );
+}
+
 fn anthropic_fast_profile(profile_name: &str, base_url: &str) -> ProviderProfile {
     ProviderProfile {
         provider_id: ProviderId::AnthropicFirstParty,

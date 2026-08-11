@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '3.0.0';
+export const CLIENT_PROTOCOL_VERSION = '5.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -155,40 +155,13 @@ export type ClientCommand =
       name: string;
       origin: AppCreateOriginDto;
       brief: string;
+      /** Git-backed source versioning choice; the engine defaults to enabled when omitted. */
+      git_enabled?: boolean;
       conversation_id?: string;
     }
-  | { type: 'update_app_brief'; app_id: string; brief: string }
-  | { type: 'retry_app_questionnaire'; app_id: string }
-  | { type: 'begin_app_planning'; app_id: string }
-  | { type: 'retry_app_plan'; app_id: string }
-  | { type: 'open_app_designer'; app_id: string }
-  | {
-      type: 'update_app_design_draft';
-      app_id: string;
-      expected_revision: number;
-      patch: AppDesignPatchDto;
-    }
-  | {
-      type: 'apply_agent_design_suggestion';
-      app_id: string;
-      suggestion_id: string;
-      expected_revision: number;
-    }
-  | {
-      type: 'request_app_design_suggestion';
-      app_id: string;
-      expected_revision: number;
-      prompt?: string;
-    }
-  | { type: 'dismiss_app_design_suggestion'; app_id: string; suggestion_id: string }
-  | { type: 'confirm_app_design'; app_id: string; revision: number; interaction_id: string }
-  | { type: 'cancel_app_design'; app_id: string }
   | { type: 'start_app'; app_id: string }
   | { type: 'stop_app'; app_id: string }
   | { type: 'restart_app'; app_id: string }
-  | { type: 'confirm_app_preview'; app_id: string; revision: number; interaction_id: string }
-  | { type: 'request_app_revision'; app_id: string; prompt: string }
-  | { type: 'retry_app_generation'; app_id: string }
   | { type: 'execute_app_bridge_request'; request: AppBridgeRequestDto }
   | {
       type: 'resolve_app_ui_request';
@@ -203,6 +176,7 @@ export type ClientCommand =
       decision: AppAuthorizationDecisionDto;
     }
   | { type: 'reset_app_permissions'; app_id: string }
+  | { type: 'list_app_sessions'; app_id: string; offset?: number; limit?: number }
   | { type: 'list_app_checkpoints'; app_id: string }
   | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
   | { type: 'delete_app'; app_id: string }
@@ -474,26 +448,11 @@ export interface TaskRowDto {
 // local_apps.rs
 //
 // The fieldless enums ride as BARE wire strings (byte-identical to the
-// local-apps core enums' canonical values — the `AccessTierDto` precedent);
-// `DesignValueDto` is tagged on `kind` and `AppDesignPatchOpDto` on `op`, the
-// discriminators the local-apps spec fixes.
+// local-apps core enums' canonical values — the `AccessTierDto` precedent).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Designer/generation workflow state (local_apps.rs `AppWorkflowStateDto`). */
-export type AppWorkflowStateDto =
-  | 'authoring_questionnaire'
-  | 'questionnaire_failed'
-  | 'collecting_spec'
-  | 'planning'
-  | 'plan_failed'
-  | 'awaiting_spec_confirmation'
-  | 'generating'
-  | 'validating'
-  | 'awaiting_preview_confirmation'
-  | 'revising'
-  | 'ready'
-  | 'generation_failed'
-  | 'validation_failed';
+/** Workflow state of an app (local_apps.rs `AppWorkflowStateDto`). */
+export type AppWorkflowStateDto = 'draft' | 'ready';
 
 /** Runtime (dev-server) state (local_apps.rs `AppRuntimeStateDto`). */
 export type AppRuntimeStateDto = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
@@ -515,6 +474,23 @@ export type AppErrorCodeDto =
   | 'llm_unavailable'
   | 'llm_output_rejected';
 
+/** Whether a catalog row is the app's pinned init session (local_apps.rs `AppSessionKindDto`). */
+export type AppSessionKindDto = 'init' | 'conversation';
+
+/**
+ * One row of an app's workspace-scoped session catalog (local_apps.rs
+ * `AppSessionRowDto`) — field-for-field the shared {@link SessionRowDto} shape
+ * plus the init marker; no file paths cross the wire.
+ */
+export interface AppSessionRowDto {
+  /** Bare session uuid (the resume key). */
+  uuid: string;
+  title: string;
+  modified_rfc3339: string;
+  message_count: number;
+  kind: AppSessionKindDto;
+}
+
 /** Why a checkpoint was recorded (local_apps.rs `AppCheckpointKindDto`). */
 export type AppCheckpointKindDto =
   | 'scaffold_created'
@@ -522,9 +498,6 @@ export type AppCheckpointKindDto =
   | 'preview_approved'
   | 'user_approved'
   | 'pre_restore';
-
-/** Layout density for a `density` design value (local_apps.rs `DensityLevelDto`). */
-export type DensityLevelDto = 'compact' | 'comfortable';
 
 /** Field type in an app-owned data collection (local_apps.rs `AppDataFieldTypeDto`). */
 export type AppDataFieldTypeDto =
@@ -555,100 +528,20 @@ export interface AppDataCollectionDto {
   enabled_by_default: boolean;
 }
 
-/** Dynamic designer field kind (local_apps.rs `AppDesignFieldTypeDto`). */
-export type AppDesignFieldTypeDto =
-  | 'short_text'
-  | 'long_text'
-  | 'single_choice'
-  | 'multiple_choice'
-  | 'boolean'
-  | 'color'
-  | 'density'
-  | 'screen_list'
-  | 'feature_list'
-  | 'data_field_list'
-  | 'domain_list';
-
-/** One selectable option for a designer field (local_apps.rs `AppDesignFieldOptionDto`). */
-export interface AppDesignFieldOptionDto {
-  value: string;
-  label: string;
-}
-
-/** One Rust-defined designer input rendered by the clients (local_apps.rs `AppDesignFieldDto`). */
-export interface AppDesignFieldDto {
-  id: string;
-  label: string;
-  description?: string;
-  field_type: AppDesignFieldTypeDto;
-  required: boolean;
-  /** Renders an `Other…` free-text box. */
-  allows_custom: boolean;
-  /** Renders "let the LLM decide". */
-  allows_defer: boolean;
-  default_value?: DesignValueDto;
-  options: AppDesignFieldOptionDto[];
-}
-
-/** One ordered step in the five-step app designer (local_apps.rs `AppDesignStepDto`). */
-export interface AppDesignStepDto {
-  id: string;
-  order: number;
-  title: string;
-  description?: string;
-  fields: AppDesignFieldDto[];
-}
-
-/**
- * The "will be created" summary shown on the confirmation page. Derived by the
- * LLM from the answers, validated by `local-apps` (local_apps.rs `AppPlanDto`).
- */
-export interface AppPlanDto {
-  collections: AppDataCollectionDto[];
-  capabilities: AppCapabilityKindDto[];
-  /** External HTTPS host names. */
-  domains: string[];
-  /** Human-readable summary; every deferred field's final resolution is spelled out here. */
-  summary: string;
-}
-
-/** One draft field value, tagged by field kind (local_apps.rs `DesignValueDto`). */
-export type DesignValueDto =
-  | { kind: 'short_text'; value: string }
-  | { kind: 'long_text'; value: string }
-  | { kind: 'single_choice'; value: string }
-  | { kind: 'multiple_choice'; value: string[] }
-  | { kind: 'boolean'; value: boolean }
-  | { kind: 'color'; value: string }
-  | { kind: 'density'; value: DensityLevelDto }
-  | { kind: 'screen_list'; value: string[] }
-  | { kind: 'feature_list'; value: string[] }
-  | { kind: 'data_field_list'; value: AppDataFieldDto[] }
-  | { kind: 'domain_list'; value: string[] }
-  /** The user explicitly chose to let the LLM decide this field. No payload. */
-  | { kind: 'deferred' };
-
-/** One patch operation against the draft field map (local_apps.rs `AppDesignPatchOpDto`). */
-export type AppDesignPatchOpDto =
-  | { op: 'set'; field_id: string; value: DesignValueDto }
-  | { op: 'remove'; field_id: string };
-
-/** An ordered batch of draft edits (local_apps.rs `AppDesignPatchDto`). */
-export interface AppDesignPatchDto {
-  ops: AppDesignPatchOpDto[];
-  note?: string;
-}
-
 /** One local-app row (local_apps.rs `AppRecordDto`). */
 export interface AppRecordDto {
   id: string;
   name: string;
   /** One-line description the user gave at creation time. */
   brief: string;
+  /** Whether Git controls this app's source checkpoints and restores. */
+  git_enabled: boolean;
   created_at_ms: number;
   updated_at_ms: number;
   workflow_state: AppWorkflowStateDto;
   conversation_id?: string;
+  /** The app's pinned "init" session (bare uuid) — listed first in its catalog. */
+  init_session_id?: string;
   workspace_rel: string;
 }
 
@@ -678,32 +571,6 @@ export type AppRuntimeRecoveryStateDto =
   | 'recovered'
   | 'failed';
 
-/** Persisted generation/build queue state (local_apps.rs `AppGenerationJobStateDto`). */
-export type AppGenerationJobStateDto =
-  | 'queued'
-  | 'scaffolding'
-  | 'generating'
-  | 'validating'
-  | 'building'
-  | 'starting_preview'
-  | 'awaiting_approval'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled';
-
-/** One durable generation job (local_apps.rs `AppGenerationJobDto`). */
-export interface AppGenerationJobDto {
-  id: string;
-  app_id: string;
-  revision: number;
-  continuation_seq: number;
-  state: AppGenerationJobStateDto;
-  percent?: number;
-  detail?: string;
-  log_rel?: string;
-  updated_at_ms: number;
-}
-
 /** Generated application manifest (local_apps.rs `AppManifestDto`). */
 export interface AppManifestDto {
   schema_version: number;
@@ -726,24 +593,11 @@ export interface AppRuntimeDetailsDto {
   last_error?: string;
 }
 
-/** A deterministic design field/value pair (local_apps.rs `AppDesignFieldValueDto`). */
-export interface AppDesignFieldValueDto {
-  field_id: string;
-  value: DesignValueDto;
-}
-
 /** Full application detail snapshot (local_apps.rs `AppDetailsDto`). */
 export interface AppDetailsDto {
   app: AppRecordDto;
-  design_revision: number;
-  design_fields: AppDesignFieldValueDto[];
-  /** The LLM-authored questionnaire driving the designer. Empty before authoring completes. */
-  questionnaire: AppDesignStepDto[];
-  /** The LLM-derived plan awaiting confirmation, if one has been authored. */
-  plan?: AppPlanDto;
   manifest?: AppManifestDto;
   runtime: AppRuntimeDetailsDto;
-  generation_job?: AppGenerationJobDto;
   checkpoints: AppCheckpointDto[];
 }
 
@@ -847,11 +701,6 @@ export type AppAuthorizationDecisionDto =
  */
 export type AppEventDto =
   | { type: 'app_details_changed'; details: AppDetailsDto }
-  /** The LLM finished (or discarded) authoring the questionnaire. */
-  | { type: 'app_questionnaire_changed'; app_id: string; revision: number; steps: AppDesignStepDto[] }
-  /** The LLM finished (or discarded) deriving the plan. */
-  | { type: 'app_plan_changed'; app_id: string; revision: number; plan?: AppPlanDto }
-  | { type: 'app_generation_job_changed'; job: AppGenerationJobDto }
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
   | { type: 'app_ui_request'; request: AppUiRequestDto }
   | { type: 'app_capability_requested'; request: AppCapabilityRequestDto }
@@ -971,34 +820,7 @@ export type ClientEvent =
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'apps_changed'; apps: AppRecordDto[] }
   | { type: 'app_event'; event: AppEventDto }
-  | { type: 'app_designer_requested'; app_id: string; interaction_id: string; revision: number }
-  | {
-      type: 'app_design_draft_changed';
-      app_id: string;
-      revision: number;
-      fields: Record<string, DesignValueDto>;
-    }
-  | {
-      type: 'app_design_suggestion_available';
-      app_id: string;
-      suggestion_id: string;
-      based_on_revision: number;
-      patch: AppDesignPatchDto;
-    }
-  | {
-      type: 'app_design_conflict';
-      app_id: string;
-      expected_revision: number;
-      actual_revision: number;
-    }
   | { type: 'app_workflow_changed'; app_id: string; state: AppWorkflowStateDto; detail?: string }
-  | {
-      type: 'app_generation_progress';
-      app_id: string;
-      stage: string;
-      percent?: number;
-      detail?: string;
-    }
   | {
       type: 'app_runtime_changed';
       app_id: string;
@@ -1007,11 +829,10 @@ export type ClientEvent =
       last_error?: string;
     }
   | {
-      type: 'app_preview_ready';
+      type: 'app_sessions_changed';
       app_id: string;
-      interaction_id: string;
-      revision: number;
-      url?: string;
+      sessions: AppSessionRowDto[];
+      next_offset?: number;
     }
   | { type: 'app_checkpoint_created'; app_id: string; checkpoint: AppCheckpointDto }
   | { type: 'app_operation_failed'; app_id?: string; code: AppErrorCodeDto; message: string }

@@ -3,11 +3,9 @@
 //! Layout under the injected data root:
 //!
 //! ```text
-//! apps/index.json                                  — { schemaVersion, apps }
-//! apps/<app-id>/runtime.json                       — AppRuntimeRecord
-//! apps/<app-id>/interactions.json                  — AppInteractions
-//! apps/<app-id>/workspace/.lingxi/app.json         — { schemaVersion, app } mirror
-//! apps/<app-id>/workspace/.lingxi/design-spec.json — AppDesignDraft
+//! apps/index.json                          — { schemaVersion, apps }
+//! apps/<app-id>/runtime.json               — AppRuntimeRecord
+//! apps/<app-id>/workspace/.lingxi/app.json — { schemaVersion, app } mirror
 //! ```
 //!
 //! Every write goes through [`traits::rooted_fs::atomic_write`] (same-directory
@@ -20,23 +18,21 @@
 //! entry first, directory last).
 //!
 //! For MUTATIONS of a listed app the per-app batch is the effective commit
-//! point instead: the batch lands `design-spec.json`, `interactions.json`,
-//! `runtime.json` and finally the `app.json` record mirror — the order is
-//! defined ONCE as [`APP_DOC_WRITE_ORDER`] and executed by
-//! [`save_app_files_steps`] — and only then does the caller rewrite the
-//! index. The repair contract depends on that ORDER, not on completeness: a
-//! writer may skip documents that did not change (the service's mutation path
-//! does), but the writes that DO happen must follow the canonical sequence,
-//! and crash tests replay true prefixes of it. A crash inside that window
-//! would otherwise strand the store torn — e.g. the index still says
-//! `awaiting_spec_confirmation` while `interactions.json` already consumed
-//! the gate and queued the `design_confirmed` continuation, leaving an
-//! unsatisfiable confirmation gate and a phantom continuation. [`load_all`]
-//! therefore reconciles on load: a diverged `app.json` mirror (written after
-//! every other per-app document) supersedes the index record, and the gate
-//! invariants of `interactions.json` (pending presence + newest undelivered
-//! continuation) roll a mid-batch tear forward. Repairs are persisted through
-//! the normal write path before the load returns.
+//! point instead: the batch lands `runtime.json` and finally the `app.json`
+//! record mirror — the order is defined ONCE as [`APP_DOC_WRITE_ORDER`] and
+//! executed by [`save_app_files_steps`] — and only then does the caller
+//! rewrite the index. The repair contract depends on that ORDER, not on
+//! completeness: a writer may skip documents that did not change (the
+//! service's mutation path does), but the writes that DO happen must follow
+//! the canonical sequence. [`load_all`] reconciles on load: a diverged
+//! `app.json` mirror (written after every other per-app document) supersedes
+//! the index record. Repairs are persisted through the normal write path
+//! before the load returns.
+//!
+//! Legacy pipeline documents (`interactions.json`, `design-spec.json`) from
+//! pre-v3 stores are simply IGNORED — never read, never deleted. That, plus
+//! the legacy-state serde aliases on
+//! [`crate::types::AppWorkflowState`], IS the on-disk migration.
 //!
 //! Cross-process coordination: `apps/index.json` is read-modify-written under
 //! the advisory `apps/index.lock` file lock ([`lock_exclusive`]-style, the
@@ -55,11 +51,7 @@
 use crate::error::AppError;
 use crate::ids;
 use crate::state::AppState;
-use crate::types::{
-    AppContinuationKind, AppDesignDraft, AppDesignPatchOp, AppInteractionKind,
-    AppInteractionRequest, AppInteractions, AppRecord, AppRuntimeRecord, AppRuntimeState,
-    AppWorkflowState, DesignValue, APPS_SCHEMA_VERSION,
-};
+use crate::types::{AppRecord, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -71,12 +63,8 @@ use traits::FsError;
 /// loads refuse to slurp a larger file (typed `storage_corrupt` — the file is
 /// out of contract), and [`save_app_files_steps`]/`write_doc` refuse to
 /// produce one (typed `invalid_request`, checked BEFORE any temp file is
-/// written). The service-level input caps keep ordinary documents far below
-/// this bound, but they do NOT arithmetically guarantee it — e.g. a maximal
-/// draft (256 fields × 20 000-byte values) whose text is dominated by
-/// JSON-escaped characters serializes well past 8 MiB — so the write seam is
-/// where the invariant is enforced: nothing this module persists can later
-/// fail its own load on size.
+/// written). The write seam is where the invariant is enforced: nothing this
+/// module persists can later fail its own load on size.
 pub const MAX_DOC_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Directory under the data root holding all app state.
@@ -94,16 +82,12 @@ pub const INDEX_LOCK_FILE: &str = "index.lock";
 pub const TRASH_DIR: &str = ".trash";
 /// Per-app runtime record.
 pub const RUNTIME_FILE: &str = "runtime.json";
-/// Per-app interaction + continuation store.
-pub const INTERACTIONS_FILE: &str = "interactions.json";
-/// Per-app workspace directory (the future Next.js project root).
+/// Per-app workspace directory (the Next.js project root).
 pub const WORKSPACE_DIR: &str = "workspace";
 /// App-scoped state directory inside the workspace (`.lingxi`).
 pub const APP_STATE_DIR: &str = branding::DOT_DIR;
 /// App-scoped metadata mirror inside `workspace/.lingxi/`.
 pub const APP_METADATA_FILE: &str = "app.json";
-/// Design draft inside `workspace/.lingxi/`.
-pub const DESIGN_SPEC_FILE: &str = "design-spec.json";
 
 /// The whole `apps/index.json` document.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,12 +153,6 @@ pub fn runtime_rel(app_id: &str) -> PathBuf {
     app_dir_rel(app_id).join(RUNTIME_FILE)
 }
 
-/// Root-relative path of `apps/<id>/interactions.json`.
-#[must_use]
-pub fn interactions_rel(app_id: &str) -> PathBuf {
-    app_dir_rel(app_id).join(INTERACTIONS_FILE)
-}
-
 /// Root-relative path of `apps/<id>/workspace`.
 #[must_use]
 pub fn workspace_dir_rel(app_id: &str) -> PathBuf {
@@ -194,14 +172,6 @@ pub fn metadata_rel(app_id: &str) -> PathBuf {
     workspace_dir_rel(app_id)
         .join(APP_STATE_DIR)
         .join(APP_METADATA_FILE)
-}
-
-/// Root-relative path of `apps/<id>/workspace/.lingxi/design-spec.json`.
-#[must_use]
-pub fn design_spec_rel(app_id: &str) -> PathBuf {
-    workspace_dir_rel(app_id)
-        .join(APP_STATE_DIR)
-        .join(DESIGN_SPEC_FILE)
 }
 
 /// Serialize a document the way the repo persists native-feature JSON:
@@ -296,54 +266,18 @@ fn ensure_schema_version(rel: &Path, found: u32) -> Result<(), AppError> {
     }
 }
 
-// `DesignValue::Deferred` ("let the model decide") is now a legitimate value
-// in TWO of the three places `AppDesignDraft` can carry a `DesignValue`:
-// `fields` (a real answer) and `pending_suggestion`'s patch ops (an
-// LLM-proposed patch may itself propose deferring a field) — both write
-// through `service::validate_design_value`, which now accepts it (see that
-// function's doc). This is what lets `engine-mobile`'s
-// `lower_design_value`/`raise_design_value` map it to/from the wire
-// `DesignValueDto::Deferred` (client-protocol) instead of treating it as
-// unreachable.
-//
-// The THIRD location — `questionnaire[*].fields[*].default_value` — stays
-// gated. A field's own authored DEFAULT is not an answer; it is validated by
-// `validate_questionnaire`'s `AppDesignFieldType::accepts`, which has no arm
-// for `Deferred` (a *validated* questionnaire can never carry one there).
-// Nothing on this LOAD path calls `validate_questionnaire` yet, so a
-// hand-edited or newer-build document could still smuggle a `Deferred`
-// default past a bare `serde_json::from_str` — reject it here, the same way
-// every other per-app invariant in `load_all` fails loudly instead of
-// laundering bad data into memory. When a future task wires
-// `validate_questionnaire` into the load path itself, this check becomes
-// redundant with it (not wrong) — leave it as the defense-in-depth layer.
-fn ensure_no_deferred_design_values(draft_rel: &Path, draft: &AppDesignDraft) -> Result<(), AppError> {
-    let is_deferred = |value: &DesignValue| matches!(value, DesignValue::Deferred);
-    let has_deferred_default = draft.questionnaire.iter().any(|step| {
-        step.fields
-            .iter()
-            .any(|field| field.default_value.as_ref().is_some_and(is_deferred))
-    });
-    if has_deferred_default {
-        return Err(AppError::StorageCorrupt(format!(
-            "{}: a questionnaire field default value is deferred, which is never a legal \
-             default (only an answer)",
-            draft_rel.display()
-        )));
-    }
-    Ok(())
-}
-
 /// Load every app from disk. A missing index means an empty store; a corrupt
 /// index or per-app document fails with `storage_corrupt` rather than
 /// silently dropping apps.
 ///
 /// A store torn by a crash between the per-app batch and the index rewrite is
-/// detected here (mirror/index divergence, gate invariants — see the module
-/// doc) and repaired forward, and a runtime record stranded busy by a crash
-/// is reconciled (phase 1 has no process manager, so nothing can still be
-/// starting/running/stopping — see [`reconcile_runtime_at_load`]); both are
-/// persisted before returning.
+/// detected here (mirror/index divergence — see the module doc) and repaired
+/// forward, and a runtime record stranded busy by a crash is reconciled (no
+/// runtime process outlives the engine — see [`reconcile_runtime_at_load`]);
+/// both are persisted before returning.
+///
+/// Legacy pipeline documents (`interactions.json`, `design-spec.json`) are
+/// NOT read — stale files from old stores are simply ignored on disk.
 pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
     // The whole load — initial read, torn-commit repairs, and their index
     // rewrite — is one read-modify-write transaction under the advisory
@@ -409,12 +343,6 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         // per-app document is read, so a tampered value is rejected instead
         // of being laundered back into the index by a later repair rewrite.
         ensure_workspace_rel("apps/index.json", &record)?;
-        let draft_rel = design_spec_rel(&record.id);
-        let draft: AppDesignDraft = read_doc(root, &draft_rel)?;
-        ensure_schema_version(&draft_rel, draft.schema_version)?;
-        ensure_no_deferred_design_values(&draft_rel, &draft)?;
-
-        let interactions = load_interactions(root, &record.id)?;
 
         let runtime_rel = runtime_rel(&record.id);
         let runtime: AppRuntimeRecord = read_doc(root, &runtime_rel)?;
@@ -446,12 +374,7 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         // BEFORE repair may adopt (and re-persist) it.
         ensure_workspace_rel(&metadata_rel.display().to_string(), &mirror.app)?;
 
-        let mut app = AppState {
-            record,
-            draft,
-            interactions,
-            runtime,
-        };
+        let mut app = AppState { record, runtime };
         let repaired = repair_torn_commit(&mut app, &mirror.app);
         if repaired {
             tracing::warn!(
@@ -492,102 +415,8 @@ fn ensure_workspace_rel(source: &str, record: &AppRecord) -> Result<(), AppError
     }
 }
 
-/// Read one app's `interactions.json` straight from disk (strict parse,
-/// schema check, and [`validate_interactions_invariants`]). Besides
-/// [`load_all`], the service's redelivery path re-reads the document through
-/// this to MERGE with memory before persisting, so a continuation that
-/// reached disk but was rolled back out of memory is never clobbered.
-pub fn load_interactions(root: &Path, app_id: &str) -> Result<AppInteractions, AppError> {
-    let rel = interactions_rel(app_id);
-    let interactions: AppInteractions = read_doc(root, &rel)?;
-    ensure_schema_version(&rel, interactions.schema_version)?;
-    validate_interactions_invariants(&rel, app_id, &interactions)?;
-    Ok(interactions)
-}
-
-/// Pin the continuation-counter invariants that [`crate::state`]'s mint logic
-/// guarantees (a fresh store starts at `next_seq` 1; seqs are minted at
-/// `next_seq` which then increments; a delivery removes the entry and
-/// advances `last_delivered_seq` in the same atomic write): every undelivered
-/// seq lies strictly between `last_delivered_seq` (exclusive) and `next_seq`
-/// (exclusive), seqs are strictly increasing in queue order (hence unique),
-/// `next_seq` is never 0 and always exceeds `last_delivered_seq` — the
-/// validator rejects NOW any state whose NEXT mint would violate these rules
-/// (finding 5: validate-now instead of accept-then-brick; a persisted
-/// `next_seq` of 0 would mint seq 0 and only the FOLLOWING load would
-/// refuse the store). Every embedded `app_id` (pending gate, undelivered
-/// entries) must name the owning app (finding 6). A violating document did
-/// not come from a legal writer and fails typed `storage_corrupt` ("violates
-/// invariants") instead of feeding garbage into torn-commit repair or
-/// redelivery.
-fn validate_interactions_invariants(
-    rel: &Path,
-    app_id: &str,
-    interactions: &AppInteractions,
-) -> Result<(), AppError> {
-    let corrupt = |detail: String| {
-        AppError::StorageCorrupt(format!(
-            "{} violates continuation invariants: {detail}",
-            rel.display()
-        ))
-    };
-    if interactions.next_seq == 0 {
-        return Err(corrupt(
-            "nextSeq 0 is below the mint floor (a fresh store starts at 1); the next \
-             mint would persist seq 0 and brick the following load"
-                .to_string(),
-        ));
-    }
-    if interactions.next_seq <= interactions.last_delivered_seq {
-        return Err(corrupt(format!(
-            "nextSeq {} does not exceed lastDeliveredSeq {} (the next mint would land \
-             at or below the delivered bound)",
-            interactions.next_seq, interactions.last_delivered_seq
-        )));
-    }
-    if let Some(pending) = &interactions.pending {
-        if pending.app_id != app_id {
-            return Err(corrupt(format!(
-                "pending gate claims app id {:?} but belongs to app {app_id:?}",
-                pending.app_id
-            )));
-        }
-    }
-    let mut previous: Option<u64> = None;
-    for continuation in &interactions.undelivered {
-        if continuation.app_id != app_id {
-            return Err(corrupt(format!(
-                "undelivered seq {} claims app id {:?} but belongs to app {app_id:?}",
-                continuation.seq, continuation.app_id
-            )));
-        }
-        if continuation.seq <= interactions.last_delivered_seq {
-            return Err(corrupt(format!(
-                "undelivered seq {} is not above lastDeliveredSeq {}",
-                continuation.seq, interactions.last_delivered_seq
-            )));
-        }
-        if continuation.seq >= interactions.next_seq {
-            return Err(corrupt(format!(
-                "undelivered seq {} was never minted (nextSeq {})",
-                continuation.seq, interactions.next_seq
-            )));
-        }
-        if let Some(previous) = previous {
-            if continuation.seq <= previous {
-                return Err(corrupt(format!(
-                    "undelivered seqs are not strictly increasing ({previous} then {})",
-                    continuation.seq
-                )));
-            }
-        }
-        previous = Some(continuation.seq);
-    }
-    Ok(())
-}
-
-/// Reconcile a runtime record stranded busy by a crash. Phase 1 has no
-/// process manager, so at load time nothing can genuinely still be
+/// Reconcile a runtime record stranded busy by a crash. No runtime process
+/// outlives the engine, so at load time nothing can genuinely still be
 /// starting/running/stopping: `stopping` settles to `stopped` (the shutdown
 /// it was waiting for cannot outlive the process), and `starting`/`running`
 /// become `failed` with a `last_error` explaining the reconciliation —
@@ -595,12 +424,12 @@ fn validate_interactions_invariants(
 /// `delete_app` would refuse with `runtime_busy` with no path out. Returns
 /// `true` when the record changed (the caller persists).
 ///
-/// ⚠️ PHASE-4 GATE (the twin of the warning on
+/// ⚠️ GATE (the twin of the warning on
 /// `AppService::update_runtime_record`): this unconditional stranding policy
-/// is CORRECT ONLY while no runtime process can outlive the engine. The
-/// phase that introduces a live process manager MUST replace it with a
-/// liveness-aware reconciliation, or loads will stamp genuinely running dev
-/// servers `failed` and un-guard deletion.
+/// is CORRECT ONLY while no runtime process can outlive the engine. A future
+/// live process manager MUST replace it with a liveness-aware
+/// reconciliation, or loads will stamp genuinely running dev servers
+/// `failed` and un-guard deletion.
 fn reconcile_runtime_at_load(app: &mut AppState) -> bool {
     let reconciled_state = match app.runtime.state {
         AppRuntimeState::Stopping => AppRuntimeState::Stopped,
@@ -621,132 +450,19 @@ fn reconcile_runtime_at_load(app: &mut AppState) -> bool {
 }
 
 /// Reconcile one loaded app against a crash torn between the per-app batch
-/// and the index rewrite (or inside the batch). Returns `true` when anything
-/// was repaired (the caller persists).
+/// and the index rewrite. Returns `true` when anything was repaired (the
+/// caller persists).
 ///
-/// Layer 1 — whole-batch tear: the `app.json` mirror is written LAST in
+/// Whole-batch tear: the `app.json` mirror is written LAST in
 /// [`save_app_files`] and BEFORE the index, so a mirror/index divergence
 /// proves the batch committed while the index write was lost. The mirror
-/// record (same batch as `interactions.json` / `design-spec.json`) wins.
-///
-/// Layer 2 — mid-batch tear (`interactions.json` committed, mirror not):
-/// `interactions.json` is authoritative for the gate. A gate-consuming
-/// transition always clears `pending` AND queues its continuation in the same
-/// atomic write, so:
-/// - an awaiting state with `pending: None` rolls forward along the newest
-///   undelivered continuation (`design_confirmed` → generating,
-///   `design_cancelled` → `collecting_spec`, `preview_confirmed` → ready,
-///   `revision_requested` → revising); with no evidence (hand-tampering) the
-///   gate is re-armed with a fresh pending interaction so it stays
-///   satisfiable;
-/// - a gate-opening transition (`open_designer` / `validation_passed`) that
-///   committed `pending` but not the state rolls the state forward to its
-///   awaiting state;
-/// - `ready` with a newest undelivered `revision_requested` is a torn
-///   `request_revision` and rolls forward to revising.
+/// record wins.
 fn repair_torn_commit(app: &mut AppState, mirror: &AppRecord) -> bool {
-    let mut repaired = false;
     if *mirror != app.record {
         app.record = mirror.clone();
-        repaired = true;
-    }
-    if resolve_gate_evidence(app) {
-        repaired = true;
-    }
-    repaired
-}
-
-/// THE gate-vs-evidence rule table, defined exactly once (finding 3b):
-/// reconcile `app.record.workflow_state` against the gate/continuation
-/// evidence in `app.interactions`, mutating the aggregate in place. Shared by
-/// [`repair_torn_commit`] (load-time torn-commit repair) and the service's
-/// redelivery merge (which, after adopting disk's proof that an armed gate
-/// was consumed, must resolve the resulting state by the SAME rules — never
-/// a duplicated table). Returns `true` when anything was repaired (state
-/// rolled forward or a gate re-armed); the caller persists.
-pub(crate) fn resolve_gate_evidence(app: &mut AppState) -> bool {
-    // Evidence: the newest continuation that is genuinely undelivered (a
-    // stale entry from a crash between deliver and dequeue is not evidence).
-    let newest_undelivered = app
-        .interactions
-        .undelivered
-        .iter()
-        .filter(|c| c.seq > app.interactions.last_delivered_seq)
-        .max_by_key(|c| c.seq)
-        .map(|c| c.kind);
-    let pending_kind = app.interactions.pending.as_ref().map(|p| p.kind);
-
-    // Both `newest_undelivered` matches below are deliberately exhaustive
-    // over `AppContinuationKind` with NO catch-all arm: adding a kind must
-    // force a compile-time decision about what it proves at each gate — a
-    // silent `_` would actively mis-repair (re-arm over real evidence, or
-    // worse) for the new kind.
-    let repaired_state = match (app.record.workflow_state, pending_kind) {
-        (AppWorkflowState::AwaitingSpecConfirmation, None) => Some(match newest_undelivered {
-            Some(AppContinuationKind::DesignConfirmed) => AppWorkflowState::Generating,
-            Some(AppContinuationKind::DesignCancelled) => AppWorkflowState::CollectingSpec,
-            // Preview-stage evidence says nothing about the DESIGNER gate;
-            // with no usable evidence (hand-tampering) the gate is re-armed.
-            Some(
-                AppContinuationKind::PreviewConfirmed | AppContinuationKind::RevisionRequested,
-            )
-            | None => {
-                rearm_gate(app, AppInteractionKind::Designer);
-                AppWorkflowState::AwaitingSpecConfirmation
-            }
-        }),
-        (AppWorkflowState::AwaitingPreviewConfirmation, None) => Some(match newest_undelivered {
-            Some(AppContinuationKind::PreviewConfirmed) => AppWorkflowState::Ready,
-            Some(AppContinuationKind::RevisionRequested) => AppWorkflowState::Revising,
-            // Designer-stage evidence says nothing about the PREVIEW gate;
-            // with no usable evidence (hand-tampering) the gate is re-armed.
-            Some(AppContinuationKind::DesignConfirmed | AppContinuationKind::DesignCancelled)
-            | None => {
-                rearm_gate(app, AppInteractionKind::Preview);
-                AppWorkflowState::AwaitingPreviewConfirmation
-            }
-        }),
-        // `open_designer` accepts GenerationFailed as well as CollectingSpec
-        // (state.rs), so a crash between the interactions.json and the mirror
-        // writes can leave either source state with the gate already armed.
-        // `plan_ready` (Task 3) arms the SAME Designer gate from `Planning` —
-        // a crash in that same write window must repair forward here too, or
-        // a torn `plan_ready` wedges `confirm_design` behind a source state
-        // this table never resolves.
-        (
-            AppWorkflowState::CollectingSpec
-            | AppWorkflowState::GenerationFailed
-            | AppWorkflowState::Planning,
-            Some(AppInteractionKind::Designer),
-        ) => Some(AppWorkflowState::AwaitingSpecConfirmation),
-        (AppWorkflowState::Validating, Some(AppInteractionKind::Preview)) => {
-            Some(AppWorkflowState::AwaitingPreviewConfirmation)
-        }
-        (AppWorkflowState::Ready, None)
-            if newest_undelivered == Some(AppContinuationKind::RevisionRequested) =>
-        {
-            Some(AppWorkflowState::Revising)
-        }
-        _ => None,
-    };
-    if let Some(state) = repaired_state {
-        app.record.workflow_state = state;
         return true;
     }
     false
-}
-
-/// Re-arm an unsatisfiable gate whose consumption left no evidence (only
-/// reachable through hand-tampering): a fresh pending interaction of `kind`
-/// at the current revision, timestamped with the record's last mutation.
-fn rearm_gate(app: &mut AppState, kind: AppInteractionKind) {
-    app.interactions.pending = Some(AppInteractionRequest {
-        interaction_id: ids::generate_interaction_id(),
-        app_id: app.record.id.clone(),
-        kind,
-        revision: app.draft.revision,
-        created_at_ms: app.record.updated_at_ms,
-    });
 }
 
 /// Atomically replace `apps/index.json` with `records` — RAW, whole-index
@@ -819,10 +535,6 @@ pub fn save_index_preserving(
 /// One per-app persisted document, as a step of [`APP_DOC_WRITE_ORDER`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppDocWriteStep {
-    /// `workspace/.lingxi/design-spec.json` ([`save_draft`]).
-    DesignSpec,
-    /// `apps/<id>/interactions.json` ([`save_interactions`]).
-    Interactions,
     /// `apps/<id>/runtime.json` ([`save_runtime`]).
     Runtime,
     /// `workspace/.lingxi/app.json` record mirror — always LAST;
@@ -832,16 +544,12 @@ pub enum AppDocWriteStep {
 
 /// THE canonical per-app write order, defined exactly once.
 /// [`save_app_files`] executes this sequence in full; partial writers (the
-/// service's changed-docs mutation path, crash tests replaying a mid-batch
-/// tear) must pass subsequences of it to [`save_app_files_steps`] — the
-/// repair contract in [`load_all`] depends on the ORDER of the writes that
-/// happen, not on every document being rewritten.
-pub const APP_DOC_WRITE_ORDER: [AppDocWriteStep; 4] = [
-    AppDocWriteStep::DesignSpec,
-    AppDocWriteStep::Interactions,
-    AppDocWriteStep::Runtime,
-    AppDocWriteStep::MetadataMirror,
-];
+/// service's changed-docs mutation path) must pass subsequences of it to
+/// [`save_app_files_steps`] — the repair contract in [`load_all`] depends on
+/// the ORDER of the writes that happen, not on every document being
+/// rewritten.
+pub const APP_DOC_WRITE_ORDER: [AppDocWriteStep; 2] =
+    [AppDocWriteStep::Runtime, AppDocWriteStep::MetadataMirror];
 
 /// The true prefix of [`APP_DOC_WRITE_ORDER`] up to and including `last` —
 /// what a crash inside [`save_app_files`] leaves behind (a mid-batch crash
@@ -883,12 +591,10 @@ impl AppBatchWriteFailure {
 /// Atomically persist the given per-app documents for `app`, in the given
 /// order. [`save_app_files`] passes the full [`APP_DOC_WRITE_ORDER`]; the
 /// service's mutation path passes the subsequence of steps whose documents
-/// actually changed; crash tests pass [`write_order_prefix_through`] prefixes
-/// to model a mid-batch crash. Does NOT touch the index — callers write the
-/// index last (the creation commit point; for mutations a lost index write
-/// is repaired forward on load, see the module doc). On failure the error
-/// reports WHICH prefix of `steps` already landed (see
-/// [`AppBatchWriteFailure`]).
+/// actually changed. Does NOT touch the index — callers write the index last
+/// (the creation commit point; for mutations a lost index write is repaired
+/// forward on load, see the module doc). On failure the error reports WHICH
+/// prefix of `steps` already landed (see [`AppBatchWriteFailure`]).
 pub fn save_app_files_steps(
     root: &Path,
     app: &AppState,
@@ -897,8 +603,6 @@ pub fn save_app_files_steps(
     let id = &app.record.id;
     for (written, step) in steps.iter().enumerate() {
         let result = match step {
-            AppDocWriteStep::DesignSpec => save_draft(root, id, &app.draft),
-            AppDocWriteStep::Interactions => save_interactions(root, id, &app.interactions),
             AppDocWriteStep::Runtime => save_runtime(root, id, &app.runtime),
             AppDocWriteStep::MetadataMirror => {
                 let mirror = AppMetadataFile {
@@ -916,23 +620,9 @@ pub fn save_app_files_steps(
 }
 
 /// Atomically persist every per-app document in [`APP_DOC_WRITE_ORDER`]
-/// (draft, interactions, runtime, metadata mirror — the mirror LAST).
+/// (runtime, then the metadata mirror — the mirror LAST).
 pub fn save_app_files(root: &Path, app: &AppState) -> Result<(), AppError> {
     save_app_files_steps(root, app, &APP_DOC_WRITE_ORDER).map_err(AppBatchWriteFailure::into_error)
-}
-
-/// Atomically persist `workspace/.lingxi/design-spec.json`.
-pub fn save_draft(root: &Path, app_id: &str, draft: &AppDesignDraft) -> Result<(), AppError> {
-    write_doc(root, &design_spec_rel(app_id), draft)
-}
-
-/// Atomically persist `apps/<id>/interactions.json`.
-pub fn save_interactions(
-    root: &Path,
-    app_id: &str,
-    interactions: &AppInteractions,
-) -> Result<(), AppError> {
-    write_doc(root, &interactions_rel(app_id), interactions)
 }
 
 /// Atomically persist `apps/<id>/runtime.json`.
@@ -1103,53 +793,16 @@ fn sweep_trash(root: &Path) {
 mod tests {
     use super::*;
     use crate::error::AppErrorCode;
-    use crate::questionnaire::{
-        AppDesignField, AppDesignFieldOption, AppDesignFieldType, AppDesignStep,
-    };
+    use crate::types::AppWorkflowState;
 
-    fn one_step() -> Vec<AppDesignStep> {
-        vec![AppDesignStep {
-            id: "basics".into(),
-            order: 0,
-            title: "basics".into(),
-            description: None,
-            fields: vec![AppDesignField {
-                id: "tone".into(),
-                label: "tone".into(),
-                description: None,
-                field_type: AppDesignFieldType::SingleChoice,
-                required: false,
-                allows_custom: false,
-                allows_defer: false,
-                default_value: None,
-                options: vec![AppDesignFieldOption {
-                    value: "a".into(),
-                    label: "A".into(),
-                }],
-            }],
-        }]
-    }
-
-    /// A fresh app fast-forwarded straight to `collecting_spec` — none of
-    /// these storage goldens exercise questionnaire authoring itself, they
-    /// pin document persistence/load-repair, so the fixture just needs to
-    /// clear `open_designer`'s `collecting_spec | generation_failed` gate.
     fn new_app(id: &str) -> AppState {
-        let mut app = AppState::create(
+        AppState::create(
             id.into(),
             format!("App {id}"),
             "a test app".into(),
             Some("conv-9".into()),
             1_700_000_000_000,
-        );
-        app.questionnaire_ready(one_step(), None, 1, 1_700_000_000_000)
-            .expect("fixture questionnaire is valid");
-        // `llm_round` is `#[serde(skip)]` (process-lifetime only, see its
-        // doc) — a disk round trip always comes back `0`. Zero it here too
-        // so an in-memory fixture compares equal to its own reload; these
-        // storage goldens pin document persistence, not this field.
-        app.record.llm_round = 0;
-        app
+        )
     }
 
     fn save_full(root: &Path, apps: &[AppState]) {
@@ -1164,7 +817,22 @@ mod tests {
     fn round_trips_full_store() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = new_app("aaaa1111");
-        app.open_designer("int-1".into(), 5).unwrap();
+        app.set_runtime(
+            AppRuntimeState::Starting,
+            Some(3010),
+            Some(9),
+            None,
+            1_700_000_000_001,
+        )
+        .unwrap();
+        app.set_runtime(
+            AppRuntimeState::Failed,
+            None,
+            None,
+            Some("boot failed".into()),
+            1_700_000_000_002,
+        )
+        .unwrap();
         let apps = vec![app, new_app("bbbb2222")];
         save_full(dir.path(), &apps);
 
@@ -1173,20 +841,90 @@ mod tests {
         // Files live where the spec says.
         assert!(dir.path().join("apps/index.json").is_file());
         assert!(dir.path().join("apps/aaaa1111/runtime.json").is_file());
-        assert!(dir.path().join("apps/aaaa1111/interactions.json").is_file());
         assert!(dir
             .path()
             .join("apps/aaaa1111/workspace/.lingxi/app.json")
-            .is_file());
-        assert!(dir
-            .path()
-            .join("apps/aaaa1111/workspace/.lingxi/design-spec.json")
             .is_file());
         // Persisted documents are pretty-printed with a trailing newline.
         let body = std::fs::read_to_string(dir.path().join("apps/index.json")).unwrap();
         assert!(body.starts_with("{\n"));
         assert!(body.ends_with("}\n"));
         assert!(body.contains("\"schemaVersion\": 1"));
+        assert!(body.contains("\"workflowState\": \"draft\""));
+    }
+
+    /// The mirror-wins half of torn-commit repair: a crash after the per-app
+    /// batch but before the index rewrite leaves the mirror AHEAD of the
+    /// index — the mirror record supersedes the index record and the repair
+    /// is persisted (both index and mirror agree on the next load).
+    #[test]
+    fn diverged_mirror_supersedes_the_index_and_the_repair_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = new_app("cccc3333");
+        save_full(dir.path(), std::slice::from_ref(&app));
+        // The mutation (mark_ready) committed its batch (runtime + mirror)…
+        app.record.workflow_state = AppWorkflowState::Ready;
+        app.record.updated_at_ms = 1_700_000_000_500;
+        save_app_files(dir.path(), &app).unwrap();
+        // …but the index rewrite was lost to a crash: index still says draft.
+
+        let loaded = load_all(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].record.workflow_state,
+            AppWorkflowState::Ready,
+            "the mirror (written after the index) wins"
+        );
+        assert_eq!(loaded[0].record.updated_at_ms, 1_700_000_000_500);
+        // The repair was persisted: the index now agrees.
+        let body = std::fs::read_to_string(dir.path().join("apps/index.json")).unwrap();
+        assert!(body.contains("\"ready\""), "{body}");
+        // A second load needs no repair and sees the same state.
+        assert_eq!(load_all(dir.path()).unwrap(), loaded);
+    }
+
+    /// The on-disk legacy migration: every pipeline-era `workflowState`
+    /// deserializes to `draft` via the serde aliases, and legacy pipeline
+    /// documents sitting in the app dir are ignored (not read, not deleted).
+    #[test]
+    fn legacy_pipeline_states_load_as_draft_and_stale_docs_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = new_app("dddd4444");
+        save_full(dir.path(), std::slice::from_ref(&app));
+        // Rewrite index + mirror with a legacy mid-pipeline state.
+        for rel in ["apps/index.json", "apps/dddd4444/workspace/.lingxi/app.json"] {
+            let path = dir.path().join(rel);
+            let body = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(
+                &path,
+                body.replace("\"draft\"", "\"awaiting_preview_confirmation\""),
+            )
+            .unwrap();
+        }
+        // Plant stale legacy pipeline documents.
+        let stale_interactions = dir.path().join("apps/dddd4444/interactions.json");
+        std::fs::write(&stale_interactions, "{\"schemaVersion\":1,\"nextSeq\":1}").unwrap();
+        let stale_spec = dir
+            .path()
+            .join("apps/dddd4444/workspace/.lingxi/design-spec.json");
+        std::fs::write(&stale_spec, "{\"schemaVersion\":1,\"revision\":3}").unwrap();
+
+        let loaded = load_all(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].record.workflow_state,
+            AppWorkflowState::Draft,
+            "a mid-pipeline legacy state can only mean 'not ready yet'"
+        );
+        // The stale documents were left alone.
+        assert_eq!(
+            std::fs::read_to_string(&stale_interactions).unwrap(),
+            "{\"schemaVersion\":1,\"nextSeq\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stale_spec).unwrap(),
+            "{\"schemaVersion\":1,\"revision\":3}"
+        );
     }
 
     #[test]
@@ -1209,15 +947,6 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
     }
 
-    // The brief's Step-1 pseudocode drives this through a
-    // `crate::test_support::memory_fs()` / `load_index` seam that does not
-    // exist in this codebase (there is no injected-fs test double here, and
-    // the loader is `load_all(root: &Path)`, not `load_index`). Adapted to
-    // the ACTUAL harness the rest of this module already uses (a real
-    // tempdir + `std::fs::write` + `load_all`), which is the same pattern
-    // `corrupt_index_is_storage_corrupt_not_silent_reset` above uses — the
-    // behavior under test (a readable error instead of a raw serde path) is
-    // unchanged.
     #[test]
     fn a_template_era_index_reports_a_readable_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -1261,7 +990,7 @@ mod tests {
                 "brief": "an evil app",
                 "createdAtMs": 1,
                 "updatedAtMs": 1,
-                "workflowState": "collecting_spec",
+                "workflowState": "draft",
                 "workspaceRel": "apps/../../escape/workspace"
             }]
         });
@@ -1293,7 +1022,7 @@ mod tests {
                     "brief": "a sneaky app",
                     "createdAtMs": 1,
                     "updatedAtMs": 1,
-                    "workflowState": "collecting_spec",
+                    "workflowState": "draft",
                     "workspaceRel": hostile
                 }]
             });
@@ -1327,82 +1056,10 @@ mod tests {
         assert!(err.to_string().contains("workspaceRel"), "{err}");
     }
 
-    /// Finding 5: a persisted `nextSeq` of 0 (or one at/below
-    /// `lastDeliveredSeq`) would mint an invalid seq and brick the FOLLOWING
-    /// load — the validator rejects it NOW instead of accept-then-brick.
-    #[test]
-    fn next_seq_zero_is_storage_corrupt_at_load_not_after_the_next_mint() {
-        // The finding's exact tamper: a fresh, otherwise-legal store whose
-        // nextSeq was reset to 0.
-        let dir = tempfile::tempdir().unwrap();
-        let app = new_app("rrrr8888");
-        save_full(dir.path(), std::slice::from_ref(&app));
-        let mut interactions = app.interactions.clone();
-        interactions.next_seq = 0;
-        save_interactions(dir.path(), "rrrr8888", &interactions).unwrap();
-        let err = load_all(dir.path()).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-        assert!(
-            err.to_string().contains("violates continuation invariants"),
-            "{err}"
-        );
-        assert!(err.to_string().contains("mint floor"), "{err}");
-
-        // And the equal-counters variant: the next mint would land AT the
-        // delivered bound.
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = new_app("rrrr8888");
-        app.open_designer("int-1".into(), 2).unwrap();
-        app.cancel_design(3).unwrap();
-        app.interactions.undelivered.clear();
-        app.interactions.last_delivered_seq = 1; // delivered
-        save_full(dir.path(), std::slice::from_ref(&app));
-        let mut interactions = app.interactions.clone();
-        interactions.next_seq = 1; // == lastDeliveredSeq
-        save_interactions(dir.path(), "rrrr8888", &interactions).unwrap();
-        let err = load_all(dir.path()).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-        assert!(err.to_string().contains("does not exceed"), "{err}");
-    }
-
-    /// Finding 6: every embedded `app_id` — the pending gate's, each
-    /// undelivered continuation's, and the runtime record's — must name the
+    /// Finding 6: the runtime record's embedded `app_id` must name the
     /// owning app; a mismatch is `storage_corrupt` like the mirror id.
     #[test]
     fn embedded_app_id_mismatches_are_storage_corrupt() {
-        // interactions.pending.app_id
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = new_app("ssss1111");
-        app.open_designer("int-1".into(), 2).unwrap();
-        save_full(dir.path(), std::slice::from_ref(&app));
-        let mut interactions = app.interactions.clone();
-        interactions.pending.as_mut().unwrap().app_id = "tttt2222".into();
-        save_interactions(dir.path(), "ssss1111", &interactions).unwrap();
-        let err = load_all(dir.path()).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "pending: {err}");
-        assert!(
-            err.to_string().contains("pending gate claims app id"),
-            "{err}"
-        );
-
-        // undelivered[*].app_id
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = new_app("ssss1111");
-        app.open_designer("int-1".into(), 2).unwrap();
-        app.cancel_design(3).unwrap();
-        save_full(dir.path(), std::slice::from_ref(&app));
-        let mut interactions = app.interactions.clone();
-        interactions.undelivered[0].app_id = "tttt2222".into();
-        save_interactions(dir.path(), "ssss1111", &interactions).unwrap();
-        let err = load_all(dir.path()).unwrap_err();
-        assert_eq!(
-            err.code(),
-            AppErrorCode::StorageCorrupt,
-            "undelivered: {err}"
-        );
-        assert!(err.to_string().contains("claims app id"), "{err}");
-
-        // runtime.app_id
         let dir = tempfile::tempdir().unwrap();
         let app = new_app("ssss1111");
         save_full(dir.path(), std::slice::from_ref(&app));
@@ -1550,7 +1207,7 @@ mod tests {
     #[test]
     fn listed_app_with_missing_document_is_storage_corrupt() {
         for missing in [
-            "apps/cccc3333/interactions.json",
+            "apps/cccc3333/runtime.json",
             "apps/cccc3333/workspace/.lingxi/app.json",
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1568,8 +1225,6 @@ mod tests {
     #[test]
     fn unsupported_per_app_doc_schema_version_is_storage_corrupt() {
         for doc in [
-            "apps/iiii9999/workspace/.lingxi/design-spec.json",
-            "apps/iiii9999/interactions.json",
             "apps/iiii9999/runtime.json",
             "apps/iiii9999/workspace/.lingxi/app.json",
         ] {
@@ -1594,169 +1249,6 @@ mod tests {
                 "{doc}: {err}"
             );
         }
-    }
-
-    /// `Deferred` ("let the model decide") is now a legitimate persisted
-    /// `fields` value (Task 2 made it a real draft answer; the sibling
-    /// write-side gate `service::validate_design_value` now accepts it too —
-    /// see that function's doc). A live app's draft is saved normally with a
-    /// `Deferred` field, then the store is reloaded from disk: this must
-    /// round-trip cleanly, not fail `storage_corrupt` the way it used to
-    /// before this gate was lifted.
-    #[test]
-    fn a_deferred_field_persists_and_reloads_cleanly() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = new_app("kkkk1111");
-        app.draft
-            .fields
-            .insert("tone".to_string(), DesignValue::Deferred);
-        save_full(dir.path(), &[app]);
-
-        let reloaded = load_all(dir.path()).expect("a deferred field must reload cleanly");
-        let reloaded_app = reloaded
-            .iter()
-            .find(|state| state.record.id == "kkkk1111")
-            .expect("app present after reload");
-        assert_eq!(
-            reloaded_app.draft.fields.get("tone"),
-            Some(&DesignValue::Deferred),
-            "the deferred answer must survive the round trip byte-for-byte"
-        );
-    }
-
-    /// Same legalization, reached through a pending suggestion's patch
-    /// instead of a live field: an LLM-proposed patch may itself propose
-    /// deferring a field. Drives a REAL round trip (`store_suggestion` ->
-    /// `save_full` -> `load_all`), not just a direct call to
-    /// `ensure_no_deferred_design_values` — that function does not inspect
-    /// `pending_suggestion` at all (only `questionnaire[*].fields[*].default_value`
-    /// remains gated; see its doc), so a direct call would pass for a reason
-    /// unrelated to this test's stated subject and would keep passing even if
-    /// pending-suggestion handling were deleted outright. Going through the
-    /// real store is what actually proves a saved pending suggestion carrying
-    /// a `Deferred` op reloads intact (parity review finding).
-    #[test]
-    fn a_deferred_value_in_a_pending_suggestion_patch_persists_and_reloads_cleanly() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = new_app("kkkk1111");
-        app.store_suggestion(
-            "sugg-1".into(),
-            crate::types::AppDesignPatch {
-                ops: vec![AppDesignPatchOp::Set {
-                    field_id: "tone".into(),
-                    value: DesignValue::Deferred,
-                }],
-                note: None,
-            },
-            1_700_000_000_000,
-        )
-        .expect("store_suggestion succeeds from collecting_spec");
-        save_full(dir.path(), &[app]);
-
-        let reloaded = load_all(dir.path())
-            .expect("a deferred value in a pending suggestion must reload cleanly");
-        let reloaded_app = reloaded
-            .iter()
-            .find(|state| state.record.id == "kkkk1111")
-            .expect("app present after reload");
-        let suggestion = reloaded_app
-            .draft
-            .pending_suggestion
-            .as_ref()
-            .expect("the pending suggestion must survive the round trip");
-        assert_eq!(
-            suggestion.patch.ops,
-            vec![AppDesignPatchOp::Set {
-                field_id: "tone".into(),
-                value: DesignValue::Deferred,
-            }],
-            "the deferred op must survive the round trip byte-for-byte"
-        );
-    }
-
-    /// The THIRD `DesignValue`-bearing location `AppDesignDraft` grew in Task
-    /// 2 — a questionnaire field's `default_value` — is covered by the same
-    /// guard, not just `fields` and the pending suggestion.
-    #[test]
-    fn a_deferred_questionnaire_default_value_is_storage_corrupt_at_load() {
-        let draft = AppDesignDraft {
-            schema_version: APPS_SCHEMA_VERSION,
-            revision: 0,
-            questionnaire: vec![crate::questionnaire::AppDesignStep {
-                id: "basics".into(),
-                order: 0,
-                title: "Basics".into(),
-                description: None,
-                fields: vec![crate::questionnaire::AppDesignField {
-                    id: "tone".into(),
-                    label: "Tone".into(),
-                    description: None,
-                    field_type: crate::questionnaire::AppDesignFieldType::ShortText,
-                    required: false,
-                    allows_custom: false,
-                    allows_defer: true,
-                    default_value: Some(DesignValue::Deferred),
-                    options: Vec::new(),
-                }],
-            }],
-            fields: std::collections::BTreeMap::new(),
-            plan: None,
-            plan_for_revision: None,
-            pending_suggestion: None,
-            confirmed_revision: None,
-        };
-        let err =
-            ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
-        assert!(err.to_string().contains("questionnaire"), "{err}");
-    }
-
-    /// A draft with no `Deferred` value anywhere (the common case, including
-    /// an empty `fields` map and no pending suggestion) is unaffected.
-    ///
-    /// The questionnaire carries a REAL step with a POPULATED, legal
-    /// non-`Deferred` `default_value` — not an empty `questionnaire: Vec::new()`
-    /// — so this is honest coverage of the new third arm
-    /// (`ensure_no_deferred_design_values`'s questionnaire check), not a
-    /// vacuous pass: a guard that rejected every populated `default_value`
-    /// regardless of its variant (e.g. `is_some()` instead of
-    /// `is_some_and(is_deferred)`) would still pass a test whose
-    /// `questionnaire` is empty, and review flagged exactly that. Verified by
-    /// hand: mutating the real `is_some_and(is_deferred)` to `is_some()` in
-    /// `ensure_no_deferred_design_values` turns this test red (see
-    /// `task-2-report.md`'s mutation-check writeup for the exact output).
-    #[test]
-    fn a_draft_without_any_deferred_value_passes_the_guard() {
-        let draft = AppDesignDraft {
-            schema_version: APPS_SCHEMA_VERSION,
-            revision: 1,
-            questionnaire: vec![crate::questionnaire::AppDesignStep {
-                id: "basics".into(),
-                order: 0,
-                title: "Basics".into(),
-                description: None,
-                fields: vec![crate::questionnaire::AppDesignField {
-                    id: "tone".into(),
-                    label: "Tone".into(),
-                    description: None,
-                    field_type: crate::questionnaire::AppDesignFieldType::ShortText,
-                    required: false,
-                    allows_custom: false,
-                    allows_defer: true,
-                    default_value: Some(DesignValue::ShortText("playful".into())),
-                    options: Vec::new(),
-                }],
-            }],
-            fields: std::collections::BTreeMap::from([(
-                "tone".to_string(),
-                DesignValue::ShortText("playful".into()),
-            )]),
-            plan: None,
-            plan_for_revision: None,
-            pending_suggestion: None,
-            confirmed_revision: None,
-        };
-        ensure_no_deferred_design_values(Path::new("design-spec.json"), &draft).unwrap();
     }
 
     /// A document above [`MAX_DOC_BYTES`] is out of contract: it must fail
@@ -1788,7 +1280,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            dir.path().join("apps/dddd4444/interactions.json.tmp-1-1"),
+            dir.path().join("apps/dddd4444/runtime.json.tmp-1-1"),
             "{\"half\":",
         )
         .unwrap();
@@ -1841,16 +1333,13 @@ mod tests {
     /// typed and the store on disk stays loadable.
     #[test]
     fn oversized_write_fails_typed_and_leaves_the_store_loadable() {
-        use crate::types::DesignValue;
         let dir = tempfile::tempdir().unwrap();
         let mut app = new_app("kkkk1111");
         save_full(dir.path(), std::slice::from_ref(&app));
 
         let over = usize::try_from(MAX_DOC_BYTES).unwrap() + 1;
-        app.draft
-            .fields
-            .insert("huge".into(), DesignValue::LongText("x".repeat(over)));
-        let err = save_draft(dir.path(), "kkkk1111", &app.draft).unwrap_err();
+        app.runtime.last_error = Some("x".repeat(over));
+        let err = save_runtime(dir.path(), "kkkk1111", &app.runtime).unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         assert!(
             err.to_string().contains("durable size limit"),
@@ -1858,87 +1347,22 @@ mod tests {
         );
 
         // Disk was never touched: the store still loads cleanly and holds the
-        // committed (empty) draft.
+        // committed (error-free) runtime record.
         let loaded = load_all(dir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert!(loaded[0].draft.fields.is_empty());
-    }
-
-    /// Finding 6: every continuation-counter invariant violation class fails
-    /// `storage_corrupt` at load instead of feeding garbage into repair or
-    /// redelivery.
-    #[test]
-    fn interactions_counter_invariant_violations_are_storage_corrupt() {
-        type Tamper = Box<dyn Fn(&mut AppInteractions)>;
-        let base = || {
-            let mut app = new_app("llll2222");
-            app.open_designer("int-1".into(), 1_700_000_000_001)
-                .unwrap();
-            app.cancel_design(1_700_000_000_002).unwrap();
-            app
-        };
-        let cases: Vec<(&str, Tamper)> = vec![
-            (
-                "undelivered seq not above lastDeliveredSeq",
-                Box::new(|ints| ints.last_delivered_seq = 1),
-            ),
-            (
-                "undelivered seq at/above nextSeq (never minted)",
-                Box::new(|ints| ints.undelivered[0].seq = 9),
-            ),
-            (
-                "undelivered seqs not strictly increasing",
-                Box::new(|ints| {
-                    let duplicate = ints.undelivered[0].clone();
-                    ints.undelivered.push(duplicate);
-                    ints.next_seq = 3;
-                }),
-            ),
-            (
-                "nextSeq trails lastDeliveredSeq",
-                Box::new(|ints| {
-                    ints.undelivered.clear();
-                    ints.next_seq = 3;
-                    ints.last_delivered_seq = 5;
-                }),
-            ),
-        ];
-        for (label, tamper) in cases {
-            let dir = tempfile::tempdir().unwrap();
-            let app = base();
-            save_full(dir.path(), std::slice::from_ref(&app));
-            let mut interactions = app.interactions.clone();
-            tamper(&mut interactions);
-            save_interactions(dir.path(), "llll2222", &interactions).unwrap();
-            let err = load_all(dir.path()).unwrap_err();
-            assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{label}: {err}");
-            assert!(
-                err.to_string().contains("violates continuation invariants"),
-                "{label}: {err}"
-            );
-        }
-        // The untampered base state passes the validation.
-        let dir = tempfile::tempdir().unwrap();
-        let app = base();
-        save_full(dir.path(), std::slice::from_ref(&app));
-        assert_eq!(load_all(dir.path()).unwrap(), vec![app]);
+        assert!(loaded[0].runtime.last_error.is_none());
     }
 
     #[test]
-    fn write_order_is_the_canonical_four_step_sequence() {
+    fn write_order_is_the_canonical_two_step_sequence() {
         assert_eq!(
             APP_DOC_WRITE_ORDER,
-            [
-                AppDocWriteStep::DesignSpec,
-                AppDocWriteStep::Interactions,
-                AppDocWriteStep::Runtime,
-                AppDocWriteStep::MetadataMirror,
-            ],
+            [AppDocWriteStep::Runtime, AppDocWriteStep::MetadataMirror],
             "the canonical order is part of the repair contract"
         );
         assert_eq!(
-            write_order_prefix_through(AppDocWriteStep::Interactions),
-            &APP_DOC_WRITE_ORDER[..2]
+            write_order_prefix_through(AppDocWriteStep::Runtime),
+            &APP_DOC_WRITE_ORDER[..1]
         );
         assert_eq!(
             write_order_prefix_through(AppDocWriteStep::MetadataMirror),
@@ -1956,13 +1380,8 @@ mod tests {
         let before = new_app("mmmm3333");
         save_full(dir.path(), std::slice::from_ref(&before));
 
-        // A distinct after-state in every document (the draft revision is
-        // poked directly; only the serialized difference matters here).
+        // A distinct after-state in both documents.
         let mut after = before.clone();
-        after.draft.revision = 1;
-        after
-            .open_designer("int-order".into(), 1_700_000_000_100)
-            .unwrap();
         after
             .set_runtime(
                 AppRuntimeState::Starting,
@@ -1972,54 +1391,26 @@ mod tests {
                 1_700_000_000_101,
             )
             .unwrap();
+        after.record.workflow_state = AppWorkflowState::Ready;
+        after.record.updated_at_ms = 1_700_000_000_101;
 
-        let squat = |rel: PathBuf| {
-            let path = dir.path().join(&rel);
-            std::fs::remove_file(&path).unwrap();
-            std::os::unix::fs::symlink("/dev/null", &path).unwrap();
-        };
-        let unsquat = |rel: PathBuf, body: &str| {
-            let path = dir.path().join(&rel);
-            std::fs::remove_file(&path).unwrap();
-            std::fs::write(&path, body).unwrap();
-        };
-        let doc = |rel: PathBuf| std::fs::read_to_string(dir.path().join(rel)).unwrap();
-
-        // Fail at interactions.json: design-spec (earlier) must be updated,
-        // runtime + mirror (later) must not.
-        let interactions_before = doc(interactions_rel("mmmm3333"));
-        squat(interactions_rel("mmmm3333"));
+        // Fail at runtime.json (the FIRST step): the mirror (later) must not
+        // be written.
+        let runtime_path = dir.path().join(runtime_rel("mmmm3333"));
+        std::fs::remove_file(&runtime_path).unwrap();
+        std::os::unix::fs::symlink("/dev/null", &runtime_path).unwrap();
         save_app_files(dir.path(), &after).unwrap_err();
+        let mirror_body =
+            std::fs::read_to_string(dir.path().join(metadata_rel("mmmm3333"))).unwrap();
         assert!(
-            doc(design_spec_rel("mmmm3333")).contains("\"revision\": 1"),
-            "design-spec is written before interactions"
-        );
-        assert!(
-            !doc(runtime_rel("mmmm3333")).contains("starting"),
-            "runtime must not be written before interactions"
-        );
-        assert!(
-            !doc(metadata_rel("mmmm3333")).contains("awaiting_spec_confirmation"),
-            "the mirror must not be written before interactions"
-        );
-        unsquat(interactions_rel("mmmm3333"), &interactions_before);
-
-        // Fail at runtime.json: interactions (earlier) updated, mirror not.
-        squat(runtime_rel("mmmm3333"));
-        save_app_files(dir.path(), &after).unwrap_err();
-        assert!(
-            doc(interactions_rel("mmmm3333")).contains("int-order"),
-            "interactions are written before runtime"
-        );
-        assert!(
-            !doc(metadata_rel("mmmm3333")).contains("awaiting_spec_confirmation"),
-            "the mirror must be the LAST write"
+            !mirror_body.contains("\"ready\""),
+            "the mirror must not be written before runtime"
         );
     }
 
     /// Finding 8: a runtime record stranded busy by a crash is reconciled at
-    /// load (phase 1 has no process manager) and the reconciliation is
-    /// persisted.
+    /// load (no runtime process outlives the engine) and the reconciliation
+    /// is persisted.
     #[test]
     fn stranded_busy_runtime_states_are_reconciled_at_load() {
         use crate::types::AppRuntimeState::{Failed, Running, Starting, Stopped, Stopping};
@@ -2106,7 +1497,7 @@ mod tests {
         std::fs::write(victim.path().join("payload.json"), "{}").unwrap();
         let app = new_app("pppp6666");
         save_full(dir.path(), std::slice::from_ref(&app));
-        let target = dir.path().join("apps/pppp6666/interactions.json");
+        let target = dir.path().join("apps/pppp6666/runtime.json");
         std::fs::remove_file(&target).unwrap();
         std::os::unix::fs::symlink(victim.path().join("payload.json"), &target).unwrap();
         let err = load_all(dir.path()).unwrap_err();

@@ -49,15 +49,19 @@ import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.cron.AndroidCronRepository
 import com.lingxi.code.cron.CronRunStatus
 import com.lingxi.code.cron.CronSchedulingMode
+import com.lingxi.code.drawer.DrawerAppScope
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.DrawerProductionData
 import com.lingxi.code.drawer.rememberDrawerUiState
+import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.conversationScopeFromKey
+import com.lingxi.code.model.persistenceKey
 import com.lingxi.code.model.withCachedRows
 import com.lingxi.code.project.ConflictResolution
 import com.lingxi.code.project.CreateProjectDialog
@@ -68,6 +72,7 @@ import com.lingxi.code.project.ProjectOperationKind
 import com.lingxi.code.project.ProjectSnapshot
 import com.lingxi.code.project.ProjectStore
 import com.lingxi.code.project.ProjectStoreState
+import com.lingxi.code.project.ScopeStateStore
 import com.lingxi.code.project.toDrawerProject
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.LinuxRuntimeBridge
@@ -88,7 +93,9 @@ import com.lingxi.code.localapps.LocalAppsAction
 import com.lingxi.code.localapps.LocalAppsDestination
 import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
+import com.lingxi.code.localapps.localAppWorkspace
 import com.lingxi.code.localapps.localAppsStrings
+import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberOrbVoiceListen
@@ -246,6 +253,7 @@ fun RootScreen(
         factory = LocalAppsViewModel.factory(
             chatViewModel.engineSource,
             strings = localAppsStrings(context),
+            sessionStrings = sessionCatalogStrings(context),
             webStorageCleanup = com.lingxi.code.localapps.AndroidLocalAppWebStorageCleanup.get(appContext),
         ),
     )
@@ -317,6 +325,14 @@ fun RootScreen(
     // directly and never falls back to mock sessions.
     val sessionState by chatViewModel.sessions.collectAsState()
     val sourceProjectId by chatViewModel.sourceProjectId.collectAsState()
+    // Which workspace the live engine is bound to (Global / Project / LocalApp)
+    // — the generalization of sourceProjectId for the local-app scopes.
+    val sourceScope by chatViewModel.sourceScope.collectAsState()
+    // Durable per-scope conversation state (last-active session + draft),
+    // keyed `global` / `project.<id>` / `app.<id>`. Project/global last-active
+    // stays with ProjectStore; this store carries the app scopes and records
+    // which scope was active across process death.
+    val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -324,11 +340,15 @@ fun RootScreen(
     // Refresh the session catalog whenever the drawer transitions to open, so the
     // list is fresh each time the user reaches for it (the engine re-reports via
     // SessionList). `isOpen` flips on the open animation's start, so this fires
-    // once per open, not per frame.
+    // once per open, not per frame. An active app scope also refreshes its
+    // workspace catalog so the drawer's app section is current.
     LaunchedEffect(drawerState.isOpen) {
         if (drawerState.isOpen) {
             chatViewModel.refreshSessions()
             cronRepository.refresh()
+            (sourceScope as? ConversationScope.LocalApp)?.let {
+                localAppsViewModel.onAction(LocalAppsAction.LoadAppSessions(it.appId, null))
+            }
         }
     }
 
@@ -387,9 +407,35 @@ fun RootScreen(
     // hold-to-talk release) can route its recognized text straight into the
     // input the user is about to send. Seeded from the ViewModel's SavedStateHandle
     // so an unsent draft survives process death; every edit mirrors back into the
-    // handle (see onDraftChange below) and `send` clears it.
+    // handle (see onDraftChange below) and `send` clears it. App scopes mirror
+    // into the per-scope store instead — see the scope-restore effect below.
     var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
     var voiceDraftBase by remember { mutableStateOf("") }
+
+    // Which scope's draft the composer is currently showing — guards the
+    // restore effect below against unrelated recompositions.
+    var draftScopeKey by remember { mutableStateOf<String?>(null) }
+
+    // Swap the visible draft when the SCOPE changes: an app scope's draft
+    // comes from the durable scope store; project/global keep today's
+    // SavedStateHandle slot. Keyed on the persistence key so rotation (same
+    // scope, new composition) never clobbers what the user is typing.
+    LaunchedEffect(sourceScope) {
+        val key = sourceScope.persistenceKey()
+        if (key == draftScopeKey) return@LaunchedEffect
+        val firstBind = draftScopeKey == null
+        draftScopeKey = key
+        val restored = when (sourceScope) {
+            is ConversationScope.LocalApp -> scopeStore.read(key)?.draft.orEmpty()
+            else -> chatViewModel.restoredDraft
+        }
+        // The very first bind after process start must not wipe a draft the
+        // user already restored (remember { } above) — only apply when the
+        // stored value differs and this is a REAL scope change.
+        if (!firstBind || sourceScope is ConversationScope.LocalApp) {
+            draft = restored
+        }
+    }
 
     // Hold-to-talk → live transcription, gated on RECORD_AUDIO. The recognized
     // partial utterance replaces the live voice suffix while recognition is
@@ -446,7 +492,16 @@ fun RootScreen(
 
     fun closeDrawer() = scope.launch { drawerState.close() }
 
+    /**
+     * Transactionally rebind the conversation engine to [engineScope]. For a
+     * Project scope [project] supplies the workspace snapshot (as before); a
+     * LocalApp scope resolves its `apps/<id>/workspace` directory against the
+     * engine data root exactly the way the code browser does; Global binds no
+     * workspace. The active scope is persisted per-scope alongside the
+     * project store's active-project index.
+     */
     suspend fun switchEngineScope(
+        engineScope: ConversationScope,
         project: ProjectSnapshot?,
         target: SessionRef?,
         newSession: Boolean,
@@ -456,20 +511,32 @@ fun RootScreen(
         val destination = target ?: SessionRef("new", context.getString(R.string.chat_new_conversation))
         var persisted: ProjectStoreState? = null
         return chatViewModel.switchWorkspaceSource(
-            projectId = project?.record?.id,
+            projectId = (engineScope as? ConversationScope.Project)?.projectId,
             target = destination,
             newSession = newSession,
             resumeEmpty = resumeEmpty,
             replacePendingTransition = replacePendingTransition,
+            scope = engineScope,
             createSource = {
                 EngineConversationSource.create(
                     context = appContext,
-                    projectWorkspace = project?.workspace,
+                    projectWorkspace = when (engineScope) {
+                        ConversationScope.Global -> null
+                        is ConversationScope.Project -> project?.workspace
+                        is ConversationScope.LocalApp -> localAppWorkspace(
+                            appFilesRoot = appContext.filesDir,
+                            appId = engineScope.appId,
+                            workspaceRel = localAppsViewModel.uiState.value.apps
+                                .firstOrNull { it.id == engineScope.appId }
+                                ?.workspaceRel,
+                        )
+                    },
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
                 )
             },
             persistSelection = {
-                persisted = projectStore.persistActive(project?.record?.id)
+                persisted = projectStore.persistActive((engineScope as? ConversationScope.Project)?.projectId)
+                scopeStore.persistActiveScope(engineScope.persistenceKey())
             },
             onCommitted = {
                 projectStore.publishActive(checkNotNull(persisted))
@@ -478,11 +545,29 @@ fun RootScreen(
         )
     }
 
+    /** Project-flow convenience: derive the scope from the snapshot. */
+    suspend fun switchEngineScope(
+        project: ProjectSnapshot?,
+        target: SessionRef?,
+        newSession: Boolean,
+        resumeEmpty: Boolean = false,
+        replacePendingTransition: Boolean = false,
+    ): Boolean = switchEngineScope(
+        engineScope = project?.let { ConversationScope.Project(it.record.id) } ?: ConversationScope.Global,
+        project = project,
+        target = target,
+        newSession = newSession,
+        resumeEmpty = resumeEmpty,
+        replacePendingTransition = replacePendingTransition,
+    )
+
     // Recover the last active Project after process start. The Activity-scoped
     // ChatViewModel survives rotation, so sourceProjectId prevents a needless
     // rebuild on configuration changes. A process-restored global Resume is
     // explicitly superseded only after the Project Source and active index are
-    // both ready, so the wrong cwd never becomes authoritative.
+    // both ready, so the wrong cwd never becomes authoritative. An app scope
+    // never trips this: entering one persists activeProject = null, and the
+    // sourceScope guard covers the in-flight transition window.
     LaunchedEffect(
         projectState.loading,
         projectState.activeProjectId,
@@ -492,7 +577,8 @@ fun RootScreen(
         if (
             !projectState.loading &&
                 project != null &&
-                sourceProjectId == null
+                sourceProjectId == null &&
+                chatViewModel.sourceScope.value !is ConversationScope.LocalApp
         ) {
             val lastSummary = project.record.lastActiveSessionId
                 ?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
@@ -506,6 +592,43 @@ fun RootScreen(
                 resumeEmpty = lastSummary?.messageCount == 0,
                 replacePendingTransition = true,
             )
+        }
+    }
+
+    // Recover the last active LOCAL-APP scope after process start — the app
+    // analog of the Project recovery above, driven by the scope store's
+    // persisted active-scope key + the app's own last-active session. Runs at
+    // most once per process; entering an app scope persists
+    // activeProject = null, so the two restore effects never race each other.
+    var appScopeRestoreAttempted by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(projectState.loading, sourceScope) {
+        if (projectState.loading || appScopeRestoreAttempted) return@LaunchedEffect
+        if (sourceScope != ConversationScope.Global) return@LaunchedEffect
+        val persistedScope = conversationScopeFromKey(scopeStore.readActiveScopeKey())
+        if (persistedScope is ConversationScope.LocalApp) {
+            appScopeRestoreAttempted = true
+            val lastSessionId = scopeStore.read(persistedScope.persistenceKey())?.lastActiveSessionId
+            val appName = localAppsViewModel.uiState.value.apps
+                .firstOrNull { it.id == persistedScope.appId }?.name
+            switchEngineScope(
+                engineScope = persistedScope,
+                project = null,
+                target = lastSessionId?.let {
+                    SessionRef(it, appName ?: context.getString(R.string.chat_new_conversation))
+                },
+                newSession = lastSessionId == null,
+                replacePendingTransition = true,
+            )
+        }
+    }
+
+    // Persist an app scope's last-active session once the engine confirms it —
+    // the durable half of "each app remembers where its conversation left
+    // off". Project/global equivalents already flow through ProjectStore.
+    LaunchedEffect(sourceScope, state.session.id, state.sessionReady) {
+        val active = sourceScope
+        if (active is ConversationScope.LocalApp && state.sessionReady && state.session.id != "new") {
+            runCatching { scopeStore.persistLastActiveSession(active.persistenceKey(), state.session.id) }
         }
     }
 
@@ -738,9 +861,14 @@ fun RootScreen(
                         onResumeSession = { uuid ->
                             showingApps = false
                             globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
-                                if (sourceProjectId == null) {
+                                // Resume directly only when the live engine IS
+                                // the global scope — a Project OR LocalApp
+                                // scope must rebind first, or the session would
+                                // resume against the wrong cwd.
+                                if (sourceScope == ConversationScope.Global) {
                                     drawerUi.selectSession(uuid)
                                     chatViewModel.resumeSession(row)
+                                    closeDrawer()
                                 } else {
                                     scope.launch {
                                         if (
@@ -755,8 +883,39 @@ fun RootScreen(
                                         }
                                     }
                                 }
-                                if (sourceProjectId == null) closeDrawer()
                             }
+                        },
+                        appScope = (sourceScope as? ConversationScope.LocalApp)?.let { active ->
+                            DrawerAppScope(
+                                appId = active.appId,
+                                appName = localAppsState.apps.firstOrNull { it.id == active.appId }?.name
+                                    ?: active.appId,
+                                sessions = localAppsState.appSessions[active.appId]?.rows.orEmpty().map { row ->
+                                    SessionRow(
+                                        uuid = row.uuid,
+                                        title = row.title,
+                                        messageCount = row.messageCount,
+                                        relativeTime = row.relativeTime,
+                                    )
+                                },
+                            )
+                        },
+                        onSelectAppScopeSession = { ref ->
+                            // Same engine scope (the section only renders for
+                            // the ACTIVE app), so a plain in-place resume.
+                            showingApps = false
+                            drawerUi.selectSession(ref.id)
+                            val appId = (sourceScope as? ConversationScope.LocalApp)?.appId
+                            val row = appId?.let { id ->
+                                localAppsState.appSessions[id]?.rows?.firstOrNull { it.uuid == ref.id }
+                            }
+                            chatViewModel.openSession(ref, empty = row?.messageCount == 0)
+                            closeDrawer()
+                        },
+                        onNewAppScopeSession = {
+                            showingApps = false
+                            chatViewModel.startNewSession()
+                            closeDrawer()
                         },
                         productionData = drawerProductionData,
                         onCreateProject = { showCreateProject = true },
@@ -864,6 +1023,32 @@ fun RootScreen(
                                 )
                             }
                         },
+                        onOpenAppSession = { appId, sessionRow ->
+                            // Leave the apps surface and drop the conversation
+                            // into the app's scope: resume the tapped catalog
+                            // row, or start fresh for 「新会话」. Already in
+                            // this app's scope → plain in-place session switch.
+                            showingApps = false
+                            val target = sessionRow?.let { SessionRef(it.uuid, it.title) }
+                            if (sourceScope == ConversationScope.LocalApp(appId)) {
+                                if (target == null) {
+                                    chatViewModel.startNewSession()
+                                } else {
+                                    drawerUi.selectSession(target.id)
+                                    chatViewModel.openSession(target, empty = sessionRow.messageCount == 0)
+                                }
+                            } else {
+                                scope.launch {
+                                    switchEngineScope(
+                                        engineScope = ConversationScope.LocalApp(appId),
+                                        project = null,
+                                        target = target,
+                                        newSession = target == null,
+                                        resumeEmpty = sessionRow?.messageCount == 0,
+                                    )
+                                }
+                            }
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
@@ -910,7 +1095,15 @@ fun RootScreen(
                         draft = draft,
                         onDraftChange = {
                             draft = it
-                            chatViewModel.onDraftChanged(it) // mirror into SavedStateHandle
+                            when (val active = sourceScope) {
+                                // App scopes persist into the per-scope store
+                                // (IO-dispatched inside), NOT the SavedState
+                                // slot — the global/project draft must survive
+                                // an app-scope visit untouched.
+                                is ConversationScope.LocalApp ->
+                                    scope.launch { scopeStore.persistDraft(active.persistenceKey(), it) }
+                                else -> chatViewModel.onDraftChanged(it) // mirror into SavedStateHandle
+                            }
                         },
                         onCameraClick = onCameraClick,
                         attachment = attachment,
@@ -937,6 +1130,8 @@ fun RootScreen(
                         onOpenTerminal = { sessionId, command ->
                             onOpenTerminal(sessionId, command)
                         },
+                        onAnswerQuestion = chatViewModel::answerQuestion,
+                        onCancelQuestion = chatViewModel::cancelQuestion,
                     )
                 }
             }

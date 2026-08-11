@@ -51,7 +51,12 @@ pub struct SkillFrontmatter {
     /// Field name aligned with `AgentDefinition::allowed_tools` (§10.2) and
     /// `CommandFrontmatter::allowed_tools` (§19.1). Accepts legacy
     /// `tools_allowed` alias.
-    #[serde(alias = "tools_allowed")]
+    /// `allowed-tools` is the CANONICAL spelling in skill markdown (and the
+    /// one the disk loader's frontmatter parser renames); without the alias a
+    /// bundled skill declaring it would silently parse as `None` and hand the
+    /// Skill tool an empty allow-list. Aliases are deserialize-only, so the
+    /// serialized key stays `allowed_tools`.
+    #[serde(alias = "allowed-tools", alias = "tools_allowed")]
     pub allowed_tools: Option<Vec<String>>,
     /// Tools removed from the model while this skill is active. Comma-separated
     /// string or YAML list. Cleared when the user sends the next message.

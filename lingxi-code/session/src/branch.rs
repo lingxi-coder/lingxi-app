@@ -77,6 +77,56 @@ pub async fn create_branch(
     custom_title: Option<&str>,
     fs: Arc<dyn FileSystem>,
 ) -> Result<BranchResult, BranchError> {
+    create_branch_in(lingxi_home, cwd, cwd, source_session_id, custom_title, fs).await
+}
+
+/// Fork `source_session_id` (living under `source_cwd`'s project dir) into a
+/// NEW session rooted at `target_cwd` — the v3 "create an app from this
+/// chat" seam: the conversation history follows the user into the app's
+/// workspace-scoped catalog while the source session stays untouched.
+///
+/// Differences from the same-cwd [`create_branch`]:
+/// - every copied entry's `cwd` field is rewritten to `target_cwd` (the
+///   fork lives there now; a resume must not leak the old root),
+/// - the TARGET project dir is created if missing (the same-cwd path can
+///   assume it exists because it just read the source from it; a fresh app
+///   workspace has no catalog yet),
+/// - title-collision numbering runs against the TARGET catalog.
+///
+/// Everything else is identical: only main-chain messages are copied
+/// (side-maps stay behind), ids/parent chains are rewritten, and each entry
+/// carries a `forkedFrom` back-reference.
+///
+/// # Errors
+/// Same surface as [`create_branch`].
+pub async fn create_branch_to_cwd(
+    lingxi_home: &Path,
+    source_cwd: &str,
+    target_cwd: &str,
+    source_session_id: Uuid,
+    custom_title: Option<&str>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BranchResult, BranchError> {
+    create_branch_in(
+        lingxi_home,
+        source_cwd,
+        target_cwd,
+        source_session_id,
+        custom_title,
+        fs,
+    )
+    .await
+}
+
+async fn create_branch_in(
+    lingxi_home: &Path,
+    source_cwd: &str,
+    target_cwd: &str,
+    source_session_id: Uuid,
+    custom_title: Option<&str>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BranchResult, BranchError> {
+    let cwd = source_cwd;
     // 1. Read the current transcript. Missing / empty ⇒ nothing to branch.
     let src_path = session_path(lingxi_home, cwd, &source_session_id.to_string());
     let content = match tokio::fs::read_to_string(&src_path).await {
@@ -102,7 +152,8 @@ pub async fn create_branch(
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => derive_fork_name(&messages),
     };
-    let title = unique_fork_name(lingxi_home, cwd, &base, &fs).await;
+    // Collision numbering runs against the catalog the fork will LIVE in.
+    let title = unique_fork_name(lingxi_home, target_cwd, &base, &fs).await;
 
     // 4. Rewrite each entry: new sessionId, rechained parentUuid, cleared
     //    sidechain flag, plus a `forkedFrom` back-reference to the origin.
@@ -116,6 +167,12 @@ pub async fn create_branch(
         entry.session_id = new_sid.clone();
         entry.parent_uuid = parent.clone();
         entry.is_sidechain = false;
+        // A cross-cwd fork lives under the target root from now on; keeping
+        // the source cwd would make a later resume re-anchor file context on
+        // a directory the session no longer belongs to.
+        if target_cwd != source_cwd {
+            entry.cwd = target_cwd.to_string();
+        }
         entry.extra.insert(
             "forkedFrom".to_string(),
             json!({ "sessionId": src_sid, "messageUuid": original_uuid }),
@@ -139,9 +196,17 @@ pub async fn create_branch(
     );
     let message_count = lines.len() - 1;
 
-    // 6. Write the branch file (0o600 like claude; the project dir already
-    //    exists — it holds the source we just read).
-    let dst_path = session_path(lingxi_home, cwd, &new_sid);
+    // 6. Write the branch file (0o600 like claude). Same-cwd: the project
+    //    dir already exists (it holds the source we just read). Cross-cwd:
+    //    a fresh app workspace has no catalog dir yet — create it.
+    let dst_path = session_path(lingxi_home, target_cwd, &new_sid);
+    if target_cwd != source_cwd {
+        if let Some(parent_dir) = dst_path.parent() {
+            tokio::fs::create_dir_all(parent_dir)
+                .await
+                .map_err(BranchError::Io)?;
+        }
+    }
     let body = format!("{}\n", lines.join("\n"));
     tokio::fs::write(&dst_path, body.as_bytes())
         .await
@@ -289,6 +354,71 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BranchError::NoConversation));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// v3: forking a chat INTO an app workspace — the target project dir does
+    /// not exist yet (created), every copied entry re-roots on the target
+    /// cwd, `forkedFrom` still points home, and the SOURCE file is untouched.
+    #[tokio::test]
+    async fn cross_cwd_branch_creates_the_target_catalog_and_rewrites_cwd() {
+        let home = scratch("cross-cwd");
+        let source_cwd = "/tmp/proj";
+        let target_cwd = "/data/apps/zz9/workspace";
+        let src = Uuid::new_v4();
+        let src_sid = src.to_string();
+        let path = session_path(&home, source_cwd, &src_sid);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let body = format!(
+            "{}\n{}\n",
+            user_line(
+                "11111111-1111-1111-1111-111111111111",
+                &src_sid,
+                None,
+                "make me an app"
+            ),
+            user_line(
+                "22222222-2222-2222-2222-222222222222",
+                &src_sid,
+                Some("11111111-1111-1111-1111-111111111111"),
+                "it tracks habits",
+            ),
+        );
+        tokio::fs::write(&path, body.clone()).await.unwrap();
+
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(std::path::PathBuf::from(source_cwd)));
+        let result = create_branch_to_cwd(&home, source_cwd, target_cwd, src, Some("习惯"), fs)
+            .await
+            .expect("cross-cwd branch");
+        assert_eq!(result.message_count, 2);
+
+        let new_sid = result.new_session_id.to_string();
+        // The fork lives under the TARGET cwd's (freshly created) project dir.
+        let dst = session_path(&home, target_cwd, &new_sid);
+        let written = tokio::fs::read_to_string(&dst).await.expect("fork exists");
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for line in &lines[..2] {
+            let entry: JsonlMessage = serde_json::from_str(line).unwrap();
+            assert_eq!(entry.session_id, new_sid);
+            assert_eq!(
+                entry.cwd, target_cwd,
+                "copied entries must re-root on the target cwd"
+            );
+            assert_eq!(
+                entry.extra["forkedFrom"]["sessionId"],
+                json!(src_sid),
+                "the back-reference still names the source session"
+            );
+        }
+        // Nothing was written into the SOURCE catalog, and the source file
+        // is byte-identical.
+        assert!(!session_path(&home, source_cwd, &new_sid).exists());
+        let source_after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(source_after, body, "the source session must not move");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

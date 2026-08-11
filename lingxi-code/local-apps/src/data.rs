@@ -1555,10 +1555,7 @@ mod tests {
 
         let migrated = store.migrate_manifest(&new_manifest, false, 3).unwrap();
         assert_eq!(migrated.backup_rel, None);
-        assert!(!root
-            .path()
-            .join("apps/abcd1234/data/backups")
-            .exists());
+        assert!(!root.path().join("apps/abcd1234/data/backups").exists());
         // The migration still bound the new contract.
         store.ensure_manifest(&new_manifest).unwrap();
         assert_eq!(
@@ -1693,11 +1690,7 @@ mod tests {
         // Pruning is not allowed to disturb the migration itself.
         store.ensure_manifest(&current).unwrap();
         assert_eq!(
-            store
-                .get(&current, "items", "a")
-                .unwrap()
-                .unwrap()
-                .document["title"],
+            store.get(&current, "items", "a").unwrap().unwrap().document["title"],
             json!("Keep")
         );
     }

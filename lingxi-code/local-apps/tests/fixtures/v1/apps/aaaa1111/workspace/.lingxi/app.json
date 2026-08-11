@@ -2,11 +2,12 @@
   "schemaVersion": 1,
   "app": {
     "id": "aaaa1111",
-    "name": "Fixture Maximal",
-    "brief": "a fixture app with every design-value kind",
+    "name": "Fixture Ready",
+    "brief": "a ready fixture app with a full runtime record",
+    "gitEnabled": true,
     "createdAtMs": 1753000000000,
-    "updatedAtMs": 1753000000700,
-    "workflowState": "awaiting_preview_confirmation",
+    "updatedAtMs": 1753000000100,
+    "workflowState": "ready",
     "conversationId": "conv-fixture-1",
     "workspaceRel": "apps/aaaa1111/workspace"
   }

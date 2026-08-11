@@ -119,6 +119,71 @@ impl OAuthHandle {
         self
     }
 
+    /// Build an authorization URL for a native host callback.
+    ///
+    /// Mobile hosts use `ASWebAuthenticationSession` instead of the loopback
+    /// listener used by the CLI. The verifier and state are returned to the
+    /// caller and must remain private until [`Self::complete_mobile_browser_login`]
+    /// receives the callback.
+    #[must_use]
+    pub fn begin_mobile_browser_login(
+        &self,
+        redirect_uri: &str,
+    ) -> (String, String, String) {
+        self.client.build_authorize_url_with_options(
+            redirect_uri,
+            &AuthorizeOptions::default(),
+        )
+    }
+
+    /// Complete a native-host callback and persist the Anthropic session.
+    ///
+    /// The callback state is checked by the mobile host before this method is
+    /// called and is also included in the token exchange body, preserving the
+    /// provider's CSRF contract without exposing tokens to Swift/Kotlin.
+    pub async fn complete_mobile_browser_login(
+        &self,
+        code: &str,
+        verifier: &str,
+        state: &str,
+        redirect_uri: &str,
+    ) -> Result<LoginInfo, AuthError> {
+        let tokens = self
+            .client
+            .exchange_code_with_redirect(code, verifier, state, redirect_uri)
+            .await
+            .map_err(|e| AuthError::ServerError(e.to_string()))?;
+
+        let (email, org_id) = match (&tokens.account, &tokens.organization) {
+            (Some(acc), Some(org)) if !acc.email_address.is_empty() => {
+                (acc.email_address.clone(), org.uuid.clone())
+            }
+            _ => {
+                self.fetch_profile(tokens.access_token.expose_secret())
+                    .await?
+            }
+        };
+
+        let refresh = tokens
+            .refresh_token
+            .as_ref()
+            .map(|s| s.expose_secret().clone());
+        self.client
+            .credentials()
+            .store_oauth_tokens(
+                tokens.access_token.expose_secret(),
+                refresh.as_deref(),
+                tokens.expires_at,
+                tokens.scopes.clone(),
+                &email,
+                &org_id,
+            )
+            .await
+            .map_err(|e| AuthError::ServerError(format!("persist: {e}")))?;
+
+        Ok(LoginInfo { email, org_id })
+    }
+
     /// Run the authorization-code flow, with the manual-entry fallback wired
     /// through [`CodeFlowIo`].
     ///

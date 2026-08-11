@@ -12,13 +12,11 @@
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
-    AppCheckpointKindDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppEventDto,
-    AppGenerationJobDto, AppGenerationJobStateDto, AppRecordDto, AppRuntimeModeDto,
+    AppCheckpointKindDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeModeDto,
     AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-    AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, DesignValueDto,
+    AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
-use std::collections::HashMap;
 
 #[test]
 fn ask_user_question_resolved_round_trips() {
@@ -284,119 +282,21 @@ fn apps_changed_round_trips() {
             git_enabled: true,
             created_at_ms: 1_750_000_000_000,
             updated_at_ms: 1_750_000_000_001,
-            workflow_state: AppWorkflowStateDto::CollectingSpec,
+            workflow_state: AppWorkflowStateDto::Draft,
             conversation_id: None,
+            init_session_id: None,
             workspace_rel: "apps/habits-1a2b/workspace".to_string(),
         }],
     };
     let json = serde_json::to_value(&ev).expect("serialize AppsChanged");
     assert_eq!(json["type"], "apps_changed");
     assert_eq!(json["apps"][0]["id"], "habits-1a2b");
-    assert_eq!(json["apps"][0]["workflow_state"], "collecting_spec");
+    assert_eq!(json["apps"][0]["workflow_state"], "draft");
     assert!(
         json["apps"][0].get("conversation_id").is_none(),
         "None conversation_id must be skipped"
     );
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppsChanged");
-    assert_eq!(back, ev);
-}
-
-/// `AppDesignerRequested` — delivers the pending designer `interaction_id`
-/// (the ONLY path the id reaches the client, gating `ConfirmAppDesign`).
-#[test]
-fn app_designer_requested_round_trips() {
-    let ev = ClientEvent::AppDesignerRequested {
-        app_id: "habits-1a2b".to_string(),
-        interaction_id: "int-designer-9".to_string(),
-        revision: 5,
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppDesignerRequested");
-    assert_eq!(json["type"], "app_designer_requested");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["interaction_id"], "int-designer-9");
-    assert_eq!(json["revision"], 5);
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppDesignerRequested");
-    assert_eq!(back, ev);
-}
-
-/// `AppDesignDraftChanged` — carries the new revision + the full field map
-/// ({`field_id` → {kind, value}}).
-#[test]
-fn app_design_draft_changed_round_trips() {
-    let mut fields = HashMap::new();
-    fields.insert(
-        "title".to_string(),
-        DesignValueDto::ShortText {
-            value: "Habit Tracker".to_string(),
-        },
-    );
-    fields.insert(
-        "screens".to_string(),
-        DesignValueDto::ScreenList {
-            value: vec!["home".to_string(), "stats".to_string()],
-        },
-    );
-    let ev = ClientEvent::AppDesignDraftChanged {
-        app_id: "habits-1a2b".to_string(),
-        revision: 6,
-        fields,
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppDesignDraftChanged");
-    assert_eq!(json["type"], "app_design_draft_changed");
-    assert_eq!(json["app_id"], "habits-1a2b");
-    assert_eq!(json["revision"], 6);
-    assert_eq!(json["fields"]["title"]["kind"], "short_text");
-    assert_eq!(json["fields"]["title"]["value"], "Habit Tracker");
-    assert_eq!(json["fields"]["screens"]["kind"], "screen_list");
-    assert_eq!(json["fields"]["screens"]["value"][1], "stats");
-    let back: ClientEvent =
-        serde_json::from_value(json).expect("deserialize AppDesignDraftChanged");
-    assert_eq!(back, ev);
-}
-
-/// `AppDesignSuggestionAvailable` — the agent's pending patch, applied only
-/// via an explicit `ApplyAgentDesignSuggestion` echo of `suggestion_id`.
-#[test]
-fn app_design_suggestion_available_round_trips() {
-    let ev = ClientEvent::AppDesignSuggestionAvailable {
-        app_id: "habits-1a2b".to_string(),
-        suggestion_id: "sugg-77".to_string(),
-        based_on_revision: 6,
-        patch: AppDesignPatchDto {
-            ops: vec![AppDesignPatchOpDto::Set {
-                field_id: "accent".to_string(),
-                value: DesignValueDto::Color {
-                    value: "#3366ff".to_string(),
-                },
-            }],
-            note: Some("bolder accent".to_string()),
-        },
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppDesignSuggestionAvailable");
-    assert_eq!(json["type"], "app_design_suggestion_available");
-    assert_eq!(json["suggestion_id"], "sugg-77");
-    assert_eq!(json["based_on_revision"], 6);
-    assert_eq!(json["patch"]["ops"][0]["op"], "set");
-    assert_eq!(json["patch"]["ops"][0]["value"]["kind"], "color");
-    let back: ClientEvent =
-        serde_json::from_value(json).expect("deserialize AppDesignSuggestionAvailable");
-    assert_eq!(back, ev);
-}
-
-/// `AppDesignConflict` — a stale `expected_revision` was rejected; both
-/// revisions surface so the client can re-pull and re-apply.
-#[test]
-fn app_design_conflict_round_trips() {
-    let ev = ClientEvent::AppDesignConflict {
-        app_id: "habits-1a2b".to_string(),
-        expected_revision: 4,
-        actual_revision: 6,
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppDesignConflict");
-    assert_eq!(json["type"], "app_design_conflict");
-    assert_eq!(json["expected_revision"], 4);
-    assert_eq!(json["actual_revision"], 6);
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppDesignConflict");
     assert_eq!(back, ev);
 }
 
@@ -406,67 +306,29 @@ fn app_design_conflict_round_trips() {
 fn app_workflow_changed_round_trips() {
     let ev = ClientEvent::AppWorkflowChanged {
         app_id: "habits-1a2b".to_string(),
-        state: AppWorkflowStateDto::GenerationFailed,
-        detail: Some("npm install failed".to_string()),
+        state: AppWorkflowStateDto::Ready,
+        detail: Some("build approved".to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize AppWorkflowChanged");
     assert_eq!(json["type"], "app_workflow_changed");
-    assert_eq!(json["state"], "generation_failed");
-    assert_eq!(json["detail"], "npm install failed");
+    assert_eq!(json["state"], "ready");
+    assert_eq!(json["detail"], "build approved");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppWorkflowChanged");
     assert_eq!(back, ev);
 
     let ev_min = ClientEvent::AppWorkflowChanged {
         app_id: "habits-1a2b".to_string(),
-        state: AppWorkflowStateDto::Generating,
+        state: AppWorkflowStateDto::Draft,
         detail: None,
     };
     let json_min = serde_json::to_value(&ev_min).expect("serialize minimal AppWorkflowChanged");
+    assert_eq!(json_min["state"], "draft");
     assert!(
         json_min.get("detail").is_none(),
         "None detail must be skipped"
     );
     let back_min: ClientEvent =
         serde_json::from_value(json_min).expect("deserialize minimal AppWorkflowChanged");
-    assert_eq!(back_min, ev_min);
-}
-
-/// `AppGenerationProgress` — stage + optional percent/detail (skipped when
-/// `None`).
-#[test]
-fn app_generation_progress_round_trips() {
-    let ev = ClientEvent::AppGenerationProgress {
-        app_id: "habits-1a2b".to_string(),
-        stage: "scaffold".to_string(),
-        percent: Some(40),
-        detail: Some("writing pages".to_string()),
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppGenerationProgress");
-    assert_eq!(json["type"], "app_generation_progress");
-    assert_eq!(json["stage"], "scaffold");
-    assert_eq!(json["percent"], 40);
-    assert_eq!(json["detail"], "writing pages");
-    let back: ClientEvent =
-        serde_json::from_value(json).expect("deserialize AppGenerationProgress");
-    assert_eq!(back, ev);
-
-    let ev_min = ClientEvent::AppGenerationProgress {
-        app_id: "habits-1a2b".to_string(),
-        stage: "validate".to_string(),
-        percent: None,
-        detail: None,
-    };
-    let json_min = serde_json::to_value(&ev_min).expect("serialize minimal AppGenerationProgress");
-    assert!(
-        json_min.get("percent").is_none(),
-        "None percent must be skipped"
-    );
-    assert!(
-        json_min.get("detail").is_none(),
-        "None detail must be skipped"
-    );
-    let back_min: ClientEvent =
-        serde_json::from_value(json_min).expect("deserialize minimal AppGenerationProgress");
     assert_eq!(back_min, ev_min);
 }
 
@@ -506,35 +368,6 @@ fn app_runtime_changed_round_trips() {
 #[allow(clippy::too_many_lines)] // a flat data table: one row per AppEventDto variant
 fn extended_local_app_events_round_trip() {
     let events = vec![
-        ClientEvent::AppEvent {
-            event: AppEventDto::AppQuestionnaireChanged {
-                app_id: "habits-1a2b".to_string(),
-                revision: 2,
-                steps: vec![],
-            },
-        },
-        ClientEvent::AppEvent {
-            event: AppEventDto::AppPlanChanged {
-                app_id: "habits-1a2b".to_string(),
-                revision: 3,
-                plan: None,
-            },
-        },
-        ClientEvent::AppEvent {
-            event: AppEventDto::AppGenerationJobChanged {
-                job: AppGenerationJobDto {
-                    id: "job-1".to_string(),
-                    app_id: "habits-1a2b".to_string(),
-                    revision: 4,
-                    continuation_seq: 1,
-                    state: AppGenerationJobStateDto::Building,
-                    percent: Some(70),
-                    detail: None,
-                    log_rel: Some("logs/job-1.log".to_string()),
-                    updated_at_ms: 1,
-                },
-            },
-        },
         ClientEvent::AppEvent {
             event: AppEventDto::AppBridgeResponse {
                 response: AppBridgeResponseDto {
@@ -582,9 +415,6 @@ fn extended_local_app_events_round_trip() {
     // directions and still succeeds, so the literals below are what make a
     // rename visible here.
     let expected_types = [
-        "app_questionnaire_changed",
-        "app_plan_changed",
-        "app_generation_job_changed",
         "app_bridge_response",
         "app_ui_request",
         "app_capability_requested",
@@ -592,13 +422,7 @@ fn extended_local_app_events_round_trip() {
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 7] = [
-        ("/event/revision", serde_json::Value::from(2_u64)),
-        ("/event/revision", serde_json::Value::from(3_u64)),
-        (
-            "/event/job/continuation_seq",
-            serde_json::Value::from(1_u64),
-        ),
+    let expected_leaves: [(&str, serde_json::Value); 4] = [
         ("/event/response/result_json", serde_json::Value::from("[]")),
         ("/event/request/action", serde_json::Value::from("inspect")),
         (
@@ -648,81 +472,6 @@ fn extended_local_app_events_round_trip() {
     assert_eq!(json["details"]["mode"], "next_production");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize extended runtime");
     assert_eq!(back, runtime);
-}
-
-/// `AppPlanChanged.plan` — parity review finding: this was the ONLY `Option`
-/// field in the crate missing `#[serde(default, skip_serializing_if =
-/// "Option::is_none")]`. A symmetric `to_value` → `from_value` round-trip
-/// (as `extended_local_app_events_round_trip` above does) cannot see this
-/// class of bug, because `to_value` on a bare `Option<T>` field produces
-/// `"plan": null`, which `from_value` happily reads back — the break only
-/// shows up in the TWO asymmetric checks below: (1) `None` must OMIT the key,
-/// not serialize it as `null`; (2) a wire payload that OMITS the key entirely
-/// (exactly what an honest client following the house convention sends) must
-/// still deserialize the whole event, not fail with "missing field `plan`".
-#[test]
-fn app_plan_changed_omits_none_plan_and_accepts_a_missing_key() {
-    let ev = ClientEvent::AppEvent {
-        event: AppEventDto::AppPlanChanged {
-            app_id: "habits-1a2b".to_string(),
-            revision: 3,
-            plan: None,
-        },
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppPlanChanged");
-    assert!(
-        json["event"].get("plan").is_none(),
-        "a None plan must be skipped from the wire, not serialized as null"
-    );
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppPlanChanged");
-    assert_eq!(back, ev);
-
-    // A wire payload that OMITS `plan` entirely — not a synthetic `null` —
-    // is what an honest client actually sends. Without `#[serde(default)]`
-    // this fails the WHOLE event with "missing field `plan`", not just the
-    // one field.
-    let wire_without_plan = serde_json::json!({
-        "type": "app_event",
-        "event": {
-            "type": "app_plan_changed",
-            "app_id": "habits-1a2b",
-            "revision": 3
-        }
-    });
-    let raised: ClientEvent = serde_json::from_value(wire_without_plan)
-        .expect("a client that omits `plan` must not fail the whole event");
-    assert_eq!(raised, ev);
-}
-
-/// `AppPreviewReady` — delivers the pending preview `interaction_id`; `url`
-/// stays `None` (skipped) until the phase-4 runtime serves the app.
-#[test]
-fn app_preview_ready_round_trips() {
-    let ev = ClientEvent::AppPreviewReady {
-        app_id: "habits-1a2b".to_string(),
-        interaction_id: "int-preview-3".to_string(),
-        revision: 6,
-        url: None,
-    };
-    let json = serde_json::to_value(&ev).expect("serialize AppPreviewReady");
-    assert_eq!(json["type"], "app_preview_ready");
-    assert_eq!(json["interaction_id"], "int-preview-3");
-    assert_eq!(json["revision"], 6);
-    assert!(json.get("url").is_none(), "None url must be skipped");
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppPreviewReady");
-    assert_eq!(back, ev);
-
-    let ev_url = ClientEvent::AppPreviewReady {
-        app_id: "habits-1a2b".to_string(),
-        interaction_id: "int-preview-4".to_string(),
-        revision: 7,
-        url: Some("http://localhost:31337".to_string()),
-    };
-    let json_url = serde_json::to_value(&ev_url).expect("serialize served AppPreviewReady");
-    assert_eq!(json_url["url"], "http://localhost:31337");
-    let back_url: ClientEvent =
-        serde_json::from_value(json_url).expect("deserialize served AppPreviewReady");
-    assert_eq!(back_url, ev_url);
 }
 
 /// `AppCheckpointCreated` — carries the recorded checkpoint row.

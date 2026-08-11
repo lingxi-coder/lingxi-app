@@ -1,6 +1,7 @@
 import SwiftUI
 
 private enum LocalAppDetailSection: String, CaseIterable, Identifiable {
+    case sessions
     case overview
     case preview
     case data
@@ -12,6 +13,7 @@ private enum LocalAppDetailSection: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .sessions: String(localized: "local_apps_section_sessions")
         case .overview: String(localized: "local_apps_section_overview")
         case .preview: String(localized: "local_apps_section_preview")
         case .data: String(localized: "local_apps_section_data")
@@ -27,26 +29,19 @@ struct LocalAppDetailView: View {
     @Bindable var store: LocalAppsStore
     let appID: String
     @Binding var path: [LocalAppsRoute]
+    /// `(appID, sessionUUID)` — RootView dismisses the cover and resumes the
+    /// session inside the app's conversation scope.
+    var onOpenAppSession: (String, String) -> Void = { _, _ in }
+    /// RootView dismisses the cover and starts a fresh conversation in the
+    /// app's scope.
+    var onNewAppSession: (String) -> Void = { _ in }
 
-    @State private var section: LocalAppDetailSection = .overview
-    @State private var revisionFeedback = ""
-    @State private var isSubmittingRevision = false
+    /// The session catalog is the app's primary surface now — each app IS a
+    /// conversation scope, so the conversations come first.
+    @State private var section: LocalAppDetailSection = .sessions
 
     private var app: LocalAppSummary? { store.app(id: appID) }
     private var runtime: LocalAppRuntimeStatus { store.runtimes[appID] ?? .stopped }
-
-    /// Whether a persistent "keep refining" input should be offered for the
-    /// given workflow state. Mirrors `AppState::request_revision`'s accepted
-    /// source states exactly (`lingxi-code/local-apps/src/state.rs`:
-    /// `[AwaitingPreviewConfirmation, Ready]`) — showing the control in any
-    /// other state would reproduce the "looks available, fails on tap"
-    /// defect class Tasks 13-15 already hit.
-    static func showsRevisionInput(for workflow: LocalAppWorkflow) -> Bool {
-        switch workflow {
-        case .ready, .awaitingPreviewConfirmation: true
-        default: false
-        }
-    }
 
     var body: some View {
         content
@@ -106,11 +101,6 @@ struct LocalAppDetailView: View {
                     sectionContent(app)
                 }
                 .background(theme.windowBg)
-                .safeAreaInset(edge: .bottom) {
-                    if Self.showsRevisionInput(for: app.workflow) {
-                        revisionInputBar(appID: app.id)
-                    }
-                }
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
                         if case .running = runtime {
@@ -121,19 +111,11 @@ struct LocalAppDetailView: View {
                             Button("common_start", systemImage: "play.fill") {
                                 Task { await store.start(appID: appID) }
                             }
-                            .disabled(app.workflow != .ready && app.workflow != .awaitingPreviewConfirmation)
+                            .disabled(app.workflow != .ready)
                         }
                         Menu {
-                            if app.workflow == .generationFailed || app.workflow == .validationFailed {
-                                Button("local_apps_retry_generate", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
-                                    Task { await store.retryGeneration(appID: appID) }
-                                }
-                            }
                             Button("local_apps_restart", systemImage: "arrow.clockwise") {
                                 Task { await store.restart(appID: appID) }
-                            }
-                            Button("local_apps_continue_design", systemImage: "slider.horizontal.3") {
-                                path.append(.designer(appID))
                             }
                         } label: {
                             Label("local_apps_more", systemImage: "ellipsis.circle")
@@ -149,18 +131,24 @@ struct LocalAppDetailView: View {
     @ViewBuilder
     private func sectionContent(_ app: LocalAppSummary) -> some View {
         switch section {
+        case .sessions:
+            LocalAppSessionsSection(
+                store: store,
+                appID: appID,
+                onOpenSession: { onOpenAppSession(appID, $0) },
+                onNewSession: { onNewAppSession(appID) }
+            )
         case .overview:
             LocalAppOverviewSection(
                 app: app,
                 runtime: runtime,
-                progress: store.generationProgress[appID],
                 distribution: store.distributionMode,
                 onOpenPreview: { path.append(.preview(appID)) }
             )
         case .preview:
             LocalAppEmbeddedPreview(store: store, appID: appID)
         case .data:
-            LocalAppDataSection(plan: store.plans[appID])
+            LocalAppDataSection(collections: store.collections[appID] ?? [])
         case .code:
             LocalAppCodeSection(app: app)
         case .history:
@@ -169,55 +157,94 @@ struct LocalAppDetailView: View {
             LocalAppPermissionsSection(store: store, appID: appID)
         }
     }
+}
 
-    /// The persistent "keep refining" bar — reachable from every section tab
-    /// while the app is in a state that accepts a revision, not just from a
-    /// one-shot feedback sheet. Submits through the same
-    /// `store.requestRevision(appID:feedback:)` the preview gate's sheet
-    /// already uses (`LocalAppPreviewView`, unchanged below); this widens the
-    /// entry point, it does not replace it.
-    @ViewBuilder
-    private func revisionInputBar(appID: String) -> some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("local_apps_revision_placeholder", text: $revisionFeedback, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1 ... 4)
-                .disabled(isSubmittingRevision)
-                .accessibilityIdentifier("local-apps.detail.revision.input")
-            Button {
-                Task { await submitRevision(appID: appID) }
-            } label: {
-                if isSubmittingRevision {
-                    ProgressView()
-                        .frame(width: 22, height: 22)
-                } else {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+/// The app's workspace-scoped session catalog (`ListAppSessions` →
+/// `AppSessionsChanged`): the pinned init session first with an「初始化」
+/// badge, the rest modified-descending, paged by「加载更多」.
+struct LocalAppSessionsSection: View {
+    @Environment(\.theme) private var theme
+    @Bindable var store: LocalAppsStore
+    let appID: String
+    let onOpenSession: (String) -> Void
+    let onNewSession: () -> Void
+
+    private var page: LocalAppSessionPage? { store.sessionPages[appID] }
+
+    var body: some View {
+        List {
+            Section {
+                Button {
+                    onNewSession()
+                } label: {
+                    Label("local_apps_session_new", systemImage: "square.and.pencil")
+                        .foregroundStyle(theme.accent)
+                }
+                .accessibilityIdentifier("local-apps.sessions.new")
+            }
+            Section {
+                ForEach(page?.rows ?? []) { row in
+                    Button {
+                        onOpenSession(row.uuid)
+                    } label: {
+                        LocalAppSessionRowView(row: row)
+                    }
+                    .accessibilityIdentifier("local-apps.sessions.row.\(row.uuid)")
+                }
+                if page?.nextOffset != nil {
+                    Button("local_apps_sessions_load_more") {
+                        Task { await store.loadMoreSessions(appID: appID) }
+                    }
+                    .accessibilityIdentifier("local-apps.sessions.load-more")
                 }
             }
-            .disabled(
-                isSubmittingRevision
-                    || revisionFeedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            )
-            .accessibilityIdentifier("local-apps.detail.revision.submit")
-            .accessibilityLabel("local_apps_submit")
         }
-        .padding()
-        .background(.bar)
+        .listStyle(.insetGrouped)
+        .overlay {
+            if page?.rows.isEmpty != false {
+                ContentUnavailableView(
+                    "local_apps_sessions_empty",
+                    systemImage: "bubble.left.and.bubble.right"
+                )
+                .allowsHitTesting(false)
+            }
+        }
+        .task {
+            await store.listSessions(appID: appID)
+        }
+        .refreshable {
+            await store.listSessions(appID: appID)
+        }
     }
+}
 
-    /// Guards against a double-tap firing two revision round trips — the
-    /// same defect class Task 14 had to add to its retry buttons after the
-    /// fact (`retryingQuestionnaire`/`retryingPlan` in
-    /// `LocalAppDesignerView`).
-    private func submitRevision(appID: String) async {
-        guard !isSubmittingRevision else { return }
-        isSubmittingRevision = true
-        let succeeded = await store.requestRevision(appID: appID, feedback: revisionFeedback)
-        isSubmittingRevision = false
-        if succeeded {
-            revisionFeedback = ""
+private struct LocalAppSessionRowView: View {
+    @Environment(\.theme) private var theme
+    let row: LocalAppSessionRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(row.title)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                if row.isInit {
+                    Text("local_apps_session_init_badge")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(theme.accent.opacity(0.14), in: Capsule())
+                }
+            }
+            Text("drawer_session_subtitle \(row.relativeTime) \(row.messageCount)")
+                .font(.caption)
+                .foregroundStyle(theme.text4)
+                .lineLimit(1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(.rect)
     }
 }
 
@@ -245,7 +272,6 @@ private struct LocalAppOverviewSection: View {
     @Environment(\.theme) private var theme
     let app: LocalAppSummary
     let runtime: LocalAppRuntimeStatus
-    let progress: LocalAppGenerationProgress?
     let distribution: LocalAppsDistributionMode
     let onOpenPreview: () -> Void
 
@@ -269,10 +295,6 @@ private struct LocalAppOverviewSection: View {
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(theme.surface, in: .rect(cornerRadius: 16))
-
-                if let progress {
-                    LocalAppGenerationCard(progress: progress, workflow: app.workflow)
-                }
 
                 VStack(alignment: .leading, spacing: 10) {
                     LabeledContent("local_apps_runtime_mode", value: distribution.runtimeLabel)
@@ -317,7 +339,7 @@ private struct LocalAppEmbeddedPreview: View {
     let appID: String
 
     var body: some View {
-        if let url = store.runtimes[appID]?.url ?? store.previews[appID]?.url {
+        if let url = store.runtimes[appID]?.url {
             LocalAppWebView(
                 appID: appID,
                 url: url,
@@ -338,7 +360,7 @@ private struct LocalAppEmbeddedPreview: View {
 }
 
 private struct LocalAppDataSection: View {
-    let plan: LocalAppPlan?
+    let collections: [LocalAppDataCollection]
 
     var body: some View {
         List {
@@ -348,7 +370,7 @@ private struct LocalAppDataSection: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            ForEach(plan?.collections ?? []) { collection in
+            ForEach(collections) { collection in
                 Section(collection.label) {
                     ForEach(collection.fields) { field in
                         LabeledContent(field.label, value: field.fieldType.rawValue)
@@ -542,12 +564,8 @@ struct LocalAppPreviewView: View {
     @Bindable var store: LocalAppsStore
     let appID: String
 
-    @State private var feedback = ""
-    @State private var showFeedback = false
-    @State private var isSubmittingFeedback = false
-
     private var previewURL: URL? {
-        store.runtimes[appID]?.url ?? store.previews[appID]?.url
+        store.runtimes[appID]?.url
     }
 
     var body: some View {
@@ -560,59 +578,11 @@ struct LocalAppPreviewView: View {
                         Task { await store.executeBridge(request) }
                     }
                 )
-                .safeAreaInset(edge: .bottom) {
-                    if store.previews[appID] != nil {
-                        HStack {
-                            Button("local_apps_feedback") { showFeedback = true }
-                                .buttonStyle(.bordered)
-                            Spacer()
-                            Button("local_apps_approve_preview") {
-                                Task { _ = await store.approvePreview(appID: appID) }
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        .padding()
-                        .background(.bar)
-                    }
-                }
             } else {
                 ContentUnavailableView("local_apps_preview_not_ready", systemImage: "hourglass")
             }
         }
-        .navigationTitle("local_apps_preview_confirm_title")
+        .navigationTitle("local_apps_section_preview")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showFeedback) {
-            NavigationStack {
-                Form {
-                    TextEditor(text: $feedback)
-                        .frame(minHeight: 140)
-                        .disabled(isSubmittingFeedback)
-                }
-                .navigationTitle("local_apps_feedback")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("common_cancel") { showFeedback = false }
-                            .disabled(isSubmittingFeedback)
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button(isSubmittingFeedback ? "local_apps_submitting" : "local_apps_submit") {
-                            Task {
-                                guard !isSubmittingFeedback else { return }
-                                isSubmittingFeedback = true
-                                let succeeded = await store.requestRevision(appID: appID, feedback: feedback)
-                                isSubmittingFeedback = false
-                                if succeeded {
-                                    showFeedback = false
-                                }
-                            }
-                        }
-                        .disabled(
-                            isSubmittingFeedback
-                                || feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        )
-                    }
-                }
-            }
-        }
     }
 }

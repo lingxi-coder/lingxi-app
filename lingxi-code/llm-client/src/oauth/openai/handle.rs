@@ -105,6 +105,74 @@ impl OpenAiOAuthHandle {
         self
     }
 
+    /// Build an authorization URL for a native host callback.
+    ///
+    /// iOS supplies a custom-scheme redirect to `ASWebAuthenticationSession`,
+    /// so this path deliberately does not bind the desktop loopback listener.
+    #[must_use]
+    pub fn begin_mobile_browser_login(
+        &self,
+        redirect_uri: &str,
+    ) -> (String, String, String) {
+        self.client.build_authorize_url_with_redirect(redirect_uri)
+    }
+
+    /// Complete a native-host callback and persist the ChatGPT session.
+    pub async fn complete_mobile_browser_login(
+        &self,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<OpenAiLoginInfo, OpenAiAuthError> {
+        let tokens = self
+            .client
+            .exchange_code_with_redirect(code, verifier, redirect_uri)
+            .await
+            .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
+
+        let claims = tokens
+            .id_token
+            .as_deref()
+            .and_then(parse_id_token)
+            .unwrap_or_default();
+        let id_token = tokens.id_token.as_deref().ok_or_else(|| {
+            OpenAiAuthError::ServerError(
+                "token exchange did not return an id_token; cannot mint API key".into(),
+            )
+        })?;
+        let api_key = self
+            .client
+            .obtain_api_key(id_token)
+            .await
+            .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
+
+        let refresh = tokens
+            .refresh_token
+            .as_ref()
+            .map(|s| s.expose_secret().clone());
+        self.credentials
+            .store_openai_oauth_tokens(
+                tokens.access_token.expose_secret(),
+                refresh.as_deref(),
+                tokens.expires_at,
+                vec![],
+                claims.account_id.as_deref(),
+                claims.fedramp,
+            )
+            .await
+            .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
+        self.credentials
+            .set_provider_key("chatgpt", &api_key)
+            .await
+            .map_err(|e| OpenAiAuthError::ServerError(format!("persist api_key: {e}")))?;
+
+        Ok(OpenAiLoginInfo {
+            account_id: claims.account_id,
+            fedramp: claims.fedramp,
+            api_key,
+        })
+    }
+
     // ── Browser-PKCE flow ─────────────────────────────────────────────────
 
     /// Run the full browser-PKCE Authorization-Code flow.
@@ -300,12 +368,12 @@ impl OpenAiOAuthHandle {
             .delete_openai_oauth_tokens()
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("logout tokens: {e}")))?;
-        // Best-effort: also clear the minted API key.
-        // set_provider_key("chatgpt", "") would overwrite; delete is cleaner but
-        // there's no `delete_provider_key` on CredentialManager — so we
-        // overwrite with an empty string (the engine already guards empty keys).
-        // A future task can add delete_provider_key for cleanliness.
-        let _ = self.credentials.set_provider_key("chatgpt", "").await;
+        // Also remove the minted API key. Keeping an empty placeholder in the
+        // keychain made the post-logout credential state look configured.
+        self.credentials
+            .delete_provider_key("chatgpt")
+            .await
+            .map_err(|e| OpenAiAuthError::ServerError(format!("logout api key: {e}")))?;
         Ok(())
     }
 }

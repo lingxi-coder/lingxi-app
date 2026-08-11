@@ -601,7 +601,7 @@ mod tests {
         let workspace = root.path().join(layout.workspace_rel());
         let state_dir = workspace.join(crate::storage::APP_STATE_DIR);
         let mirror = state_dir.join(crate::storage::APP_METADATA_FILE);
-        let draft = state_dir.join(crate::storage::DESIGN_SPEC_FILE);
+        let draft = state_dir.join("design-spec.json");
         let manifest = root.path().join(layout.manifest_rel());
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(workspace.join("page.js"), "one").unwrap();
@@ -651,7 +651,7 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(workspace.join("page.js"), "one").unwrap();
         fs::write(state_dir.join(crate::storage::APP_METADATA_FILE), "{}").unwrap();
-        fs::write(state_dir.join(crate::storage::DESIGN_SPEC_FILE), "{}").unwrap();
+        fs::write(state_dir.join("design-spec.json"), "{}").unwrap();
         let checkpoint = AppCheckpointStore::new(&layout)
             .create(AppCheckpointKind::ScaffoldCreated, "first", 1_000)
             .unwrap();
@@ -687,8 +687,12 @@ mod tests {
         let state_dir = workspace.join(crate::storage::APP_STATE_DIR);
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(workspace.join("page.js"), "one").unwrap();
-        fs::write(state_dir.join(crate::storage::APP_METADATA_FILE), "record-v1").unwrap();
-        fs::write(state_dir.join(crate::storage::DESIGN_SPEC_FILE), "draft-v1").unwrap();
+        fs::write(
+            state_dir.join(crate::storage::APP_METADATA_FILE),
+            "record-v1",
+        )
+        .unwrap();
+        fs::write(state_dir.join("design-spec.json"), "draft-v1").unwrap();
         seed_legacy_checkpoint(&workspace, 1_000);
         assert!(
             tracked_paths(&workspace)
@@ -720,7 +724,7 @@ mod tests {
         let workspace = root.path().join(layout.workspace_rel());
         let state_dir = workspace.join(crate::storage::APP_STATE_DIR);
         let mirror = state_dir.join(crate::storage::APP_METADATA_FILE);
-        let draft = state_dir.join(crate::storage::DESIGN_SPEC_FILE);
+        let draft = state_dir.join("design-spec.json");
         let manifest = root.path().join(layout.manifest_rel());
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(workspace.join("page.js"), "one").unwrap();
@@ -772,7 +776,7 @@ mod tests {
         let layout = layout(root.path());
         let workspace = root.path().join(layout.workspace_rel());
         let state_dir = workspace.join(crate::storage::APP_STATE_DIR);
-        let draft = state_dir.join(crate::storage::DESIGN_SPEC_FILE);
+        let draft = state_dir.join("design-spec.json");
         let retired = state_dir.join("retired.json");
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(workspace.join("page.js"), "one").unwrap();

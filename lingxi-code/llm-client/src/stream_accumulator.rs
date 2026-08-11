@@ -634,8 +634,8 @@ pub fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use crate::TokenUsage;
+    use futures::stream;
 
     fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()

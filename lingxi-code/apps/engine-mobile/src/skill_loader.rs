@@ -113,9 +113,57 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
     }
 }
 
-/// [`SkillLoader`] backed by a registry built once from the device's on-disk
-/// `.lingxi/commands` + `.lingxi/skills` layers.
+/// Project a compiled-in [`skill_api::Skill`] onto the descriptor the `Skill`
+/// tool consumes — the bundled analog of [`to_descriptor`] (which projects
+/// disk-loaded [`SlashCommand`]s and cannot be reused here because bundled
+/// skills never pass through the command registry's frontmatter type).
+fn bundled_to_descriptor(skill: &skill_api::Skill, session_id: Option<&str>) -> SkillDescriptor {
+    let fm = &skill.frontmatter;
+    SkillDescriptor {
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        body: skill.content.clone(),
+        disable_model_invocation: fm.disable_model_invocation,
+        command_type: SkillCommandType::Prompt,
+        model: fm.model.clone(),
+        allowed_tools: fm.allowed_tools.clone().unwrap_or_default(),
+        disallowed_tools: fm.disallowed_tools.clone().unwrap_or_default(),
+        argument_names: fm.named_arguments.clone().unwrap_or_default(),
+        // skill-api keeps `shell` as the raw frontmatter string; the command
+        // registry's typed variants are Bash | PowerShell with Bash the
+        // default, so anything except an explicit powershell selector maps to
+        // the default route.
+        shell: fm.shell.as_deref().map(|shell| {
+            if shell.eq_ignore_ascii_case("powershell") {
+                command_api::FrontmatterShell::PowerShell
+            } else {
+                command_api::FrontmatterShell::Bash
+            }
+        }),
+        // Compiled-in markdown is first-party, so shell expansion runs (same
+        // stance as the disk Markdown arm above).
+        skip_shell_expansion: false,
+        // `<bundled:name>` is a marker, not a directory — no skill root to
+        // resolve relative file references against.
+        skill_root: None,
+        context: fm.context.clone(),
+        background: fm.background,
+        agent: fm.agent.clone(),
+        session_id: session_id.map(str::to_owned),
+        dynamic_body: None,
+    }
+}
+
+/// [`SkillLoader`] backed by the compiled-in mobile skill set plus a registry
+/// built once from the device's on-disk `.lingxi/commands` + `.lingxi/skills`
+/// layers.
 pub struct MobileDiskSkillLoader {
+    /// Compiled-in mobile skills (`skill_api::register_mobile` — e.g.
+    /// `create-local-app`). Resolved BEFORE the disk layers, mirroring the
+    /// workflow launcher's `resolve_script` precedence (builtins → project →
+    /// user): the skill a release ships must not be shadowed by a stale
+    /// on-device file.
+    bundled: skill_api::SkillRegistry,
     registry: CommandRegistry,
     /// Per-session id stamped on resolved descriptors (`${LINGXI_SESSION_ID}`),
     /// or `None` to leave the token un-substituted.
@@ -157,7 +205,10 @@ impl MobileDiskSkillLoader {
             &[],
         )
         .await;
+        let mut bundled = skill_api::SkillRegistry::new();
+        skill_api::register_mobile(&mut bundled);
         Self {
+            bundled,
             registry,
             session_id,
         }
@@ -167,7 +218,14 @@ impl MobileDiskSkillLoader {
 #[async_trait::async_trait]
 impl SkillLoader for MobileDiskSkillLoader {
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
-        // `resolve` follows aliases (findCommand over name + aliases).
+        // Bundled first (see the field doc for the precedence rationale),
+        // then `resolve` follows aliases (findCommand over name + aliases).
+        if let Some(skill) = self.bundled.get(name) {
+            return Ok(Some(bundled_to_descriptor(
+                skill,
+                self.session_id.as_deref(),
+            )));
+        }
         Ok(self
             .registry
             .resolve(name)
@@ -219,5 +277,65 @@ mod tests {
             .await
             .expect("load ok")
             .is_none());
+    }
+
+    /// QA regression (2026-08-10): the device showed `Unknown skill:
+    /// create-local-app` because the loader consulted ONLY the disk layers —
+    /// the compiled-in mobile skill set was registered for the listing but
+    /// never for resolution. An empty-disk loader must resolve it.
+    #[tokio::test]
+    async fn resolves_bundled_create_local_app_with_an_empty_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let loader = MobileDiskSkillLoader::load_from_disk(
+            root,
+            &root.join(".lingxi"),
+            root,
+            Some("session-1".into()),
+        )
+        .await;
+
+        let desc = loader
+            .load("create-local-app")
+            .await
+            .expect("load ok")
+            .expect("the bundled mobile skill resolves without any disk state");
+        assert_eq!(desc.name, "create-local-app");
+        assert_eq!(desc.command_type, SkillCommandType::Prompt);
+        assert!(!desc.disable_model_invocation);
+        assert!(
+            desc.body.contains("local-app-build"),
+            "the bundled body is the v3 flow (names the build workflow)"
+        );
+    }
+
+    /// Bundled precedence mirrors the workflow launcher's `resolve_script`
+    /// (builtins → project → user): a stale on-device file with the same name
+    /// must not shadow the skill the release ships.
+    #[tokio::test]
+    async fn bundled_skill_shadows_a_same_named_disk_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cmd_dir = root.join(".lingxi").join("commands");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(
+            cmd_dir.join("create-local-app.md"),
+            "---\ndescription: stale decoy\n---\nDECOY BODY\n",
+        )
+        .await
+        .unwrap();
+
+        let loader =
+            MobileDiskSkillLoader::load_from_disk(root, &root.join(".lingxi"), root, None).await;
+        let desc = loader
+            .load("create-local-app")
+            .await
+            .expect("load ok")
+            .expect("resolves");
+        assert!(
+            !desc.body.contains("DECOY BODY"),
+            "the compiled-in skill wins over the on-disk decoy"
+        );
+        assert!(desc.body.contains("local-app-build"));
     }
 }

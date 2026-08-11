@@ -119,8 +119,8 @@ pub struct AppManifest {
 
 impl AppManifest {
     /// Build the initial native contract for a newly-created application.
-    /// Collections start empty — they are filled in from the LLM-authored
-    /// plan, validated by `questionnaire::validate_plan`, once one exists.
+    /// Collections start empty — the agent fills them in as it designs the
+    /// app's data model.
     #[must_use]
     pub fn for_new_app(app_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {

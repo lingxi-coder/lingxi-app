@@ -6,11 +6,7 @@
 //! query an app's data and drive its UI, but an app had no way to tell the
 //! conversation anything.
 //!
-//! Deliberately NOT folded into `interactions.json`: that file's
-//! `undelivered` queue is consumed by `AppGenerationCoordinator` as a
-//! design-gate → generation continuation channel, and a new kind flowing
-//! into that match would be a different subsystem's problem. This is its own
-//! per-app document with its own bounds, in the same shape
+//! Its own per-app document with its own bounds, in the same shape
 //! `permissions.json` established.
 //!
 //! Everything an app writes here is UNTRUSTED input. The mailbox stores it
@@ -215,12 +211,12 @@ impl AppMailbox {
 /// point.
 pub fn load_mailbox(layout: &AppLayout) -> Result<AppMailbox, AppError> {
     let relative = layout.mailbox_rel();
-    let body =
-        match rooted_fs::read_to_string_limited(layout.root(), &relative, MAX_MAILBOX_BYTES) {
-            Ok(body) => body,
-            Err(FsError::NotFound(_)) => return Ok(AppMailbox::default()),
-            Err(error) => return Err(AppError::from_fs("read app mailbox", &error)),
-        };
+    let body = match rooted_fs::read_to_string_limited(layout.root(), &relative, MAX_MAILBOX_BYTES)
+    {
+        Ok(body) => body,
+        Err(FsError::NotFound(_)) => return Ok(AppMailbox::default()),
+        Err(error) => return Err(AppError::from_fs("read app mailbox", &error)),
+    };
     match serde_json::from_str::<AppMailbox>(&body).map_err(|error| error.to_string()) {
         Ok(mailbox) if mailbox.validate().is_ok() => Ok(mailbox),
         Ok(_) | Err(_) => {
@@ -276,8 +272,12 @@ mod tests {
     #[test]
     fn appended_events_get_monotonic_sequence_numbers() {
         let mut mailbox = AppMailbox::default();
-        let first = mailbox.append("timer.done", body("一"), 1_000).expect("append");
-        let second = mailbox.append("timer.done", body("二"), 1_001).expect("append");
+        let first = mailbox
+            .append("timer.done", body("一"), 1_000)
+            .expect("append");
+        let second = mailbox
+            .append("timer.done", body("二"), 1_001)
+            .expect("append");
         assert!(second > first, "sequence numbers must be monotonic");
         assert_eq!(mailbox.events.len(), 2);
     }
@@ -326,7 +326,10 @@ mod tests {
                 mailbox.events.iter().any(|event| event.seq == seq),
                 "an append must never evict the event it just minted"
             );
-            let encoded = serde_json::to_vec_pretty(&mailbox).expect("serialize").len() + 1;
+            let encoded = serde_json::to_vec_pretty(&mailbox)
+                .expect("serialize")
+                .len()
+                + 1;
             assert!(
                 encoded as u64 <= MAX_MAILBOX_BYTES,
                 "append #{i} left {encoded} bytes, which save_mailbox refuses \
@@ -406,7 +409,9 @@ mod tests {
         assert_eq!(load_mailbox(&layout).unwrap(), AppMailbox::default());
 
         let mut mailbox = AppMailbox::default();
-        mailbox.append("timer.done", body("番茄钟结束"), 1_000).unwrap();
+        mailbox
+            .append("timer.done", body("番茄钟结束"), 1_000)
+            .unwrap();
         save_mailbox(&layout, &mailbox).unwrap();
         assert_eq!(load_mailbox(&layout).unwrap(), mailbox);
     }

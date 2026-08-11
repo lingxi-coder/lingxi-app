@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { getLingXiBridge } from "../lib/lingxi-bridge";
 
-export function AppShell() {
+export default function AppShell() {
   const [bridgeReady, setBridgeReady] = useState(false);
 
   useEffect(() => {

@@ -56,13 +56,11 @@ use client_protocol::listings::{
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
     AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto, AppCheckpointKindDto,
-    AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto,
-    AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto, AppDesignFieldValueDto,
-    AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto, AppDetailsDto, AppErrorCodeDto,
-    AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto, AppManifestDto, AppPlanDto,
-    AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto,
-    AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto,
+    AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto,
+    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
+    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
+    AppSessionKindDto, AppSessionRowDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -441,89 +439,11 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
-            "event/app_questionnaire_changed.json",
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppQuestionnaireChanged {
-                    app_id: "habits-1a2b".to_string(),
-                    revision: 2,
-                    steps: canonical_questionnaire(),
-                },
-            },
-        ),
-        (
-            "event/app_plan_changed.json",
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppPlanChanged {
-                    app_id: "habits-1a2b".to_string(),
-                    revision: 3,
-                    plan: Some(canonical_app_plan()),
-                },
-            },
-        ),
-        (
-            "event/app_designer_requested.json",
-            ClientEvent::AppDesignerRequested {
-                app_id: "habits-1a2b".to_string(),
-                interaction_id: "int-00000001".to_string(),
-                revision: 3,
-            },
-        ),
-        (
-            "event/app_design_draft_changed.json",
-            ClientEvent::AppDesignDraftChanged {
-                app_id: "habits-1a2b".to_string(),
-                revision: 4,
-                // Exactly ONE entry: a HashMap's iteration order is
-                // nondeterministic, so a multi-entry map would make the
-                // pretty-printed golden flaky.
-                fields: HashMap::from([(
-                    "title".to_string(),
-                    DesignValueDto::ShortText {
-                        value: "Habit Tracker".to_string(),
-                    },
-                )]),
-            },
-        ),
-        (
-            "event/app_design_suggestion_available.json",
-            ClientEvent::AppDesignSuggestionAvailable {
-                app_id: "habits-1a2b".to_string(),
-                suggestion_id: "sugg-00000001".to_string(),
-                based_on_revision: 4,
-                patch: canonical_design_patch(),
-            },
-        ),
-        (
-            "event/app_design_conflict.json",
-            ClientEvent::AppDesignConflict {
-                app_id: "habits-1a2b".to_string(),
-                expected_revision: 2,
-                actual_revision: 4,
-            },
-        ),
-        (
             "event/app_workflow_changed.json",
             ClientEvent::AppWorkflowChanged {
                 app_id: "habits-1a2b".to_string(),
-                state: AppWorkflowStateDto::Generating,
+                state: AppWorkflowStateDto::Ready,
                 detail: None,
-            },
-        ),
-        (
-            "event/app_generation_progress.json",
-            ClientEvent::AppGenerationProgress {
-                app_id: "habits-1a2b".to_string(),
-                stage: "scaffold".to_string(),
-                percent: Some(40),
-                detail: Some("writing pages".to_string()),
-            },
-        ),
-        (
-            "event/app_generation_job_changed.json",
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppGenerationJobChanged {
-                    job: canonical_generation_job(),
-                },
             },
         ),
         (
@@ -533,15 +453,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 state: AppRuntimeStateDto::Stopped,
                 details: Some(canonical_app_details().runtime),
                 last_error: None,
-            },
-        ),
-        (
-            "event/app_preview_ready.json",
-            ClientEvent::AppPreviewReady {
-                app_id: "habits-1a2b".to_string(),
-                interaction_id: "int-00000002".to_string(),
-                revision: 4,
-                url: None,
             },
         ),
         (
@@ -585,6 +496,29 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         reason: "Fetch approved remote data".to_string(),
                     },
                 },
+            },
+        ),
+        (
+            "event/app_sessions_changed.json",
+            ClientEvent::AppSessionsChanged {
+                app_id: "habits-1a2b".to_string(),
+                sessions: vec![
+                    AppSessionRowDto {
+                        uuid: "0f0e0d0c-0b0a-0908-0706-050403020100".to_string(),
+                        title: "初始化".to_string(),
+                        modified_rfc3339: "2026-08-09T12:00:00Z".to_string(),
+                        message_count: 12,
+                        kind: AppSessionKindDto::Init,
+                    },
+                    AppSessionRowDto {
+                        uuid: "00112233-4455-6677-8899-aabbccddeeff".to_string(),
+                        title: "加一个统计页".to_string(),
+                        modified_rfc3339: "2026-08-09T13:30:00Z".to_string(),
+                        message_count: 7,
+                        kind: AppSessionKindDto::Conversation,
+                    },
+                ],
+                next_offset: Some(52),
             },
         ),
         (
@@ -838,82 +772,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
-            "command/update_app_brief.json",
-            ClientCommand::UpdateAppBrief {
-                app_id: "habits-1a2b".to_string(),
-                brief: "A todo list instead".to_string(),
-            },
-        ),
-        (
-            "command/retry_app_questionnaire.json",
-            ClientCommand::RetryAppQuestionnaire {
-                app_id: "habits-1a2b".to_string(),
-            },
-        ),
-        (
-            "command/begin_app_planning.json",
-            ClientCommand::BeginAppPlanning {
-                app_id: "habits-1a2b".to_string(),
-            },
-        ),
-        (
-            "command/retry_app_plan.json",
-            ClientCommand::RetryAppPlan {
-                app_id: "habits-1a2b".to_string(),
-            },
-        ),
-        (
-            "command/open_app_designer.json",
-            ClientCommand::OpenAppDesigner {
-                app_id: "habits-1a2b".to_string(),
-            },
-        ),
-        (
-            "command/update_app_design_draft.json",
-            ClientCommand::UpdateAppDesignDraft {
-                app_id: "habits-1a2b".to_string(),
-                expected_revision: 3,
-                patch: canonical_design_patch(),
-            },
-        ),
-        (
-            "command/apply_agent_design_suggestion.json",
-            ClientCommand::ApplyAgentDesignSuggestion {
-                app_id: "habits-1a2b".to_string(),
-                suggestion_id: "sugg-00000001".to_string(),
-                expected_revision: 4,
-            },
-        ),
-        (
-            "command/request_app_design_suggestion.json",
-            ClientCommand::RequestAppDesignSuggestion {
-                app_id: "habits-1a2b".to_string(),
-                expected_revision: 4,
-                prompt: Some("Use a calmer layout".to_string()),
-            },
-        ),
-        (
-            "command/dismiss_app_design_suggestion.json",
-            ClientCommand::DismissAppDesignSuggestion {
-                app_id: "habits-1a2b".to_string(),
-                suggestion_id: "sugg-00000001".to_string(),
-            },
-        ),
-        (
-            "command/confirm_app_design.json",
-            ClientCommand::ConfirmAppDesign {
-                app_id: "habits-1a2b".to_string(),
-                revision: 4,
-                interaction_id: "int-00000001".to_string(),
-            },
-        ),
-        (
-            "command/cancel_app_design.json",
-            ClientCommand::CancelAppDesign {
-                app_id: "habits-1a2b".to_string(),
-            },
-        ),
-        (
             "command/start_app.json",
             ClientCommand::StartApp {
                 app_id: "habits-1a2b".to_string(),
@@ -929,31 +787,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/restart_app.json",
             ClientCommand::RestartApp {
                 app_id: "habits-1a2b".to_string(),
-            },
-        ),
-        (
-            "command/confirm_app_preview.json",
-            ClientCommand::ConfirmAppPreview {
-                app_id: "habits-1a2b".to_string(),
-                revision: 4,
-                interaction_id: "int-00000002".to_string(),
-            },
-        ),
-        (
-            "command/request_app_revision.json",
-            ClientCommand::RequestAppRevision {
-                app_id: "habits-1a2b".to_string(),
-                prompt: "make the chart blue".to_string(),
-            },
-        ),
-        (
-            "command/retry_app_generation.json",
-            ClientCommand::RetryAppGeneration {
-                app_id: "habits-1a2b".to_string(),
-                // `None` on purpose: `skip_serializing_if` means the golden
-                // bytes are unchanged by this field's addition, which is the
-                // compatibility claim this snapshot exists to hold.
-                prompt: None,
             },
         ),
         (
@@ -987,6 +820,14 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/reset_app_permissions.json",
             ClientCommand::ResetAppPermissions {
                 app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/list_app_sessions.json",
+            ClientCommand::ListAppSessions {
+                app_id: "habits-1a2b".to_string(),
+                offset: Some(50),
+                limit: Some(50),
             },
         ),
         (
@@ -1373,7 +1214,7 @@ fn canonical_coordinator_worker() -> CoordinatorWorkerDto {
     }
 }
 
-/// The canonical local-app record: a chat-born dashboard app mid-design.
+/// The canonical local-app record: a chat-born app still in draft.
 fn canonical_app_record() -> AppRecordDto {
     AppRecordDto {
         id: "habits-1a2b".to_string(),
@@ -1382,23 +1223,10 @@ fn canonical_app_record() -> AppRecordDto {
         git_enabled: true,
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
-        workflow_state: AppWorkflowStateDto::CollectingSpec,
+        workflow_state: AppWorkflowStateDto::Draft,
         conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+        init_session_id: None,
         workspace_rel: "apps/habits-1a2b/workspace".to_string(),
-    }
-}
-
-fn canonical_generation_job() -> AppGenerationJobDto {
-    AppGenerationJobDto {
-        id: "job-00000001".to_string(),
-        app_id: "habits-1a2b".to_string(),
-        revision: 4,
-        continuation_seq: 1,
-        state: AppGenerationJobStateDto::Building,
-        percent: Some(70),
-        detail: Some("exporting static assets".to_string()),
-        log_rel: Some("logs/job-00000001.log".to_string()),
-        updated_at_ms: 1_750_000_000_002,
     }
 }
 
@@ -1434,62 +1262,9 @@ fn canonical_app_manifest() -> AppManifestDto {
     }
 }
 
-/// The canonical authored questionnaire: one step with a text field that
-/// allows both a custom answer and deferring to the model.
-fn canonical_questionnaire() -> Vec<AppDesignStepDto> {
-    vec![AppDesignStepDto {
-        id: "basics".to_string(),
-        order: 1,
-        title: "Basics".to_string(),
-        description: None,
-        fields: vec![AppDesignFieldDto {
-            id: "accent".to_string(),
-            label: "Accent color".to_string(),
-            description: None,
-            field_type: AppDesignFieldTypeDto::SingleChoice,
-            required: true,
-            allows_custom: true,
-            allows_defer: true,
-            default_value: None,
-            options: vec![AppDesignFieldOptionDto {
-                value: "blue".to_string(),
-                label: "Blue".to_string(),
-            }],
-        }],
-    }]
-}
-
-/// The canonical derived plan.
-fn canonical_app_plan() -> AppPlanDto {
-    AppPlanDto {
-        collections: vec![AppDataCollectionDto {
-            id: "records".to_string(),
-            label: "Records".to_string(),
-            fields: vec![AppDataFieldDto {
-                id: "title".to_string(),
-                label: "Title".to_string(),
-                field_type: AppDataFieldTypeDto::Text,
-                required: true,
-                options: vec![],
-            }],
-            enabled_by_default: true,
-        }],
-        capabilities: vec![AppCapabilityKindDto::DataMutation],
-        domains: vec!["api.example.com".to_string()],
-        summary: "A habit tracker with a records collection.".to_string(),
-    }
-}
-
 fn canonical_app_details() -> AppDetailsDto {
     AppDetailsDto {
         app: canonical_app_record(),
-        design_revision: 4,
-        design_fields: vec![AppDesignFieldValueDto {
-            field_id: "accent".to_string(),
-            value: DesignValueDto::Deferred,
-        }],
-        questionnaire: canonical_questionnaire(),
-        plan: Some(canonical_app_plan()),
         manifest: Some(canonical_app_manifest()),
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,
@@ -1499,99 +1274,7 @@ fn canonical_app_details() -> AppDetailsDto {
             recovery_state: Some(AppRuntimeRecoveryStateDto::Pending),
             last_error: None,
         },
-        generation_job: Some(canonical_generation_job()),
         checkpoints: vec![],
-    }
-}
-
-/// The canonical design patch: one `set` (a `{kind, value}` design value) and
-/// one `remove`, plus a note — pinning the spec-§A `{op, field_id, value}` op
-/// shape exactly.
-/// Canonical patch carrying EVERY `DesignValueDto` kind exactly once (in a
-/// `Vec`, so the golden bytes stay deterministic) plus a remove op. The
-/// checked-in goldens built from this patch are the ONLY artifact the TS
-/// mirror (`clients/shared`) validates its `DesignValueDto` union and
-/// `validateDesignValue` branches against, so every kind must appear in
-/// Rust-produced bytes — a single-kind patch would leave the other arms
-/// untested across the language seam.
-fn canonical_design_patch() -> AppDesignPatchDto {
-    AppDesignPatchDto {
-        ops: vec![
-            AppDesignPatchOpDto::Set {
-                field_id: "title".to_string(),
-                value: DesignValueDto::ShortText {
-                    value: "Habit Tracker".to_string(),
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "description".to_string(),
-                value: DesignValueDto::LongText {
-                    value: "Track daily habits\nwith streaks.".to_string(),
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "layout".to_string(),
-                value: DesignValueDto::SingleChoice {
-                    value: "grid".to_string(),
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "tags".to_string(),
-                value: DesignValueDto::MultipleChoice {
-                    value: vec!["health".to_string(), "daily".to_string()],
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "compact_mode".to_string(),
-                value: DesignValueDto::Boolean { value: true },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "accent_color".to_string(),
-                value: DesignValueDto::Color {
-                    value: "#3366ff".to_string(),
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "density".to_string(),
-                value: DesignValueDto::Density {
-                    value: DensityLevelDto::Comfortable,
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "screens".to_string(),
-                value: DesignValueDto::ScreenList {
-                    value: vec!["today".to_string(), "history".to_string()],
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "features".to_string(),
-                value: DesignValueDto::FeatureList {
-                    value: vec!["streaks".to_string(), "reminders".to_string()],
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "collection_fields".to_string(),
-                value: DesignValueDto::DataFieldList {
-                    value: vec![AppDataFieldDto {
-                        id: "title".to_string(),
-                        label: "Title".to_string(),
-                        field_type: AppDataFieldTypeDto::Text,
-                        required: true,
-                        options: vec![],
-                    }],
-                },
-            },
-            AppDesignPatchOpDto::Set {
-                field_id: "network_domains".to_string(),
-                value: DesignValueDto::DomainList {
-                    value: vec!["api.example.com".to_string()],
-                },
-            },
-            AppDesignPatchOpDto::Remove {
-                field_id: "accent".to_string(),
-            },
-        ],
-        note: Some("rename + drop accent".to_string()),
     }
 }
 

@@ -4,7 +4,7 @@
 //! WebView handles.  This broker is the single trust boundary for those
 //! operations and is also used by the native client command surface.
 
-use crate::local_apps_bridge::lower_error_code;
+use crate::local_apps_build::{detect_build_target, LocalAppBuildTarget};
 use crate::local_apps_mcp::LocalAppsMcpHost;
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
@@ -16,10 +16,10 @@ use client_protocol::local_apps::{
 };
 use futures_util::StreamExt;
 use local_apps::{
-    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore,
-    AppGenerationCoordinator, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState,
-    AppService, AppWorkflowState, DataMigrationPreview, DataMutation, DataQuery, DataSortDirection,
-    DataSortKey, PermissionDecision, SessionPermissions,
+    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore, AppLayout,
+    AppPermissions, AppRuntimeMode, AppRuntimeState, AppService, DataMigrationPreview,
+    DataMutation, DataQuery, DataSortDirection, DataSortKey, PermissionDecision,
+    SessionPermissions,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -99,6 +99,7 @@ struct RuntimeEntry {
     state: RuntimeEntryState,
     last_used: u64,
     generation: u64,
+    uses_full_runtime: bool,
 }
 
 /// Releases a `Starting` reservation whose owner never resolved it.
@@ -337,11 +338,8 @@ pub(crate) struct LocalAppsHostBroker {
     full_runtime: bool,
     runtime_root: Option<PathBuf>,
     service: OnceLock<Arc<AppService>>,
-    generation: OnceLock<Arc<AppGenerationCoordinator>>,
     /// Set once at profile load (same call site as `attach_service`), so the
-    /// MCP `create` tool can trigger background authoring the same way
-    /// `host.rs`'s wire-client path does — see
-    /// [`LocalAppsMcpHost::trigger_authoring`].
+    /// broker's `llm.chat` bridge operation reaches the live model.
     llm: OnceLock<Arc<crate::local_apps_profile::SharedLlm>>,
     /// Set at the same profile-load site as `llm` — live per-connection
     /// device handles behind a swap cell (see `local_apps_device`).
@@ -420,6 +418,10 @@ pub(crate) struct LocalAppsHostBroker {
 }
 
 impl LocalAppsHostBroker {
+    /// Test-convenience constructor (production goes through
+    /// [`Self::new_with_physical_memory`], which every test root that needs a
+    /// memory figure also uses).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         root: PathBuf,
         event_sink: Arc<dyn ClientEventSink>,
@@ -453,7 +455,6 @@ impl LocalAppsHostBroker {
             full_runtime,
             runtime_root,
             service: OnceLock::new(),
-            generation: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
             recording: Arc::new(Mutex::new(None)),
@@ -483,13 +484,6 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
         self.service.set(service)
-    }
-
-    pub(crate) fn attach_generation(
-        &self,
-        generation: Arc<AppGenerationCoordinator>,
-    ) -> Result<(), Arc<AppGenerationCoordinator>> {
-        self.generation.set(generation)
     }
 
     pub(crate) fn attach_llm(
@@ -537,14 +531,20 @@ impl LocalAppsHostBroker {
         AppLayout::new(&self.root, app_id).map_err(|error| error.to_string())
     }
 
+    pub(crate) fn physical_memory_bytes(&self) -> u64 {
+        self.physical_memory_bytes
+    }
+
     pub(crate) fn fixed_runtime_mount(&self) -> Result<MountSpec, String> {
         let root = self
             .runtime_root
             .as_ref()
-            .filter(|path| path.join("node_modules/next/dist/bin/next").is_file())
+            .filter(|path| {
+                path.join("node_modules/next/dist/bin/next").is_file()
+                    && path.join("node_modules/vite/bin/vite.js").is_file()
+            })
             .ok_or_else(|| {
-                "verified local-app Node runtime is unavailable; stage local-app-runtime first"
-                    .to_string()
+                "verified local-app Node runtime is unavailable or incomplete; stage the combined Next/Vite local-app-runtime first".to_string()
             })?;
         Ok(MountSpec {
             host_path: root.join("node_modules"),
@@ -1084,6 +1084,12 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
+        let layout = self.layout(app_id)?;
+        let uses_full_runtime = self.full_runtime
+            && matches!(
+                detect_build_target(&layout).map_err(|error| error.to_string())?,
+                LocalAppBuildTarget::NextStaticV1
+            );
         loop {
             let access_tick = self.next_request_id.fetch_add(1, Ordering::Relaxed);
             let mut wait_for_start = None;
@@ -1107,8 +1113,12 @@ impl LocalAppsHostBroker {
                             }
                         }
                     }
-                } else if !self.full_runtime
-                    || runtimes.len() < runtime_instance_quota(self.physical_memory_bytes)
+                } else if !uses_full_runtime
+                    || runtimes
+                        .values()
+                        .filter(|entry| entry.uses_full_runtime)
+                        .count()
+                        < runtime_instance_quota(self.physical_memory_bytes)
                 {
                     let generation = self.next_request_id.fetch_add(1, Ordering::Relaxed);
                     let (gate, _) = watch::channel(RuntimeStartStatus::Pending);
@@ -1118,6 +1128,7 @@ impl LocalAppsHostBroker {
                             state: RuntimeEntryState::Starting { gate },
                             last_used: access_tick,
                             generation,
+                            uses_full_runtime,
                         },
                     );
                     reserved_generation = Some(generation);
@@ -1126,6 +1137,7 @@ impl LocalAppsHostBroker {
                         .iter()
                         .filter(|(candidate, entry)| {
                             *candidate != app_id
+                                && entry.uses_full_runtime
                                 && matches!(entry.state, RuntimeEntryState::Running { .. })
                         })
                         .min_by_key(|(_, entry)| entry.last_used)
@@ -1175,7 +1187,9 @@ impl LocalAppsHostBroker {
                     runtime_instance_quota(self.physical_memory_bytes)
                 ));
             };
-            return self.start_reserved_runtime(app_id, generation).await;
+            return self
+                .start_reserved_runtime(app_id, generation, uses_full_runtime)
+                .await;
         }
     }
 
@@ -1210,14 +1224,19 @@ impl LocalAppsHostBroker {
         }
     }
 
-    async fn start_reserved_runtime(&self, app_id: &str, generation: u64) -> Result<Value, String> {
+    async fn start_reserved_runtime(
+        &self,
+        app_id: &str,
+        generation: u64,
+        uses_full_runtime: bool,
+    ) -> Result<Value, String> {
         let _reservation = RuntimeReservation {
             runtimes: Arc::clone(&self.runtimes),
             app_id: app_id.to_string(),
             generation,
         };
         let service = self.service()?;
-        let runtime_mount = if self.full_runtime {
+        let runtime_mount = if uses_full_runtime {
             if self.mobile_linux.is_none() {
                 return self
                     .fail_reserved_runtime_start(
@@ -1239,7 +1258,7 @@ impl LocalAppsHostBroker {
         } else {
             None
         };
-        let static_root = if self.full_runtime {
+        let static_root = if uses_full_runtime {
             None
         } else {
             let layout = self.layout(app_id)?;
@@ -1312,7 +1331,7 @@ impl LocalAppsHostBroker {
         // window, and everything between here and the spawn — two record
         // persistences, ~11 ms measured — is the distance that buys.  Releasing
         // early costs nothing: on this path nothing ever reads the listener.
-        let static_listener = if self.full_runtime {
+        let static_listener = if uses_full_runtime {
             drop(listener);
             None
         } else {
@@ -1321,7 +1340,7 @@ impl LocalAppsHostBroker {
         if let Err(error) = service
             .set_runtime_mode(
                 app_id,
-                if self.full_runtime {
+                if uses_full_runtime {
                     AppRuntimeMode::NextProduction
                 } else {
                     AppRuntimeMode::StaticExport
@@ -1367,7 +1386,7 @@ impl LocalAppsHostBroker {
             lease.commit();
         }
 
-        let handle = if self.full_runtime {
+        let handle = if uses_full_runtime {
             let runtime = self.mobile_linux.as_ref().ok_or_else(|| {
                 "Full local-app runtime requires the mobile Linux runtime".to_string()
             })?;
@@ -1785,19 +1804,27 @@ impl LocalAppsHostBroker {
     pub(crate) async fn restore_checkpoint_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let checkpoint_id = required_string(&input, "checkpoint_id")?.to_string();
-        let record = self
-            .service()?
+        let service = self.service()?;
+        service
             .record(&app_id)
             .await
             .map_err(|e| e.to_string())?;
-        // The workspace hard reset is irreversible from the client, so refuse
-        // before the capability prompt rather than asking the user to approve
-        // something `begin_restore_rebuild` will reject afterwards.
-        if record.workflow_state != AppWorkflowState::Ready {
-            return Err(format!(
-                "restoring app {app_id} is only available once it is ready (current workflow state {})",
-                record.workflow_state
-            ));
+        // Pre-flight the one precondition the restore cannot recover from,
+        // BEFORE prompting the user and BEFORE stopping the runtime: an app
+        // created with `git_enabled: false` has no checkpoints to restore, and
+        // the service rejects it deep inside `restore_checkpoint`. Discovering
+        // that after the stop leaves the user with an approved restore that
+        // did nothing except take their app offline.
+        if !service
+            .git_version_control_enabled(&app_id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "this app was created without Git version control, so it has no checkpoints to \
+                 restore"
+                    .into(),
+            );
         }
         let decision = self
             .request_capability(
@@ -1810,27 +1837,109 @@ impl LocalAppsHostBroker {
         if matches!(raise_decision(decision), PermissionDecision::Deny) {
             return Err("user denied checkpoint restoration".into());
         }
+        // Remember whether the app was serving BEFORE the restore so a
+        // successful rebuild can put it back the way the user had it.
+        let was_running = service
+            .runtime_record(&app_id)
+            .await
+            .map(|runtime| {
+                matches!(
+                    runtime.state,
+                    AppRuntimeState::Starting | AppRuntimeState::Running
+                )
+            })
+            .unwrap_or(false);
         self.stop_runtime(&app_id).await?;
-        // The coordinator — not `AppService` — is the seam that checks both
-        // preconditions BEFORE the `git reset --hard`: the workflow state (which
-        // can have moved while the prompt was open) and any in-flight job over
-        // the same workspace.
-        let (safety, job) = self
-            .generation
-            .get()
-            .ok_or_else(|| "generation coordinator is unavailable".to_string())?
+        // The service does the durable work: a PreRestore safety checkpoint
+        // first, then the workspace-only Git restore (data/runtime/build
+        // paths sit outside the repository and are never reset).
+        service
             .restore_checkpoint(&app_id, &checkpoint_id)
             .await
             .map_err(|error| error.to_string())?;
+        // Rebuild the restored source so the served output matches it.
+        let layout = self.layout(&app_id)?;
+        let builder = crate::local_apps_build::LocalAppBuilder {
+            mobile_linux: self.mobile_linux.clone(),
+            host: self,
+        };
+        builder.build_workspace(&layout).await.map_err(|error| {
+            format!(
+                "checkpoint {checkpoint_id} was restored, but rebuilding the workspace \
+                 failed: {error}. Read the build log via read_logs (log=\"build\"), fix \
+                 the source, then run the build tool again."
+            )
+        })?;
+        // Best-effort restart when the runtime was serving before the
+        // restore; a failure here leaves the app restored+rebuilt but
+        // stopped, which the caller can see and fix via manage_runtime.
+        let restarted = if was_running {
+            self.manage_runtime_value(json!({ "app_id": app_id.clone(), "action": "start" }))
+                .await
+                .is_ok()
+        } else {
+            false
+        };
         Ok(json!({
+            "ok": true,
             "app_id": app_id,
-            "restored_checkpoint_id": checkpoint_id,
-            "pre_restore_checkpoint": safety,
-            "data_preserved": true,
-            "rebuild_required": false,
-            "rebuild_queued": true,
-            "generation_job": crate::local_apps_generation::lower_job(job)
+            "checkpoint_id": checkpoint_id,
+            "rebuilt": true,
+            "restarted": restarted,
         }))
+    }
+
+    /// Lay down the fixed template workspace for a freshly created app (v3:
+    /// `create` scaffolds immediately; the conversation agent then edits the
+    /// source in place and calls `build`).
+    pub(crate) async fn scaffold_app_value(&self, app_id: &str) -> Result<(), String> {
+        let layout = self.layout(app_id)?;
+        let builder = crate::local_apps_build::LocalAppBuilder {
+            mobile_linux: self.mobile_linux.clone(),
+            host: self,
+        };
+        builder
+            .scaffold_workspace(&layout, true)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Write the per-app LINGXI.md context file at the workspace root:
+        // every session rooted in this workspace auto-loads it into the
+        // system context (`orchestrator::prompt::real_provider`), so the
+        // agent starts with the brief + the workspace contract without any
+        // prompt plumbing. Note this file is NOT tamper-proof: v3 has no
+        // source validator, so the contract it states is enforced only where
+        // the host can enforce it — `restore_locked_files` re-pins the locked
+        // files on every build, and capability/domain grants still go through
+        // the user prompt.
+        let record = self.service()?.record(app_id).await.map_err(|e| e.to_string())?;
+        let workspace = layout.root().join(layout.workspace_rel());
+        let context = format!(
+            "# Local App: {name} ({id})\n\n\
+             Brief: {brief}\n\n\
+             ## Workspace contract\n\
+             - Edit ONLY files under `app/`, `components/`, `lib/`, `styles/`, `public/`.\n\
+             - NEVER touch the locked files: `package.json`, `package-lock.json`, \
+             `vite.config.mjs`, `index.html`, `app/main.jsx`, `lib/lingxi-bridge.js`.\n\
+             - No new npm dependencies: the offline runtime ships a fixed `node_modules`.\n\
+             - The page reaches host data/network/device ONLY through `window.lingxi.v1` \
+             (see `lib/lingxi-bridge.js`).\n\
+             - Declare data collections / network domains / capabilities through \
+             `mcp__local_apps__update_manifest` BEFORE the page relies on them; runtime \
+             authorization still prompts the user.\n\n\
+             ## Build & preview\n\
+             - `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline Vite build \
+             (30-minute budget); success marks the app ready.\n\
+             - `mcp__local_apps__manage_runtime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
+             — serve the built output and return the preview url.\n\
+             - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
+             - After the user confirms a working state, record it with \
+             `mcp__local_apps__create_checkpoint`.\n",
+            name = record.name,
+            id = record.id,
+            brief = record.brief,
+        );
+        std::fs::write(workspace.join("LINGXI.md"), context)
+            .map_err(|error| format!("write workspace LINGXI.md: {error}"))
     }
 }
 
@@ -1838,6 +1947,100 @@ impl LocalAppsHostBroker {
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn manage_runtime(&self, input: Value) -> Result<Value, String> {
         self.manage_runtime_value(input).await
+    }
+
+    async fn build_app(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        // Existence gate (same shape as the UI ops above).
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let layout =
+            AppLayout::new(self.root.clone(), app_id.clone()).map_err(|e| e.to_string())?;
+        let builder = crate::local_apps_build::LocalAppBuilder {
+            mobile_linux: self.mobile_linux.clone(),
+            host: self,
+        };
+        let target = crate::local_apps_build::detect_build_target(&layout)
+            .map_err(|e| e.to_string())?;
+        builder
+            .build_workspace(&layout)
+            .await
+            .map_err(|e| e.to_string())?;
+        // "Ready" means SERVABLE, not "the build tool exited 0". The static
+        // preview server refuses to start without `build/store/out/index.html`
+        // (see `start_runtime`), and a build whose output landed elsewhere —
+        // e.g. an edited `vite.config.mjs` reverting `build.outDir` to the
+        // Vite default — exits 0 while producing nothing this host can serve.
+        // Stamping `ready` there would leave a permanently unstartable app
+        // advertised as ready in the library.
+        let served_index = layout
+            .root()
+            .join(layout.build_rel(false))
+            .join("out")
+            .join("index.html");
+        if !served_index.exists() {
+            return Err(format!(
+                "the build finished but produced no servable output at {}. The build must emit \
+                 an `out/` directory (the locked `vite.config.mjs` sets `build.outDir`); restore \
+                 it, then run the build tool again.",
+                served_index.display()
+            ));
+        }
+        self.service()?
+            .mark_ready(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "app_id": app_id,
+            "target": match target {
+                crate::local_apps_build::LocalAppBuildTarget::NextStaticV1 => "next-static-v1",
+                crate::local_apps_build::LocalAppBuildTarget::ViteReactStaticV1 => {
+                    "vite-react-static-v1"
+                }
+            },
+            "hint": "start or restart the runtime with manage_runtime to serve the new build",
+        }))
+    }
+
+    async fn update_manifest(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let layout =
+            AppLayout::new(self.root.clone(), app_id.clone()).map_err(|e| e.to_string())?;
+        let mut manifest = local_apps::load_manifest(&layout).map_err(|e| e.to_string())?;
+        if let Some(collections) = input.get("collections") {
+            manifest.collections = serde_json::from_value(collections.clone())
+                .map_err(|e| format!("invalid collections: {e}"))?;
+        }
+        if let Some(domains) = input.get("allowed_domains") {
+            manifest.allowed_domains = serde_json::from_value(domains.clone())
+                .map_err(|e| format!("invalid allowed_domains: {e}"))?;
+        }
+        if let Some(capabilities) = input.get("capabilities") {
+            manifest.capabilities = serde_json::from_value(capabilities.clone())
+                .map_err(|e| format!("invalid capabilities: {e}"))?;
+        }
+        manifest.validate().map_err(|e| e.to_string())?;
+        // Schema changes against live data go through the SAME preview +
+        // destructive-approval gate the pipeline used — an agent declaring a
+        // narrower schema cannot silently drop user rows.
+        crate::local_apps_build::migrate_manifest_with_approval(self, &layout, &manifest)
+            .await
+            .map_err(|e| e.to_string())?;
+        local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "app_id": app_id,
+            "collections": manifest.collections.len(),
+            "allowed_domains": manifest.allowed_domains,
+            "capabilities": manifest.capabilities,
+        }))
     }
 
     async fn query_data(&self, input: Value) -> Result<Value, String> {
@@ -1918,52 +2121,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.read_app_events_value(input).await
     }
 
-    async fn trigger_authoring(&self, app_id: String, epoch: u64) {
-        let (Ok(service), Some(llm)) = (self.service(), self.llm.get()) else {
-            // `service`/`llm` are attached together with `generation` at
-            // profile load, right after `create_app` itself becomes
-            // reachable — this should not happen. If it ever does, the app
-            // is not stuck forever: the load-time sweep and the
-            // `retry_questionnaire`-from-`authoring_questionnaire` escape
-            // hatch both still apply.
-            tracing::error!(
-                app_id,
-                "local-apps host: service or llm not attached; MCP-triggered authoring \
-                 was skipped — the app stays recoverable via retry_questionnaire"
-            );
-            return;
-        };
-        let notifier: Arc<dyn crate::local_apps_profile::AppFailureNotifier> =
-            Arc::new(BrokerFailureNotifier(self.event_sink.clone()));
-        crate::local_apps_profile::spawn_authoring(service, llm.current(), notifier, app_id, epoch);
-    }
-}
-
-/// The MCP host's [`crate::local_apps_profile::AppFailureNotifier`]: lowers
-/// a synthesized failure directly onto the broker's own profile-wide client
-/// fanout (the same sink every OTHER broker-originated event already rides —
-/// `event_sink`, not the connection-scoped `AppEmissionQueue` `host.rs` uses,
-/// since a profile-scoped broker has no single connection to prefer).
-struct BrokerFailureNotifier(Arc<dyn ClientEventSink>);
-
-#[async_trait]
-impl crate::local_apps_profile::AppFailureNotifier for BrokerFailureNotifier {
-    async fn notify_failure(
-        &self,
-        service: Option<&AppService>,
-        app_id: Option<String>,
-        error: &local_apps::AppError,
-    ) {
-        if let Some(service) = service {
-            service.flush_events().await;
-        }
-        self.0
-            .emit(ClientEvent::AppOperationFailed {
-                app_id,
-                code: lower_error_code(error.code()),
-                message: error.to_string(),
-            })
-            .await;
+    async fn scaffold_app(&self, app_id: String) -> Result<(), String> {
+        self.scaffold_app_value(&app_id).await
     }
 }
 
@@ -2841,7 +3000,7 @@ mod tests {
     use client_adapter::{ClientEventSink, MockSink};
     use futures_util::stream;
     use local_apps::test_support::FixedClock;
-    use local_apps::{storage, AppState, NoopAppEventObserver, NoopContinuationSink};
+    use local_apps::{storage, AppState, NoopAppEventObserver};
     use serde_json::json;
     use std::fs;
     use std::future::Future;
@@ -3171,7 +3330,6 @@ mod tests {
             AppService::load(
                 root.path(),
                 Arc::new(FixedClock::new(1)),
-                Arc::new(NoopContinuationSink),
                 Arc::new(NoopAppEventObserver),
             )
             .await
@@ -3184,6 +3342,9 @@ mod tests {
         let next_bin = runtime_root.join("node_modules/next/dist/bin/next");
         fs::create_dir_all(next_bin.parent().unwrap()).expect("create runtime root");
         fs::write(&next_bin, b"#!/bin/sh\n").expect("write next bin");
+        let vite_bin = runtime_root.join("node_modules/vite/bin/vite.js");
+        fs::create_dir_all(vite_bin.parent().unwrap()).expect("create Vite runtime root");
+        fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write Vite bin");
         runtime_root
     }
 
@@ -3226,7 +3387,18 @@ mod tests {
         fs::write(static_out.join("index.html"), "<html>ok</html>").expect("write index.html");
         let full_build = root.path().join(layout.build_rel(true));
         fs::create_dir_all(&full_build).expect("create full build");
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::write(workspace.join("next.config.mjs"), "export default {};")
+            .expect("mark fixture as a legacy Next app");
         record.id
+    }
+
+    fn mark_fixture_as_vite(root: &TempDir, app_id: &str) {
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::remove_file(workspace.join("next.config.mjs")).expect("remove legacy Next marker");
+        fs::write(workspace.join("vite.config.mjs"), "export default {};")
+            .expect("mark fixture as Vite");
     }
 
     /// `create_app_fixture` with a CHOSEN id, for the one test whose exercised
@@ -3475,6 +3647,13 @@ mod tests {
         );
         assert!(matches!(request.network, NetworkPolicy::LoopbackOnly));
         assert_eq!(request.resource_limits.max_memory_mb, Some(800));
+        assert!(
+            request
+                .args
+                .iter()
+                .all(|argument| !argument.starts_with("--max-old-space-size=")),
+            "the 800 MiB Full runtime policy must stay distinct from build heap tuning"
+        );
         assert_eq!(
             request.env,
             [
@@ -3546,6 +3725,36 @@ mod tests {
             .expect("second static runtime starts");
 
         assert_eq!(broker.runtimes.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn vite_apps_use_the_static_runtime_even_in_a_full_build() {
+        let mobile_linux = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(true, Some(mobile_linux.clone())).await;
+        let app_id = create_app_fixture(&root, &service, "Vite Static").await;
+        mark_fixture_as_vite(&root, &app_id);
+
+        broker
+            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
+            .await
+            .expect("Vite static runtime starts");
+
+        assert_eq!(mobile_linux.spawn_count(), 0);
+        assert_eq!(
+            service
+                .runtime_record(&app_id)
+                .await
+                .expect("runtime record")
+                .mode,
+            Some(AppRuntimeMode::StaticExport)
+        );
+        let runtimes = broker.runtimes.lock().await;
+        assert!(
+            !runtimes
+                .get(&app_id)
+                .expect("runtime entry")
+                .uses_full_runtime
+        );
     }
 
     #[test]
@@ -4384,37 +4593,8 @@ mod tests {
         assert_eq!(broker.runtimes.lock().await.len(), 1);
     }
 
-    #[tokio::test]
-    async fn restore_checkpoint_is_refused_before_the_workspace_is_touched() {
-        let root = TempDir::new().expect("tempdir");
-        let service = test_service(&root).await;
-        let sink = MockSink::arc();
-        let broker =
-            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
-        assert!(broker.attach_service(service.clone()).is_ok());
-        let app_id = create_app_fixture(&root, &service, "Restore").await;
-
-        let refusal = timeout(
-            Duration::from_secs(2),
-            broker.restore_checkpoint_value(
-                json!({"app_id": app_id, "checkpoint_id": "scaffold_created"}),
-            ),
-        )
-        .await
-        .expect("the refusal returns without waiting on an approval")
-        .expect_err("a non-ready app cannot be restored");
-        assert!(
-            refusal.contains("only available once it is ready"),
-            "{refusal}"
-        );
-        assert!(
-            sink.is_empty().await,
-            "no capability prompt is raised for a restore that will be refused"
-        );
-    }
-
-    /// Declare `capability` in the app's persisted manifest, the way a
-    /// confirmed plan reaches it through `reconcile_manifest`.
+    /// Declare `capability` in the app's persisted manifest, the way an
+    /// `update_manifest` call reaches it.
     fn declare_capability(root: &TempDir, app_id: &str, capability: AppCapability) {
         let layout = AppLayout::new(root.path().to_path_buf(), app_id).expect("layout");
         let mut manifest = load_manifest(&layout).expect("fixture manifest");
@@ -4668,6 +4848,7 @@ mod tests {
                     },
                     last_used: 1,
                     generation,
+                    uses_full_runtime: false,
                 },
             );
             let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");

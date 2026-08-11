@@ -360,48 +360,6 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::AppEvent", "app_event");
     put("ClientEvent::AppEvent.event", "AppEventDto");
 
-    put(
-        "ClientEvent::AppDesignerRequested",
-        "app_designer_requested",
-    );
-    put("ClientEvent::AppDesignerRequested.app_id", "String");
-    put("ClientEvent::AppDesignerRequested.interaction_id", "String");
-    put("ClientEvent::AppDesignerRequested.revision", "u64");
-
-    put(
-        "ClientEvent::AppDesignDraftChanged",
-        "app_design_draft_changed",
-    );
-    put("ClientEvent::AppDesignDraftChanged.app_id", "String");
-    put("ClientEvent::AppDesignDraftChanged.revision", "u64");
-    put(
-        "ClientEvent::AppDesignDraftChanged.fields",
-        "HashMap<String, DesignValueDto>",
-    );
-
-    put(
-        "ClientEvent::AppDesignSuggestionAvailable",
-        "app_design_suggestion_available",
-    );
-    put("ClientEvent::AppDesignSuggestionAvailable.app_id", "String");
-    put(
-        "ClientEvent::AppDesignSuggestionAvailable.suggestion_id",
-        "String",
-    );
-    put(
-        "ClientEvent::AppDesignSuggestionAvailable.based_on_revision",
-        "u64",
-    );
-    put(
-        "ClientEvent::AppDesignSuggestionAvailable.patch",
-        "AppDesignPatchDto",
-    );
-
-    put("ClientEvent::AppDesignConflict", "app_design_conflict");
-    put("ClientEvent::AppDesignConflict.app_id", "String");
-    put("ClientEvent::AppDesignConflict.expected_revision", "u64");
-    put("ClientEvent::AppDesignConflict.actual_revision", "u64");
-
     put("ClientEvent::AppWorkflowChanged", "app_workflow_changed");
     put("ClientEvent::AppWorkflowChanged.app_id", "String");
     put(
@@ -409,18 +367,6 @@ fn current_contract_index() -> ContractIndex {
         "AppWorkflowStateDto",
     );
     put("ClientEvent::AppWorkflowChanged.detail", "Option<String>");
-
-    put(
-        "ClientEvent::AppGenerationProgress",
-        "app_generation_progress",
-    );
-    put("ClientEvent::AppGenerationProgress.app_id", "String");
-    put("ClientEvent::AppGenerationProgress.stage", "String");
-    put("ClientEvent::AppGenerationProgress.percent", "Option<u8>");
-    put(
-        "ClientEvent::AppGenerationProgress.detail",
-        "Option<String>",
-    );
 
     put("ClientEvent::AppRuntimeChanged", "app_runtime_changed");
     put("ClientEvent::AppRuntimeChanged.app_id", "String");
@@ -433,12 +379,6 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::AppRuntimeChanged.last_error",
         "Option<String>",
     );
-
-    put("ClientEvent::AppPreviewReady", "app_preview_ready");
-    put("ClientEvent::AppPreviewReady.app_id", "String");
-    put("ClientEvent::AppPreviewReady.interaction_id", "String");
-    put("ClientEvent::AppPreviewReady.revision", "u64");
-    put("ClientEvent::AppPreviewReady.url", "Option<String>");
 
     put(
         "ClientEvent::AppCheckpointCreated",
@@ -630,85 +570,6 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp.git_enabled", "bool");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
 
-    put("ClientCommand::UpdateAppBrief", "update_app_brief");
-    put("ClientCommand::UpdateAppBrief.app_id", "String");
-    put("ClientCommand::UpdateAppBrief.brief", "String");
-
-    put(
-        "ClientCommand::RetryAppQuestionnaire",
-        "retry_app_questionnaire",
-    );
-    put("ClientCommand::RetryAppQuestionnaire.app_id", "String");
-
-    put("ClientCommand::BeginAppPlanning", "begin_app_planning");
-    put("ClientCommand::BeginAppPlanning.app_id", "String");
-
-    put("ClientCommand::RetryAppPlan", "retry_app_plan");
-    put("ClientCommand::RetryAppPlan.app_id", "String");
-
-    put("ClientCommand::OpenAppDesigner", "open_app_designer");
-    put("ClientCommand::OpenAppDesigner.app_id", "String");
-
-    put(
-        "ClientCommand::UpdateAppDesignDraft",
-        "update_app_design_draft",
-    );
-    put("ClientCommand::UpdateAppDesignDraft.app_id", "String");
-    put(
-        "ClientCommand::UpdateAppDesignDraft.expected_revision",
-        "u64",
-    );
-    put(
-        "ClientCommand::UpdateAppDesignDraft.patch",
-        "AppDesignPatchDto",
-    );
-
-    put(
-        "ClientCommand::ApplyAgentDesignSuggestion",
-        "apply_agent_design_suggestion",
-    );
-    put("ClientCommand::ApplyAgentDesignSuggestion.app_id", "String");
-    put(
-        "ClientCommand::ApplyAgentDesignSuggestion.suggestion_id",
-        "String",
-    );
-    put(
-        "ClientCommand::ApplyAgentDesignSuggestion.expected_revision",
-        "u64",
-    );
-
-    put(
-        "ClientCommand::RequestAppDesignSuggestion",
-        "request_app_design_suggestion",
-    );
-    put("ClientCommand::RequestAppDesignSuggestion.app_id", "String");
-    put(
-        "ClientCommand::RequestAppDesignSuggestion.expected_revision",
-        "u64",
-    );
-    put(
-        "ClientCommand::RequestAppDesignSuggestion.prompt",
-        "Option<String>",
-    );
-
-    put(
-        "ClientCommand::DismissAppDesignSuggestion",
-        "dismiss_app_design_suggestion",
-    );
-    put("ClientCommand::DismissAppDesignSuggestion.app_id", "String");
-    put(
-        "ClientCommand::DismissAppDesignSuggestion.suggestion_id",
-        "String",
-    );
-
-    put("ClientCommand::ConfirmAppDesign", "confirm_app_design");
-    put("ClientCommand::ConfirmAppDesign.app_id", "String");
-    put("ClientCommand::ConfirmAppDesign.revision", "u64");
-    put("ClientCommand::ConfirmAppDesign.interaction_id", "String");
-
-    put("ClientCommand::CancelAppDesign", "cancel_app_design");
-    put("ClientCommand::CancelAppDesign.app_id", "String");
-
     put("ClientCommand::StartApp", "start_app");
     put("ClientCommand::StartApp.app_id", "String");
 
@@ -717,19 +578,6 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::RestartApp", "restart_app");
     put("ClientCommand::RestartApp.app_id", "String");
-
-    put("ClientCommand::ConfirmAppPreview", "confirm_app_preview");
-    put("ClientCommand::ConfirmAppPreview.app_id", "String");
-    put("ClientCommand::ConfirmAppPreview.revision", "u64");
-    put("ClientCommand::ConfirmAppPreview.interaction_id", "String");
-
-    put("ClientCommand::RequestAppRevision", "request_app_revision");
-    put("ClientCommand::RequestAppRevision.app_id", "String");
-    put("ClientCommand::RequestAppRevision.prompt", "String");
-
-    put("ClientCommand::RetryAppGeneration", "retry_app_generation");
-    put("ClientCommand::RetryAppGeneration.app_id", "String");
-    put("ClientCommand::RetryAppGeneration.prompt", "Option<String>");
 
     put(
         "ClientCommand::ExecuteAppBridgeRequest",
@@ -1015,31 +863,8 @@ fn current_contract_index() -> ContractIndex {
     put("CoordinatorWorkerDto.status", "String");
 
     // ── Local-apps DTOs (local_apps.rs) ───────────────────────────────────
-    put(
-        "AppWorkflowStateDto::AuthoringQuestionnaire",
-        "authoring_questionnaire",
-    );
-    put(
-        "AppWorkflowStateDto::QuestionnaireFailed",
-        "questionnaire_failed",
-    );
-    put("AppWorkflowStateDto::CollectingSpec", "collecting_spec");
-    put("AppWorkflowStateDto::Planning", "planning");
-    put("AppWorkflowStateDto::PlanFailed", "plan_failed");
-    put(
-        "AppWorkflowStateDto::AwaitingSpecConfirmation",
-        "awaiting_spec_confirmation",
-    );
-    put("AppWorkflowStateDto::Generating", "generating");
-    put("AppWorkflowStateDto::Validating", "validating");
-    put(
-        "AppWorkflowStateDto::AwaitingPreviewConfirmation",
-        "awaiting_preview_confirmation",
-    );
-    put("AppWorkflowStateDto::Revising", "revising");
+    put("AppWorkflowStateDto::Draft", "draft");
     put("AppWorkflowStateDto::Ready", "ready");
-    put("AppWorkflowStateDto::GenerationFailed", "generation_failed");
-    put("AppWorkflowStateDto::ValidationFailed", "validation_failed");
 
     put("AppRuntimeStateDto::Stopped", "stopped");
     put("AppRuntimeStateDto::Starting", "starting");
@@ -1074,9 +899,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppCheckpointKindDto::UserApproved", "user_approved");
     put("AppCheckpointKindDto::PreRestore", "pre_restore");
 
-    put("DensityLevelDto::Compact", "compact");
-    put("DensityLevelDto::Comfortable", "comfortable");
-
     put("AppDataFieldTypeDto::Text", "text");
     put("AppDataFieldTypeDto::LongText", "long_text");
     put("AppDataFieldTypeDto::Integer", "integer");
@@ -1097,42 +919,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppDataCollectionDto.fields", "Vec<AppDataFieldDto>");
     put("AppDataCollectionDto.enabled_by_default", "bool");
 
-    put("AppDesignFieldTypeDto::ShortText", "short_text");
-    put("AppDesignFieldTypeDto::LongText", "long_text");
-    put("AppDesignFieldTypeDto::SingleChoice", "single_choice");
-    put("AppDesignFieldTypeDto::MultipleChoice", "multiple_choice");
-    put("AppDesignFieldTypeDto::Boolean", "boolean");
-    put("AppDesignFieldTypeDto::Color", "color");
-    put("AppDesignFieldTypeDto::Density", "density");
-    put("AppDesignFieldTypeDto::ScreenList", "screen_list");
-    put("AppDesignFieldTypeDto::FeatureList", "feature_list");
-    put("AppDesignFieldTypeDto::DataFieldList", "data_field_list");
-    put("AppDesignFieldTypeDto::DomainList", "domain_list");
-
-    put("AppDesignFieldOptionDto.value", "String");
-    put("AppDesignFieldOptionDto.label", "String");
-
-    put("AppDesignFieldDto.id", "String");
-    put("AppDesignFieldDto.label", "String");
-    put("AppDesignFieldDto.description", "Option<String>");
-    put("AppDesignFieldDto.field_type", "AppDesignFieldTypeDto");
-    put("AppDesignFieldDto.required", "bool");
-    put("AppDesignFieldDto.allows_custom", "bool");
-    put("AppDesignFieldDto.allows_defer", "bool");
-    put("AppDesignFieldDto.default_value", "Option<DesignValueDto>");
-    put("AppDesignFieldDto.options", "Vec<AppDesignFieldOptionDto>");
-
-    put("AppDesignStepDto.id", "String");
-    put("AppDesignStepDto.order", "u32");
-    put("AppDesignStepDto.title", "String");
-    put("AppDesignStepDto.description", "Option<String>");
-    put("AppDesignStepDto.fields", "Vec<AppDesignFieldDto>");
-
-    put("AppPlanDto.collections", "Vec<AppDataCollectionDto>");
-    put("AppPlanDto.capabilities", "Vec<AppCapabilityKindDto>");
-    put("AppPlanDto.domains", "Vec<String>");
-    put("AppPlanDto.summary", "String");
-
     put("AppRecordDto.id", "String");
     put("AppRecordDto.name", "String");
     put("AppRecordDto.brief", "String");
@@ -1142,42 +928,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
     put("AppRecordDto.conversation_id", "Option<String>");
     put("AppRecordDto.workspace_rel", "String");
-
-    put("DesignValueDto::ShortText", "short_text");
-    put("DesignValueDto::ShortText.value", "String");
-    put("DesignValueDto::LongText", "long_text");
-    put("DesignValueDto::LongText.value", "String");
-    put("DesignValueDto::SingleChoice", "single_choice");
-    put("DesignValueDto::SingleChoice.value", "String");
-    put("DesignValueDto::MultipleChoice", "multiple_choice");
-    put("DesignValueDto::MultipleChoice.value", "Vec<String>");
-    put("DesignValueDto::Boolean", "boolean");
-    put("DesignValueDto::Boolean.value", "bool");
-    put("DesignValueDto::Color", "color");
-    put("DesignValueDto::Color.value", "String");
-    put("DesignValueDto::Density", "density");
-    put("DesignValueDto::Density.value", "DensityLevelDto");
-    put("DesignValueDto::ScreenList", "screen_list");
-    put("DesignValueDto::ScreenList.value", "Vec<String>");
-    put("DesignValueDto::FeatureList", "feature_list");
-    put("DesignValueDto::FeatureList.value", "Vec<String>");
-    put("DesignValueDto::DataFieldList", "data_field_list");
-    put(
-        "DesignValueDto::DataFieldList.value",
-        "Vec<AppDataFieldDto>",
-    );
-    put("DesignValueDto::DomainList", "domain_list");
-    put("DesignValueDto::DomainList.value", "Vec<String>");
-    put("DesignValueDto::Deferred", "deferred");
-
-    put("AppDesignPatchOpDto::Set", "set");
-    put("AppDesignPatchOpDto::Set.field_id", "String");
-    put("AppDesignPatchOpDto::Set.value", "DesignValueDto");
-    put("AppDesignPatchOpDto::Remove", "remove");
-    put("AppDesignPatchOpDto::Remove.field_id", "String");
-
-    put("AppDesignPatchDto.ops", "Vec<AppDesignPatchOpDto>");
-    put("AppDesignPatchDto.note", "Option<String>");
 
     put("AppCheckpointDto.id", "String");
     put("AppCheckpointDto.label", "String");
@@ -1210,33 +960,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppRuntimeRecoveryStateDto::Recovered", "recovered");
     put("AppRuntimeRecoveryStateDto::Failed", "failed");
 
-    put("AppGenerationJobStateDto::Queued", "queued");
-    put("AppGenerationJobStateDto::Scaffolding", "scaffolding");
-    put("AppGenerationJobStateDto::Generating", "generating");
-    put("AppGenerationJobStateDto::Validating", "validating");
-    put("AppGenerationJobStateDto::Building", "building");
-    put(
-        "AppGenerationJobStateDto::StartingPreview",
-        "starting_preview",
-    );
-    put(
-        "AppGenerationJobStateDto::AwaitingApproval",
-        "awaiting_approval",
-    );
-    put("AppGenerationJobStateDto::Succeeded", "succeeded");
-    put("AppGenerationJobStateDto::Failed", "failed");
-    put("AppGenerationJobStateDto::Cancelled", "cancelled");
-
-    put("AppGenerationJobDto.id", "String");
-    put("AppGenerationJobDto.app_id", "String");
-    put("AppGenerationJobDto.revision", "u64");
-    put("AppGenerationJobDto.continuation_seq", "u64");
-    put("AppGenerationJobDto.state", "AppGenerationJobStateDto");
-    put("AppGenerationJobDto.percent", "Option<u8>");
-    put("AppGenerationJobDto.detail", "Option<String>");
-    put("AppGenerationJobDto.log_rel", "Option<String>");
-    put("AppGenerationJobDto.updated_at_ms", "u64");
-
     put("AppManifestDto.schema_version", "u32");
     put("AppManifestDto.app_id", "String");
     put("AppManifestDto.name", "String");
@@ -1258,20 +981,9 @@ fn current_contract_index() -> ContractIndex {
     );
     put("AppRuntimeDetailsDto.last_error", "Option<String>");
 
-    put("AppDesignFieldValueDto.field_id", "String");
-    put("AppDesignFieldValueDto.value", "DesignValueDto");
-
     put("AppDetailsDto.app", "AppRecordDto");
-    put("AppDetailsDto.design_revision", "u64");
-    put("AppDetailsDto.design_fields", "Vec<AppDesignFieldValueDto>");
-    put("AppDetailsDto.questionnaire", "Vec<AppDesignStepDto>");
-    put("AppDetailsDto.plan", "Option<AppPlanDto>");
     put("AppDetailsDto.manifest", "Option<AppManifestDto>");
     put("AppDetailsDto.runtime", "AppRuntimeDetailsDto");
-    put(
-        "AppDetailsDto.generation_job",
-        "Option<AppGenerationJobDto>",
-    );
     put("AppDetailsDto.checkpoints", "Vec<AppCheckpointDto>");
 
     put("AppBridgeOperationDto::QueryData", "query_data");
@@ -1360,28 +1072,6 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppEventDto::AppDetailsChanged", "app_details_changed");
     put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
-    put(
-        "AppEventDto::AppQuestionnaireChanged",
-        "app_questionnaire_changed",
-    );
-    put("AppEventDto::AppQuestionnaireChanged.app_id", "String");
-    put("AppEventDto::AppQuestionnaireChanged.revision", "u64");
-    put(
-        "AppEventDto::AppQuestionnaireChanged.steps",
-        "Vec<AppDesignStepDto>",
-    );
-    put("AppEventDto::AppPlanChanged", "app_plan_changed");
-    put("AppEventDto::AppPlanChanged.app_id", "String");
-    put("AppEventDto::AppPlanChanged.revision", "u64");
-    put("AppEventDto::AppPlanChanged.plan", "Option<AppPlanDto>");
-    put(
-        "AppEventDto::AppGenerationJobChanged",
-        "app_generation_job_changed",
-    );
-    put(
-        "AppEventDto::AppGenerationJobChanged.job",
-        "AppGenerationJobDto",
-    );
     put("AppEventDto::AppBridgeResponse", "app_bridge_response");
     put(
         "AppEventDto::AppBridgeResponse.response",
@@ -1693,13 +1383,10 @@ fn contract_index_covers_every_dto() {
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
         AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
         AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
-        AppDataFieldTypeDto, AppDesignFieldDto, AppDesignFieldOptionDto, AppDesignFieldTypeDto,
-        AppDesignFieldValueDto, AppDesignPatchDto, AppDesignPatchOpDto, AppDesignStepDto,
-        AppDetailsDto, AppErrorCodeDto, AppEventDto, AppGenerationJobDto, AppGenerationJobStateDto,
-        AppManifestDto, AppPlanDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
-        AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-        AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, DensityLevelDto,
-        DesignValueDto,
+        AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto, AppManifestDto,
+        AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto,
+        AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
+        AppUiTargetDto, AppWorkflowStateDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -1891,23 +1578,10 @@ fn contract_index_covers_every_dto() {
             git_enabled: true,
             created_at_ms: 0,
             updated_at_ms: 0,
-            workflow_state: AppWorkflowStateDto::CollectingSpec,
+            workflow_state: AppWorkflowStateDto::Draft,
             conversation_id: None,
+            init_session_id: None,
             workspace_rel: String::new(),
-        },
-        AppDesignPatchDto {
-            ops: vec![
-                AppDesignPatchOpDto::Set {
-                    field_id: String::new(),
-                    value: DesignValueDto::Density {
-                        value: DensityLevelDto::Compact,
-                    },
-                },
-                AppDesignPatchOpDto::Remove {
-                    field_id: String::new(),
-                },
-            ],
-            note: None,
         },
         AppCheckpointDto {
             id: String::new(),
@@ -1944,45 +1618,6 @@ fn contract_index_covers_every_dto() {
         fields: Vec::new(),
         enabled_by_default: false,
     };
-    let _app_design_field_option = AppDesignFieldOptionDto {
-        value: String::new(),
-        label: String::new(),
-    };
-    let _app_design_field = AppDesignFieldDto {
-        id: String::new(),
-        label: String::new(),
-        description: None,
-        field_type: AppDesignFieldTypeDto::ShortText,
-        required: false,
-        allows_custom: false,
-        allows_defer: false,
-        default_value: None,
-        options: Vec::new(),
-    };
-    let _app_design_step = AppDesignStepDto {
-        id: String::new(),
-        order: 0,
-        title: String::new(),
-        description: None,
-        fields: Vec::new(),
-    };
-    let _app_plan = AppPlanDto {
-        collections: Vec::new(),
-        capabilities: Vec::new(),
-        domains: Vec::new(),
-        summary: String::new(),
-    };
-    let app_generation_job = AppGenerationJobDto {
-        id: String::new(),
-        app_id: String::new(),
-        revision: 0,
-        continuation_seq: 0,
-        state: AppGenerationJobStateDto::Queued,
-        percent: None,
-        detail: None,
-        log_rel: None,
-        updated_at_ms: 0,
-    };
     let _app_manifest = AppManifestDto {
         schema_version: 0,
         app_id: String::new(),
@@ -2000,10 +1635,6 @@ fn contract_index_covers_every_dto() {
         recovery_state: Some(AppRuntimeRecoveryStateDto::NotNeeded),
         last_error: None,
     };
-    let _app_design_field_value = AppDesignFieldValueDto {
-        field_id: String::new(),
-        value: DesignValueDto::Boolean { value: false },
-    };
     let app_details = AppDetailsDto {
         app: AppRecordDto {
             id: String::new(),
@@ -2012,14 +1643,11 @@ fn contract_index_covers_every_dto() {
             git_enabled: true,
             created_at_ms: 0,
             updated_at_ms: 0,
-            workflow_state: AppWorkflowStateDto::CollectingSpec,
+            workflow_state: AppWorkflowStateDto::Draft,
             conversation_id: None,
+            init_session_id: None,
             workspace_rel: String::new(),
         },
-        design_revision: 0,
-        design_fields: Vec::new(),
-        questionnaire: Vec::new(),
-        plan: None,
         manifest: None,
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,
@@ -2029,7 +1657,6 @@ fn contract_index_covers_every_dto() {
             recovery_state: None,
             last_error: None,
         },
-        generation_job: None,
         checkpoints: Vec::new(),
     };
     let _app_bridge_request = AppBridgeRequestDto {
@@ -2067,24 +1694,11 @@ fn contract_index_covers_every_dto() {
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
     // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these ten tags to
+    // `ClientEvent::AppEvent`, so nothing else forces these seven tags to
     // exist.
     let _app_events: Vec<AppEventDto> = vec![
         AppEventDto::AppDetailsChanged {
             details: app_details,
-        },
-        AppEventDto::AppQuestionnaireChanged {
-            app_id: String::new(),
-            revision: 0,
-            steps: Vec::new(),
-        },
-        AppEventDto::AppPlanChanged {
-            app_id: String::new(),
-            revision: 0,
-            plan: None,
-        },
-        AppEventDto::AppGenerationJobChanged {
-            job: app_generation_job,
         },
         AppEventDto::AppBridgeResponse {
             response: app_bridge_response,
@@ -2117,23 +1731,4 @@ fn contract_index_covers_every_dto() {
         ix.contains_key("ClientEvent::TextDelta.text"),
         "the contract index must enumerate the contract leaves"
     );
-}
-
-/// `DesignValueDto::Deferred` carries no payload — unlike every other
-/// `DesignValueDto` variant, its wire form is the bare tag alone
-/// (`{ "kind": "deferred" }`, no `value` key). Pins that shape so a future
-/// change cannot silently attach a payload to the "let the model decide"
-/// sentinel.
-#[test]
-fn deferred_design_value_serialises_as_a_bare_tagged_variant() {
-    let json = serde_json::to_value(client_protocol::local_apps::DesignValueDto::Deferred)
-        .expect("serialise");
-    assert_eq!(
-        json,
-        serde_json::json!({ "kind": "deferred" }),
-        "Deferred carries no payload; the tag alone must round-trip"
-    );
-    let back: client_protocol::local_apps::DesignValueDto =
-        serde_json::from_value(json).expect("deserialise");
-    assert_eq!(back, client_protocol::local_apps::DesignValueDto::Deferred);
 }

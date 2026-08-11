@@ -183,6 +183,19 @@ impl AuthState {
         emit_proactive_canceled(&self.bus, "engine_shutdown").await;
     }
 
+    /// Invalidate the in-memory token after persisted credentials are removed.
+    /// This prevents an already-built engine from continuing to authenticate
+    /// until its source is rebuilt.
+    pub async fn invalidate(&self) {
+        let mut token = self.token.write().await;
+        token.access_token = Secret::new(String::new());
+        token.refresh_token = None;
+        token.expires_at = SystemTime::UNIX_EPOCH;
+        token.account_id = None;
+        token.fedramp = false;
+        token.last_refresh = None;
+    }
+
     /// Perform the actual HTTP refresh POST. `OpenAI` token endpoint:
     /// POST `config.token_url`, JSON body: { `client_id`, `grant_type`: "`refresh_token`", `refresh_token` }.
     async fn do_refresh_http(
@@ -288,6 +301,12 @@ impl RefreshDriver {
     #[must_use]
     pub fn new(state: Arc<AuthState>) -> Self {
         Self { state }
+    }
+
+    /// Stop proactive refresh and invalidate this driver's in-memory token.
+    pub async fn invalidate(&self, spawner: &dyn traits::RuntimeSpawner) {
+        self.state.shutdown(spawner).await;
+        self.state.invalidate().await;
     }
 }
 

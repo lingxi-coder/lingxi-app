@@ -1,20 +1,14 @@
 //! Typed domain events emitted by [`crate::service::AppService`].
 //!
-//! The engine maps these 1:1 onto client-protocol `App*` events (phase 1 T3);
-//! this crate deliberately knows nothing about the client protocol. Operation
-//! FAILURES are not events here — service methods return typed
+//! The engine maps these 1:1 onto client-protocol `App*` events; this crate
+//! deliberately knows nothing about the client protocol. Operation FAILURES
+//! are not events here — service methods return typed
 //! [`crate::error::AppError`]s and the engine synthesizes
-//! `AppOperationFailed { code, message }` from them. The one deliberate
-//! exception is [`AppEvent::DesignConflict`], which the spec requires to be
-//! emitted alongside the `revision_conflict` error on draft edits.
+//! `AppOperationFailed { code, message }` from them.
 
-use crate::questionnaire::{AppDesignStep, AppPlan};
-use crate::types::{
-    AppCheckpoint, AppDesignPatch, AppGenerationProgress, AppRecord, AppRuntimeRecord,
-    AppWorkflowState, DesignValue,
-};
+use crate::types::{AppCheckpoint, AppRecord, AppRuntimeRecord, AppWorkflowState};
 use async_trait::async_trait;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -27,63 +21,7 @@ pub enum AppEvent {
         /// Every app record, in stored order.
         apps: Vec<AppRecord>,
     },
-    /// The questionnaire is ready or was cleared (`steps` empty).
-    QuestionnaireChanged {
-        /// App whose questionnaire changed.
-        app_id: String,
-        /// Draft revision at the time of the change.
-        revision: u64,
-        /// The full step list, or empty when cleared.
-        steps: Vec<AppDesignStep>,
-    },
-    /// The plan is ready or was invalidated (`plan: None`).
-    PlanChanged {
-        /// App whose plan changed.
-        app_id: String,
-        /// Draft revision at the time of the change.
-        revision: u64,
-        /// The plan, or `None` when invalidated.
-        plan: Option<AppPlan>,
-    },
-    /// A designer gate opened; the client needs `interaction_id` to confirm.
-    DesignerRequested {
-        /// App whose designer opened.
-        app_id: String,
-        /// Pending interaction id (the confirm capability).
-        interaction_id: String,
-        /// Draft revision at open time.
-        revision: u64,
-    },
-    /// The draft changed (user edit or applied suggestion).
-    DesignDraftChanged {
-        /// App whose draft changed.
-        app_id: String,
-        /// New draft revision.
-        revision: u64,
-        /// Full field map after the change.
-        fields: BTreeMap<String, DesignValue>,
-    },
-    /// The agent stored a suggestion awaiting explicit application.
-    DesignSuggestionAvailable {
-        /// App the suggestion targets.
-        app_id: String,
-        /// Id to echo back in `ApplyAgentDesignSuggestion`.
-        suggestion_id: String,
-        /// Draft revision the suggestion was computed against.
-        based_on_revision: u64,
-        /// The proposed edit.
-        patch: AppDesignPatch,
-    },
-    /// A draft edit raced a newer revision; the user value was kept.
-    DesignConflict {
-        /// App whose draft conflicted.
-        app_id: String,
-        /// Revision the caller expected.
-        expected_revision: u64,
-        /// Revision the draft actually holds.
-        actual_revision: u64,
-    },
-    /// The workflow state machine advanced.
+    /// The workflow state advanced (draft -> ready).
     WorkflowChanged {
         /// App whose workflow advanced.
         app_id: String,
@@ -92,8 +30,6 @@ pub enum AppEvent {
         /// Optional human-readable detail (e.g. failure summary).
         detail: Option<String>,
     },
-    /// Generation progress report (phase 3 produces these).
-    GenerationProgress(AppGenerationProgress),
     /// The runtime record changed.
     RuntimeChanged {
         /// App whose runtime changed.
@@ -101,19 +37,7 @@ pub enum AppEvent {
         /// Complete persisted runtime snapshot.
         runtime: AppRuntimeRecord,
     },
-    /// A preview gate opened; `url` stays `None` until the phase-4 runtime.
-    PreviewReady {
-        /// App whose preview is ready.
-        app_id: String,
-        /// Pending interaction id (the confirm capability).
-        interaction_id: String,
-        /// Draft revision the preview was generated from.
-        revision: u64,
-        /// Where the preview is served (phase 4).
-        url: Option<String>,
-    },
-    /// A checkpoint was recorded (git wiring is phase 5; no phase-1
-    /// producer, but the wire layer already maps the variant).
+    /// A checkpoint was recorded.
     CheckpointCreated {
         /// App the checkpoint belongs to.
         app_id: String,

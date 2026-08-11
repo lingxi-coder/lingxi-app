@@ -3,53 +3,21 @@
 //! Mirrors `tests/computer_access_test.rs`: each type gets a serialize →
 //! assert-shape → deserialize → assert-eq round-trip. The fieldless enums ride
 //! as bare wire STRINGS (the `AccessTierDto` precedent — byte-identical to the
-//! `local-apps` core enums' canonical `as_str()` values), and the two
-//! payload-carrying enums use the spec-§A discriminators (`kind` / `op`), so
-//! several tests assert BYTE-IDENTICAL serialized JSON, not just structural
-//! equivalence.
+//! `local-apps` core enums' canonical `as_str()` values), so several tests
+//! assert BYTE-IDENTICAL serialized JSON, not just structural equivalence.
 
 use client_protocol::local_apps::{
-    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDataFieldTypeDto,
-    AppDesignFieldTypeDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto,
-    AppRuntimeStateDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppErrorCodeDto, AppRecordDto,
+    AppRuntimeStateDto, AppWorkflowStateDto,
 };
 
-/// `AppWorkflowStateDto` — every spec-§B state round-trips as its bare
-/// `snake_case` string.
+/// `AppWorkflowStateDto` — both states round-trip as their bare `snake_case`
+/// strings (`"draft"` / `"ready"`).
 #[test]
 fn workflow_state_serializes_as_bare_string() {
     let cases = [
-        (
-            AppWorkflowStateDto::AuthoringQuestionnaire,
-            "\"authoring_questionnaire\"",
-        ),
-        (
-            AppWorkflowStateDto::QuestionnaireFailed,
-            "\"questionnaire_failed\"",
-        ),
-        (AppWorkflowStateDto::CollectingSpec, "\"collecting_spec\""),
-        (AppWorkflowStateDto::Planning, "\"planning\""),
-        (AppWorkflowStateDto::PlanFailed, "\"plan_failed\""),
-        (
-            AppWorkflowStateDto::AwaitingSpecConfirmation,
-            "\"awaiting_spec_confirmation\"",
-        ),
-        (AppWorkflowStateDto::Generating, "\"generating\""),
-        (AppWorkflowStateDto::Validating, "\"validating\""),
-        (
-            AppWorkflowStateDto::AwaitingPreviewConfirmation,
-            "\"awaiting_preview_confirmation\"",
-        ),
-        (AppWorkflowStateDto::Revising, "\"revising\""),
+        (AppWorkflowStateDto::Draft, "\"draft\""),
         (AppWorkflowStateDto::Ready, "\"ready\""),
-        (
-            AppWorkflowStateDto::GenerationFailed,
-            "\"generation_failed\"",
-        ),
-        (
-            AppWorkflowStateDto::ValidationFailed,
-            "\"validation_failed\"",
-        ),
     ];
     for (state, expected) in cases {
         let json = serde_json::to_string(&state).expect("serialize AppWorkflowStateDto");
@@ -152,130 +120,6 @@ fn checkpoint_kind_serializes_as_bare_string() {
     }
 }
 
-/// `DesignValueDto` is tagged on `kind` with the payload under `value` —
-/// BYTE-IDENTICAL to the core `DesignValue` adjacently-tagged wire form for
-/// every field kind (spec §A).
-#[test]
-fn design_value_matches_exact_wire_shape() {
-    let cases = [
-        (
-            DesignValueDto::ShortText {
-                value: "Team Board".to_string(),
-            },
-            r#"{"kind":"short_text","value":"Team Board"}"#,
-        ),
-        (
-            DesignValueDto::LongText {
-                value: "line one\nline two".to_string(),
-            },
-            r#"{"kind":"long_text","value":"line one\nline two"}"#,
-        ),
-        (
-            DesignValueDto::SingleChoice {
-                value: "cards".to_string(),
-            },
-            r#"{"kind":"single_choice","value":"cards"}"#,
-        ),
-        (
-            DesignValueDto::MultipleChoice {
-                value: vec!["tags".to_string(), "search".to_string()],
-            },
-            r#"{"kind":"multiple_choice","value":["tags","search"]}"#,
-        ),
-        (
-            DesignValueDto::Boolean { value: true },
-            r#"{"kind":"boolean","value":true}"#,
-        ),
-        (
-            DesignValueDto::Color {
-                value: "#aabbcc".to_string(),
-            },
-            r##"{"kind":"color","value":"#aabbcc"}"##,
-        ),
-        (
-            DesignValueDto::Density {
-                value: DensityLevelDto::Compact,
-            },
-            r#"{"kind":"density","value":"compact"}"#,
-        ),
-        (
-            DesignValueDto::ScreenList {
-                value: vec!["home".to_string(), "detail".to_string()],
-            },
-            r#"{"kind":"screen_list","value":["home","detail"]}"#,
-        ),
-        (
-            DesignValueDto::FeatureList {
-                value: vec!["export".to_string()],
-            },
-            r#"{"kind":"feature_list","value":["export"]}"#,
-        ),
-        (DesignValueDto::Deferred, r#"{"kind":"deferred"}"#),
-    ];
-    for (value, expected) in cases {
-        let json = serde_json::to_string(&value).expect("serialize DesignValueDto");
-        assert_eq!(json, expected, "DesignValueDto::{value:?} wire form");
-        let back: DesignValueDto = serde_json::from_str(&json).expect("deserialize DesignValueDto");
-        assert_eq!(back, value);
-    }
-}
-
-/// `DensityLevelDto` — bare `"compact"` / `"comfortable"` strings.
-#[test]
-fn density_level_serializes_as_bare_string() {
-    let cases = [
-        (DensityLevelDto::Compact, "\"compact\""),
-        (DensityLevelDto::Comfortable, "\"comfortable\""),
-    ];
-    for (level, expected) in cases {
-        let json = serde_json::to_string(&level).expect("serialize DensityLevelDto");
-        assert_eq!(json, expected, "DensityLevelDto::{level:?} wire form");
-        let back: DensityLevelDto =
-            serde_json::from_str(&json).expect("deserialize DensityLevelDto");
-        assert_eq!(back, level);
-    }
-}
-
-/// `AppDesignPatchDto` / `AppDesignPatchOpDto` — the spec-§A wire shape:
-/// `{ "op": "set", "field_id": …, "value": … }` / `{ "op": "remove",
-/// "field_id": … }`, with an absent `note` omitted.
-#[test]
-fn design_patch_matches_exact_wire_shape() {
-    let patch = AppDesignPatchDto {
-        ops: vec![
-            AppDesignPatchOpDto::Set {
-                field_id: "title".to_string(),
-                value: DesignValueDto::ShortText {
-                    value: "Hi".to_string(),
-                },
-            },
-            AppDesignPatchOpDto::Remove {
-                field_id: "accent".to_string(),
-            },
-        ],
-        note: None,
-    };
-    let json = serde_json::to_string(&patch).expect("serialize AppDesignPatchDto");
-    assert_eq!(
-        json,
-        r#"{"ops":[{"op":"set","field_id":"title","value":{"kind":"short_text","value":"Hi"}},{"op":"remove","field_id":"accent"}]}"#
-    );
-    let back: AppDesignPatchDto =
-        serde_json::from_str(&json).expect("deserialize AppDesignPatchDto");
-    assert_eq!(back, patch);
-
-    // A present note is carried.
-    let with_note = AppDesignPatchDto {
-        ops: vec![],
-        note: Some("polish the palette".to_string()),
-    };
-    let json_n = serde_json::to_value(&with_note).expect("serialize noted AppDesignPatchDto");
-    assert_eq!(json_n["note"], "polish the palette");
-    let back_n: AppDesignPatchDto =
-        serde_json::from_value(json_n).expect("deserialize noted AppDesignPatchDto");
-    assert_eq!(back_n, with_note);
-}
-
 /// `AppRecordDto` — `snake_case` protocol fields; an absent `conversation_id` is
 /// omitted from the wire.
 #[test]
@@ -287,8 +131,9 @@ fn app_record_round_trips_and_skips_none_conversation() {
         git_enabled: true,
         created_at_ms: 1_750_000_000_000,
         updated_at_ms: 1_750_000_000_001,
-        workflow_state: AppWorkflowStateDto::CollectingSpec,
+        workflow_state: AppWorkflowStateDto::Draft,
         conversation_id: None,
+        init_session_id: None,
         workspace_rel: "apps/habits-1a2b/workspace".to_string(),
     };
     let json = serde_json::to_value(&record).expect("serialize AppRecordDto");
@@ -296,7 +141,7 @@ fn app_record_round_trips_and_skips_none_conversation() {
     assert_eq!(json["brief"], "Track daily habits");
     assert_eq!(json["git_enabled"], true);
     assert_eq!(json["created_at_ms"], 1_750_000_000_000_u64);
-    assert_eq!(json["workflow_state"], "collecting_spec");
+    assert_eq!(json["workflow_state"], "draft");
     assert_eq!(json["workspace_rel"], "apps/habits-1a2b/workspace");
     assert!(
         json.get("conversation_id").is_none(),
@@ -333,30 +178,4 @@ fn app_checkpoint_round_trips() {
     let back: AppCheckpointDto =
         serde_json::from_value(json).expect("deserialize AppCheckpointDto");
     assert_eq!(back, checkpoint);
-}
-
-#[test]
-fn structured_design_values_round_trip_without_untyped_json() {
-    let value = DesignValueDto::DataFieldList {
-        value: vec![client_protocol::local_apps::AppDataFieldDto {
-            id: "priority".to_string(),
-            label: "Priority".to_string(),
-            field_type: AppDataFieldTypeDto::Enum,
-            required: true,
-            options: vec!["low".to_string(), "high".to_string()],
-        }],
-    };
-    let json = serde_json::to_value(&value).expect("serialize data field list");
-    assert_eq!(json["kind"], "data_field_list");
-    assert_eq!(json["value"][0]["field_type"], "enum");
-    let back: DesignValueDto = serde_json::from_value(json).expect("deserialize data field list");
-    assert_eq!(back, value);
-
-    let domains = DesignValueDto::DomainList {
-        value: vec!["api.example.com".to_string()],
-    };
-    let json = serde_json::to_value(&domains).expect("serialize domain list");
-    assert_eq!(json["kind"], "domain_list");
-    let back: DesignValueDto = serde_json::from_value(json).expect("deserialize domain list");
-    assert_eq!(back, domains);
 }

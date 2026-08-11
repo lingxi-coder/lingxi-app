@@ -84,6 +84,12 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
+                if !convo.backgroundTasks.isEmpty {
+                    TasksStatusPanel(tasks: convo.backgroundTasks)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 4)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if voiceInteraction.isPresented {
                     InlineVoicePanel(
                         controller: voiceInteraction,
@@ -209,7 +215,7 @@ struct ChatView: View {
         // its own definition of "something new arrived".
         TranscriptScroll(
             follow: FollowSignal(
-                itemCount: convo.items.count,
+                itemCount: convo.items.count + convo.pendingQuestions.count,
                 streaming: convo.streaming,
                 error: convo.error,
                 notice: convo.notice
@@ -219,7 +225,7 @@ struct ChatView: View {
             accessibilityIdentifier: "conversation.message-list"
         ) {
             if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
-            ForEach(convo.items) { item in
+            ForEach(renderItems) { item in
                 switch item {
                 case let .message(message):
                     MessageBubble(
@@ -230,6 +236,14 @@ struct ChatView: View {
                     .equatable()
                 case let .run(run):
                     ConversationExecutionRunCard(run: run, onOpenShellTask: onOpenShellTask)
+                case let .question(question):
+                    AskUserQuestionCard(
+                        question: question,
+                        onSubmit: { answers in await answerQuestion(question.requestId, answers: answers) },
+                        onCancel: { await cancelQuestion(question.requestId) }
+                    )
+                case let .notice(notice):
+                    transcriptNoticeRow(notice)
                 }
             }
             if convo.streaming { streamingRow }
@@ -252,6 +266,61 @@ struct ChatView: View {
         let streaming: Bool
         let error: ConversationError?
         let notice: TurnNotice?
+    }
+
+    /// Ordered render list: the transcript, then every pending interactive
+    /// question appended after the messages while it awaits an answer.
+    private var renderItems: [ConversationRenderItem] {
+        convo.items + convo.pendingQuestions.map(ConversationRenderItem.question)
+    }
+
+    // A standalone transcript notice line (e.g. a background task settling
+    // after its turn ended) — a dim, centered chip like `noticeRow`.
+    private func transcriptNoticeRow(_ notice: ConversationExecutionNotice) -> some View {
+        HStack {
+            Spacer()
+            Text(notice.text)
+                .font(.system(size: 12))
+                .foregroundColor(notice.kind == .error ? t.danger : t.text3)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(t.surface)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(t.border, lineWidth: 0.5))
+            Spacer()
+        }
+        .padding(.bottom, 18)
+    }
+
+    /// 提交 for a pending questionnaire. The card stays disabled until the
+    /// engine confirms with `askUserQuestionResolved` (which removes it);
+    /// returning `false` re-enables the card for a retry.
+    private func answerQuestion(_ requestId: UInt64, answers: [String: String]) async -> Bool {
+        #if canImport(engine_mobileFFI)
+            do {
+                try await source.submitEngineCommand(
+                    .answerAskUserQuestion(requestId: requestId, answers: answers)
+                )
+                return true
+            } catch {
+                return false
+            }
+        #else
+            return false
+        #endif
+    }
+
+    /// 取消 for a pending questionnaire.
+    private func cancelQuestion(_ requestId: UInt64) async -> Bool {
+        #if canImport(engine_mobileFFI)
+            do {
+                try await source.submitEngineCommand(.cancelAskUserQuestion(requestId: requestId))
+                return true
+            } catch {
+                return false
+            }
+        #else
+            return false
+        #endif
     }
 
     private var emptyState: some View {

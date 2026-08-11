@@ -42,6 +42,11 @@ uniffi = [
     "dep:sandbox",
     "dep:telemetry",
     "dep:platform-posix-minimal",
+    # v3 Phase 1 (workflow-on-mobile)
+    "dep:agent",
+    "dep:tasks",
+    "dep:tool-workflow",
+    "dep:workflow",
     # P0.2 (mobile hook lifecycle): the real `HookExecutorImpl` + `HookRegistry`
     # + settings hook loader the mobile composition root wires (replacing the
     # `noop_hook_executor()` stub) so the Command / Prompt hook arms run and the
@@ -71,6 +76,7 @@ uniffi = [
     "dep:tracing",
     "dep:thiserror",
     "dep:serde_json",
+    "dep:url",
     "dep:async-trait",
     # 3c-T3: populate LlmResponse.cost from the builtin pricing catalog.
     "dep:cost",
@@ -92,9 +98,10 @@ uniffi = [
     # routes the 15 `*App*` client commands to it, so the crate rides the same
     # uniffi gate as the client-protocol DTO surface it is lowered onto.
     "dep:local-apps",
-    # Local Apps MCP is the sole mobile MCP provider. It is an in-process
-    # transport only; mobile still does not discover .mcp.json, stdio or remote
-    # servers.
+    # Mobile MCP keeps the in-process Local Apps provider and reads standard
+    # settings/project entries for truthful listing/configuration. External
+    # stdio/remote entries remain disconnected until a platform transport is
+    # injected; they are never reported as connected by the mobile engine.
     "dep:mcp",
     "dep:tool-mcp",
     "dep:futures-util",
@@ -153,6 +160,17 @@ hooks = { path = "../../hooks", optional = true }
 # 3c-T3: builtin pricing catalog for LlmResponse.cost population. Optional +
 # uniffi-gated (the cost estimator is constructed inside build_mobile_inner).
 cost = { path = "../../cost", optional = true }
+# v3 Phase 1 (workflow-on-mobile): the subagent pool + task registry + the
+# Workflow tool itself. All engine-tier, optional + uniffi-gated like the
+# runtime-wiring siblings above. `tasks` brings the `LocalWorkflowHandler`
+# bridge (spawn requests, journal, progress spool); `agent` the
+# `PoolSubagentSpawner`; `tool-workflow` the model-facing tool + launcher
+# trait; `workflow` the QuickJS runtime (already in the closure via
+# orchestrator — direct edge for `validate_meta`/`check_determinism`).
+agent = { path = "../../agent", optional = true }
+tasks = { path = "../../tasks", optional = true }
+tool-workflow = { path = "../../tools/workflow", optional = true }
+workflow = { path = "../../workflow", optional = true }
 # Phase 2a-mobile: the shared multi-provider assembly (`assemble` +
 # `MultiCredentialProvider`) the desktop build path already uses. Engine-tier
 # (no `apps/*` edge), optional + uniffi-gated like its siblings above.
@@ -189,6 +207,7 @@ tokio-util = { workspace = true, optional = true }
 tracing = { version = "0.1", optional = true }
 thiserror = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+url = { version = "2", optional = true }
 async-trait = { workspace = true, optional = true }
 
 # Cross-platform tool crates (shared with engine-desktop).

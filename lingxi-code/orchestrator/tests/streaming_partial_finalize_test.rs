@@ -9,11 +9,11 @@
 //! `tengu_streaming_partial_finalized` fires (with the right `cause`), and the
 //! `tengu_api_success` success telemetry / non-streaming fallback do NOT fire.
 //!
-//! The pre-2.1.199 behavior is preserved for the case where the stream erred
-//! BEFORE its first block completed (a bare `content_block_start` that never
-//! reached `content_block_stop`): that still routes to the non-streaming
-//! fallback / graceful `model_error` (see `streaming_transient_retry_test.rs`
-//! and the `midstream_529_*` unit tests).
+//! A transport close after text deltas but before `content_block_stop` also
+//! finalizes the text that was already shown to the user. Dropping that text
+//! made mobile creation turns end with a raw reqwest error even though useful
+//! output was visible on screen. Provider/server errors retain their existing
+//! fallback behavior until a block completes.
 
 use llm_client::{LlmError, LlmEvent};
 use orchestrator::test_support::{
@@ -262,14 +262,12 @@ async fn stream_ended_without_stop_after_completed_block_finalizes_partial() {
     );
 }
 
-/// GUARD (pre-2.1.199 behavior preserved): a stream that errors BEFORE its first
-/// block completes (a bare `content_block_start` + delta, no `content_block_stop`)
-/// does NOT finalize — a non-finalize-class error (here a plain protocol error via
-/// an unrelated transport with no completed block) ends as `model_error` with the
-/// raw text and NO partial-finalize telemetry. The Overloaded/no-completed-block
-/// → non-streaming-fallback case is covered in `conversation.rs` unit tests.
+/// A transport close after visible text but before `content_block_stop` keeps the
+/// in-flight text and follows the normal partial-finalize path. The provider may
+/// disappear between any two SSE frames; requiring a stop frame discarded text
+/// already emitted to mobile clients and replaced it with a raw transport error.
 #[tokio::test]
-async fn started_but_incomplete_block_does_not_finalize() {
+async fn transport_after_incomplete_text_block_finalizes_visible_partial() {
     let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_text(0)),
@@ -289,20 +287,49 @@ async fn started_but_incomplete_block_does_not_finalize() {
     let outcome = orch.run_turn_streaming("hi").await.expect("graceful end");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
-    // No finalize telemetry; the raw error text is surfaced (model_error path).
+    let session = orch.session();
+    let guard = session.lock().await;
+    let assistants: Vec<&Vec<ContentBlock>> = guard
+        .history
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::Assistant { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistants.len(), 2, "partial text plus interruption notice");
+    assert!(matches!(
+        assistants[0].first(),
+        Some(ContentBlock::Text { text }) if text == "partial"
+    ));
+    drop(guard);
+
     let events = sink.events().await;
-    assert!(
-        !events
-            .iter()
-            .any(|e| e.name == "tengu_streaming_partial_finalized"),
-        "an incomplete (never-stopped) block must NOT finalize"
+    let finalized = events
+        .iter()
+        .find(|event| event.name == "tengu_streaming_partial_finalized")
+        .expect("visible in-flight text must be finalized");
+    assert_eq!(
+        meta_str(finalized.metadata.get("cause")),
+        Some("stale_connection")
     );
+
+    let expected_notice =
+        "API Error: Connection closed mid-response. The response above may be incomplete.";
     assert!(
         output
             .text_events()
             .await
             .iter()
-            .any(|t| t.contains("connection reset by peer")),
-        "the raw error text is surfaced when no block completed"
+            .any(|text| text == expected_notice),
+        "a stable interruption notice must replace the raw transport error"
+    );
+    assert!(
+        !output
+            .text_events()
+            .await
+            .iter()
+            .any(|text| text.contains("connection reset by peer")),
+        "raw transport details must not be rendered as assistant content"
     );
 }

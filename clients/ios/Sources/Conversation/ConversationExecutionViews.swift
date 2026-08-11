@@ -2,6 +2,9 @@ import SwiftUI
 
 struct ConversationExecutionRunCard: View {
     @Environment(\.theme) private var t
+    // Pinned status must not consume the conversation viewport by default.
+    // The header still exposes liveness/status and expands on demand.
+    @State private var collapsed = true
     let run: ConversationExecutionRun
     /// Which tool rows are expanded, keyed by tool-use id. Owned by
     /// `ConversationModel` — never by the row, which is recycled on scroll.
@@ -11,116 +14,137 @@ struct ConversationExecutionRunCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                LXIcon(name: .workflow, size: 14, color: t.accent, stroke: 1.8)
-                Text("chat_agent_run")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(t.text)
-                StatusChip(text: run.status.label, accent: statusColor)
-                Spacer(minLength: 6)
-                if let cost = run.costFormatted, !cost.isEmpty {
-                    Text(cost)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(t.text3)
-                }
-            }
-
-            if !run.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                blockPanel(icon: .brain, title: String(localized: "chat_thinking"), body: run.reasoning)
-            }
-
-            if !run.notices.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(run.notices) { notice in
-                        HStack(alignment: .top, spacing: 8) {
-                            Circle()
-                                .fill(color(for: notice.kind))
-                                .frame(width: 6, height: 6)
-                                .padding(.top, 6)
-                            Text(notice.text)
-                                .font(.system(size: 12.5))
-                                .foregroundColor(t.text2)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
-
-            if let retry = run.retry {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
+            } label: {
                 HStack(spacing: 8) {
-                    LXIcon(name: .clock, size: 12, color: t.text3, stroke: 1.6)
-                    Text(String(localized: "chat_retry_attempt \(retry.message) \(retry.attempt) \(retry.maxRetries) \(retry.delayMs)"))
-                        .font(.system(size: 12.5))
-                        .foregroundColor(t.text2)
-                }
-            }
-
-            if !run.tools.isEmpty {
-                // One renderer for every tool row, live or restored: it consumes
-                // the engine's derived header/display and falls back to the old
-                // summaries only when an older engine ships neither.
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(run.tools) { tool in
-                        ToolCallView(
-                            trace: tool,
-                            isExpanded: expandedToolCalls.contains(tool.id),
-                            onToggle: { onToggleToolCall(tool.id) }
-                        )
-                    }
-                }
-            }
-
-            if !run.shellCards.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(run.shellCards) { card in
-                        ConversationShellCardView(card: card, onOpenInTerminal: onOpenShellTask)
-                    }
-                }
-            }
-
-            if let usage = run.usage {
-                HStack(spacing: 10) {
-                    UsageChip(label: String(localized: "chat_usage_input"), value: "\(usage.inputTokens)")
-                    UsageChip(label: String(localized: "chat_usage_output"), value: "\(usage.outputTokens)")
-                    if usage.cacheReadTokens > 0 {
-                        UsageChip(label: String(localized: "chat_usage_cache_read"), value: "\(usage.cacheReadTokens)")
-                    }
-                    if usage.cacheCreationTokens > 0 {
-                        UsageChip(label: String(localized: "chat_usage_cache_write"), value: "\(usage.cacheCreationTokens)")
-                    }
-                }
-            }
-
-            if !run.compactions.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(run.compactions) { item in
-                        Text(String(localized: "chat_compaction \(item.messagesBefore) \(item.messagesAfter) \(item.bytesSaved)"))
-                            .font(.system(size: 12))
+                    LXIcon(name: .workflow, size: 14, color: t.accent, stroke: 1.8)
+                    Text("chat_agent_run")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(t.text)
+                    StatusChip(text: run.status.label, accent: statusColor)
+                    Spacer(minLength: 6)
+                    if let cost = run.costFormatted, !cost.isEmpty {
+                        Text(cost)
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundColor(t.text3)
                     }
+                    Image(systemName: collapsed ? "chevron.down" : "chevron.up")
+                        .font(.caption2)
+                        .foregroundStyle(t.text4)
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("conversation.agent-run.toggle")
+            .accessibilityLabel(collapsed
+                ? String(localized: "chat_run_expand")
+                : String(localized: "chat_run_collapse"))
 
-            if run.activeWorkers > 0 || !run.workers.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(run.coordinatorTeam.map { String(localized: "chat_team_active_agents \($0) \(run.activeWorkers)") } ?? String(localized: "chat_active_agents \(run.activeWorkers)"))
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundColor(t.text2)
-                    ForEach(run.workers) { worker in
-                        HStack(spacing: 8) {
-                            Text(worker.name)
-                                .font(.system(size: 12.5, weight: .medium))
-                                .foregroundColor(t.text)
-                            Text(worker.agentType)
-                                .font(.system(size: 11.5))
-                                .foregroundColor(t.text4)
-                            Spacer(minLength: 4)
-                            Text(worker.status)
-                                .font(.system(size: 11.5))
-                                .foregroundColor(t.text3)
+            if !collapsed {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if !run.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            blockPanel(icon: .brain, title: String(localized: "chat_thinking"), body: run.reasoning)
+                        }
+
+                        if !run.notices.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(run.notices) { notice in
+                                    HStack(alignment: .top, spacing: 8) {
+                                        Circle()
+                                            .fill(color(for: notice.kind))
+                                            .frame(width: 6, height: 6)
+                                            .padding(.top, 6)
+                                        Text(notice.text)
+                                            .font(.system(size: 12.5))
+                                            .foregroundColor(t.text2)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                        }
+
+                        if let retry = run.retry {
+                            HStack(spacing: 8) {
+                                LXIcon(name: .clock, size: 12, color: t.text3, stroke: 1.6)
+                                Text(String(localized: "chat_retry_attempt \(retry.message) \(retry.attempt) \(retry.maxRetries) \(retry.delayMs)"))
+                                    .font(.system(size: 12.5))
+                                    .foregroundColor(t.text2)
+                            }
+                        }
+
+                        if !run.tools.isEmpty {
+                            // One renderer for every tool row, live or restored: it consumes
+                            // the engine's derived header/display and falls back to the old
+                            // summaries only when an older engine ships neither.
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(run.tools) { tool in
+                                    ToolCallView(
+                                        trace: tool,
+                                        isExpanded: expandedToolCalls.contains(tool.id),
+                                        onToggle: { onToggleToolCall(tool.id) }
+                                    )
+                                }
+                            }
+                        }
+
+                        if !run.shellCards.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(run.shellCards) { card in
+                                    ConversationShellCardView(card: card, onOpenInTerminal: onOpenShellTask)
+                                }
+                            }
+                        }
+
+                        if let usage = run.usage {
+                            HStack(spacing: 10) {
+                                UsageChip(label: String(localized: "chat_usage_input"), value: "\(usage.inputTokens)")
+                                UsageChip(label: String(localized: "chat_usage_output"), value: "\(usage.outputTokens)")
+                                if usage.cacheReadTokens > 0 {
+                                    UsageChip(label: String(localized: "chat_usage_cache_read"), value: "\(usage.cacheReadTokens)")
+                                }
+                                if usage.cacheCreationTokens > 0 {
+                                    UsageChip(label: String(localized: "chat_usage_cache_write"), value: "\(usage.cacheCreationTokens)")
+                                }
+                            }
+                        }
+
+                        if !run.compactions.isEmpty {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(run.compactions) { item in
+                                    Text(String(localized: "chat_compaction \(item.messagesBefore) \(item.messagesAfter) \(item.bytesSaved)"))
+                                        .font(.system(size: 12))
+                                        .foregroundColor(t.text3)
+                                }
+                            }
+                        }
+
+                        if run.activeWorkers > 0 || !run.workers.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(run.coordinatorTeam.map { String(localized: "chat_team_active_agents \($0) \(run.activeWorkers)") } ?? String(localized: "chat_active_agents \(run.activeWorkers)"))
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundColor(t.text2)
+                                ForEach(run.workers) { worker in
+                                    HStack(spacing: 8) {
+                                        Text(worker.name)
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .foregroundColor(t.text)
+                                        Text(worker.agentType)
+                                            .font(.system(size: 11.5))
+                                            .foregroundColor(t.text4)
+                                        Spacer(minLength: 4)
+                                        Text(worker.status)
+                                            .font(.system(size: 11.5))
+                                            .foregroundColor(t.text3)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                .frame(maxHeight: 360)
+                .scrollIndicators(.visible)
             }
         }
         .padding(12)
@@ -128,7 +152,6 @@ struct ConversationExecutionRunCard: View {
         .background(t.surface.opacity(0.72))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(t.border, lineWidth: 0.5))
-        .padding(.bottom, 18)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation.agent-run")
     }

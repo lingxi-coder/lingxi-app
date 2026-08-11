@@ -1,5 +1,7 @@
 package com.lingxi.code.conversation
 
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SheetValue
 import com.lingxi.code.bindings.AskOptionDto
 import com.lingxi.code.bindings.AskQuestionDto
 import com.lingxi.code.bindings.AskUserQuestionRequestDto
@@ -27,8 +29,15 @@ import org.junit.Test
  * plus the answer/cancel commands — and the pure answer-assembly helpers the
  * card uses. All JVM-only: the binding DTOs are plain Kotlin data classes.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class, ExperimentalMaterial3Api::class)
 class AskUserQuestionQueueTest {
+
+    @Test
+    fun `pending question sheet blocks implicit hide transitions`() {
+        assertFalse(pendingQuestionSheetAllowsTransition(SheetValue.Hidden))
+        assertTrue(pendingQuestionSheetAllowsTransition(SheetValue.PartiallyExpanded))
+        assertTrue(pendingQuestionSheetAllowsTransition(SheetValue.Expanded))
+    }
 
     private class RecordingSource : ConversationSource {
         val commands = mutableListOf<ClientCommand>()
@@ -196,7 +205,7 @@ class AskUserQuestionQueueTest {
     }
 
     @Test
-    fun `render items place the question card at the transcript tail with a stable key`() {
+    fun `agent run and first question stay outside transcript for pinned and sheet presentation`() {
         val user = Message(role = Role.User, text = "做个记账应用")
         val live = Message(role = Role.Ai, text = "先问几个问题")
         val state = ChatState(
@@ -210,12 +219,14 @@ class AskUserQuestionQueueTest {
         )
         val items = buildChatRenderItems(state)
         assertEquals(
-            listOf(user.id, live.id, "agent-run-1", "question-5"),
+            listOf(user.id, live.id),
             items.map { it.key },
         )
+        assertEquals(1L, state.agentRun?.turnId)
+        assertEquals(5uL, pendingQuestionForSheet(state)?.requestId)
         assertTrue(
-            "only the FIRST pending request renders",
-            items.count { it is ChatRenderItem.Question } == 1,
+            "only the FIRST pending request is selected for the sheet",
+            state.pendingQuestions.drop(1).none { it.requestId == pendingQuestionForSheet(state)?.requestId },
         )
     }
 

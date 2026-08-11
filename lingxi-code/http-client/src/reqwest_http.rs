@@ -480,7 +480,7 @@ impl HttpTransport for ReqwestHttp {
         }
 
         let byte_stream = resp.bytes_stream();
-        let event_stream = sse_event_stream(byte_stream);
+        let event_stream = sse_event_stream(byte_stream, self.detailed_connection_errors);
         Ok(Box::pin(event_stream))
     }
 
@@ -541,7 +541,7 @@ impl HttpTransport for ReqwestHttp {
         }
 
         let byte_stream = resp.bytes_stream();
-        let event_stream = sse_event_stream(byte_stream);
+        let event_stream = sse_event_stream(byte_stream, self.detailed_connection_errors);
         Ok(SseStreamWithMeta {
             status,
             headers,
@@ -753,6 +753,7 @@ fn parse_sse_chunks(raw: &str) -> Vec<SseEvent> {
 /// element is a single fully-formed `SseEvent` (or a connection error).
 pub(crate) fn sse_event_stream<S>(
     byte_stream: S,
+    detailed_connection_errors: bool,
 ) -> impl Stream<Item = Result<SseEvent, HttpError>> + Send
 where
     S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -760,7 +761,7 @@ where
     let buffer = BytesMut::new();
     futures_util::stream::unfold(
         (Box::pin(byte_stream), buffer),
-        |(mut s, mut buf)| async move {
+        move |(mut s, mut buf)| async move {
             loop {
                 // First, drain any complete events already in the buffer.
                 if let Some((event_len, boundary_len)) = find_event_boundary(&buf) {
@@ -779,7 +780,10 @@ where
                 match s.next().await {
                     Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
                     Some(Err(e)) => {
-                        return Some((Err(map_reqwest_connection_error(e, false)), (s, buf)));
+                        return Some((
+                            Err(map_reqwest_connection_error(e, detailed_connection_errors)),
+                            (s, buf),
+                        ));
                     }
                     None => return None,
                 }

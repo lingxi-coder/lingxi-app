@@ -26,7 +26,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -78,6 +82,7 @@ import com.lingxi.code.theme.LingXiTheme
  * @param onMicHoldStart / onMicHoldRelease hook the voice-flow overlay — held
  *   past the threshold opens it, releasing dismisses (the iOS "松开发送").
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     state: ChatState,
@@ -159,7 +164,6 @@ fun ChatScreen(
         state.shellTools.size,
         state.agentRun?.revision,
         state.streaming,
-        state.pendingQuestions.size,
     ) {
         if (!followsLatest) return@LaunchedEffect
         if (renderItems.isNotEmpty()) listState.scrollToItem(renderItems.size - 1)
@@ -193,8 +197,6 @@ fun ChatScreen(
                 listState = listState,
                 onShare = onShare,
                 onOpenTerminal = onOpenTerminal,
-                onAnswerQuestion = onAnswerQuestion,
-                onCancelQuestion = onCancelQuestion,
                 onToggleToolCall = onToggleToolCall,
                 modifier = Modifier.weight(1f),
             )
@@ -216,8 +218,21 @@ fun ChatScreen(
                 state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
             state.statusLine?.let { StatusRow(text = it) }
-            // The model-managed plan sits between the transient status line and
-            // the composer — the same slot the terminal pins it in.
+            // Asynchronous agent execution is transient status, so keep it in
+            // the same persistent bottom stack as Tasks/Todos instead of
+            // interleaving it with durable transcript messages.
+            state.agentRun?.let { run ->
+                AgentRunTimeline(
+                    state = run,
+                    modifier = Modifier
+                        .padding(horizontal = 14.dp)
+                        .padding(bottom = 6.dp),
+                    expandedToolCalls = state.expandedToolCalls,
+                    onToggleToolCall = onToggleToolCall,
+                )
+            }
+            // The model-managed plan stays closest to the composer — the same
+            // slot the terminal pins it in.
             PlanTasksPanel(
                 tasks = state.planTasks,
                 expanded = state.planExpanded,
@@ -256,7 +271,30 @@ fun ChatScreen(
             )
         }
     }
+
+    pendingQuestionForSheet(state)?.let { request ->
+        val sheetState = rememberModalBottomSheetState(
+            confirmValueChange = ::pendingQuestionSheetAllowsTransition,
+        )
+        ModalBottomSheet(
+            onDismissRequest = {},
+            sheetState = sheetState,
+        ) {
+            AskUserQuestionCard(
+                request = request,
+                onSubmit = onAnswerQuestion,
+                onCancel = onCancelQuestion,
+                modifier = Modifier
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp),
+            )
+        }
+    }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun pendingQuestionSheetAllowsTransition(target: SheetValue): Boolean =
+    target != SheetValue.Hidden
 
 /**
  * Real Direct-build Computer Use readiness projected into the conversation UI.
@@ -378,8 +416,6 @@ private fun MessageList(
     listState: androidx.compose.foundation.lazy.LazyListState,
     onShare: (String) -> Unit = {},
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
-    onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
-    onCancelQuestion: (requestId: ULong) -> Unit = {},
     onToggleToolCall: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -441,18 +477,7 @@ private fun MessageList(
                     onOpenTerminal = onOpenTerminal,
                     modifier = Modifier.padding(vertical = 4.dp),
                 )
-                is ChatRenderItem.AgentRun -> AgentRunTimeline(
-                    state = item.run,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    expandedToolCalls = state.expandedToolCalls,
-                    onToggleToolCall = stableOnToggleToolCall,
-                )
                 ChatRenderItem.StreamingIndicator -> StreamingRow()
-                is ChatRenderItem.Question -> AskUserQuestionCard(
-                    request = item.request,
-                    onSubmit = onAnswerQuestion,
-                    onCancel = onCancelQuestion,
-                )
             }
         }
     }

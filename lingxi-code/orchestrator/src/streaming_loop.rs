@@ -155,11 +155,11 @@ pub(crate) struct PumpFailure {
     ///
     /// P1-04 (cc 2.1.199 partial-finalize, binary-verified): when a mid-stream
     /// server/overloaded/api error, watchdog stall, or connection close lands
-    /// AFTER a real content block completed, the caller finalizes this partial in
-    /// place (synthesized `stop_reason` + `usage`) instead of discarding it — see
-    /// [`partial_has_output`] / [`partial_finalize_cause`]. Empty on the paths
-    /// where nothing completed (a bare `content_block_start` that never reached
-    /// `content_block_stop`), which still route to the non-streaming fallback.
+    /// after useful output, the caller finalizes this partial in place
+    /// (synthesized `stop_reason` + `usage`) instead of discarding it — see
+    /// [`partial_has_output`] / [`partial_finalize_cause`]. For a transport close,
+    /// this also includes non-empty text whose `content_block_stop` frame was lost,
+    /// because those deltas were already emitted to the user.
     pub(crate) partial: PumpedTurn,
 }
 
@@ -233,15 +233,14 @@ pub(crate) fn partial_finalize_cause(error: &OrchestratorError) -> Option<Partia
 }
 
 /// Whether the accumulated partial carries REAL (non-thinking) output worth
-/// preserving: a COMPLETED non-thinking content block or a dispatched `tool_use`.
+/// preserving: a completed non-thinking content block, a dispatched `tool_use`,
+/// or visible in-flight text recovered by [`build_failure`] after a transport
+/// close.
 ///
-/// Mirrors cc's `_r.some(m=>m.message.content.some(b=>b.type!=="thinking" &&
-/// b.type!=="redacted_thinking"))` finalize guard. Because `assistant_blocks`
-/// only holds blocks that reached `content_block_stop`, a block that merely
-/// STARTED (a bare `content_block_start` + deltas, no stop) is absent here — so a
-/// stream that erred before its first block completed still routes to the
-/// non-streaming fallback, not the partial finalize (matching cc, where such a
-/// block is not yet in `_r`).
+/// Completed blocks follow cc's `_r.some(...)` finalize guard. The transport
+/// recovery is a mobile reliability extension: text deltas are rendered before
+/// `content_block_stop`, so dropping an unterminated text block makes persisted
+/// history disagree with the transcript the user already saw.
 pub(crate) fn partial_has_output(turn: &PumpedTurn) -> bool {
     !turn.tool_uses.is_empty()
         || turn.assistant_blocks.iter().any(|b| {
@@ -255,10 +254,25 @@ pub(crate) fn partial_has_output(turn: &PumpedTurn) -> bool {
 /// Attach the accumulated partial + a usage seed to a terminal pump error.
 fn build_failure(
     mut partial: PumpedTurn,
+    accumulator: &BlockAccumulator,
     message_start_usage: &Option<LlmUsage>,
     error: OrchestratorError,
     real_content_started: bool,
 ) -> PumpFailure {
+    // A network close can land between the final text delta and the block-stop
+    // frame. Those text bytes have already reached every live output sink, so
+    // preserve them in history and let the existing partial-finalize path render
+    // its stable interruption notice. Provider errors (not transport closes)
+    // retain their existing retry/fallback semantics for incomplete blocks.
+    if matches!(
+        error,
+        OrchestratorError::Streaming(LlmError::Transport { .. })
+            | OrchestratorError::StreamEndedWithoutStop
+    ) {
+        partial
+            .assistant_blocks
+            .extend(accumulator.incomplete_text_blocks());
+    }
     // Seed billing from `message_start` when no `message_delta` usage arrived, so
     // a finalized partial still records input tokens (cc patches `message.usage`
     // onto every yielded message from the same `pn` snapshot).
@@ -432,6 +446,7 @@ async fn pump_stream_inner(
             Err(e) => {
                 return Err(build_failure(
                     turn,
+                    &acc,
                     &message_start_usage,
                     OrchestratorError::Streaming(e),
                     real_content_started,
@@ -461,6 +476,7 @@ async fn pump_stream_inner(
             Err(e) => {
                 return Err(build_failure(
                     turn,
+                    &acc,
                     &message_start_usage,
                     OrchestratorError::StreamingProtocol(e.to_string()),
                     real_content_started,
@@ -548,6 +564,7 @@ async fn pump_stream_inner(
     // Stream ended without a MessageStop.
     Err(build_failure(
         turn,
+        &acc,
         &message_start_usage,
         OrchestratorError::StreamEndedWithoutStop,
         real_content_started,

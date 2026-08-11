@@ -1,6 +1,6 @@
 ---
 name: create-local-app
-description: Orchestrate a confirmed local-app design, dependency proposal, React generation, offline build, and browser plus native WebView verification.
+description: Orchestrate a confirmed, local-capability-first app design, dependency proposal, React generation, offline build, and browser plus native WebView verification.
 ---
 
 # Create a local app
@@ -22,6 +22,8 @@ confirmable specification containing:
 - pages, navigation/back semantics, complete states, data/permissions;
 - design direction, platform tokens, responsive/adaptive behavior, and the
   exact packages proposed for installation (including versions/specs);
+- which host-provided data, LLM, device, and agent capabilities satisfy each
+  product requirement, plus any user-requested external exception;
 - whether original raster imagery is required.
 
 Do not silently add a package, capability, domain, platform, or image asset.
@@ -38,6 +40,30 @@ using `mcp__local_apps__create`. Declare collections, domains, capabilities,
 and the confirmed `device_context` with `mcp__local_apps__update_manifest`
 before generated source relies on them. Inside an existing app, do not call
 `create` again.
+
+## Prefer local and host-provided capabilities
+
+Resolve every requirement against the capabilities already supplied by the
+host before proposing a dependency, external API, hosted AI service, or custom
+replacement. In particular:
+
+1. Use `window.lingxi.v1.llm.chat` for AI features so the app uses the user's
+   locally configured model/provider, quota, privacy controls, and permission
+   prompt. Do not embed provider keys or add a direct LLM SDK/API call.
+2. Use `window.lingxi.v1.data`, `device`, `network`, `runtime`, and `agent` for
+   structured storage, native device operations, mediated HTTPS, device
+   context, and conversation events. Reuse an available built-in skill/tool
+   during generation and QA before proposing a substitute.
+3. Prefer platform APIs, CSS, and existing project packages over a new package;
+   prefer an app collection over a remote database unless sharing/sync is an
+   explicit requirement.
+
+Use an external service or alternative implementation only when the user
+explicitly requests it. Record that exception in the confirmed specification,
+show its package/domain/capability and privacy or quota impact, and declare it
+in the manifest before source relies on it. If a required host capability is
+unavailable, report the limitation and ask the user to choose setup, a reduced
+local implementation, or a specific external service; never switch silently.
 
 ## Image assets (conditional)
 

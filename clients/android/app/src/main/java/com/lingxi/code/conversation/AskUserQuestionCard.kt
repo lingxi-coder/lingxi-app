@@ -78,7 +78,7 @@ internal fun askAnswersComplete(
 }
 
 /**
- * The interactive `AskUserQuestion` card at the transcript tail: one question
+ * The interactive `AskUserQuestion` content hosted by a native modal sheet: one question
  * shown at a time with 上一题/下一题 across the request's 1–4 questions,
  * options as selectable chips (multi-select per the question's flag), an
  * always-present free-text 「其他」 row, and 提交 / 取消 resolving the whole

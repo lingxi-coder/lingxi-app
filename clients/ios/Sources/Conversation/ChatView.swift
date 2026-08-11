@@ -84,10 +84,22 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
-                // Two DISTINCT pinned panels, stacked rather than merged:
-                // engine background tasks (Workflow builds, background jobs)
-                // above, and the model's own working plan closest to the
-                // composer — the same ordering the terminal uses.
+                // Asynchronous execution belongs in the persistent bottom
+                // status area, not interleaved with durable chat messages.
+                // Agent run, engine background tasks, then the model's own plan
+                // stack above the composer; each remains independently foldable.
+                if let run = pinnedExecutionRun {
+                    ConversationExecutionRunCard(
+                        run: run,
+                        expandedToolCalls: convo.expandedToolCalls,
+                        onToggleToolCall: toggleToolCall,
+                        onOpenShellTask: onOpenShellTask
+                    )
+                    .id(run.id)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 4)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if !convo.backgroundTasks.isEmpty {
                     TasksStatusPanel(tasks: convo.backgroundTasks)
                         .padding(.horizontal, 14)
@@ -180,6 +192,24 @@ struct ChatView: View {
             guard let completion else { return }
             voiceInteraction.handleTurnCompletion(completion)
         }
+        .sheet(item: pendingQuestionBinding) { question in
+            NavigationStack {
+                ScrollView {
+                    AskUserQuestionCard(
+                        question: question,
+                        onSubmit: { answers in await answerQuestion(question.requestId, answers: answers) },
+                        onCancel: { await cancelQuestion(question.requestId) }
+                    )
+                    .padding(16)
+                }
+                .background(t.windowBg)
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            // The engine owns the pending request. Require the explicit cancel
+            // action so a swipe cannot leave the turn parked with no UI.
+            .interactiveDismissDisabled()
+        }
         // The chat is the detail column of RootView's split view. Its chrome is
         // the system navigation bar so that the leading item stays the system's
         // sidebar affordance — the only thing that both opens the sidebar and
@@ -225,7 +255,7 @@ struct ChatView: View {
         // its own definition of "something new arrived".
         TranscriptScroll(
             follow: FollowSignal(
-                itemCount: convo.items.count + convo.pendingQuestions.count,
+                itemCount: renderItems.count,
                 streaming: convo.streaming,
                 error: convo.error,
                 notice: convo.notice
@@ -258,12 +288,6 @@ struct ChatView: View {
                         onToggle: { toggleToolCall(trace.id) }
                     )
                     .padding(.bottom, 14)
-                case let .question(question):
-                    AskUserQuestionCard(
-                        question: question,
-                        onSubmit: { answers in await answerQuestion(question.requestId, answers: answers) },
-                        onCancel: { await cancelQuestion(question.requestId) }
-                    )
                 case let .notice(notice):
                     transcriptNoticeRow(notice)
                 }
@@ -290,10 +314,21 @@ struct ChatView: View {
         let notice: TurnNotice?
     }
 
-    /// Ordered render list: the transcript, then every pending interactive
-    /// question appended after the messages while it awaits an answer.
+    /// Durable transcript rows only. Agent execution is pinned above the
+    /// composer, while pending questions are presented by the native sheet.
     private var renderItems: [ConversationRenderItem] {
-        convo.items + convo.pendingQuestions.map(ConversationRenderItem.question)
+        ConversationRenderLayout.transcriptItems(convo.items)
+    }
+
+    private var pinnedExecutionRun: ConversationExecutionRun? {
+        ConversationRenderLayout.pinnedRun(convo.items)
+    }
+
+    private var pendingQuestionBinding: Binding<ConversationPendingQuestion?> {
+        Binding(
+            get: { ConversationRenderLayout.sheetQuestion(convo.pendingQuestions) },
+            set: { _ in }
+        )
     }
 
     // A standalone transcript notice line (e.g. a background task settling

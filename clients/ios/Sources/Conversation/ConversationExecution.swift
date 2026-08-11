@@ -9,9 +9,6 @@ enum ConversationRenderItem: Identifiable, Equatable {
     /// exists so a resumed transcript can interleave tool rows between messages
     /// without a `tool_result` ever reaching the right-aligned user bubble.
     case toolCall(ConversationToolTrace)
-    /// An interactive `AskUserQuestion` questionnaire waiting for the user,
-    /// appended after the messages while pending.
-    case question(ConversationPendingQuestion)
     /// A standalone transcript notice (e.g. a background task finishing after
     /// its turn already ended, so no run row exists to attach it to).
     case notice(ConversationExecutionNotice)
@@ -24,11 +21,39 @@ enum ConversationRenderItem: Identifiable, Equatable {
             return "run:\(run.id)"
         case let .toolCall(trace):
             return "tool:\(trace.id)"
-        case let .question(question):
-            return "question:\(question.requestId)"
         case let .notice(notice):
             return "notice:\(notice.id)"
         }
+    }
+}
+
+/// Splits transient asynchronous agent execution from durable transcript rows.
+/// The latest run is pinned with Tasks/Todos above the composer. Earlier run
+/// cards remain in their original transcript positions because live-only
+/// reasoning, notices, usage, and shell output are not reconstructed elsewhere.
+enum ConversationRenderLayout {
+    static func transcriptItems(_ items: [ConversationRenderItem]) -> [ConversationRenderItem] {
+        guard let pinnedIndex = items.lastIndex(where: {
+            if case .run = $0 { return true }
+            return false
+        }) else { return items }
+
+        return items.enumerated().compactMap { index, item in
+            index == pinnedIndex ? nil : item
+        }
+    }
+
+    static func pinnedRun(_ items: [ConversationRenderItem]) -> ConversationExecutionRun? {
+        for item in items.reversed() {
+            if case let .run(run) = item { return run }
+        }
+        return nil
+    }
+
+    static func sheetQuestion(
+        _ questions: [ConversationPendingQuestion]
+    ) -> ConversationPendingQuestion? {
+        questions.first
     }
 }
 

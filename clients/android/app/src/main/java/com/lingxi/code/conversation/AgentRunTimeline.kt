@@ -62,7 +62,9 @@ internal fun AgentRunTimeline(
     expandedToolCalls: Set<String> = emptySet(),
     onToggleToolCall: (String) -> Unit = {},
 ) {
-    var expanded by rememberSaveable(state.turnId) { mutableStateOf(true) }
+    // This card is pinned above the composer, so keep the default footprint to
+    // one status row and let the user expand the execution trace on demand.
+    var expanded by rememberSaveable(state.turnId) { mutableStateOf(false) }
     val title = when (state.outcome) {
         AgentRunOutcome.Running -> stringResource(R.string.chat_run_status_running)
         AgentRunOutcome.Completed -> stringResource(R.string.chat_run_status_completed)

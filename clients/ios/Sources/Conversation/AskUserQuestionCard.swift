@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The interactive `AskUserQuestion` questionnaire card rendered at the tail
-/// of the transcript while a request is pending. 1–4 questions behind a
+/// The interactive `AskUserQuestion` questionnaire rendered in a native sheet
+/// while a request is pending. 1–4 questions behind a
 /// stepper, option chips per question (single or multi select), an automatic
 /// 「其他」free-text row, 提交/取消.
 ///

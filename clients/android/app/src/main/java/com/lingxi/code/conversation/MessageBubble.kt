@@ -10,16 +10,22 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -86,6 +92,10 @@ fun MessageBubble(
             )
         }
     } else {
+        val isCollapsible = remember(message.text) {
+            AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+        }
+        var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Row(
             modifier = modifier
                 .padding(bottom = 26.dp)
@@ -103,18 +113,27 @@ fun MessageBubble(
                 // IN ORDER — prose as Markdown, tool calls as their derived
                 // header + `⎿` result. Everything else (a user turn, a message
                 // still streaming) has no blocks and renders its text as before.
-                if (message.blocks.isEmpty()) {
-                    AIText(markdown = message.text, onOpenLink = onOpenLink)
-                } else {
-                    message.blocks.forEach { block ->
-                        when (block) {
-                            is MessageContent.Text ->
-                                AIText(markdown = block.text, onOpenLink = onOpenLink)
-                            is MessageContent.Tool -> ToolCallView(
-                                call = block.call,
-                                expanded = block.call.id in expandedToolCalls,
-                                onToggleExpanded = { onToggleToolCall(block.call.id) },
-                            )
+                Column(
+                    modifier = if (isCollapsible && !expanded) {
+                        Modifier.heightIn(max = 360.dp).clipToBounds()
+                    } else {
+                        Modifier
+                    },
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (message.blocks.isEmpty()) {
+                        AIText(markdown = message.text, onOpenLink = onOpenLink)
+                    } else {
+                        message.blocks.forEach { block ->
+                            when (block) {
+                                is MessageContent.Text ->
+                                    AIText(markdown = block.text, onOpenLink = onOpenLink)
+                                is MessageContent.Tool -> ToolCallView(
+                                    call = block.call,
+                                    expanded = block.call.id in expandedToolCalls,
+                                    onToggleExpanded = { onToggleToolCall(block.call.id) },
+                                )
+                            }
                         }
                     }
                 }
@@ -123,7 +142,38 @@ fun MessageBubble(
                 // `traits::SharingService` — so a bubble share and a `tool-share`
                 // invocation are the identical launch path (mirrors how the
                 // composer's camera affordance reuses CameraController).
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (isCollapsible) {
+                        val toggleLabel = stringResource(
+                            if (expanded) R.string.chat_run_collapse else R.string.chat_run_expand,
+                        )
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { expanded = !expanded }
+                                .testTag("conversation.message.assistant.toggle")
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            LXIcon(
+                                name = LXIconName.Chevron,
+                                size = 11.dp,
+                                color = t.accent,
+                                stroke = 2f,
+                                contentDescription = null,
+                            )
+                            Text(
+                                text = toggleLabel,
+                                color = t.accent,
+                                fontSize = 11.5f.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
                     Box(
                         modifier = Modifier
                             .size(28.dp)

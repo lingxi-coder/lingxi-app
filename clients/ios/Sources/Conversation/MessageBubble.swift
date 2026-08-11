@@ -3,6 +3,7 @@ import SwiftUI
 // MARK: - Message bubble (user right-aligned, AI left with avatar)
 struct MessageBubble: View, Equatable {
     @Environment(\.theme) private var t
+    @State private var assistantExpanded = false
     let message: Message
     var detail: ConversationMessageDetail? = nil
     /// When the most-recent AI reply is dimmed during voice flow ("上下文已记入").
@@ -44,23 +45,47 @@ struct MessageBubble: View, Equatable {
                 AssistantAvatar()
                 VStack(alignment: .leading, spacing: 8) {
                     if let tag = message.tag { Pill(text: tag, color: t.accent) }
-                    if let detail, !detail.blocks.isEmpty {
-                        StructuredAIBlocks(detail: detail, fallback: message.text)
-                    } else {
-                        AIText(markdown: message.text)
-                            .equatable()
-                    }
+                    assistantContent
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(
+                            maxHeight: assistantIsCollapsed ? 360 : nil,
+                            alignment: .top
+                        )
+                        .clipped()
                     // Share affordance: surfaces the native chooser for this
                     // reply's text through the same ShareImpl the engine bridges
                     // onto `traits::SharingService` — so a bubble share and a
                     // `tool-share` invocation are the identical launch path.
-                    Button(action: { onShare(message.text) }) {
-                        LXIcon(name: .share, size: 15, color: t.text3, stroke: 1.8)
-                            .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 8))
+                    HStack(spacing: 4) {
+                        if assistantIsCollapsible {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    assistantExpanded.toggle()
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    LXIcon(name: .chevron, size: 11, color: t.accent, stroke: 2)
+                                        .rotationEffect(.degrees(assistantExpanded ? 180 : 0))
+                                    Text(assistantExpanded
+                                        ? String(localized: "chat_run_collapse")
+                                        : String(localized: "chat_run_expand"))
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundColor(t.accent)
+                                }
+                                .frame(minHeight: 28)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("conversation.message.assistant.toggle")
+                        }
+                        Button(action: { onShare(message.text) }) {
+                            LXIcon(name: .share, size: 15, color: t.text3, stroke: 1.8)
+                                .frame(width: 28, height: 28)
+                                .contentShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("chat_share_reply")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("chat_share_reply")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Spacer(minLength: 0)
@@ -71,6 +96,37 @@ struct MessageBubble: View, Equatable {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.message.assistant")
         }
+    }
+
+    @ViewBuilder
+    private var assistantContent: some View {
+        if let detail, !detail.blocks.isEmpty {
+            StructuredAIBlocks(detail: detail, fallback: message.text)
+        } else {
+            AIText(markdown: message.text)
+                .equatable()
+        }
+    }
+
+    private var assistantIsCollapsible: Bool {
+        AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+    }
+
+    private var assistantIsCollapsed: Bool {
+        assistantIsCollapsible && !assistantExpanded
+    }
+}
+
+/// Stable, cross-platform threshold for keeping long streaming replies from
+/// taking over the transcript. Character and explicit-line limits complement
+/// each other: CJK prose can be visually tall without newline delimiters, while
+/// logs and generated code often contain many short lines.
+enum AssistantMessageCollapsePolicy {
+    private static let characterLimit = 640
+    private static let lineLimit = 20
+
+    static func shouldCollapse(_ text: String) -> Bool {
+        text.count >= characterLimit || text.lazy.filter { $0 == "\n" }.prefix(lineLimit).count >= lineLimit
     }
 }
 

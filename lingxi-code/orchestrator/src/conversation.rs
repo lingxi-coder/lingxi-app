@@ -9032,15 +9032,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Truthiness follows `isEnvTruthy` (non-empty, non-"false", non-"0").
             //
             // P1-04 (cc 2.1.199, binary-verified): once a REAL content block has
-            // COMPLETED (`content_block_stop` → `pumped.assistant_blocks`) the
-            // partial is NO LONGER discarded on a finalize-class error. The
+            // completed — or a transport close leaves visible text whose stop
+            // frame was lost — the partial is no longer discarded. The
             // `partial_has_output` arm in the `match pump_outcome` below finalizes
             // it in place (synthesized stop_reason + usage + `tengu_streaming_partial_finalized`),
             // persists the streamed blocks, and appends the "API Error: … may be
             // incomplete." notice — instead of the pre-2.1.199 discard-and-refetch.
-            // The non-streaming fallback therefore fires ONLY when the stream erred
-            // BEFORE its first block completed (a bare `content_block_start` that
-            // never reached `content_block_stop`), matching cc's `_r`-length guard.
+            // The non-streaming fallback therefore fires only when the stream
+            // produced no recoverable output. Provider errors before the first
+            // completed block retain cc's `_r`-length behavior.
             // In both cases partial deltas already reached callers LIVE via
             // `event_router.rs` → `output.emit_text` at each `TextDelta`
             // (claude.ts:2210 `yield m`).
@@ -9154,8 +9154,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         Ok(p) => p,
                         // P1-04 (cc 2.1.199 partial-stream finalize, binary-verified): a
                         // finalize-class mid-stream error (server/overloaded/api error,
-                        // watchdog stall, or connection close) that landed AFTER a real
-                        // content block COMPLETED is NOT discarded. The already-streamed
+                        // watchdog stall, or connection close) that landed after useful
+                        // output is not discarded. The already-streamed
                         // partial is finalized in place — persisted with a synthesized
                         // `stop_reason` (`tool_use` if any tool_use else `end_turn`) +
                         // usage — `tengu_streaming_partial_finalized` fires, and a byte-exact
@@ -9346,9 +9346,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         // ends the turn GRACEFULLY as `model_error` (faithful port of the
                         // `query.ts` catch) rather than bubbling a hard error / phantom
                         // interrupt. Reached when the partial finalize above did NOT apply —
-                        // either no content block completed before the error (a bare
-                        // `content_block_start` that never reached `content_block_stop`, so
-                        // there is no orphaned tool_use to repair) or the error is not a
+                        // either no recoverable output existed before the error (for
+                        // example, an incomplete tool block) or the error is not a
                         // finalize class. The assistant message for a partial-with-real-
                         // -output turn is persisted by the finalize arm above; here nothing
                         // was persisted (TS `yieldMissingToolResultBlocks` no-op).

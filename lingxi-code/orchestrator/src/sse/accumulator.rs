@@ -281,6 +281,29 @@ impl BlockAccumulator {
         Ok(completed)
     }
 
+    /// Snapshot visible text from blocks that have started but have not yet
+    /// received `content_block_stop`.
+    ///
+    /// Text deltas are emitted to clients immediately, so losing this buffer on
+    /// a transport close makes the persisted conversation disagree with what the
+    /// user already saw. Tool JSON is deliberately excluded: an incomplete tool
+    /// call is neither safe to persist nor executable. Thinking-only buffers are
+    /// excluded as well because they are not user-visible answer content.
+    #[must_use]
+    pub(crate) fn incomplete_text_blocks(&self) -> Vec<ContentBlock> {
+        let mut blocks: Vec<_> = self.blocks.iter().collect();
+        blocks.sort_unstable_by_key(|(index, _)| **index);
+        blocks
+            .into_iter()
+            .filter_map(|(_, state)| match &state.kind {
+                BlockKind::Text if !state.text_buf.is_empty() => Some(ContentBlock::Text {
+                    text: state.text_buf.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// `true` when no blocks are currently in-flight.
     #[must_use]
     pub fn is_idle(&self) -> bool {

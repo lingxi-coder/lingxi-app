@@ -388,7 +388,6 @@ import XCTest
                 case .message: return "message"
                 case .toolCall: return "tool"
                 case .run: return "run"
-                case .question: return "question"
                 case .notice: return "notice"
                 }
             }

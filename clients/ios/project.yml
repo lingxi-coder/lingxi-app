@@ -23,9 +23,11 @@ configs:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    DEVELOPMENT_TEAM: ""
+    # The company team the user configured in Xcode (2026-08-09) — kept in the
+    # generator source so `xcodegen generate` stops resetting code signing.
+    DEVELOPMENT_TEAM: "AZ4AX7J833"
     CODE_SIGN_STYLE: Automatic
-    TARGETED_DEVICE_FAMILY: "1" # iPhone only
+    TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad (NavigationSplitView goes multi-column on iPad)
     CFBundleLocalizations:
       - zh-Hans
       - zh-Hant
@@ -69,7 +71,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: Info.plist
         ENABLE_PREVIEWS: true
         GENERATE_INFOPLIST_FILE: false

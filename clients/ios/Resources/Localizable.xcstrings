@@ -2,626 +2,6 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
-    "chat_tasks_expand_hint": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Show the task list"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "展开任务列表"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "展開任務清單"}}, "ja": {"stringUnit": {"state": "translated", "value": "タスク一覧を表示"}}, "ko": {"stringUnit": {"state": "translated", "value": "작업 목록 펼치기"}}}},
-    "chat_tasks_collapse_hint": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Hide the task list"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "收起任务列表"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "收合任務清單"}}, "ja": {"stringUnit": {"state": "translated", "value": "タスク一覧を隠す"}}, "ko": {"stringUnit": {"state": "translated", "value": "작업 목록 접기"}}}},
-    "chat_tasks_summary %lld %lld %lld %lld": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "%lld tasks (%lld done, %lld running, %lld open)"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "%lld 个任务（%lld 完成 · %lld 进行中 · %lld 待启动）"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "%lld 個任務（%lld 完成 · %lld 進行中 · %lld 待啟動）"}}, "ja": {"stringUnit": {"state": "translated", "value": "%lld 件のタスク（%lld 完了 · %lld 実行中 · %lld 待機）"}}, "ko": {"stringUnit": {"state": "translated", "value": "%lld개 작업 (%lld 완료 · %lld 진행 중 · %lld 대기)"}}}},
-    "chat_tasks_more_completed %lld": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "… +%lld completed"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "… 另有 %lld 个已完成"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "… 另有 %lld 個已完成"}}, "ja": {"stringUnit": {"state": "translated", "value": "… 他 %lld 件完了"}}, "ko": {"stringUnit": {"state": "translated", "value": "… 외 %lld개 완료"}}}},
-    "local_apps_activity_calling_ai": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "应用正在调用 AI"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "應用正在呼叫 AI"}}, "en": {"stringUnit": {"state": "translated", "value": "The app is calling AI"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリが AI を呼び出しています"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 AI를 호출하는 중"}}}},
-    "local_apps_activity_unread_events %lld": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "%lld 条事件待助手查看"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "%lld 則事件待助手查看"}}, "en": {"stringUnit": {"state": "translated", "value": "%lld event(s) waiting for your assistant"}}, "ja": {"stringUnit": {"state": "translated", "value": "アシスタント宛のイベント %lld 件"}}, "ko": {"stringUnit": {"state": "translated", "value": "어시스턴트에게 전달된 이벤트 %lld개"}}}},
-    "local_apps_brief": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "简介"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "簡介"}}, "en": {"stringUnit": {"state": "translated", "value": "Brief"}}, "ja": {"stringUnit": {"state": "translated", "value": "概要"}}, "ko": {"stringUnit": {"state": "translated", "value": "개요"}}}},
-    "local_apps_create_brief_detail": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "AI 会据此生成一份问卷，帮助细化需求。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "AI 會據此生成一份問卷，幫助細化需求。"}}, "en": {"stringUnit": {"state": "translated", "value": "The model will turn this into a short questionnaire to nail down the details."}}, "ja": {"stringUnit": {"state": "translated", "value": "AI がこれをもとに詳細を詰めるための質問票を作成します。"}}, "ko": {"stringUnit": {"state": "translated", "value": "AI가 이를 바탕으로 세부 사항을 정리할 설문지를 작성합니다."}}}},
-    "local_apps_create_brief_section": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "用一句话描述你想要的应用"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "用一句話描述你想要的應用"}}, "en": {"stringUnit": {"state": "translated", "value": "Describe the app you want in one line"}}, "ja": {"stringUnit": {"state": "translated", "value": "作りたいアプリを一行で説明してください"}}, "ko": {"stringUnit": {"state": "translated", "value": "원하는 앱을 한 줄로 설명해 주세요"}}}},
-    "local_apps_create_git_version_control": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "使用 Git 管理应用版本（推荐）"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "使用 Git 管理應用版本（推薦）"}}, "en": {"stringUnit": {"state": "translated", "value": "Use Git to manage app versions (recommended)"}}, "ja": {"stringUnit": {"state": "translated", "value": "Git でアプリのバージョンを管理する（推奨）"}}, "ko": {"stringUnit": {"state": "translated", "value": "Git으로 앱 버전 관리(권장)"}}}},
-    "local_apps_error_bridge_detached": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "应用视图已关闭，这次请求不会有结果了。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "應用檢視已關閉，這次請求不會有結果了。"}}, "en": {"stringUnit": {"state": "translated", "value": "The app view closed; this request will not be answered."}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリ画面が閉じたため、このリクエストは応答されません。"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱 화면이 닫혀 이 요청은 응답되지 않습니다."}}}},
-    "local_apps_error_bridge_payload_invalid": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "请求内容无法序列化。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "請求內容無法序列化。"}}, "en": {"stringUnit": {"state": "translated", "value": "The request payload could not be serialized."}}, "ja": {"stringUnit": {"state": "translated", "value": "リクエスト内容をシリアライズできません。"}}, "ko": {"stringUnit": {"state": "translated", "value": "요청 내용을 직렬화할 수 없습니다."}}}},
-    "local_apps_error_bridge_payload_too_large %lld %lld": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "请求内容为 %1$lld 字节，超过上限 %2$lld；大文件请用 mediaId 传递。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "請求內容為 %1$lld 位元組，超過上限 %2$lld；大檔案請用 mediaId 傳遞。"}}, "en": {"stringUnit": {"state": "translated", "value": "The request payload is %1$lld bytes (limit %2$lld); pass large media by mediaId."}}, "ja": {"stringUnit": {"state": "translated", "value": "リクエスト内容は %1$lld バイトで上限 %2$lld を超えています。大きなメディアは mediaId で渡してください。"}}, "ko": {"stringUnit": {"state": "translated", "value": "요청 내용이 %1$lld바이트로 한도 %2$lld를 초과합니다. 큰 미디어는 mediaId로 전달하세요."}}}},
-    "local_apps_error_brief_required": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "请用一句话描述这个应用。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "請用一句話描述這個應用。"}}, "en": {"stringUnit": {"state": "translated", "value": "Please describe your app in one line."}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリを一行で説明してください。"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱을 한 줄로 설명해 주세요."}}}},
-    "local_apps_permission_agent_notify": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用向对话助手发送事件？"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用向對話助手發送事件？"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to send events to your assistant?"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリがアシスタントにイベントを送ることを許可しますか？"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 어시스턴트에 이벤트를 보내도록 허용하시겠습니까?"}}}},
-    "local_apps_permission_camera": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用使用相机拍照？"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用使用相機拍照？"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to take a photo?"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリがカメラで撮影することを許可しますか？"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 카메라로 촬영하도록 허용하시겠습니까?"}}}},
-    "local_apps_permission_llm": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用调用 AI 模型？（会消耗你的模型用量）"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用呼叫 AI 模型？（會消耗你的模型用量）"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to call the AI model? (uses your model quota)"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリが AI モデルを呼び出すことを許可しますか？（あなたの利用量を消費します）"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 AI 모델을 호출하도록 허용하시겠습니까? (사용량이 소모됩니다)"}}}},
-    "local_apps_permission_location": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用获取一次当前位置？"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用取得一次目前位置？"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to read your current location once?"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリが現在地を 1 回取得することを許可しますか？"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 현재 위치를 한 번 가져오도록 허용하시겠습니까?"}}}},
-    "local_apps_permission_microphone": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用使用麦克风录音？"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用使用麥克風錄音？"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to record with the microphone?"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリがマイクで録音することを許可しますか？"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 마이크로 녹음하도록 허용하시겠습니까?"}}}},
-    "local_apps_permission_notifications": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用发送本地通知？"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用發送本機通知？"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to post local notifications?"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリがローカル通知を送ることを許可しますか？"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 로컬 알림을 보내도록 허용하시겠습니까?"}}}},
-    "local_apps_permission_photo_library": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "允许应用从相册选择图片？"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "允許應用從相簿選擇圖片？"}}, "en": {"stringUnit": {"state": "translated", "value": "Allow the app to pick an image from your photo library?"}}, "ja": {"stringUnit": {"state": "translated", "value": "アプリが写真ライブラリから画像を選ぶことを許可しますか？"}}, "ko": {"stringUnit": {"state": "translated", "value": "앱이 사진 보관함에서 이미지를 선택하도록 허용하시겠습니까?"}}}},
-    "session_details_agent_count": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "Agents"}}, "en": {"stringUnit": {"state": "translated", "value": "Agents"}}}},
-    "session_details_agents": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "Agents"}}, "en": {"stringUnit": {"state": "translated", "value": "Agents"}}}},
-    "session_details_agents_subtitle": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "当前会话中的协作 Agent"}}, "en": {"stringUnit": {"state": "translated", "value": "Collaborators in this session"}}}},
-    "session_details_button": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "详情"}}, "en": {"stringUnit": {"state": "translated", "value": "Details"}}}},
-    "session_details_messages": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "消息"}}, "en": {"stringUnit": {"state": "translated", "value": "Messages"}}}},
-    "session_details_model": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "模型"}}, "en": {"stringUnit": {"state": "translated", "value": "Model"}}}},
-    "session_details_no_agents": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "当前没有协作 Agent"}}, "en": {"stringUnit": {"state": "translated", "value": "No collaborating agents yet"}}}},
-    "session_details_no_plan": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "当前没有结构化计划数据"}}, "en": {"stringUnit": {"state": "translated", "value": "No structured plan data yet"}}}},
-    "session_details_no_tasks": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "当前没有工具或命令任务"}}, "en": {"stringUnit": {"state": "translated", "value": "No tool or command tasks yet"}}}},
-    "session_details_plan": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "Plan & progress"}}, "en": {"stringUnit": {"state": "translated", "value": "Plan & progress"}}}},
-    "session_details_plan_subtitle": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "Reasoning 与执行进度"}}, "en": {"stringUnit": {"state": "translated", "value": "Reasoning and execution progress"}}}},
-    "session_details_runs": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "执行轮次"}}, "en": {"stringUnit": {"state": "translated", "value": "Runs"}}}},
-    "session_details_status": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "状态"}}, "en": {"stringUnit": {"state": "translated", "value": "Status"}}}},
-    "session_details_status_ready": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "就绪"}}, "en": {"stringUnit": {"state": "translated", "value": "Ready"}}}},
-    "session_details_task_count": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "Tasks"}}, "en": {"stringUnit": {"state": "translated", "value": "Tasks"}}}},
-    "session_details_tasks": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "Tasks"}}, "en": {"stringUnit": {"state": "translated", "value": "Tasks"}}}},
-    "session_details_tasks_subtitle": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "工具调用与 Shell 命令"}}, "en": {"stringUnit": {"state": "translated", "value": "Tool calls and shell commands"}}}},
-    "session_details_title": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "会话详情"}}, "en": {"stringUnit": {"state": "translated", "value": "Session Details"}}}},
-    "session_details_workspace": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "工作区"}}, "en": {"stringUnit": {"state": "translated", "value": "Workspace"}}}},
-    "settings_provider_replace_key": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "更换"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "更換"}}, "en": {"stringUnit": {"state": "translated", "value": "Replace"}}, "ja": {"stringUnit": {"state": "translated", "value": "変更"}}, "ko": {"stringUnit": {"state": "translated", "value": "교체"}}}},
-    "settings_save": {"localizations": {"zh-Hans": {"stringUnit": {"state": "translated", "value": "保存"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "儲存"}}, "en": {"stringUnit": {"state": "translated", "value": "Save"}}, "ja": {"stringUnit": {"state": "translated", "value": "保存"}}, "ko": {"stringUnit": {"state": "translated", "value": "저장"}}}},
-    "local_apps_init_kickoff %@": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请使用 create-local-app 技能开始创建这个应用。\n\n应用简介：%@\n\n先用问卷向我确认需求。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "請使用 create-local-app 技能開始建立這個應用。\n\n應用簡介：%@\n\n先用問卷向我確認需求。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Use the create-local-app skill to start building this app.\n\nBrief: %@\n\nBegin by confirming requirements with me via questions."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "create-local-app スキルでこのアプリの作成を開始してください。\n\n概要：%@\n\nまず質問で要件を確認してください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "create-local-app 스킬로 이 앱 생성을 시작하세요.\n\n소개: %@\n\n먼저 질문으로 요구 사항을 확인해 주세요."
-          }
-        }
-      }
-    },
-    "local_apps_state_draft": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "草稿"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "草稿"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Draft"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下書き"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "초안"
-          }
-        }
-      }
-    },
-    "local_apps_state_ready": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "就绪"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "就緒"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ready"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "準備完了"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "준비됨"
-          }
-        }
-      }
-    },
-    "local_apps_section_sessions": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会话"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "會話"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sessions"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "セッション"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "세션"
-          }
-        }
-      }
-    },
-    "local_apps_session_init_badge": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "初始化"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "初始化"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Init"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "初期化"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "초기화"
-          }
-        }
-      }
-    },
-    "local_apps_session_new": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "新会话"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "新會話"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "New Session"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "新規セッション"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "새 세션"
-          }
-        }
-      }
-    },
-    "local_apps_sessions_load_more": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "加载更多"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "載入更多"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Load More"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "さらに読み込む"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "더 불러오기"
-          }
-        }
-      }
-    },
-    "local_apps_sessions_empty": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "暂无会话"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "尚無會話"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No Sessions Yet"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "セッションはまだありません"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "세션이 아직 없습니다"
-          }
-        }
-      }
-    },
-    "chat_ask_user_question_title": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请回答以下问题"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "請回答以下問題"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Please Answer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "以下の質問に答えてください"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다음 질문에 답해주세요"
-          }
-        }
-      }
-    },
-    "chat_ask_other_option": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "其他"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "其他"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Other"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "その他"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "기타"
-          }
-        }
-      }
-    },
-    "chat_ask_other_placeholder": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "输入自定义回答"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "輸入自訂回答"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enter a custom answer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "カスタム回答を入力"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "사용자 지정 답변 입력"
-          }
-        }
-      }
-    },
-    "chat_ask_progress %lld %lld": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "第 %1$lld / %2$lld 题"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "第 %1$lld / %2$lld 題"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Question %1$lld of %2$lld"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "質問 %1$lld / %2$lld"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "질문 %1$lld / %2$lld"
-          }
-        }
-      }
-    },
-    "chat_ask_prev": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "上一题"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "上一題"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Previous"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "前へ"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이전"
-          }
-        }
-      }
-    },
-    "chat_ask_next": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下一题"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下一題"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "次へ"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다음"
-          }
-        }
-      }
-    },
-    "chat_task_completed %@": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "后台任务 %@ 已完成"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "背景任務 %@ 已完成"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Background task %@ completed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "バックグラウンドタスク %@ が完了しました"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "백그라운드 작업 %@ 완료"
-          }
-        }
-      }
-    },
-    "chat_task_failed %@": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "后台任务 %@ 失败"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "背景任務 %@ 失敗"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Background task %@ failed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "バックグラウンドタスク %@ が失敗しました"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "백그라운드 작업 %@ 실패"
-          }
-        }
-      }
-    },
-    "chat_task_cancelled %@": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "后台任务 %@ 已取消"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "背景任務 %@ 已取消"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Background task %@ cancelled"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "バックグラウンドタスク %@ がキャンセルされました"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "백그라운드 작업 %@ 취소됨"
-          }
-        }
-      }
-    },
     "CFBundleDisplayName": {
       "localizations": {
         "zh-Hans": {
@@ -1234,6 +614,210 @@
         }
       }
     },
+    "chat_ask_next": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一题"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一題"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次へ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음"
+          }
+        }
+      }
+    },
+    "chat_ask_other_option": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "その他"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기타"
+          }
+        }
+      }
+    },
+    "chat_ask_other_placeholder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入自定义回答"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "輸入自訂回答"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a custom answer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "カスタム回答を入力"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용자 지정 답변 입력"
+          }
+        }
+      }
+    },
+    "chat_ask_prev": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一题"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一題"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previous"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前へ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전"
+          }
+        }
+      }
+    },
+    "chat_ask_progress %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %1$lld / %2$lld 题"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %1$lld / %2$lld 題"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Question %1$lld of %2$lld"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "質問 %1$lld / %2$lld"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "질문 %1$lld / %2$lld"
+          }
+        }
+      }
+    },
+    "chat_ask_user_question_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请回答以下问题"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請回答以下問題"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please Answer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以下の質問に答えてください"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음 질문에 답해주세요"
+          }
+        }
+      }
+    },
     "chat_cancel_failed %@": {
       "localizations": {
         "zh-Hans": {
@@ -1672,6 +1256,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "Computer Use를 아직 사용할 수 없습니다"
+          }
+        }
+      }
+    },
+    "chat_diff_more_rows %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还有 %lld 行差异"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "還有 %lld 行差異"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld more line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "他 %lld 行"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 더"
+          }
+        }
+      }
+    },
+    "chat_diff_more_rows_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还有 %1$d 行差异"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "還有 %1$d 行差異"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d more line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "他 %1$d 行"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 더"
           }
         }
       }
@@ -3138,6 +2790,482 @@
         }
       }
     },
+    "chat_plan_collapse_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起任务清单"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起任務清單"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapse plan"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスクリストを折りたたむ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "할 일 목록 접기"
+          }
+        }
+      }
+    },
+    "chat_plan_expand_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开任务清单"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開任務清單"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expand plan"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスクリストを展開"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "할 일 목록 펼치기"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_completed %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 项已完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 項已完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld completed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完了 %lld 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "완료 %lld개"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_completed_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项已完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 項已完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d completed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完了 %1$d 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "완료 %1$d개"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_in_progress %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 项进行中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 項進行中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld in progress"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "進行中 %lld 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "진행 중 %lld개"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_in_progress_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项进行中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 項進行中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d in progress"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "進行中 %1$d 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "진행 중 %1$d개"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_pending %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 项待办"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 項待辦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld pending"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未着手 %lld 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대기 중 %lld개"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_pending_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 项待办"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 項待辦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d pending"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未着手 %1$d 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대기 중 %1$d개"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_prefix %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%@"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%@"
+          }
+        }
+      }
+    },
+    "chat_plan_overflow_prefix_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%1$s"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%1$s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%1$s"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%1$s"
+          }
+        }
+      }
+    },
+    "chat_plan_state_completed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Completed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "완료"
+          }
+        }
+      }
+    },
+    "chat_plan_state_in_progress": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "进行中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "進行中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In progress"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "進行中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "진행 중"
+          }
+        }
+      }
+    },
+    "chat_plan_state_pending": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待办"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待辦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pending"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未着手"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대기 중"
+          }
+        }
+      }
+    },
+    "chat_plan_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务清单"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任務清單"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスクリスト"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "할 일 목록"
+          }
+        }
+      }
+    },
     "chat_provider_engine_unavailable": {
       "localizations": {
         "zh-Hans": {
@@ -3202,6 +3330,686 @@
           "stringUnit": {
             "state": "translated",
             "value": "[접힌 생각 과정]"
+          }
+        }
+      }
+    },
+    "chat_result_added %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %lld 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Added %lld line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 行を追加"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 추가"
+          }
+        }
+      }
+    },
+    "chat_result_added_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %1$d 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %1$d 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Added %1$d line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 行を追加"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 추가"
+          }
+        }
+      }
+    },
+    "chat_result_added_removed %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %lld 行，删除 %lld 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %lld 行，刪除 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Added %lld line(s), removed %lld line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 行を追加、%lld 行を削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 추가, %lld줄 삭제"
+          }
+        }
+      }
+    },
+    "chat_result_added_removed_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %1$d 行，删除 %2$d 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 %1$d 行，刪除 %2$d 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Added %1$d line(s), removed %2$d line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 行を追加、%2$d 行を削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 추가, %2$d줄 삭제"
+          }
+        }
+      }
+    },
+    "chat_result_files_found %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %lld 个文件"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %lld 個檔案"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %lld file(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 件のファイルが見つかりました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "파일 %lld개 발견"
+          }
+        }
+      }
+    },
+    "chat_result_files_found_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %1$d 个文件"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %1$d 個檔案"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %1$d file(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 件のファイルが見つかりました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "파일 %1$d개 발견"
+          }
+        }
+      }
+    },
+    "chat_result_files_found_truncated %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %lld 个文件（已截断）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %lld 個檔案（已截斷）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %lld file(s) (truncated)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 件のファイルが見つかりました（省略あり）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "파일 %lld개 발견(잘림)"
+          }
+        }
+      }
+    },
+    "chat_result_files_found_truncated_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %1$d 个文件（已截断）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到 %1$d 個檔案（已截斷）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %1$d file(s) (truncated)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 件のファイルが見つかりました（省略あり）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "파일 %1$d개 발견(잘림)"
+          }
+        }
+      }
+    },
+    "chat_result_interrupted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已中断"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已中斷"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Interrupted"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中断されました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "중단됨"
+          }
+        }
+      }
+    },
+    "chat_result_lines_found %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "匹配 %lld 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "符合 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %lld line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 行が一致"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 일치"
+          }
+        }
+      }
+    },
+    "chat_result_lines_found_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "匹配 %1$d 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "符合 %1$d 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %1$d line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 行が一致"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 일치"
+          }
+        }
+      }
+    },
+    "chat_result_lines_read %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取 %lld 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讀取 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read %lld line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 行を読み取り"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 읽음"
+          }
+        }
+      }
+    },
+    "chat_result_lines_read_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取 %1$d 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讀取 %1$d 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read %1$d line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 行を読み取り"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 읽음"
+          }
+        }
+      }
+    },
+    "chat_result_lines_read_partial %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取 %lld 行（共 %lld 行）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讀取 %lld 行（共 %lld 行）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read %lld line(s) of %lld"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 行を読み取り（全 %lld 行）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 읽음(전체 %lld줄)"
+          }
+        }
+      }
+    },
+    "chat_result_lines_read_partial_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取 %1$d 行（共 %2$d 行）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讀取 %1$d 行（共 %2$d 行）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read %1$d line(s) of %2$d"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 行を読み取り（全 %2$d 行）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 읽음(전체 %2$d줄)"
+          }
+        }
+      }
+    },
+    "chat_result_matches_found %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "匹配 %lld 处"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "符合 %lld 處"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %lld match(es)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 件が一致"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld건 일치"
+          }
+        }
+      }
+    },
+    "chat_result_matches_found_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "匹配 %1$d 处"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "符合 %1$d 處"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Found %1$d match(es)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 件が一致"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d건 일치"
+          }
+        }
+      }
+    },
+    "chat_result_no_content": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无输出"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無輸出"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "(No content)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "（出力なし）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "(출력 없음)"
+          }
+        }
+      }
+    },
+    "chat_result_removed %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除 %lld 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刪除 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Removed %lld line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 行を削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 삭제"
+          }
+        }
+      }
+    },
+    "chat_result_removed_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除 %1$d 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刪除 %1$d 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Removed %1$d line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 行を削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 삭제"
           }
         }
       }
@@ -4600,6 +5408,244 @@
         }
       }
     },
+    "chat_task_cancelled %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %@ 已取消"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %@ 已取消"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %@ cancelled"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %@ がキャンセルされました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %@ 취소됨"
+          }
+        }
+      }
+    },
+    "chat_task_completed %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %@ 已完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %@ 已完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %@ completed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %@ が完了しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %@ 완료"
+          }
+        }
+      }
+    },
+    "chat_task_failed %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %@ 失败"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %@ 失敗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %@ failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %@ が失敗しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %@ 실패"
+          }
+        }
+      }
+    },
+    "chat_tasks_collapse_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起任务列表"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收合任務清單"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide the task list"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスク一覧を隠す"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업 목록 접기"
+          }
+        }
+      }
+    },
+    "chat_tasks_expand_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开任务列表"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開任務清單"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show the task list"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスク一覧を表示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업 목록 펼치기"
+          }
+        }
+      }
+    },
+    "chat_tasks_more_completed %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… 另有 %lld 个已完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… 另有 %lld 個已完成"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… +%lld completed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… 他 %lld 件完了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "… 외 %lld개 완료"
+          }
+        }
+      }
+    },
+    "chat_tasks_summary %lld %lld %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 个任务（%lld 完成 · %lld 进行中 · %lld 待启动）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 個任務（%lld 完成 · %lld 進行中 · %lld 待啟動）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld tasks (%lld done, %lld running, %lld open)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 件のタスク（%lld 完了 · %lld 実行中 · %lld 待機）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 작업 (%lld 완료 · %lld 진행 중 · %lld 대기)"
+          }
+        }
+      }
+    },
     "chat_team_active_agents %@ %u": {
       "localizations": {
         "zh-Hans": {
@@ -4834,6 +5880,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "라이트 테마로 전환"
+          }
+        }
+      }
+    },
+    "chat_tool_body_truncated": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输出已截断"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "輸出已截斷"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Output truncated"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "出力は省略されています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "출력이 잘렸습니다"
           }
         }
       }
@@ -5348,6 +6428,108 @@
         }
       }
     },
+    "chat_tool_show_less": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show less"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "折りたたむ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "접기"
+          }
+        }
+      }
+    },
+    "chat_tool_show_more %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开其余 %lld 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開其餘 %lld 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show %lld more line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "残り %lld 行を表示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld줄 더 보기"
+          }
+        }
+      }
+    },
+    "chat_tool_show_more_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开其余 %1$d 行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開其餘 %1$d 行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show %1$d more line(s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "残り %1$d 行を表示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d줄 더 보기"
+          }
+        }
+      }
+    },
     "chat_tool_status_completed": {
       "localizations": {
         "zh-Hans": {
@@ -5378,6 +6560,414 @@
           "stringUnit": {
             "state": "translated",
             "value": "완료"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_create": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写入"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "寫入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Write"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "書き込み"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "쓰기"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_fetch": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "抓取"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "抓取"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fetch"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取得"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "가져오기"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_kill": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "终止"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "終止"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kill"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "중지"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_output": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输出"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "輸出"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Output"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "出力"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "출력"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_read": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讀取"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "読み取り"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "읽기"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_search": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜尋"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "検索"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "검색"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_shell %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在执行 %lld 条 Shell 命令…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在執行 %lld 條 Shell 命令…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running %lld shell command(s)…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 件のシェルコマンドを実行中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "셸 명령 %lld개 실행 중…"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_shell_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在执行 %1$d 条 Shell 命令…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在執行 %1$d 條 Shell 命令…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running %1$d shell command(s)…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 件のシェルコマンドを実行中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "셸 명령 %1$d개 실행 중…"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_skill": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "技能"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "技能"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skill"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スキル"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스킬"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_task": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委派"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委派"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委任"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "위임"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_todo": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新任务清单"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新任務清單"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Todos"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスクリストを更新"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "할 일 목록 업데이트"
+          }
+        }
+      }
+    },
+    "chat_tool_verb_update": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修改"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修改"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "수정"
           }
         }
       }
@@ -15242,6 +16832,74 @@
         }
       }
     },
+    "local_apps_activity_calling_ai": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用正在调用 AI"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用正在呼叫 AI"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app is calling AI"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが AI を呼び出しています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 AI를 호출하는 중"
+          }
+        }
+      }
+    },
+    "local_apps_activity_unread_events %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 条事件待助手查看"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 則事件待助手查看"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld event(s) waiting for your assistant"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アシスタント宛のイベント %lld 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "어시스턴트에게 전달된 이벤트 %lld개"
+          }
+        }
+      }
+    },
     "local_apps_add_a11y": {
       "localizations": {
         "zh-Hans": {
@@ -15680,6 +17338,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "생성 작업을 기다리는 중…"
+          }
+        }
+      }
+    },
+    "local_apps_brief": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "简介"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "簡介"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Brief"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "概要"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "개요"
           }
         }
       }
@@ -16224,6 +17916,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "만들고 디자인 시작"
+          }
+        }
+      }
+    },
+    "local_apps_create_brief_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 会据此生成一份问卷，帮助细化需求。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 會據此生成一份問卷，幫助細化需求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The model will turn this into a short questionnaire to nail down the details."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI がこれをもとに詳細を詰めるための質問票を作成します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI가 이를 바탕으로 세부 사항을 정리할 설문지를 작성합니다."
+          }
+        }
+      }
+    },
+    "local_apps_create_brief_section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用一句话描述你想要的应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用一句話描述你想要的應用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Describe the app you want in one line"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "作りたいアプリを一行で説明してください"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원하는 앱을 한 줄로 설명해 주세요"
+          }
+        }
+      }
+    },
+    "local_apps_create_git_version_control": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Git 管理应用版本（推荐）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Git 管理應用版本（推薦）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use Git to manage app versions (recommended)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git でアプリのバージョンを管理する（推奨）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git으로 앱 버전 관리(권장)"
           }
         }
       }
@@ -17486,6 +19280,40 @@
         }
       }
     },
+    "local_apps_error_bridge_detached": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用视图已关闭，这次请求不会有结果了。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用檢視已關閉，這次請求不會有結果了。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app view closed; this request will not be answered."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ画面が閉じたため、このリクエストは応答されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 화면이 닫혀 이 요청은 응답되지 않습니다."
+          }
+        }
+      }
+    },
     "local_apps_error_bridge_failed": {
       "localizations": {
         "zh-Hans": {
@@ -17550,6 +19378,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "Bridge가 잘못된 JSON을 반환했습니다."
+          }
+        }
+      }
+    },
+    "local_apps_error_bridge_payload_invalid": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求内容无法序列化。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請求內容無法序列化。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request payload could not be serialized."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リクエスト内容をシリアライズできません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청 내용을 직렬화할 수 없습니다."
+          }
+        }
+      }
+    },
+    "local_apps_error_bridge_payload_too_large %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求内容为 %1$lld 字节，超过上限 %2$lld；大文件请用 mediaId 传递。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請求內容為 %1$lld 位元組，超過上限 %2$lld；大檔案請用 mediaId 傳遞。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request payload is %1$lld bytes (limit %2$lld); pass large media by mediaId."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リクエスト内容は %1$lld バイトで上限 %2$lld を超えています。大きなメディアは mediaId で渡してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청 내용이 %1$lld바이트로 한도 %2$lld를 초과합니다. 큰 미디어는 mediaId로 전달하세요."
           }
         }
       }
@@ -17652,6 +19548,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱이 지원되지 않는 Bridge 작업을 요청했습니다: %1$s"
+          }
+        }
+      }
+    },
+    "local_apps_error_brief_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请用一句话描述这个应用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請用一句話描述這個應用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please describe your app in one line."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリを一行で説明してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱을 한 줄로 설명해 주세요."
           }
         }
       }
@@ -18778,6 +20708,40 @@
         }
       }
     },
+    "local_apps_init_kickoff %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请使用 create-local-app 技能开始创建这个应用。\n\n应用简介：%@\n\n先用问卷向我确认需求。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請使用 create-local-app 技能開始建立這個應用。\n\n應用簡介：%@\n\n先用問卷向我確認需求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the create-local-app skill to start building this app.\n\nBrief: %@\n\nBegin by confirming requirements with me via questions."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "create-local-app スキルでこのアプリの作成を開始してください。\n\n概要：%@\n\nまず質問で要件を確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "create-local-app 스킬로 이 앱 생성을 시작하세요.\n\n소개: %@\n\n먼저 질문으로 요구 사항을 확인해 주세요."
+          }
+        }
+      }
+    },
     "local_apps_leave_app_detail": {
       "localizations": {
         "zh-Hans": {
@@ -19628,6 +21592,74 @@
         }
       }
     },
+    "local_apps_permission_agent_notify": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用向对话助手发送事件？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用向對話助手發送事件？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to send events to your assistant?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがアシスタントにイベントを送ることを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 어시스턴트에 이벤트를 보내도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_camera": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用使用相机拍照？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用使用相機拍照？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to take a photo?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがカメラで撮影することを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 카메라로 촬영하도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
     "local_apps_permission_data_mutation": {
       "localizations": {
         "zh-Hans": {
@@ -19692,6 +21724,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱 데이터 수정을 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_llm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用调用 AI 模型？（会消耗你的模型用量）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用呼叫 AI 模型？（會消耗你的模型用量）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to call the AI model? (uses your model quota)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが AI モデルを呼び出すことを許可しますか？（あなたの利用量を消費します）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 AI 모델을 호출하도록 허용하시겠습니까? (사용량이 소모됩니다)"
+          }
+        }
+      }
+    },
+    "local_apps_permission_location": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用获取一次当前位置？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用取得一次目前位置？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to read your current location once?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが現在地を 1 回取得することを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 현재 위치를 한 번 가져오도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_microphone": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用使用麦克风录音？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用使用麥克風錄音？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to record with the microphone?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがマイクで録音することを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 마이크로 녹음하도록 허용하시겠습니까?"
           }
         }
       }
@@ -19862,6 +21996,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱의 네트워크 연결을 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_notifications": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用发送本地通知？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用發送本機通知？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to post local notifications?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがローカル通知を送ることを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 로컬 알림을 보내도록 허용하시겠습니까?"
+          }
+        }
+      }
+    },
+    "local_apps_permission_photo_library": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许应用从相册选择图片？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許應用從相簿選擇圖片？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow the app to pick an image from your photo library?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリが写真ライブラリから画像を選ぶことを許可しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 사진 보관함에서 이미지를 선택하도록 허용하시겠습니까?"
           }
         }
       }
@@ -22008,6 +24210,176 @@
         }
       }
     },
+    "local_apps_section_sessions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "會話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sessions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "セッション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세션"
+          }
+        }
+      }
+    },
+    "local_apps_session_init_badge": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "初始化"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "初始化"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Init"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "初期化"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "초기화"
+          }
+        }
+      }
+    },
+    "local_apps_session_new": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新會話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新規セッション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 세션"
+          }
+        }
+      }
+    },
+    "local_apps_sessions_empty": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚無會話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Sessions Yet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "セッションはまだありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세션이 아직 없습니다"
+          }
+        }
+      }
+    },
+    "local_apps_sessions_load_more": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加载更多"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "載入更多"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Load More"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "さらに読み込む"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "더 불러오기"
+          }
+        }
+      }
+    },
     "local_apps_source": {
       "localizations": {
         "zh-Hans": {
@@ -22276,6 +24648,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "저장되었습니다. 다음 빌드에서 소스 코드를 다시 검증합니다."
+          }
+        }
+      }
+    },
+    "local_apps_state_draft": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "草稿"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "草稿"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Draft"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下書き"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "초안"
+          }
+        }
+      }
+    },
+    "local_apps_state_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就绪"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就緒"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ready"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "準備完了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "준비됨"
           }
         }
       }
@@ -28498,6 +30938,652 @@
           "stringUnit": {
             "state": "translated",
             "value": "AI가 실시간 웹 검색에 접근하도록 하려면 검색 제공업체를 선택해 \"웹 검색\" 모드를 활성화하세요."
+          }
+        }
+      }
+    },
+    "session_details_agent_count": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "エージェント"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "에이전트"
+          }
+        }
+      }
+    },
+    "session_details_agents": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "エージェント"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "에이전트"
+          }
+        }
+      }
+    },
+    "session_details_agents_subtitle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前会话中的协作 Agent"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前工作階段中的協作 Agent"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collaborators in this session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このセッションの協働エージェント"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 세션의 협업 에이전트"
+          }
+        }
+      }
+    },
+    "session_details_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "详情"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "詳細資料"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Details"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "詳細"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세부 정보"
+          }
+        }
+      }
+    },
+    "session_details_messages": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Messages"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メッセージ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메시지"
+          }
+        }
+      }
+    },
+    "session_details_model": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "モデル"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델"
+          }
+        }
+      }
+    },
+    "session_details_no_agents": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有协作 Agent"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前沒有協作 Agent"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No collaborating agents yet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "協働エージェントはまだありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 협업 에이전트가 없습니다"
+          }
+        }
+      }
+    },
+    "session_details_no_plan": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有结构化计划数据"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前沒有結構化計畫資料"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No structured plan data yet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "構造化された計画データはまだありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 구조화된 계획 데이터가 없습니다"
+          }
+        }
+      }
+    },
+    "session_details_no_tasks": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有工具或命令任务"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前沒有工具或命令任務"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No tool or command tasks yet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ツールやコマンドのタスクはまだありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 도구 또는 명령 작업이 없습니다"
+          }
+        }
+      }
+    },
+    "session_details_plan": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan & progress"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan & progress"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan & progress"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan & progress"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan & progress"
+          }
+        }
+      }
+    },
+    "session_details_plan_subtitle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reasoning 与执行进度"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reasoning 與執行進度"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reasoning and execution progress"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reasoning と実行の進捗"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reasoning 및 실행 진행 상황"
+          }
+        }
+      }
+    },
+    "session_details_runs": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行轮次"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "執行輪次"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runs"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "実行回数"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실행 횟수"
+          }
+        }
+      }
+    },
+    "session_details_status": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "狀態"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ステータス"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "상태"
+          }
+        }
+      }
+    },
+    "session_details_status_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就绪"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就緒"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ready"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "準備完了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "준비됨"
+          }
+        }
+      }
+    },
+    "session_details_task_count": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスク"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업"
+          }
+        }
+      }
+    },
+    "session_details_tasks": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タスク"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업"
+          }
+        }
+      }
+    },
+    "session_details_tasks_subtitle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具调用与 Shell 命令"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工具呼叫與 Shell 命令"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tool calls and shell commands"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ツール呼び出しとシェルコマンド"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "도구 호출 및 셸 명령"
+          }
+        }
+      }
+    },
+    "session_details_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话详情"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作階段詳細資料"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Session Details"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "セッションの詳細"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세션 세부 정보"
+          }
+        }
+      }
+    },
+    "session_details_workspace": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作区"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作區"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업 공간"
           }
         }
       }
@@ -41728,6 +44814,40 @@
         }
       }
     },
+    "settings_provider_replace_key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更换"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更換"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Replace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "変更"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "교체"
+          }
+        }
+      }
+    },
     "settings_provider_retry_range %lld %lld": {
       "localizations": {
         "zh-Hans": {
@@ -43458,6 +46578,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "최초 설정 가이드를 다시 진행합니다"
+          }
+        }
+      }
+    },
+    "settings_save": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "儲存"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "저장"
           }
         }
       }

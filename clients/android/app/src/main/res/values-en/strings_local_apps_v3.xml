@@ -3,24 +3,13 @@
 <resources>
     <string name="local_apps_create_brief_label">Describe the app you want in one line</string>
     <string name="local_apps_create_brief_hint">The model will turn this into a short questionnaire to nail down the details.</string>
-    <string name="local_apps_create_git_version_control">Use Git to manage app versions (recommended)</string>
     <string name="local_apps_webview_upgrade_required">This Android System WebView cannot provide the secure local-app bridge. Update System WebView first.</string>
     <string name="local_apps_webview_untrusted_origin">Local apps can only open from a trusted loopback origin.</string>
     <string name="local_apps_webview_storage_cleanup_waiting">Safely clearing old browser data for this app address…</string>
     <string name="local_apps_webview_storage_cleanup_failed">Browser data could not be prepared safely, so the app was not loaded.</string>
     <string name="local_apps_error_web_storage_cleanup_queue">The browser-data cleanup could not be saved safely, so the app was not deleted.</string>
-    <string name="local_apps_permission_camera">Allow this app to take photos with the camera?</string>
-    <string name="local_apps_permission_photo_library">Allow this app to pick images from the photo library?</string>
-    <string name="local_apps_permission_microphone">Allow this app to record with the microphone?</string>
-    <string name="local_apps_permission_location">Allow this app to read the current location?</string>
-    <string name="local_apps_permission_notifications">Allow this app to post local notifications?</string>
-    <string name="local_apps_permission_llm">Allow this app to call the AI model? (uses your model quota)</string>
-    <string name="local_apps_permission_agent_notify">Allow this app to post events to the assistant?</string>
     <string name="local_apps_workflow_draft">Draft</string>
-    <string name="local_apps_section_sessions">Sessions</string>
-    <string name="local_apps_session_init_badge">Init</string>
     <string name="local_apps_session_load_more">Load more</string>
-    <string name="local_apps_sessions_empty">This app has no sessions yet.</string>
     <string name="local_apps_sessions_loading">Loading sessions…</string>
     <string name="local_apps_session_meta">%1$s · %2$d messages</string>
     <string name="chat_question_card_title">The assistant wants to confirm a few things</string>

@@ -9,6 +9,74 @@ export function getLingXiBridge() {
   return bridge && typeof bridge === "object" ? bridge : null;
 }
 
+/**
+ * The shape every device-context reader can rely on. Exported so a component
+ * can compare against it, and used verbatim when no host bridge is present —
+ * a plain desktop browser or `npm run dev`, which is exactly where the app is
+ * first tested.
+ */
+export const FALLBACK_DEVICE_CONTEXT = {
+  os: "unknown",
+  formFactor: "unknown",
+  viewport: { width: 0, height: 0 },
+  safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+  colorScheme: "light",
+  reducedMotion: false,
+  inputMode: "touch",
+};
+
+function nonNegativeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
+/**
+ * Coerce anything into a complete device context, field by field.
+ *
+ * A spread merge (`{ ...FALLBACK, ...value }`) is NOT enough: it would let a
+ * malformed `safeArea` through as a string and turn `${safeArea.top}px` into
+ * `"undefinedpx"`. Every field is type-checked, so the result is always safe
+ * to dereference.
+ */
+export function normalizeDeviceContext(value) {
+  if (!value || typeof value !== "object") return FALLBACK_DEVICE_CONTEXT;
+  return {
+    os: typeof value.os === "string" ? value.os : "unknown",
+    formFactor:
+      typeof value.formFactor === "string" ? value.formFactor : "unknown",
+    viewport: {
+      width: nonNegativeNumber(value.viewport?.width),
+      height: nonNegativeNumber(value.viewport?.height),
+    },
+    safeArea: {
+      top: nonNegativeNumber(value.safeArea?.top),
+      right: nonNegativeNumber(value.safeArea?.right),
+      bottom: nonNegativeNumber(value.safeArea?.bottom),
+      left: nonNegativeNumber(value.safeArea?.left),
+    },
+    colorScheme: value.colorScheme === "dark" ? "dark" : "light",
+    reducedMotion: value.reducedMotion === true,
+    inputMode: value.inputMode === "pointer" ? "pointer" : "touch",
+  };
+}
+
+/**
+ * Host-provided OS/form-factor facts; never infer platform from viewport UA.
+ *
+ * ALWAYS returns a complete context — never null. Callers dereference `.os`,
+ * `.formFactor` and `.safeArea.*` directly, so a null here would crash the app
+ * in every no-bridge environment (a plain desktop browser, `npm run dev`).
+ * This is the ONE derivation of the device context: `./device-context`
+ * re-exports it rather than normalizing a second time.
+ */
+export function getDeviceContext() {
+  const bridge = getLingXiBridge();
+  return normalizeDeviceContext(
+    bridge?.deviceContext ?? bridge?.runtime?.deviceContext,
+  );
+}
+
 export async function queryCollection(request) {
   const bridge = getLingXiBridge();
   if (!bridge?.data?.query) {

@@ -18,6 +18,7 @@ _VERIFY_SPEC.loader.exec_module(_VERIFY)
 
 EXPECTED_DEPENDENCIES = _VERIFY.EXPECTED_DEPENDENCIES
 EXPECTED_SWCS = _VERIFY.EXPECTED_SWCS
+EXPECTED_ROLLDOWN_BINDINGS = _VERIFY.EXPECTED_ROLLDOWN_BINDINGS
 fail = _VERIFY.fail
 load_json = _VERIFY.load_json
 validate_apk_pins = _VERIFY.validate_apk_pins
@@ -63,7 +64,18 @@ def expected_swcs_for(platform: str) -> dict[str, str]:
     return dict(EXPECTED_SWCS)
 
 
-def validate_node_modules(root: pathlib.Path, allowed_swcs: dict[str, str]) -> None:
+def expected_rolldown_bindings_for(platform: str) -> dict[str, str]:
+    if platform == "ios":
+        name = "@rolldown/binding-linux-arm64-musl"
+        return {name: EXPECTED_ROLLDOWN_BINDINGS[name]}
+    return dict(EXPECTED_ROLLDOWN_BINDINGS)
+
+
+def validate_node_modules(
+    root: pathlib.Path,
+    allowed_swcs: dict[str, str],
+    allowed_rolldown_bindings: dict[str, str],
+) -> None:
     if not root.is_dir() or root.is_symlink():
         fail(f"node_modules input is missing or unsafe: {root}")
     validate_symlinks(root)
@@ -91,6 +103,28 @@ def validate_node_modules(root: pathlib.Path, allowed_swcs: dict[str, str]) -> N
     next_binary = root / "next" / "dist" / "bin" / "next"
     if not next_binary.is_file() or next_binary.is_symlink():
         fail("runtime node_modules is missing the fixed Next CLI")
+    vite_binary = root / "vite" / "bin" / "vite.js"
+    if not vite_binary.is_file() or vite_binary.is_symlink():
+        fail("runtime node_modules is missing the fixed Vite CLI")
+    allowed_rolldown_dirs = {
+        name.removeprefix("@rolldown/") for name in allowed_rolldown_bindings
+    }
+    rolldown_roots = (
+        [path for path in (root / "@rolldown").iterdir()]
+        if (root / "@rolldown").is_dir()
+        else []
+    )
+    for path in rolldown_roots:
+        if path.name.startswith("binding-") and path.name not in allowed_rolldown_dirs:
+            fail(f"runtime node_modules resolved an unexpected Rolldown binding: @rolldown/{path.name}")
+    for name, version in allowed_rolldown_bindings.items():
+        package_root = root / pathlib.PurePosixPath(name)
+        package = load_json(package_root / "package.json")
+        if package.get("version") != version:
+            fail(f"runtime node_modules did not resolve {name}@{version}")
+        native_bindings = list(package_root.glob("*.node"))
+        if len(native_bindings) != 1 or native_bindings[0].is_symlink():
+            fail(f"runtime node_modules must contain one real native binding for {name}")
     bin_dir = root / ".bin"
     for name in ("corepack", "npm", "npx", "pnpm", "yarn"):
         path = bin_dir / name
@@ -185,7 +219,8 @@ def main() -> None:
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
     allowed_swcs = expected_swcs_for(args.platform)
-    validate_node_modules(node_modules, allowed_swcs)
+    allowed_rolldown_bindings = expected_rolldown_bindings_for(args.platform)
+    validate_node_modules(node_modules, allowed_swcs, allowed_rolldown_bindings)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -224,6 +259,7 @@ def main() -> None:
             "read_only": True,
             "package_lock_sha256": sha256(template / "package-lock.json"),
             "resolved_swc": sorted(allowed_swcs),
+            "resolved_rolldown_bindings": sorted(allowed_rolldown_bindings),
             "files": inventory(temporary),
         }
         (temporary / "runtime-manifest.json").write_text(

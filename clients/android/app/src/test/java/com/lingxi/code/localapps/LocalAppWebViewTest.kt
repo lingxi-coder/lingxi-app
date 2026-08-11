@@ -96,15 +96,26 @@ class LocalAppWebViewTest {
 
     @Test
     fun `document start bootstrap exposes parity APIs and blocks direct external channels`() {
+        val bootstrap = buildLingxiV1Bootstrap(formFactor = "tablet")
         listOf(
             "capturePhoto", "pickImage", "recordAudioStart", "recordAudioStop", "getLocation",
             "transcribeSpeech", "postNotification", "llm_chat", "agent_post",
             "Content-Security-Policy", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon",
             "External resources are blocked", "error.code = envelope.code",
             "const normalAnchor = attribute === 'href' && this.tagName === 'A'",
-            "request_too_large", "worker-src 'none'",
-        ).forEach { token -> assertTrue("missing bootstrap contract: $token", LINGXI_V1_BOOTSTRAP.contains(token)) }
-        assertFalse(LINGXI_V1_BOOTSTRAP.contains("addJavascriptInterface"))
+            "request_too_large", "worker-src 'none'", "deviceContext", "os: 'android'",
+            "formFactor: 'tablet'", "get viewport()", "get safeArea()", "get colorScheme()",
+            "get reducedMotion()", "get inputMode()",
+        ).forEach { token -> assertTrue("missing bootstrap contract: $token", bootstrap.contains(token)) }
+        assertFalse(bootstrap.contains("window.screen"))
+        assertFalse(bootstrap.contains("addJavascriptInterface"))
+        assertFalse(bootstrap.contains("navigator.userAgent"))
+    }
+
+    @Test
+    fun `native Android form factor uses host configuration rather than viewport geometry`() {
+        assertEquals("phone", androidFormFactor(smallestScreenWidthDp = 599))
+        assertEquals("tablet", androidFormFactor(smallestScreenWidthDp = 600))
     }
 
     @Test

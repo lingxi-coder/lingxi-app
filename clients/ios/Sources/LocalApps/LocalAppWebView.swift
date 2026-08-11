@@ -717,7 +717,24 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         "lingxiData", "lingxiNetwork", "lingxiRuntime", "lingxiDevice", "lingxiLlm", "lingxiAgent",
     ]
 
-    static let bridgeSource = #"""
+    @MainActor
+    static var bridgeSource: String {
+        bridgeSource(formFactor: formFactor(for: UIDevice.current.userInterfaceIdiom))
+    }
+
+    static func formFactor(for idiom: UIUserInterfaceIdiom) -> String {
+        idiom == .pad ? "ipad" : "iphone"
+    }
+
+    static func bridgeSource(formFactor: String) -> String {
+        precondition(["iphone", "ipad"].contains(formFactor), "Unsupported iOS form factor")
+        return bridgeSourceTemplate.replacingOccurrences(
+            of: "__LINGXI_NATIVE_FORM_FACTOR__",
+            with: formFactor
+        )
+    }
+
+    private static let bridgeSourceTemplate = #"""
     (() => {
       if (window.lingxi?.v1) return;
       const installCsp = () => {
@@ -774,7 +791,31 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         pending.set(requestId, { resolve, reject });
         handler.postMessage({ requestId, operation, payload });
       });
+      const readInsets = () => {
+        const probe = document.createElement('div');
+        probe.style.cssText = 'position:fixed;inset:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);pointer-events:none;';
+        (document.documentElement || document.body).appendChild(probe);
+        const style = getComputedStyle(probe);
+        const number = value => Number.parseFloat(value) || 0;
+        const result = { top: number(style.paddingTop), right: number(style.paddingRight), bottom: number(style.paddingBottom), left: number(style.paddingLeft) };
+        probe.remove();
+        return result;
+      };
+      const readViewport = () => ({
+        width: Math.round(window.visualViewport?.width || window.innerWidth || 0),
+        height: Math.round(window.visualViewport?.height || window.innerHeight || 0),
+      });
+      const deviceContext = Object.freeze({
+        os: 'ios',
+        formFactor: '__LINGXI_NATIVE_FORM_FACTOR__',
+        get viewport() { return readViewport(); },
+        get safeArea() { return readInsets(); },
+        get colorScheme() { return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; },
+        get reducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; },
+        get inputMode() { return window.matchMedia?.('(pointer: fine)').matches ? 'pointer' : 'touch'; },
+      });
       const api = Object.freeze({
+        deviceContext,
         data: Object.freeze({
           query: payload => request('Data', 'query', payload),
           mutate: payload => request('Data', 'mutate', payload),
@@ -784,6 +825,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }),
         runtime: Object.freeze({
           info: () => request('Runtime', 'info', {}),
+          deviceContext,
         }),
         device: Object.freeze({
           capturePhoto: (payload = {}) => request('Device', 'capturePhoto', payload),

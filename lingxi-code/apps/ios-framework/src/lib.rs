@@ -3442,9 +3442,24 @@ mod tests {
         let _listener: Arc<dyn ClientEventListener> = handle.listener();
 
         // The M8 smoke signal reflects the Rust-bundled mobile skill catalog.
+        // Anchored to the live roster, never to a literal: this assert sat at a
+        // stale `1` while `BUILTIN_MOBILE` grew to five, and because the module
+        // is `#[cfg(feature = "uniffi")]` a plain `cargo test --workspace`
+        // compiled none of it, so the rot only surfaced under `--all-features`.
+        let bundled = engine_mobile::mobile_skill_registry();
+        assert!(!bundled.is_empty(), "mobile ships builtin skills");
+        assert_eq!(
+            handle.skill_count() as usize,
+            bundled.len(),
+            "the handle must expose the live bundled mobile skill catalog"
+        );
         // `create-local-app` is always present so the agent can enter the
         // template-guided, approval-gated local-app workflow offline.
-        assert_eq!(handle.skill_count(), 1);
+        assert!(
+            bundled.get("create-local-app").is_some(),
+            "bundled mobile skills must include create-local-app; got {:?}",
+            bundled.names()
+        );
     }
 
     /// F3-04: `create_session` is no longer the M8 stub (which returned an

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Design"
+  short_description: "Specify distinctive native UI before coding"
+  default_prompt: "Use $frontend-design to produce a confirmed platform-native design spec before implementing this local app."

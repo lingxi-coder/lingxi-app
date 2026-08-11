@@ -16,7 +16,10 @@
 
 #![forbid(unsafe_code)]
 
-use command_api::CommandRegistry;
+use command_api::{
+    BundledPromptFn, CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand,
+    SlashCommandKind,
+};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
@@ -374,6 +377,7 @@ pub fn mobile_command_registry(
     let cron_enabled =
         !traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(&mut reg, cron_enabled);
+    register_mobile_skill_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
@@ -390,6 +394,56 @@ pub fn mobile_command_registry(
     // unimplemented stubs. Register real mobile handlers on `reg` directly here
     // when implemented.
     reg
+}
+
+/// Mirror the compiled-in mobile Skill registry into the slash-command
+/// catalog. The Skill tool remains the canonical invocation path, but a
+/// settings screen and `/` palette must see the same five shipped skills — a
+/// second hard-coded client list would drift again. The prompt body is the
+/// exact bundled markdown, so a slash invocation and a Skill-tool invocation
+/// receive identical guidance.
+fn register_mobile_skill_commands(reg: &mut CommandRegistry) {
+    let skills = mobile_skill_registry();
+    for name in [
+        "create-local-app",
+        "frontend-design",
+        "frontend-qa",
+        "accessibility",
+        "react-best-practices",
+    ] {
+        let Some(skill) = skills.get(name) else {
+            continue;
+        };
+        reg.register_command(SlashCommand {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter::default(),
+                prompt_fn: Some(Arc::new(MobileSkillPrompt {
+                    body: skill.content.clone(),
+                })),
+            },
+            loaded_from: Some("bundled".into()),
+            user_invocable: Some(true),
+            has_user_specified_description: true,
+            ..SlashCommand::default()
+        });
+    }
+}
+
+struct MobileSkillPrompt {
+    body: String,
+}
+
+impl BundledPromptFn for MobileSkillPrompt {
+    fn build(&self, args: &str) -> String {
+        if args.trim().is_empty() {
+            self.body.clone()
+        } else {
+            format!("{}\n\nUser-supplied focus:\n{}", self.body, args.trim())
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 package com.lingxi.code.localapps
 
 import android.annotation.SuppressLint
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -887,7 +888,7 @@ fun LocalAppWebView(
                 }
                 WebViewCompat.addDocumentStartJavaScript(
                     this,
-                    LINGXI_V1_BOOTSTRAP,
+                    buildLingxiV1Bootstrap(androidFormFactor(context.resources.configuration)),
                     setOf(trustedOriginRule),
                 )
                 val guardedClient = object : WebViewClient() {
@@ -998,7 +999,18 @@ internal fun Uri.toTrustedOriginString(): String {
 
 private const val LINGXI_V1_MESSAGE_OBJECT = "LingXiNativeV1"
 
-internal const val LINGXI_V1_BOOTSTRAP = """
+internal fun androidFormFactor(configuration: Configuration): String =
+    androidFormFactor(configuration.smallestScreenWidthDp)
+
+internal fun androidFormFactor(smallestScreenWidthDp: Int): String =
+    if (smallestScreenWidthDp >= 600) "tablet" else "phone"
+
+internal fun buildLingxiV1Bootstrap(formFactor: String): String {
+    require(formFactor == "phone" || formFactor == "tablet") { "Unsupported Android form factor" }
+    return LINGXI_V1_BOOTSTRAP_TEMPLATE.replace("__LINGXI_NATIVE_FORM_FACTOR__", formFactor)
+}
+
+private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
 (() => {
   if (window.lingxi?.v1) return;
   const installCsp = () => {
@@ -1095,7 +1107,31 @@ internal const val LINGXI_V1_BOOTSTRAP = """
     pending.set(requestId, {resolve, reject});
     handler.postMessage(serialized);
   });
+  const readInsets = () => {
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:fixed;inset:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);pointer-events:none;';
+    (document.documentElement || document.body).appendChild(probe);
+    const style = getComputedStyle(probe);
+    const number = value => Number.parseFloat(value) || 0;
+    const result = {top: number(style.paddingTop), right: number(style.paddingRight), bottom: number(style.paddingBottom), left: number(style.paddingLeft)};
+    probe.remove();
+    return result;
+  };
+  const readViewport = () => ({
+    width: Math.round(window.visualViewport?.width || window.innerWidth || 0),
+    height: Math.round(window.visualViewport?.height || window.innerHeight || 0)
+  });
+  const deviceContext = Object.freeze({
+    os: 'android',
+    formFactor: '__LINGXI_NATIVE_FORM_FACTOR__',
+    get viewport() { return readViewport(); },
+    get safeArea() { return readInsets(); },
+    get colorScheme() { return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; },
+    get reducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; },
+    get inputMode() { return window.matchMedia?.('(pointer: fine)').matches ? 'pointer' : 'touch'; },
+  });
   const v1 = Object.freeze({
+    deviceContext,
     data: Object.freeze({
       query: (payload) => request('query_data', payload),
       mutate: (payload) => request('mutate_data', payload)
@@ -1106,7 +1142,8 @@ internal const val LINGXI_V1_BOOTSTRAP = """
     }),
     runtime: Object.freeze({
       info: () => request('runtime_status', {}),
-      status: () => request('runtime_status', {})
+      status: () => request('runtime_status', {}),
+      deviceContext,
     }),
     device: Object.freeze({
       capturePhoto: (payload = {}) => request('capture_photo', payload),

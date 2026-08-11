@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
 TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/next-static-v1"
+VITE_TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1"
 TEMP_ROOT="$(mktemp -d)"
 STAGED_OUTPUT="${REPO_ROOT}/clients/android/app/build/local-app-supply-chain-test-${RANDOM}"
 trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}"' EXIT
@@ -19,14 +20,40 @@ import sys
 policy = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 package_policy = policy["package_manager_policy"]
 assert package_policy["npm_family_present"] is True
-assert package_policy["npm_scope"] == "interactive_terminal_only"
+assert package_policy["npm_scope"] == "app_workspace_shell_approval"
 assert package_policy["generation_jobs"] is False
 assert package_policy["mcp"] is False
 commands = policy["commands"]
 assert commands["store_build"]["network_policy"] == "disabled"
 assert commands["full_build"]["network_policy"] == "disabled"
 assert commands["full_start"]["network_policy"] == "loopback_only"
-assert all(command["memory_limit_bytes"] == 838860800 for command in commands.values())
+for name in ("store_build", "full_build", "vite_static_build"):
+    command = commands[name]
+    assert command["memory_limit_policy"] == "physical_memory_tier"
+    assert "memory_limit_bytes" not in command
+    assert command["argv"][1] == "--max-old-space-size={build_node_old_space_size_mib}"
+assert commands["full_start"]["memory_limit_bytes"] == 838860800
+limits = policy["limits"]
+assert limits["build_node_old_space_percent"] == 75
+assert limits["build_memory_tiers"] == [
+    {
+        "physical_memory_max_exclusive_bytes": 6 * 1024**3,
+        "process_tree_memory_bytes": 2048 * 1024**2,
+        "node_max_old_space_size_mib": 1536,
+    },
+    {
+        "physical_memory_max_exclusive_bytes": 8 * 1024**3,
+        "process_tree_memory_bytes": 3072 * 1024**2,
+        "node_max_old_space_size_mib": 2304,
+    },
+    {
+        "physical_memory_max_exclusive_bytes": None,
+        "process_tree_memory_bytes": 4096 * 1024**2,
+        "node_max_old_space_size_mib": 3072,
+    },
+]
+assert limits["runtime_process_tree_memory_bytes"] == 838860800
+assert "node_process_tree_memory_bytes" not in limits
 launcher = policy["android_network_policy_launcher"]
 assert launcher["supported_network_policies"] == ["disabled", "loopback_only"]
 assert launcher["loopback_only_ready"] is True
@@ -34,10 +61,34 @@ ish_policy = policy["ios_ish_execution_policy"]
 assert ish_policy["supported_network_policies"] == ["disabled", "loopback_only"]
 assert ish_policy["loopback_only_ready"] is True
 assert ish_policy["hook_version"] == 1
-assert ish_policy["memory_limit_bytes"] == 838860800
+assert ish_policy["runtime_memory_limit_bytes"] == 838860800
+assert "memory_limit_bytes" not in ish_policy
 assert ish_policy["watchdog_interval_ms"] == 250
 assert ish_policy["memory_accounting"] == "guest_backed_pages_by_execution_context"
 PY
+
+cp -R "${VITE_TEMPLATE}" "${TEMP_ROOT}/vite-compressed-size"
+python3 - "${TEMP_ROOT}/vite-compressed-size/vite.config.mjs" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+config = path.read_text(encoding="utf-8")
+if "reportCompressedSize: false" not in config:
+    raise SystemExit("fixed Vite config is missing the compressed-size policy fixture")
+path.write_text(
+    config.replace(
+        "reportCompressedSize: false",
+        "reportCompressedSize: true,\n    // reportCompressedSize: false",
+    ),
+    encoding="utf-8",
+)
+PY
+if python3 "${TOOL}" --repo-root "${REPO_ROOT}" \
+  --vite-template "${TEMP_ROOT}/vite-compressed-size"; then
+  echo "expected Vite compressed-size reporting to fail validation" >&2
+  exit 1
+fi
 
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
   --lock "${TEMPLATE}/package-lock.json" \
@@ -113,8 +164,11 @@ fi
 NODE_MODULES="${TEMP_ROOT}/node_modules"
 mkdir -p \
   "${NODE_MODULES}/next/dist/bin" \
+  "${NODE_MODULES}/vite/bin" \
   "${NODE_MODULES}/react" \
   "${NODE_MODULES}/react-dom" \
+  "${NODE_MODULES}/@rolldown/binding-linux-arm64-musl" \
+  "${NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
   "${NODE_MODULES}/@next/swc-linux-arm64-musl" \
   "${NODE_MODULES}/@next/swc-linux-x64-musl"
 python3 - "${NODE_MODULES}" <<'PY'
@@ -127,6 +181,9 @@ packages = {
     "next": "16.2.11",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "vite": "8.2.1",
+    "@rolldown/binding-linux-arm64-musl": "1.2.3",
+    "@rolldown/binding-linux-x64-musl": "1.2.3",
     "@next/swc-linux-arm64-musl": "16.2.11",
     "@next/swc-linux-x64-musl": "16.2.11",
 }
@@ -137,8 +194,11 @@ for name, version in packages.items():
         encoding="utf-8",
     )
 (root / "next/dist/bin/next").write_text("#!/usr/bin/env node\n", encoding="utf-8")
+(root / "vite/bin/vite.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
 (root / "@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "@next/swc-linux-x64-musl/next-swc.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \

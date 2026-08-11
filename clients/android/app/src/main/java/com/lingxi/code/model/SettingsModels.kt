@@ -298,6 +298,84 @@ object SettingsMock {
         ),
     )
 
+    /**
+     * The mobile bundled catalog. This mirrors the engine's compiled registry
+     * (`skill-api`'s `BUILTIN_MOBILE`) instead of inventing Android-only
+     * placeholder rows, so the settings surface exposes the same five Local
+     * Apps skills as slash discovery.
+     *
+     * [resolve] carries the same (string resource id, zh-Hans fallback)
+     * contract as [skills] and MUST be passed by any production caller — the
+     * descriptions are user-facing prose, and a resolver-less call renders
+     * Simplified Chinese on an English / Japanese / Korean / zh-TW device.
+     *
+     * `name` is deliberately NOT localized: it is the skill's canonical
+     * identifier, the same string the `/create-local-app` trigger and the
+     * engine's registry use. Translating it would break that correspondence.
+     */
+    fun bundledSkills(resolve: (id: Int, fallback: String) -> String = { _, fallback -> fallback }): List<Skill> = listOf(
+        Skill(
+            "create-local-app",
+            "create-local-app",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_create_local_app_desc,
+                "编排设计、依赖、生成、构建和验证本地应用",
+            ),
+            listOf("/create-local-app"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "frontend-design",
+            "frontend-design",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_frontend_design_desc,
+                "为目标平台和 form factor 设计原生前端方向",
+            ),
+            listOf("/frontend-design"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "frontend-qa",
+            "frontend-qa",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_frontend_qa_desc,
+                "用 Browser 与原生 WebView 验证界面和交互",
+            ),
+            listOf("/frontend-qa"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "accessibility",
+            "accessibility",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_accessibility_desc,
+                "检查语义、键盘、触控、对比度和动态字体",
+            ),
+            listOf("/accessibility"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "react-best-practices",
+            "react-best-practices",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_react_best_practices_desc,
+                "检查 React 状态、效果、性能和完整状态",
+            ),
+            listOf("/react-best-practices"),
+            enabled = true,
+            builtin = true,
+        ),
+    )
+
     fun mcpServers(resolve: (id: Int, fallback: String) -> String = { _, fallback -> fallback }): List<MCPServer> = listOf(
         MCPServer("mcp1", "Filesystem", "stdio://npx -y @modelcontextprotocol/server-filesystem", 8, ConnStatus.Connected, enabled = true, transport = "stdio"),
         MCPServer("mcp2", "GitHub", "https://mcp.github.com", 14, ConnStatus.Connected, enabled = true, transport = "sse", auth = "oauth"),

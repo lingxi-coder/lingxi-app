@@ -41,9 +41,12 @@ development checks from treating artifact hashes alone as executable evidence.
 `docs/mobile-linux/local-app-runtime-policy.json` is the executable contract:
 the host invokes Next through `/usr/bin/node` directly, mounts the committed
 `node_modules` bundle read-only, binds production servers to loopback, and
-enforces the build/start timeout and 800 MiB process-tree limit. Generated jobs,
-MCP, and local-app runtime commands never invoke npm or npx; those executables
-belong exclusively to the user-opened interactive terminal.
+enforces build/start timeouts. Build process trees receive 2048/3072/4096 MiB
+for devices with `<6`/`6–<8`/`>=8` GiB of physical memory, with Node old-space
+fixed to 75% of that budget; Full runtime process trees remain limited to 800
+MiB. Generated jobs, MCP, and local-app runtime commands never invoke npm or
+npx; those executables belong exclusively to the user-opened interactive
+terminal.
 
 Policy decisions:
 
@@ -60,8 +63,8 @@ Policy decisions:
   receipt is absent or invalid.
 - iOS builds apply and then restore a pinned iSH syscall patch during archive
   construction. The patch enforces the same `Disabled`/`LoopbackOnly` socket
-  contract per inherited execution context; a 250 ms watchdog terminates an
-  execution context whose guest-backed process-tree memory exceeds 800 MiB.
+  contract per inherited execution context; a 250 ms watchdog enforces the
+  selected build tier or the Full runtime's 800 MiB process-tree limit.
 - The source archive format is Alpine's official `tar.gz`; its digest is a
   source pin. The deterministic package-augmented release archive has a
   separate manifest digest and Gradle stores it without recompression.

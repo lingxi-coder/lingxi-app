@@ -2,15 +2,26 @@
   "schema_version": 1,
   "node_executable": "/usr/bin/node",
   "next_executable": "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
+  "vite_executable": "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js",
   "node_modules_mount": {
     "source": "bundled:local-app-runtime/node_modules",
     "target": "/opt/lingxi/local-app-runtime/node_modules",
     "read_only": true
   },
+  "scaffold": {
+    "primary": "official_create_vite_cli",
+    "target": "empty_staging_source_root",
+    "javascript_command": "npm create vite@latest . -- --template react --no-interactive",
+    "typescript_command": "npm create vite@latest . -- --template react-ts --no-interactive",
+    "shell": "existing_mobile_linux_shell",
+    "offline_fallback": ".lingxi/vite-fallback",
+    "fallback_only_when": "registry_or_network_unavailable"
+  },
   "commands": {
     "store_build": {
       "argv": [
         "/usr/bin/node",
+        "--max-old-space-size={build_node_old_space_size_mib}",
         "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
         "build"
       ],
@@ -20,12 +31,13 @@
         "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
       },
       "network_policy": "disabled",
-      "memory_limit_bytes": 838860800,
-      "timeout_ms": 180000
+      "memory_limit_policy": "physical_memory_tier",
+      "timeout_ms": 1800000
     },
     "full_build": {
       "argv": [
         "/usr/bin/node",
+        "--max-old-space-size={build_node_old_space_size_mib}",
         "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
         "build"
       ],
@@ -35,8 +47,23 @@
         "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
       },
       "network_policy": "disabled",
-      "memory_limit_bytes": 838860800,
-      "timeout_ms": 180000
+      "memory_limit_policy": "physical_memory_tier",
+      "timeout_ms": 1800000
+    },
+    "vite_static_build": {
+      "argv": [
+        "/usr/bin/node",
+        "--max-old-space-size={build_node_old_space_size_mib}",
+        "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js",
+        "build"
+      ],
+      "environment": {
+        "NODE_ENV": "production",
+        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
+      },
+      "network_policy": "disabled",
+      "memory_limit_policy": "physical_memory_tier",
+      "timeout_ms": 1800000
     },
     "full_start": {
       "argv": [
@@ -61,7 +88,25 @@
   },
   "limits": {
     "build_concurrency": 1,
-    "node_process_tree_memory_bytes": 838860800,
+    "build_node_old_space_percent": 75,
+    "build_memory_tiers": [
+      {
+        "physical_memory_max_exclusive_bytes": 6442450944,
+        "process_tree_memory_bytes": 2147483648,
+        "node_max_old_space_size_mib": 1536
+      },
+      {
+        "physical_memory_max_exclusive_bytes": 8589934592,
+        "process_tree_memory_bytes": 3221225472,
+        "node_max_old_space_size_mib": 2304
+      },
+      {
+        "physical_memory_max_exclusive_bytes": null,
+        "process_tree_memory_bytes": 4294967296,
+        "node_max_old_space_size_mib": 3072
+      }
+    ],
+    "runtime_process_tree_memory_bytes": 838860800,
     "max_page_size": 100,
     "max_batch_mutations": 50
   },
@@ -98,7 +143,7 @@
       "loopback_only"
     ],
     "loopback_only_ready": true,
-    "memory_limit_bytes": 838860800,
+    "runtime_memory_limit_bytes": 838860800,
     "watchdog_interval_ms": 250,
     "memory_accounting": "guest_backed_pages_by_execution_context",
     "platform": "iphoneos"
@@ -108,6 +153,6 @@
     "generation_jobs": false,
     "mcp": false,
     "npm_family_present": true,
-    "npm_scope": "interactive_terminal_only"
+    "npm_scope": "app_workspace_shell_approval"
   }
 }

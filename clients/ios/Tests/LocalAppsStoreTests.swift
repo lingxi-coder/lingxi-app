@@ -588,7 +588,8 @@ final class LocalAppsStoreTests: XCTestCase {
                         enabledByDefault: true
                     )],
                     allowedDomains: [],
-                    capabilities: []
+                    capabilities: [],
+                    deviceContext: nil
                 ),
                 runtime: AppRuntimeDetailsDto(
                     state: .stopped,
@@ -1096,7 +1097,7 @@ final class LocalAppsStoreTests: XCTestCase {
         /// fallback (`createdAppID`) must stay quiet on this path.
         func testCreateClaimWaitsForTheInitSessionPin() async throws {
             let store = LocalAppsStore()
-            store.configure { _ in true }
+            store.configure { _ in }
             _ = await store.createApp(brief: "一个记事本")
             // Announce #1: record only, no pin yet.
             store.handle(event: .appsChanged(apps: [app(id: "notes", name: "记事本")]))
@@ -1118,13 +1119,88 @@ final class LocalAppsStoreTests: XCTestCase {
         /// the init-chat signal immediately.
         func testCreateClaimFiresImmediatelyWhenThePinIsInTheFirstAnnounce() async throws {
             let store = LocalAppsStore()
-            store.configure { _ in true }
+            store.configure { _ in }
             _ = await store.createApp(brief: "一个记事本")
             store.handle(event: .appsChanged(apps: [
                 appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
             ]))
             let created = try XCTUnwrap(store.consumeCreatedAppSession())
             XCTAssertEqual(created.initSessionID, "init-uuid-1")
+        }
+
+        /// A create that fails ENGINE-SIDE must disarm the claim.
+        ///
+        /// `createApp`'s own `if !succeeded { pendingCreation = nil }` cannot
+        /// cover this: `send(_:)` reports success the moment the FFI submit does
+        /// not throw, so an engine-side rejection arrives later and
+        /// asynchronously, as `AppOperationFailed`. The claim matches "an app id
+        /// absent from the pre-create snapshot", so leaving it armed makes the
+        /// NEXT app to appear — including one the assistant creates through the
+        /// MCP tool minutes later — look like the user's pending creation and
+        /// yank them out of their conversation into its init chat.
+        func testAnEngineSideCreateFailureDisarmsTheCreateClaim() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            // The submit itself succeeds — the engine rejects afterwards.
+            do { let submitted = await store.createApp(brief: "一个记事本"); XCTAssertTrue(submitted) }
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .workflowStateInvalid, message: "创建失败"))
+            XCTAssertEqual(store.errorMessage, "创建失败")
+
+            // Minutes later the assistant creates an unrelated app through MCP.
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "assistant-app", name: "助手的应用", initSessionId: "init-uuid-9")
+            ]))
+
+            XCTAssertNil(
+                store.consumeCreatedAppSession(),
+                "a failed create must not claim the next app that appears")
+            XCTAssertNil(
+                store.consumeCreatedAppID(),
+                "nor may the details-page fallback claim it")
+        }
+
+        /// The pin wait is a SET, not one slot. Two creates inside the 3s
+        /// fallback window each arm their own landing; a single slot would let
+        /// the second overwrite the first, stranding it with no landing at all
+        /// — neither the init chat nor the details fallback.
+        func testTwoCreatesInsideTheFallbackWindowBothLand() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            // Create #1 announces its record with no pin yet → armed.
+            do { let submitted = await store.createApp(brief: "记事本"); XCTAssertTrue(submitted) }
+            store.handle(event: .appsChanged(apps: [appRecord(id: "notes", name: "记事本")]))
+            XCTAssertNil(store.createdAppSession)
+
+            // Create #2 lands inside #1's window and announces its own record.
+            do { let submitted = await store.createApp(brief: "清单"); XCTAssertTrue(submitted) }
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本"),
+                appRecord(id: "list", name: "清单"),
+            ]))
+            XCTAssertNil(store.createdAppSession)
+
+            // #1's pin arrives first — it must still be armed.
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-notes"),
+                appRecord(id: "list", name: "清单"),
+            ]))
+            let first = try XCTUnwrap(
+                store.consumeCreatedAppSession(),
+                "the FIRST create must not be stranded by the second")
+            XCTAssertEqual(first.appID, "notes")
+            XCTAssertEqual(first.initSessionID, "init-notes")
+
+            // …and #2 still lands on its own announce.
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-notes"),
+                appRecord(id: "list", name: "清单", initSessionId: "init-list"),
+            ]))
+            let second = try XCTUnwrap(store.consumeCreatedAppSession())
+            XCTAssertEqual(second.appID, "list")
+            XCTAssertEqual(second.initSessionID, "init-list")
         }
 
         private func app(

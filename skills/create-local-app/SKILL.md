@@ -1,106 +1,140 @@
 ---
 name: create-local-app
-description: Create and evolve a local mini-app with the user - gather requirements interactively, scaffold, write the source, build offline, and preview on device
+description: Orchestrate a confirmed local-app design, dependency proposal, React generation, offline build, and browser plus native WebView verification.
 ---
 
 # Create a local app
 
-A local app is a small Vite + React static app that lives in its own workspace
-(`apps/<id>/workspace`), builds fully offline against a fixed runtime (no new
-npm dependencies, 30-minute build budget), and reaches host data, network and
-device capabilities ONLY through the `window.lingxi.v1` bridge
-(`lib/lingxi-bridge.js`). You — the conversation agent — drive the whole flow:
-there is no background designer pipeline.
+This skill is the coordinator. Keep the product brief and confirmation short;
+delegate specialist work to `$frontend-design`, `$accessibility`,
+`$react-best-practices`, and `$frontend-qa` instead of duplicating their rules.
 
-## Which entry mode are you in?
+## Entry and confirmation
 
-- **Inside the app's own session** (the workspace `LINGXI.md` describing this
-  app is in your context — brief, contract, build commands): the app record
-  and scaffold ALREADY exist. **Skip step 3 (create) entirely** — never call
-  `mcp__local_apps__create` for an app you are already inside. Start at
-  step 1 (requirements), using the brief from `LINGXI.md` as the seed: open
-  with 1–4 AskUserQuestion questions that sharpen that brief.
-- **In a project/global chat** and the user asks for a new app: run steps 1–3
-  only (requirements → spec → create), then STOP and tell the user to open
-  the app's chat to continue. Steps 4–8 (manifest, build workflow, preview,
-  iteration) must run inside the app's own session: the build segment's
-  subagents inherit THIS session's working directory, so running step 5 from
-  a project chat writes the app's React source into the user's project repo.
+Inside an app's own workspace, read `LINGXI.md` and sharpen its brief. In a
+global chat, gather the product, screens, data, capabilities, and visual intent
+before creating the app. Ask focused questions in rounds, then show one
+confirmable specification containing:
 
-## The flow
+- target OS and form factor; if omitted, infer from the host device context
+  (`os`, `formFactor`, `viewport`, `safeArea`, `colorScheme`, `reducedMotion`,
+  and `inputMode`) and show that inference for confirmation;
+- pages, navigation/back semantics, complete states, data/permissions;
+- design direction, platform tokens, responsive/adaptive behavior, and the
+  exact packages proposed for installation (including versions/specs);
+- whether original raster imagery is required.
 
-1. **Gather requirements with AskUserQuestion.** Ask 1–4 focused questions per
-   round (options plus the automatic free-text "Other"); iterate until you can
-   write a concrete spec. Never invent or assume answers on the user's behalf,
-   and never skip this step for a non-trivial app. Cover at least: what the
-   app does, the screens/views, what data it stores, and look & feel.
-2. **Write the spec and confirm it.** Summarize the plan in a few short
-   sections (screens, data collections, behavior, style). Confirm with
-   AskUserQuestion (approve / change something). Do not proceed unapproved.
-3. **Create the app**: `mcp__local_apps__create {"brief": "<one line>",
-   "name": "<display name>"}`. This commits the record and scaffolds the
-   workspace (template + `LINGXI.md` contract file). The origin conversation
-   is bound by the host — you never pass a conversation id.
-4. **Declare the manifest** if the spec needs stored data, network domains or
-   device capabilities: `mcp__local_apps__update_manifest` with the
-   collections/domains/capabilities. Do this BEFORE building; runtime
-   authorization still prompts the user — declaring is not granting.
-5. **Run the build segment**: call the Workflow tool exactly once with
-   `{"name": "local-app-build", "args": {"app_id": "<id>", "spec": "<the
-   confirmed spec>"}}`. It writes the source in the app workspace, builds
-   until green (≤3 attempts) and starts the preview. It runs in the
-   background: you get a task id now and a task notification when it
-   finishes; check progress with TaskOutput if the user asks.
-6. **Preview.** When the build segment reports its preview url, hand it to
-   the user and ask them to try the app. The user's verdict decides what
-   happens next — never approve on their behalf.
-7. **Iterate on feedback.**
-   - Small fixes (copy, colors, a bug in one component): edit the source
-     files directly — you are in the app's own session, rooted at its
-     workspace — then `mcp__local_apps__build` and restart the runtime.
-   - Structural changes (new screens, new data): update the spec, update the
-     manifest if needed, and run `Workflow {"name": "local-app-build",
-     "args": {"app_id": ..., "spec": ..., "revision_prompt": "<the user's
-     feedback>"}}` again.
-8. **Checkpoint when the user is satisfied**:
-   `mcp__local_apps__create_checkpoint {"app_id": ..., "label": "<short>"}` —
-   a restorable Git checkpoint of the working state.
+Do not silently add a package, capability, domain, platform, or image asset.
+The same business logic may serve multiple targets, but each target must use a
+platform adapter/tokens layer rather than a width-only conditional.
 
-Steps 4–8 require the app's own session. If you are not in one, stop after
-step 3 and hand off — every file edit and every build-workflow subagent runs
-in the CURRENT session's workspace, so continuing from a project chat writes
-the app's source into the wrong repository.
+Create a new app with:
 
-## Workspace contract (violations break the app)
+```json
+{"brief":"<confirmed one-line brief>","name":"<display name>"}
+```
 
-- Edit ONLY files under `app/`, `components/`, `lib/`, `styles/`, `public/`.
-- NEVER touch the locked files: `package.json`, `package-lock.json`,
-  `vite.config.mjs`, `index.html`, `app/main.jsx`, `lib/lingxi-bridge.js`.
-- No new npm dependencies; the offline runtime ships a fixed `node_modules`.
-- Host access only through `window.lingxi.v1`: collection CRUD, fetch limited
-  to declared domains, `agent.post` for app→agent messages.
-- Build with `mcp__local_apps__build` (never a shell); serve with
-  `mcp__local_apps__manage_runtime`; read failures with
-  `mcp__local_apps__read_logs {"log": "build"}`.
+using `mcp__local_apps__create`. Declare collections, domains, capabilities,
+and the confirmed `device_context` with `mcp__local_apps__update_manifest`
+before generated source relies on them. Inside an existing app, do not call
+`create` again.
 
-## Operate an existing app
+## Image assets (conditional)
 
-- Data: `mcp__local_apps__query_data` / `mutate_data` (structured filters,
-  never SQL strings).
-- UI: `mcp__local_apps__inspect_ui` / `act_on_ui` (structured actions, never
-  injected JavaScript).
-- App-posted events: `mcp__local_apps__read_app_events`.
-- History: `mcp__local_apps__list_checkpoints` /
-  `restore_checkpoint` (each restore asks the user; it rebuilds from the
-  checkpoint).
-- Lifecycle: `manage_runtime` (start/stop/restart/open/suspend/resume),
-  `mcp__local_apps__delete` does not exist — deletion is a user action in the
-  app library UI.
+Only when the brief needs an original photo, illustration, texture, hero,
+background, or other bitmap, detect whether the built-in ImageGen skill/tool is
+available. If available and configured, generate the asset into `public/` and
+record prompt, source, and use in the spec. If unavailable, ask once whether
+to guide installation/configuration or skip it; on skip, use CSS, gradients,
+user assets, or an honest placeholder and do not ask again in this task. A
+built-in path does not need an API key; a CLI/API fallback may require
+`OPENAI_API_KEY`. After the user chooses setup, follow the environment's
+install path, reload skills (`/reload-skills` or its equivalent), re-detect,
+and enable immediately if ready. Lucide/SVG is sufficient for ordinary icons.
 
-## Never automate these user decisions
+## Build orchestration
 
-- Approving the spec (step 2) or the preview (step 6).
-- Destructive data migrations (`update_manifest` narrowing a schema over
-  existing rows — the host prompts the user; never claim it was approved).
-- Capability grants (camera, network domains, UI control — runtime prompts).
-- Restoring a checkpoint over current work.
+Call the `local-app-build` workflow once with the confirmed spec:
+
+```json
+{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>"}}
+```
+
+The workflow is deterministic and owns these phases in order:
+
+1. **Design** — invoke `$frontend-design`, produce/confirm platform and form
+   factor, page structure, tokens, adapters, interactions, and asset decision.
+   For a new app with no `package.json`, use the existing Mobile Linux
+   `Shell`/Bash tool to run the official CLI in a newly created empty staging
+   source root: `npm create vite@latest . -- --template react --no-interactive`.
+   Use `--template react-ts` only when the confirmed specification explicitly
+   requires TypeScript; the exact TypeScript command is
+   `npm create vite@latest . -- --template react-ts --no-interactive`; do not
+   make template choice interactive. The app
+   workspace already contains host `.lingxi/` metadata, so never target that
+   non-empty directory directly. Copy the completed staging contents into the
+   still-empty source root only after checking that no user source exists.
+   If registry/network access is unavailable, copy the repository-verified
+   `.lingxi/vite-fallback/` into the source root as an explicit
+   `offline-fallback`, record the reason, and report that the official CLI did
+   not run. Do not use that fallback for unrelated CLI failures or add a Vite
+   wrapper/scaffold API.
+2. **Dependencies** — compare the confirmed package list with the app's
+   package manifest using the existing `Shell` tool in the app workspace. Show
+   the exact displayed specs, then run `npm install -- <specs>` or
+   `npm uninstall -- <specs>` through Shell; its existing network/command
+   approval and command logs cover network access and lifecycle scripts. After
+   the official scaffold, run ordinary `npm install` in that same workspace
+   when `node_modules` is absent or incomplete. After restore, run `npm ci`
+   through the same Shell when the lockfile and installed tree differ. Optional
+   `tailwindcss`/`@tailwindcss/vite`, `motion`, and `lucide-react` packages are
+   valid proposals, but only install the exact specs shown and confirmed.
+3. **Generate** — invoke `$accessibility` and `$react-best-practices`; inject
+   the LingXi bridge, `deviceContext`, source policy/manifest integration,
+   platform adapter, complete React source, and all required states under the
+   editable roots (`src/` is the normal Vite source root; `app/` remains the
+   explicit offline fallback root).
+4. **Build** — call `mcp__local_apps__build`; the host runs the production
+   `vite build`/`npm run build` equivalent offline with the fixed runtime and
+   the app's projected, read-only dependencies. `npx vite` is for a Shell
+   preview/development session only and never enables network in production
+   verification.
+5. **Verify** — invoke `$frontend-qa`. Use Browser when available for preview,
+   screenshots, console, navigation, and core interactions, then use native
+   WebView inspect/act/log tools for bridge, data, system back, and device
+   context. Cover the phone/tablet matrix and desktop when supported.
+
+On a verification finding, repair, rebuild, and re-verify at most twice. If
+issues remain, return them with evidence and the reduced verification level;
+never claim full Browser or native QA that was not run.
+
+## Workspace and dependency boundary
+
+Edit generated source only under `app/`, `src/`, `components/`, `lib/`,
+`styles/`, and `public/`. The normal project workflow owns `package.json`,
+lockfile, and `node_modules`; use the existing Shell tool in the app workspace
+for `npm install`, `npm uninstall`, `npm ci`, `npm run build`, or `npx vite`,
+never a new wrapper or MCP tool. The official Vite `index.html` and
+`vite.config.*` remain host-controlled; `src/main.*` may be minimally adapted
+to import the checked-in bridge/deviceContext/platform adapter. The build is
+offline and only reads the installed app-local dependencies.
+Use only `window.lingxi.v1` for host data, network, device, and agent events.
+The build is offline and the bridge/device context is untrusted input: validate
+it at the adapter boundary.
+
+Source versioning uses the existing Git/Bash capability and its normal
+workspace approval and command logs. Checkpoints are ordinary workspace Git
+history plus the package-lock digest; do not introduce a second version store
+or a checkpoint-specific command surface.
+
+## Existing app operations
+
+Use `mcp__local_apps__build`, `mcp__local_apps__manage_runtime`,
+`mcp__local_apps__read_logs`, structured `mcp__local_apps__inspect_ui` /
+`mcp__local_apps__act_on_ui`, `mcp__local_apps__query_data` /
+`mcp__local_apps__mutate_data`, `mcp__local_apps__restore_checkpoint`, and
+app-event tools as needed. Restore
+checkpoints only after the user's explicit choice; a restore
+must compare package-lock digests and show the difference before any `npm ci`
+through the existing Shell tool.
+Create a checkpoint only after the user approves the working preview.

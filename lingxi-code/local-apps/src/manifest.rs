@@ -92,6 +92,82 @@ pub struct DataCollectionSchema {
     pub fields: Vec<DataFieldSchema>,
 }
 
+/// Native host context used to choose a platform-specific generated shell.
+///
+/// This is deliberately a small, version-tolerant contract: the host owns
+/// the values and the generated app treats an absent context as unknown. It
+/// is not inferred from the browser user agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceContext {
+    /// `ios`, `android`, `desktop`, or `unknown`.
+    pub os: String,
+    /// `iphone`, `ipad`, `phone`, `tablet`, `desktop`, or `unknown`.
+    pub form_factor: String,
+    pub viewport: DeviceViewport,
+    pub safe_area: DeviceInsets,
+    /// `light`, `dark`, or `unknown`.
+    pub color_scheme: String,
+    pub reduced_motion: bool,
+    /// `touch`, `pointer`, `hybrid`, or `unknown`.
+    pub input_mode: String,
+}
+
+/// CSS-pixel/point viewport dimensions supplied by the native host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceViewport {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Safe-area insets supplied by the native host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInsets {
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub left: u32,
+}
+
+impl DeviceContext {
+    fn validate(&self) -> Result<(), AppError> {
+        let valid_os = matches!(self.os.as_str(), "ios" | "android" | "desktop" | "unknown");
+        let valid_form_factor = matches!(
+            self.form_factor.as_str(),
+            "iphone" | "ipad" | "phone" | "tablet" | "desktop" | "unknown"
+        );
+        let valid_color_scheme = matches!(self.color_scheme.as_str(), "light" | "dark" | "unknown");
+        let valid_input_mode = matches!(self.input_mode.as_str(), "touch" | "pointer" | "hybrid" | "unknown");
+        if !valid_os || !valid_form_factor || !valid_color_scheme || !valid_input_mode {
+            return Err(AppError::InvalidRequest(
+                "manifest deviceContext contains an unsupported platform value".into(),
+            ));
+        }
+        if self.viewport.width == 0 || self.viewport.height == 0 {
+            return Err(AppError::InvalidRequest(
+                "manifest deviceContext viewport must be non-zero".into(),
+            ));
+        }
+        let valid_pair = matches!(
+            (self.os.as_str(), self.form_factor.as_str()),
+            ("ios", "iphone")
+                | ("ios", "ipad")
+                | ("android", "phone")
+                | ("android", "tablet")
+                | ("desktop", "desktop")
+                | ("unknown", "unknown")
+        );
+        if !valid_pair {
+            return Err(AppError::InvalidRequest(
+                "manifest deviceContext os and formFactor do not agree".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Versioned local application manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +191,10 @@ pub struct AppManifest {
     /// meaning "no device/LLM capability was ever declared".
     #[serde(default)]
     pub capabilities: Vec<AppCapability>,
+    /// Host-derived context captured when the generated target was confirmed.
+    /// Older manifests omit this field and remain valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_context: Option<DeviceContext>,
 }
 
 impl AppManifest {
@@ -131,6 +211,7 @@ impl AppManifest {
             collections: Vec::new(),
             allowed_domains: Vec::new(),
             capabilities: Vec::new(),
+            device_context: None,
         }
     }
 
@@ -244,6 +325,9 @@ impl AppManifest {
                     "duplicate capability {capability:?}"
                 )));
             }
+        }
+        if let Some(device_context) = &self.device_context {
+            device_context.validate()?;
         }
         Ok(())
     }
@@ -571,6 +655,7 @@ mod tests {
             }],
             allowed_domains: vec!["api.example.com".into()],
             capabilities: Vec::new(),
+            device_context: None,
         }
     }
 
@@ -592,6 +677,31 @@ mod tests {
         save_manifest(&layout, &expected).unwrap();
         assert_eq!(load_manifest(&layout).unwrap(), expected);
         assert_eq!(expected.hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn device_context_requires_a_native_platform_form_factor_pair() {
+        let mut manifest = manifest();
+        manifest.device_context = Some(DeviceContext {
+            os: "ios".into(),
+            form_factor: "iphone".into(),
+            viewport: DeviceViewport {
+                width: 393,
+                height: 852,
+            },
+            safe_area: DeviceInsets {
+                top: 59,
+                right: 0,
+                bottom: 34,
+                left: 0,
+            },
+            color_scheme: "light".into(),
+            reduced_motion: false,
+            input_mode: "touch".into(),
+        });
+        manifest.validate().unwrap();
+        manifest.device_context.as_mut().unwrap().form_factor = "tablet".into();
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

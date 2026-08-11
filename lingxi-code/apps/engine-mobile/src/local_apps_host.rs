@@ -16,10 +16,10 @@ use client_protocol::local_apps::{
 };
 use futures_util::StreamExt;
 use local_apps::{
-    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore, AppLayout,
-    AppPermissions, AppRuntimeMode, AppRuntimeState, AppService, DataMigrationPreview,
-    DataMutation, DataQuery, DataSortDirection, DataSortKey, PermissionDecision,
-    SessionPermissions,
+    load_manifest, load_permissions, save_permissions, AppCapability, AppCheckpointStore,
+    AppDataStore, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState, AppService,
+    DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
+    PermissionDecision, SessionPermissions,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -1393,6 +1393,32 @@ impl LocalAppsHostBroker {
             let layout = self.layout(app_id)?;
             let workspace = layout.root().join(layout.build_rel(true));
             let workspace_guest = format!("/var/lingxi/local-app-build/{app_id}/full");
+            let app_node_modules_projection = match app_node_modules_projection(&layout, app_id) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    return self
+                        .fail_reserved_runtime_start(app_id, generation, Some(port), error)
+                        .await;
+                }
+            };
+            let mut environment = [
+                ("LINGXI_APP_OUTPUT".into(), "server".into()),
+                (
+                    "NODE_PATH".into(),
+                    app_node_modules_projection.as_ref().map(|mount| {
+                        format!(
+                            "{}:/opt/lingxi/local-app-runtime/node_modules",
+                            mount.guest_path
+                        )
+                    })
+                        .unwrap_or_else(|| {
+                            "/opt/lingxi/local-app-runtime/node_modules".into()
+                        }),
+                ),
+                ("NODE_ENV".into(), "production".into()),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
             let request = LinuxCommandRequest {
                 command: "/usr/bin/node".into(),
                 args: vec![
@@ -1404,16 +1430,15 @@ impl LocalAppsHostBroker {
                     port.to_string(),
                 ],
                 cwd: Some(workspace_guest.clone()),
-                env: [
-                    ("LINGXI_APP_OUTPUT".into(), "server".into()),
-                    (
-                        "NODE_PATH".into(),
-                        "/opt/lingxi/local-app-runtime/node_modules".into(),
-                    ),
-                    ("NODE_ENV".into(), "production".into()),
-                ]
-                .into_iter()
-                .collect(),
+                env: {
+                    if let Some(mount) = &app_node_modules_projection {
+                        environment.insert(
+                            "LINGXI_APP_NODE_MODULES".into(),
+                            mount.guest_path.clone(),
+                        );
+                    }
+                    environment
+                },
                 stdin: None,
                 timeout_ms: None,
                 network: NetworkPolicy::LoopbackOnly,
@@ -1421,15 +1446,21 @@ impl LocalAppsHostBroker {
                     max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
                     ..ResourceLimits::default()
                 },
-                mounts: vec![
+                mounts: {
+                    let mut mounts = vec![
                     MountSpec {
                         host_path: workspace,
                         guest_path: workspace_guest,
                         read_only: false,
                         purpose: MountPurpose::LocalAppBuild,
                     },
-                    runtime_mount.expect("full runtime mount was preflighted"),
-                ],
+                        runtime_mount.expect("full runtime mount was preflighted"),
+                    ];
+                    if let Some(mount) = app_node_modules_projection {
+                        mounts.push(mount);
+                    }
+                    mounts
+                },
             };
             let process = match runtime.spawn_background(request).await {
                 Ok(process) => process,
@@ -1810,9 +1841,10 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|e| e.to_string())?;
         // Pre-flight the one precondition the restore cannot recover from,
-        // BEFORE prompting the user and BEFORE stopping the runtime: an app
-        // created with `git_enabled: false` has no checkpoints to restore, and
-        // the service rejects it deep inside `restore_checkpoint`. Discovering
+        // BEFORE reading any digest, BEFORE prompting the user and BEFORE
+        // stopping the runtime: an app created with `git_enabled: false` has
+        // no checkpoints to restore, and the store rejects it deep inside
+        // git2 with a raw "could not find repository" message. Discovering
         // that after the stop leaves the user with an approved restore that
         // did nothing except take their app offline.
         if !service
@@ -1826,12 +1858,35 @@ impl LocalAppsHostBroker {
                     .into(),
             );
         }
+        let layout = self.layout(&app_id)?;
+        let checkpoint_store = AppCheckpointStore::new(&layout);
+        let current_package_lock_digest = checkpoint_store
+            .current_package_lock_digest()
+            .map_err(|error| error.to_string())?;
+        let target_package_lock_digest = checkpoint_store
+            .package_lock_digest(&checkpoint_id)
+            .map_err(|error| error.to_string())?;
+        let package_lock_changed = current_package_lock_digest != target_package_lock_digest;
+        let restore_reason = if package_lock_changed {
+            let dependency_action = if target_package_lock_digest.is_some() {
+                "run npm ci through the existing Shell tool"
+            } else {
+                "stale node_modules will be removed as part of the restore; then run npm install through the existing Shell tool because the target has no lockfile"
+            };
+            format!(
+                "Restoring rewinds application source code and changes package-lock.json digest from {} to {}. After the source restore, {dependency_action}; Shell will apply its normal network approval and command logging. App data is not changed.",
+                current_package_lock_digest.as_deref().unwrap_or("none"),
+                target_package_lock_digest.as_deref().unwrap_or("none"),
+            )
+        } else {
+            "Restoring rewinds application source code. App data is not changed.".to_string()
+        };
         let decision = self
             .request_capability(
                 &app_id,
                 AppCapabilityKindDto::RestoreCheckpoint,
                 None,
-                "Restoring rewinds application source code. App data is not changed.",
+                &restore_reason,
             )
             .await?;
         if matches!(raise_decision(decision), PermissionDecision::Deny) {
@@ -1853,23 +1908,48 @@ impl LocalAppsHostBroker {
         // The service does the durable work: a PreRestore safety checkpoint
         // first, then the workspace-only Git restore (data/runtime/build
         // paths sit outside the repository and are never reset).
-        service
+        let safety = service
             .restore_checkpoint(&app_id, &checkpoint_id)
             .await
             .map_err(|error| error.to_string())?;
+        if package_lock_changed {
+            let workspace = layout.root().join(layout.workspace_rel());
+            let dependency_plan =
+                reconcile_restored_dependencies(&workspace, target_package_lock_digest.as_deref())?;
+            return Ok(json!({
+                "ok": true,
+                "app_id": app_id,
+                "checkpoint_id": checkpoint_id,
+                "rebuilt": false,
+                "restarted": false,
+                "package_lock_changed": true,
+                "dependency_reconciliation_required": dependency_plan.dependency_install_required,
+                "npm_ci_required": dependency_plan.npm_ci_required,
+                "npm_install_required": !dependency_plan.npm_ci_required,
+                "dependency_install_command": dependency_plan.install_command,
+                "node_modules_removed": dependency_plan.node_modules_removed,
+                "next_step": format!(
+                    "Use the existing Shell tool in the app workspace for {}, then call build.",
+                    dependency_plan.install_command,
+                ),
+            }));
+        }
         // Rebuild the restored source so the served output matches it.
-        let layout = self.layout(&app_id)?;
         let builder = crate::local_apps_build::LocalAppBuilder {
             mobile_linux: self.mobile_linux.clone(),
             host: self,
         };
-        builder.build_workspace(&layout).await.map_err(|error| {
-            format!(
-                "checkpoint {checkpoint_id} was restored, but rebuilding the workspace \
-                 failed: {error}. Read the build log via read_logs (log=\"build\"), fix \
-                 the source, then run the build tool again."
-            )
-        })?;
+        if let Err(error) = builder.build_workspace(&layout).await {
+            let source_rollback_error = service
+                .restore_checkpoint(&app_id, &safety.id)
+                .await
+                .err()
+                .map(|error| error.to_string());
+            return Err(format!(
+                "checkpoint {checkpoint_id} was restored, but rebuilding failed: {error}; source rollback: {}. Read the build log via read_logs (log=\"build\"), fix the source, then run the build tool again.",
+                source_rollback_error.as_deref().unwrap_or("completed")
+            ));
+        }
         // Best-effort restart when the runtime was serving before the
         // restore; a failure here leaves the app restored+rebuilt but
         // stopped, which the caller can see and fix via manage_runtime.
@@ -1889,9 +1969,10 @@ impl LocalAppsHostBroker {
         }))
     }
 
-    /// Lay down the fixed template workspace for a freshly created app (v3:
-    /// `create` scaffolds immediately; the conversation agent then edits the
-    /// source in place and calls `build`).
+    /// Initialize the host-owned metadata and repository-verified offline
+    /// fallback for a freshly created app. The normal source scaffold is done
+    /// later by the workflow through the existing Mobile Linux Shell, using
+    /// the official Vite CLI in an empty staging directory.
     pub(crate) async fn scaffold_app_value(&self, app_id: &str) -> Result<(), String> {
         let layout = self.layout(app_id)?;
         let builder = crate::local_apps_build::LocalAppBuilder {
@@ -1899,36 +1980,36 @@ impl LocalAppsHostBroker {
             host: self,
         };
         builder
-            .scaffold_workspace(&layout, true)
+            .prepare_offline_vite_fallback(&layout)
             .await
             .map_err(|error| error.to_string())?;
         // Write the per-app LINGXI.md context file at the workspace root:
         // every session rooted in this workspace auto-loads it into the
         // system context (`orchestrator::prompt::real_provider`), so the
         // agent starts with the brief + the workspace contract without any
-        // prompt plumbing. Note this file is NOT tamper-proof: v3 has no
-        // source validator, so the contract it states is enforced only where
-        // the host can enforce it — `restore_locked_files` re-pins the locked
-        // files on every build, and capability/domain grants still go through
-        // the user prompt.
+        // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
+        // cannot edit its own contract.
         let record = self.service()?.record(app_id).await.map_err(|e| e.to_string())?;
         let workspace = layout.root().join(layout.workspace_rel());
         let context = format!(
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
              ## Workspace contract\n\
-             - Edit ONLY files under `app/`, `components/`, `lib/`, `styles/`, `public/`.\n\
-             - NEVER touch the locked files: `package.json`, `package-lock.json`, \
-             `vite.config.mjs`, `index.html`, `app/main.jsx`, `lib/lingxi-bridge.js`.\n\
-             - No new npm dependencies: the offline runtime ships a fixed `node_modules`.\n\
+             - Edit ONLY files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
+             - The normal new-app path is the official Vite CLI through the existing Mobile Linux `Shell`: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
+             - If registry/network access is unavailable, use only `.lingxi/vite-fallback/` as the explicit offline fallback and report that mode/reason. Do not add a Vite wrapper or scaffold API.\n\
+             - Generated source must not edit `package.json` or `package-lock.json`; use the existing `Shell` tool for npm in this workspace. Preserve `index.html` and `vite.config.*`; `src/` is the official Vite source root and may receive the host bridge/deviceContext/platform adapter integration.\n\
+             - Show exact package specs in the confirmed design, then use the existing `Shell` tool from this workspace for `npm install`, `npm uninstall`, or `npm ci`. The existing shell network/command approval and logs apply; the subsequent build is offline.\n\
+             - Use the existing Git/Bash capability for source status, diff, and checkpoint versioning; checkpoints are workspace Git history plus the package-lock digest, not a second package/version store.\n\
              - The page reaches host data/network/device ONLY through `window.lingxi.v1` \
              (see `lib/lingxi-bridge.js`).\n\
              - Declare data collections / network domains / capabilities through \
              `mcp__local_apps__update_manifest` BEFORE the page relies on them; runtime \
              authorization still prompts the user.\n\n\
              ## Build & preview\n\
-             - `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline Vite build \
-             (30-minute budget); success marks the app ready.\n\
+             - `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
+             (30-minute budget); an ordinary project may also use `npm run build` \
+             or `npx vite` for preview only through the existing Shell.\n\
              - `mcp__local_apps__manage_runtime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
              — serve the built output and return the preview url.\n\
              - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
@@ -1970,8 +2051,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|e| e.to_string())?;
         // "Ready" means SERVABLE, not "the build tool exited 0". The static
         // preview server refuses to start without `build/store/out/index.html`
-        // (see `start_runtime`), and a build whose output landed elsewhere —
-        // e.g. an edited `vite.config.mjs` reverting `build.outDir` to the
+        // (see `start_reserved_runtime`), and a build whose output landed
+        // elsewhere — e.g. a `vite.config.*` reverting `build.outDir` to the
         // Vite default — exits 0 while producing nothing this host can serve.
         // Stamping `ready` there would leave a permanently unstartable app
         // advertised as ready in the library.
@@ -1983,8 +2064,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         if !served_index.exists() {
             return Err(format!(
                 "the build finished but produced no servable output at {}. The build must emit \
-                 an `out/` directory (the locked `vite.config.mjs` sets `build.outDir`); restore \
-                 it, then run the build tool again.",
+                 an `out/` directory (the checked-in `vite.config.mjs` sets `build.outDir`); \
+                 restore it, then run the build tool again.",
                 served_index.display()
             ));
         }
@@ -2026,6 +2107,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             manifest.capabilities = serde_json::from_value(capabilities.clone())
                 .map_err(|e| format!("invalid capabilities: {e}"))?;
         }
+        if let Some(device_context) = input.get("device_context") {
+            manifest.device_context = serde_json::from_value(device_context.clone())
+                .map_err(|e| format!("invalid device_context: {e}"))?;
+        }
         manifest.validate().map_err(|e| e.to_string())?;
         // Schema changes against live data go through the SAME preview +
         // destructive-approval gate the pipeline used — an agent declaring a
@@ -2040,6 +2125,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "collections": manifest.collections.len(),
             "allowed_domains": manifest.allowed_domains,
             "capabilities": manifest.capabilities,
+            "device_context": manifest.device_context,
         }))
     }
 
@@ -2558,6 +2644,77 @@ fn derived_window_slot(app_id: &str) -> u16 {
         hash.wrapping_mul(16_777_619) ^ u32::from(byte)
     });
     u16::try_from(hash % u32::from(APP_PORT_WINDOW_LEN)).unwrap_or(0)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RestoredDependencyPlan {
+    dependency_install_required: bool,
+    npm_ci_required: bool,
+    install_command: &'static str,
+    node_modules_removed: bool,
+}
+
+fn reconcile_restored_dependencies(
+    workspace: &Path,
+    target_package_lock_digest: Option<&str>,
+) -> Result<RestoredDependencyPlan, String> {
+    if target_package_lock_digest.is_some() {
+        return Ok(RestoredDependencyPlan {
+            dependency_install_required: true,
+            npm_ci_required: true,
+            install_command: "npm ci",
+            node_modules_removed: false,
+        });
+    }
+
+    let node_modules = workspace.join("node_modules");
+    let node_modules_removed = match std::fs::symlink_metadata(&node_modules) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(&node_modules)
+                .map_err(|error| format!("remove stale workspace node_modules: {error}"))?;
+            true
+        }
+        Ok(_) => {
+            std::fs::remove_file(&node_modules)
+                .map_err(|error| format!("remove stale workspace node_modules: {error}"))?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("inspect stale workspace node_modules: {error}")),
+    };
+
+    Ok(RestoredDependencyPlan {
+        dependency_install_required: true,
+        npm_ci_required: false,
+        install_command: "npm install",
+        node_modules_removed,
+    })
+}
+
+/// Resolve an app's ordinary workspace dependency directory for projection
+/// into the isolated build/full-runtime guest. The returned path is never a
+/// store or a host-managed package cache: it is exactly the app workspace's
+/// `node_modules`, and the caller mounts it read-only with app-first module
+/// resolution.
+fn app_node_modules_projection(
+    layout: &AppLayout,
+    app_id: &str,
+) -> Result<Option<MountSpec>, String> {
+    let app_node_modules = layout.root().join(layout.workspace_rel()).join("node_modules");
+    match std::fs::symlink_metadata(&app_node_modules) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("workspace node_modules must not be a symlink".into())
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(Some(MountSpec {
+            host_path: app_node_modules,
+            guest_path: format!("/var/lingxi/local-app-build/{app_id}/full-node_modules"),
+            read_only: true,
+            purpose: MountPurpose::External,
+        })),
+        Ok(_) => Err("workspace node_modules must be a directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("inspect workspace node_modules: {error}")),
+    }
 }
 
 /// Ports every OTHER app in this profile has already pinned, each paired with
@@ -3348,6 +3505,48 @@ mod tests {
         runtime_root
     }
 
+    #[test]
+    fn restoring_without_a_lockfile_removes_stale_dependencies_and_requires_npm_install() {
+        let root = TempDir::new().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        let stale_package = workspace.join("node_modules/stale/package.json");
+        fs::create_dir_all(stale_package.parent().expect("stale package parent"))
+            .expect("create stale dependencies");
+        fs::write(&stale_package, "{}").expect("write stale dependency");
+
+        let plan = reconcile_restored_dependencies(&workspace, None)
+            .expect("reconcile dependencies without a lockfile");
+
+        assert!(!workspace.join("node_modules").exists());
+        assert!(!plan.npm_ci_required);
+        assert!(plan.dependency_install_required);
+        assert_eq!(plan.install_command, "npm install");
+        assert!(plan.node_modules_removed);
+    }
+
+    #[test]
+    fn restoring_a_different_lockfile_requires_npm_ci_without_preemptive_deletion() {
+        let root = TempDir::new().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        let installed_package = workspace.join("node_modules/current/package.json");
+        fs::create_dir_all(
+            installed_package
+                .parent()
+                .expect("installed package parent"),
+        )
+        .expect("create installed dependencies");
+        fs::write(&installed_package, "{}").expect("write installed dependency");
+
+        let plan = reconcile_restored_dependencies(&workspace, Some("target-lock-digest"))
+            .expect("reconcile dependencies for a lockfile");
+
+        assert!(workspace.join("node_modules").exists());
+        assert!(plan.npm_ci_required);
+        assert!(plan.dependency_install_required);
+        assert_eq!(plan.install_command, "npm ci");
+        assert!(!plan.node_modules_removed);
+    }
+
     async fn create_broker(
         full_runtime: bool,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
@@ -3667,6 +3866,32 @@ mod tests {
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>()
         );
+    }
+
+    #[tokio::test]
+    async fn full_runtime_projects_app_node_modules_read_only_before_shared_modules() {
+        let (root, service, _broker) = create_broker(false, None).await;
+        let app_id = create_app_fixture(&root, &service, "App modules").await;
+        let layout = AppLayout::new(root.path(), app_id.clone()).expect("layout");
+        let app_node_modules = root.path().join(layout.workspace_rel()).join("node_modules");
+        fs::create_dir_all(app_node_modules.join("app-only")).expect("app node_modules");
+        fs::write(app_node_modules.join("app-only/package.json"), "{}").expect("app package");
+
+        let mount = app_node_modules_projection(&layout, &app_id)
+            .expect("projection inspection")
+            .expect("app-local node_modules projection");
+        assert_eq!(mount.host_path, app_node_modules);
+        assert_eq!(
+            format!(
+                "{}:/opt/lingxi/local-app-runtime/node_modules",
+                mount.guest_path
+            ),
+            "/var/lingxi/local-app-build/".to_string()
+                + &app_id
+                + "/full-node_modules:/opt/lingxi/local-app-runtime/node_modules"
+        );
+        assert!(mount.read_only, "app dependencies must be read-only at runtime");
+        assert_eq!(mount.purpose, MountPurpose::External);
     }
 
     #[tokio::test]

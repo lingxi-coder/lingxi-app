@@ -1244,16 +1244,22 @@
   ],
   "next_runtime": {
     "lockfile": "lingxi-code/local-apps/templates/next-static-v1/package-lock.json",
-    "lockfile_sha256": "6cc014b95e5e828eecab6ce725dab1ca2aa6ebbfacbecabd6a73f6391932eb89",
+    "lockfile_sha256": "d6dc5d4ccdb5df1735e2dcc57f39daa0552d52de772f0f755e9311c055f3dca5",
     "next": "16.2.11",
     "node": "24.18.1",
     "react": "19.2.8",
     "react_dom": "19.2.8",
+    "rolldown": "1.2.3",
+    "rolldown_bindings": {
+      "@rolldown/binding-linux-arm64-musl": "1.2.3",
+      "@rolldown/binding-linux-x64-musl": "1.2.3"
+    },
     "swc": {
       "@next/swc-linux-arm64-musl": "16.2.11",
       "@next/swc-linux-x64-musl": "16.2.11"
     },
-    "template": "lingxi-code/local-apps/templates/next-static-v1"
+    "template": "lingxi-code/local-apps/templates/next-static-v1",
+    "vite": "8.2.1"
   },
   "release_ready": false,
   "runtime_packages": {

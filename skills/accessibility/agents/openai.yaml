@@ -1,0 +1,4 @@
+interface:
+  display_name: "Accessibility"
+  short_description: "Make generated UI usable by everyone"
+  default_prompt: "Use $accessibility to audit and repair semantics, focus, contrast, touch targets, and motion in this local app."

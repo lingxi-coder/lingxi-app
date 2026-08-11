@@ -301,6 +301,40 @@ pub struct AppManifestDto {
     /// empty) for pre-capability manifests.
     #[serde(default)]
     pub capabilities: Vec<AppCapabilityKindDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_context: Option<DeviceContextDto>,
+}
+
+/// Native host context captured for platform-aware generated UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceContextDto {
+    pub os: String,
+    pub form_factor: String,
+    pub viewport: DeviceViewportDto,
+    pub safe_area: DeviceInsetsDto,
+    pub color_scheme: String,
+    pub reduced_motion: bool,
+    pub input_mode: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceViewportDto {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInsetsDto {
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub left: u32,
 }
 
 /// Runtime snapshot included in an app detail response.

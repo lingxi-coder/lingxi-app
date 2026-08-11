@@ -19,7 +19,7 @@ usage() {
 Usage: build-local-app-runtime.sh --platform <ios|android> --variant <name> [--output <dir>]
 
 Build the local-app Node runtime inside a digest-pinned Alpine 3.24 arm64/musl
-container using the frozen next-static-v1 lockfile, then stage a read-only
+container using the frozen combined Next/Vite lockfile, then stage a read-only
 runtime tree under a client build directory.
 EOF
 }
@@ -82,9 +82,48 @@ trap cleanup EXIT
 cp "${TEMPLATE_DIR}/package.json" "${WORKDIR}/package.json"
 cp "${TEMPLATE_DIR}/package-lock.json" "${WORKDIR}/package-lock.json"
 
+# Which native slices survive the prune is PLATFORM-DEPENDENT, and the answer is
+# owned by stage-local-app-runtime.py — the very next step, which rejects a tree
+# that carries anything else *or* is missing anything it expects. iOS ships the
+# arm64/musl slice alone (devices and Apple Silicon simulators are both arm64);
+# one Android asset tree serves every ABI in the APK, so it keeps the full
+# pinned set. Pruning unconditionally to arm64, as this used to, built a tree
+# `--platform android` could never stage.
+#
+# Read from the staging script rather than re-listing here: a second hand-kept
+# copy of this set is exactly how the two would drift apart.
+expected_native_slices() { # kind: swc | rolldown
+  python3 - "${STAGE_SCRIPT}" "${PLATFORM}" "$1" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("local_app_staging", source)
+if spec is None or spec.loader is None:
+    raise SystemExit(f"cannot load {source}")
+staging = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(staging)
+
+platform, kind = sys.argv[2], sys.argv[3]
+if kind == "swc":
+    names, scope = staging.expected_swcs_for(platform), "@next/"
+else:
+    names, scope = staging.expected_rolldown_bindings_for(platform), "@rolldown/"
+if not names:
+    raise SystemExit(f"no {kind} packages expected for platform {platform}")
+print(" ".join(sorted(name.removeprefix(scope) for name in names)))
+PY
+}
+
+KEEP_SWC="$(expected_native_slices swc)"
+KEEP_ROLLDOWN="$(expected_native_slices rolldown)"
+
 "${CONTAINER_RUNTIME}" run --rm --platform linux/arm64 \
   -v "${WORKDIR}:/work" \
   -w /work \
+  -e "KEEP_SWC=${KEEP_SWC}" \
+  -e "KEEP_ROLLDOWN=${KEEP_ROLLDOWN}" \
   "${IMAGE}" \
   sh -lc "
     set -euo pipefail
@@ -93,13 +132,42 @@ cp "${TEMPLATE_DIR}/package-lock.json" "${WORKDIR}/package-lock.json"
     test \"\$(npm --version)\" = '11.12.1'
     test \"\$(npx --version)\" = '11.12.1'
     npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
-    find node_modules/@next -maxdepth 1 -mindepth 1 -type d -name 'swc-*' ! -name 'swc-linux-arm64-musl' -exec rm -rf {} +
-    test -d node_modules/@next/swc-linux-arm64-musl
-    test -f node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
-    if find node_modules/@next -maxdepth 1 -mindepth 1 -type d -name 'swc-*' ! -name 'swc-linux-arm64-musl' | grep -q .; then
-      echo 'non-arm64-musl SWC package resolved in runtime node_modules' >&2
-      exit 1
-    fi
+
+    # \$1 scope dir, \$2 directory-name prefix, \$3 space-separated keep list.
+    prune_native_slices() {
+      for slice in \"node_modules/\$1/\$2\"*; do
+        [ -d \"\$slice\" ] || continue
+        name=\"\${slice##*/}\"
+        case \" \$3 \" in
+          *\" \$name \"*) ;;
+          *) rm -rf \"\$slice\" ;;
+        esac
+      done
+      for slice in \"node_modules/\$1/\$2\"*; do
+        [ -d \"\$slice\" ] || continue
+        name=\"\${slice##*/}\"
+        case \" \$3 \" in
+          *\" \$name \"*) ;;
+          *)
+            echo \"unexpected \$1 native slice survived the prune: \$name\" >&2
+            exit 1
+            ;;
+        esac
+      done
+    }
+
+    prune_native_slices '@next' 'swc-' \"\$KEEP_SWC\"
+    prune_native_slices '@rolldown' 'binding-' \"\$KEEP_ROLLDOWN\"
+
+    for name in \$KEEP_SWC; do
+      test -d \"node_modules/@next/\$name\"
+      test -f \"node_modules/@next/\$name/next-swc.\${name#swc-}.node\"
+    done
+    for name in \$KEEP_ROLLDOWN; do
+      test -d \"node_modules/@rolldown/\$name\"
+      test -f \"node_modules/@rolldown/\$name/rolldown-binding.\${name#binding-}.node\"
+    done
+
     rm -f node_modules/.package-lock.json
   "
 

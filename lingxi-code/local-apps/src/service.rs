@@ -522,6 +522,10 @@ impl AppService {
         Ok(self.record(app_id).await?.git_enabled)
     }
 
+    /// Stamp the app `ready` — the host calls this after the first successful
+    /// offline build (v3: the objective "this app has runnable output"
+    /// signal; there is no preview-approval gate anymore). Idempotent: an
+    /// already-ready app is a no-op with no event.
     /// Pin the app's init session (bare uuid). Set-once: the anchor is the
     /// app's durable "set-up conversation" identity, so a second call with a
     /// DIFFERENT id is rejected (idempotent for the same id). The engine
@@ -556,10 +560,6 @@ impl AppService {
         Ok(())
     }
 
-    /// Stamp the app `ready` — the host calls this after a build that
-    /// produced servable output (v3: the objective "this app has runnable
-    /// output" signal; there is no preview-approval gate anymore).
-    /// Idempotent: an already-ready app is a no-op with no event.
     pub async fn mark_ready(&self, app_id: &str) -> Result<(), AppError> {
         self.with_app(app_id, |app, now| {
             if app.record.workflow_state == AppWorkflowState::Ready {

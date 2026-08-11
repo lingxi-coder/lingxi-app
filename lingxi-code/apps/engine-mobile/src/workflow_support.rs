@@ -132,7 +132,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             // becomes a FILENAME (the persisted script below, and the journal
             // in the task handler). An unchecked `../…` or absolute value
             // would write outside the scratch dir, e.g. over the workspace's
-            // locked `lib/lingxi-bridge.js`.
+            // host-managed `lib/lingxi-bridge.js`.
             if !is_valid_run_id(rid) {
                 return Err(tool_workflow::WorkflowLaunchError(format!(
                     "resumeFromRunId {rid:?} is not a workflow run id (expected wf_ followed by \

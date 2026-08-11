@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend QA"
+  short_description: "Exercise browser and native app behavior"
+  default_prompt: "Use $frontend-qa to verify this local app across browser, WebView, phone, tablet, and desktop targets."

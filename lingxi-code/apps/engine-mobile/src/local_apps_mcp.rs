@@ -52,10 +52,9 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// `agent.post` — the app's own timer posting while the agent reads is
     /// the INTENDED usage, not an exotic interleaving.
     async fn read_app_events(&self, input: Value) -> Result<Value, String>;
-    /// Lay down the fixed template workspace for a freshly created app
-    /// (v3: `create` scaffolds the workspace immediately — there is no
-    /// background pipeline anymore; the conversation agent edits the
-    /// scaffolded source in place and calls `build`).
+    /// Initialize host metadata and the repository-verified offline fallback
+    /// for a freshly created app. The workflow performs the normal official
+    /// Vite CLI scaffold through the existing Mobile Linux Shell.
     async fn scaffold_app(&self, app_id: String) -> Result<(), String>;
 }
 
@@ -328,7 +327,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record from a one-line description and scaffold its Vite workspace immediately. Then edit the source under app/ components/ lib/ styles/ public/, call build, and preview via manage_runtime.",
+                "Create a local app record and host metadata. The local-app-build workflow then uses the existing Mobile Linux Shell to run the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript), copies it into the app workspace without overwriting source, and uses the repository-verified .lingxi/vite-fallback only when registry/network access is unavailable. Generate under src/ (or app/ for the explicit fallback), call build, and preview via manage_runtime.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -354,12 +353,21 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "update_manifest",
-                "Declare the app's data collections, allowed network domains and capabilities in its manifest. Destructive schema migrations against existing data require the user's approval.",
+                "Declare the app's data collections, allowed network domains, capabilities and confirmed native device context in its manifest. Destructive schema migrations against existing data require the user's approval.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "collections":{"type":"array","maxItems":8},
                     "allowed_domains":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":200}},
-                    "capabilities":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":64}}
+                    "capabilities":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":64}},
+                    "device_context":{"type":"object","properties":{
+                        "os":{"enum":["ios","android","desktop","unknown"]},
+                        "formFactor":{"enum":["iphone","ipad","phone","tablet","desktop","unknown"]},
+                        "viewport":{"type":"object","properties":{"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1}},"required":["width","height"],"additionalProperties":false},
+                        "safeArea":{"type":"object","properties":{"top":{"type":"integer","minimum":0},"right":{"type":"integer","minimum":0},"bottom":{"type":"integer","minimum":0},"left":{"type":"integer","minimum":0}},"required":["top","right","bottom","left"],"additionalProperties":false},
+                        "colorScheme":{"enum":["light","dark","unknown"]},
+                        "reducedMotion":{"type":"boolean"},
+                        "inputMode":{"enum":["touch","pointer","hybrid","unknown"]}
+                    },"required":["os","formFactor","viewport","safeArea","colorScheme","reducedMotion","inputMode"],"additionalProperties":false}
                 },"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -591,7 +599,7 @@ impl LocalAppsMcpTransport {
                 let mut result = json!({
                     "app": record,
                     "scaffolded": scaffolded,
-                    "next_step": "Edit the scaffolded source under app/ components/ lib/ styles/ public/, then call build and preview via manage_runtime."
+                    "next_step": "Run local-app-build: Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript), Dependencies uses the existing Shell for npm, Generate edits src/ and injects the bridge/platform adapter, then call build and preview via manage_runtime."
                 });
                 if let (Some(object), Some(warning)) = (result.as_object_mut(), warning) {
                     object.insert("warning".into(), Value::String(warning));
@@ -1008,7 +1016,6 @@ mod tests {
             .to_lowercase();
         assert!(!schemas.contains("sql"));
         assert!(!schemas.contains("javascript"));
-        assert!(!schemas.contains("package_manager"));
         assert!(schemas.contains("click"));
         assert!(schemas.contains("reload"));
         // The four static template kinds were deleted from the codebase

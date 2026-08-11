@@ -12,12 +12,34 @@ EXPECTED_DEPENDENCIES = {
     "next": "16.2.11",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "vite": "8.2.1",
 }
 EXPECTED_SWCS = {
     "@next/swc-linux-arm64-musl": "16.2.11",
     "@next/swc-linux-x64-musl": "16.2.11",
 }
+EXPECTED_ROLLDOWN_BINDINGS = {
+    "@rolldown/binding-linux-arm64-musl": "1.2.3",
+    "@rolldown/binding-linux-x64-musl": "1.2.3",
+}
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
+# Derived, never re-listed: a second verbatim copy is how the two templates
+# drift apart. The official `create vite` scaffold puts sources under `src/`,
+# so the Vite fallback allows exactly one root more than the Next template.
+VITE_EXPECTED_WRITABLE_ROOTS = EXPECTED_WRITABLE_ROOTS + ["src"]
+FORBIDDEN_ROUTE_FILES = {"route.js", "route.jsx", "route.ts", "route.tsx"}
+# Files the Vite fallback SHIPS FROM the Next template: engine-mobile's
+# `local_apps_build.rs` `include_bytes!`s these from `next-static-v1` for BOTH
+# build targets and writes them into the Vite scaffold. A copy under
+# `vite-react-static-v1/` would therefore be dead product code that this
+# verifier nonetheless scans — a fork that can rot without any build noticing.
+# The originals are covered by the Next template walk.
+VITE_FILES_SHIPPED_FROM_NEXT = (
+    "app/globals.css",
+    "lib/device-context.js",
+    "lib/lingxi-bridge.js",
+    "lib/platform-adapter.js",
+)
 
 # Package-manager policy for the *rootfs* APK closure. npm and npx are now
 # first-class members of the shipped developer environment, so only the
@@ -50,7 +72,15 @@ SOURCE_SUFFIXES = {
 FORBIDDEN_SOURCE_PATTERNS = {
     "direct network access": re.compile(r"\b(fetch|XMLHttpRequest|WebSocket|EventSource)\s*\("),
     "dynamic code evaluation": re.compile(r"\b(eval|Function)\s*\("),
-    "external script": re.compile(r"<script\b[^>]*\bsrc\s*=", re.IGNORECASE),
+    # Third-party scripts only. A same-origin RELATIVE src (`/x.js`, `./x.js`)
+    # is Vite's required entry form and loads nothing the app did not ship, so
+    # it is allowed; anything with a scheme (`https:`, `data:`, `javascript:`),
+    # a protocol-relative `//host`, a `..` escape, a bare unrooted path, or a
+    # dynamic expression still fails.
+    "external script": re.compile(
+        r"<script\b[^>]*?\bsrc\s*=\s*(?![\"']?\.?/(?!/))",
+        re.IGNORECASE,
+    ),
     "package manager invocation": re.compile(r"\b(npm|npx|corepack|yarn|pnpm)\b\s+(install|add|exec|dlx)\b"),
     "server action": re.compile(r"^[\t ]*[\"']use server[\"'];?", re.MULTILINE),
 }
@@ -290,6 +320,13 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         entry = packages.get(f"node_modules/{name}")
         if not isinstance(entry, dict) or entry.get("version") != version:
             fail(f"package-lock did not pin {name}@{version}")
+    rolldown = packages.get("node_modules/rolldown")
+    if not isinstance(rolldown, dict) or rolldown.get("version") != "1.2.3":
+        fail("package-lock did not pin rolldown@1.2.3")
+    for name, version in EXPECTED_ROLLDOWN_BINDINGS.items():
+        entry = packages.get(f"node_modules/{name}")
+        if not isinstance(entry, dict) or entry.get("version") != version:
+            fail(f"package-lock did not pin {name}@{version}")
 
     runtime = pins.get("next_runtime")
     expected_runtime = {
@@ -298,6 +335,9 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         "next": EXPECTED_DEPENDENCIES["next"],
         "react": EXPECTED_DEPENDENCIES["react"],
         "react_dom": EXPECTED_DEPENDENCIES["react-dom"],
+        "vite": EXPECTED_DEPENDENCIES["vite"],
+        "rolldown": "1.2.3",
+        "rolldown_bindings": EXPECTED_ROLLDOWN_BINDINGS,
         "swc": EXPECTED_SWCS,
         "lockfile": "lingxi-code/local-apps/templates/next-static-v1/package-lock.json",
         # Checked against the file on disk rather than a literal, so a lockfile
@@ -314,32 +354,60 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         fail("package-lock bytes diverged from the pinned SHA-256")
 
 
-def validate_source_policy(template: pathlib.Path) -> None:
+def validate_workspace_sources(
+    template: pathlib.Path,
+    writable_roots: list[str],
+    top_level_files: set[str],
+    description: str,
+) -> None:
+    """The one source-policy walk both app templates go through.
+
+    Parametrized rather than copied: the Vite fallback used to carry a
+    near-duplicate of this function that had silently dropped the API-route ban
+    and the top-level-config escape hatch, so `index.html` and `vite.config.mjs`
+    were never pattern-scanned at all. A single walk means the next rule added
+    here lands on both templates by construction.
+
+    `top_level_files` are the host-managed files that live outside every
+    writable root and must still be scanned — the Next config, and the Vite
+    entry HTML plus its config.
+    """
     policy = load_json(template / ".lingxi" / "source-policy.json")
-    if policy.get("agent_writable_roots") != EXPECTED_WRITABLE_ROOTS:
-        fail("agent writable roots must match the fixed source policy")
-    allowed_top_level = set(EXPECTED_WRITABLE_ROOTS) | {
-        ".lingxi",
-        "next.config.mjs",
-        "package-lock.json",
-        "package.json",
-    }
+    if policy.get("agent_writable_roots") != writable_roots:
+        fail(f"{description} agent writable roots must match the fixed source policy")
+    allowed_top_level = (
+        set(writable_roots)
+        | top_level_files
+        | {".lingxi", "package-lock.json", "package.json"}
+    )
     for path in template.rglob("*"):
         if path.is_symlink():
-            fail(f"symbolic links are forbidden in the app template: {path}")
+            fail(f"symbolic links are forbidden in the {description}: {path}")
         relative = path.relative_to(template)
         if relative.parts[0] not in allowed_top_level:
             fail(f"path is outside the fixed app workspace roots: {relative}")
         if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
             continue
-        if relative.parts[0] not in EXPECTED_WRITABLE_ROOTS and relative.name not in {"next.config.mjs"}:
+        if (
+            relative.parts[0] not in writable_roots
+            and relative.as_posix() not in top_level_files
+        ):
             continue
-        if relative.name in {"route.js", "route.jsx", "route.ts", "route.tsx"}:
+        if relative.name in FORBIDDEN_ROUTE_FILES:
             fail(f"API routes are forbidden: {relative}")
         text = path.read_text(encoding="utf-8")
         for label, pattern in FORBIDDEN_SOURCE_PATTERNS.items():
             if pattern.search(text):
                 fail(f"forbidden {label} in {relative}")
+
+
+def validate_source_policy(template: pathlib.Path) -> None:
+    validate_workspace_sources(
+        template,
+        writable_roots=EXPECTED_WRITABLE_ROOTS,
+        top_level_files={"next.config.mjs"},
+        description="app template",
+    )
 
     next_config = (template / "next.config.mjs").read_text(encoding="utf-8")
     required_csp = {
@@ -400,20 +468,72 @@ def validate_sbom(repo: pathlib.Path, template: pathlib.Path) -> None:
             fail(f"SBOM checksum does not match package-lock integrity: {path}")
 
 
+def validate_vite_template(vite_template: pathlib.Path) -> None:
+    config_path = vite_template / "vite.config.mjs"
+    try:
+        config = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"missing fixed Vite template config: {exc}")
+    compressed_size_values = re.findall(
+        r"^[\t ]*reportCompressedSize\s*:\s*(true|false)\s*,?[\t ]*(?://.*)?$",
+        config,
+        flags=re.MULTILINE,
+    )
+    if compressed_size_values != ["false"]:
+        fail("fixed Vite build must disable compressed-size reporting")
+    package_json = load_json(vite_template / "package.json")
+    scripts = package_json.get("scripts")
+    if not isinstance(scripts, dict) or scripts.get("build") != "vite build" or scripts.get("dev") != "vite" or scripts.get("preview") != "vite preview":
+        fail("offline Vite fallback must expose the standard dev/build/preview scripts")
+
+
+def validate_vite_source_policy(vite_template: pathlib.Path) -> None:
+    for shipped in VITE_FILES_SHIPPED_FROM_NEXT:
+        if (vite_template / shipped).exists():
+            fail(
+                f"Vite fallback must not fork {shipped}: engine-mobile ships the "
+                "next-static-v1 copy into the Vite scaffold, so this file would be "
+                "dead product code that only the supply-chain gate ever reads"
+            )
+    validate_workspace_sources(
+        vite_template,
+        writable_roots=VITE_EXPECTED_WRITABLE_ROOTS,
+        top_level_files={"index.html", "vite.config.mjs"},
+        description="Vite fallback",
+    )
+
+
 def validate_runtime_policy(repo: pathlib.Path) -> None:
     policy = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-policy.json")
     node = "/usr/bin/node"
     next_binary = "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next"
+    vite_binary = "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js"
     node_path = "/opt/lingxi/local-app-runtime/node_modules"
     if policy.get("schema_version") != 1:
         fail("local-app runtime policy must use schema_version 1")
-    if policy.get("node_executable") != node or policy.get("next_executable") != next_binary:
+    if (
+        policy.get("node_executable") != node
+        or policy.get("next_executable") != next_binary
+        or policy.get("vite_executable") != vite_binary
+    ):
         fail("local-app runtime command paths diverged")
     mount = policy.get("node_modules_mount")
     if not isinstance(mount, dict) or mount.get("target") != "/opt/lingxi/local-app-runtime/node_modules" or mount.get("read_only") is not True:
         fail("node_modules must use the fixed read-only mount")
+    scaffold = policy.get("scaffold")
+    if scaffold != {
+        "primary": "official_create_vite_cli",
+        "target": "empty_staging_source_root",
+        "javascript_command": "npm create vite@latest . -- --template react --no-interactive",
+        "typescript_command": "npm create vite@latest . -- --template react-ts --no-interactive",
+        "shell": "existing_mobile_linux_shell",
+        "offline_fallback": ".lingxi/vite-fallback",
+        "fallback_only_when": "registry_or_network_unavailable",
+    }:
+        fail("local-app scaffold policy must prefer the official Vite CLI")
     commands = policy.get("commands")
-    expected_build = [node, next_binary, "build"]
+    old_space_argument = "--max-old-space-size={build_node_old_space_size_mib}"
+    expected_build = [node, old_space_argument, next_binary, "build"]
     if not isinstance(commands, dict):
         fail("local-app runtime policy missing commands")
     for name, output in (("store_build", "export"), ("full_build", "server")):
@@ -428,10 +548,23 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
                 "NODE_PATH": node_path,
             }
             or command.get("network_policy") != "disabled"
-            or command.get("memory_limit_bytes") != 800 * 1024 * 1024
-            or command.get("timeout_ms") != 180000
+            or command.get("memory_limit_policy") != "physical_memory_tier"
+            or "memory_limit_bytes" in command
+            or command.get("timeout_ms") != 30 * 60 * 1000
         ):
             fail(f"fixed build command diverged: {name}")
+    vite_build = commands.get("vite_static_build")
+    if (
+        not isinstance(vite_build, dict)
+        or vite_build.get("argv") != [node, old_space_argument, vite_binary, "build"]
+        or vite_build.get("environment")
+        != {"NODE_ENV": "production", "NODE_PATH": node_path}
+        or vite_build.get("network_policy") != "disabled"
+        or vite_build.get("memory_limit_policy") != "physical_memory_tier"
+        or "memory_limit_bytes" in vite_build
+        or vite_build.get("timeout_ms") != 30 * 60 * 1000
+    ):
+        fail("fixed Vite build command diverged")
     start = commands.get("full_start")
     if (
         not isinstance(start, dict)
@@ -450,15 +583,39 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
     ):
         fail("fixed production start command diverged")
     limits = policy.get("limits")
-    if not isinstance(limits, dict) or limits.get("build_concurrency") != 1 or limits.get("node_process_tree_memory_bytes") != 800 * 1024 * 1024:
-        fail("local-app build concurrency or memory limit diverged")
+    expected_build_memory_tiers = [
+        {
+            "physical_memory_max_exclusive_bytes": 6 * 1024**3,
+            "process_tree_memory_bytes": 2048 * 1024**2,
+            "node_max_old_space_size_mib": 1536,
+        },
+        {
+            "physical_memory_max_exclusive_bytes": 8 * 1024**3,
+            "process_tree_memory_bytes": 3072 * 1024**2,
+            "node_max_old_space_size_mib": 2304,
+        },
+        {
+            "physical_memory_max_exclusive_bytes": None,
+            "process_tree_memory_bytes": 4096 * 1024**2,
+            "node_max_old_space_size_mib": 3072,
+        },
+    ]
+    if (
+        not isinstance(limits, dict)
+        or limits.get("build_concurrency") != 1
+        or limits.get("build_node_old_space_percent") != 75
+        or limits.get("build_memory_tiers") != expected_build_memory_tiers
+        or limits.get("runtime_process_tree_memory_bytes") != 800 * 1024 * 1024
+        or "node_process_tree_memory_bytes" in limits
+    ):
+        fail("local-app build tiers or runtime memory limit diverged")
     package_policy = policy.get("package_manager_policy")
     if package_policy != {
         "interactive_terminal_apk": True,
         "generation_jobs": False,
         "mcp": False,
         "npm_family_present": True,
-        "npm_scope": "interactive_terminal_only",
+        "npm_scope": "app_workspace_shell_approval",
     }:
         fail("local-app package-manager policy diverged")
 
@@ -536,7 +693,8 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         ish_policy.get("hook_version") != 1
         or ish_policy.get("supported_network_policies") != ["disabled", "loopback_only"]
         or ish_policy.get("loopback_only_ready") is not True
-        or ish_policy.get("memory_limit_bytes") != 800 * 1024 * 1024
+        or ish_policy.get("runtime_memory_limit_bytes") != 800 * 1024 * 1024
+        or "memory_limit_bytes" in ish_policy
         or ish_policy.get("watchdog_interval_ms") != 250
         or ish_policy.get("memory_accounting")
         != "guest_backed_pages_by_execution_context"
@@ -578,20 +736,71 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     if not text.startswith("---\nname: create-local-app\ndescription: "):
         fail("create-local-app skill frontmatter is invalid")
     required_tokens = {
-        "mcp__local_apps__list",
         "mcp__local_apps__create",
-        "mcp__local_apps__propose_design",
-        "mcp__local_apps__query_data",
-        "mcp__local_apps__mutate_data",
+        "mcp__local_apps__update_manifest",
+        "mcp__local_apps__build",
+        "mcp__local_apps__manage_runtime",
+        "mcp__local_apps__read_logs",
         "mcp__local_apps__inspect_ui",
         "mcp__local_apps__act_on_ui",
+        "mcp__local_apps__query_data",
+        "mcp__local_apps__mutate_data",
         "mcp__local_apps__restore_checkpoint",
-        "next-static-v1",
+        "existing `Shell` tool",
+        "npm install",
+        "npm uninstall",
+        "npm ci",
+        "npm create vite@latest . -- --template react --no-interactive",
+        "npm create vite@latest . -- --template react-ts --no-interactive",
+        "npx vite",
+        "npm run build",
+        "offline-fallback",
         "window.lingxi.v1",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
         fail(f"create-local-app skill is missing host contract tokens: {missing}")
+    workflow_path = repo / "lingxi-code" / "tools" / "workflow" / "src" / "local_app_build_workflow.js"
+    try:
+        workflow = workflow_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"missing local-app-build workflow: {exc}")
+    workflow_tokens = {
+        "npm create vite@latest . -- --template react --no-interactive",
+        "npm create vite@latest . -- --template react-ts --no-interactive",
+        "existing Mobile Linux Shell/Bash",
+        ".lingxi/vite-fallback/",
+        "offline-fallback",
+        "mcp__local_apps__build",
+    }
+    missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
+    if missing_workflow:
+        fail(f"local-app-build workflow is missing Vite CLI contract tokens: {missing_workflow}")
+
+
+def validate_product_model_name_absence(repo: pathlib.Path) -> None:
+    """Keep the task-only model name out of product routing and generation."""
+    forbidden = "gpt-5.6" + "luna"
+    roots = [
+        repo / "clients",
+        repo / "lingxi-code" / "apps",
+        repo / "lingxi-code" / "llm-client",
+        repo / "lingxi-code" / "tools",
+        repo / "skills",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or any(
+                part in {".git", "target", "build", "node_modules"} for part in path.parts
+            ):
+                continue
+            try:
+                if forbidden in path.read_text(encoding="utf-8"):
+                    fail(f"task-only model name leaked into product source: {path}")
+            except (OSError, UnicodeDecodeError):
+                continue
 
 
 def main() -> None:
@@ -600,6 +809,7 @@ def main() -> None:
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--apk-dir")
     parser.add_argument("--template")
+    parser.add_argument("--vite-template")
     args = parser.parse_args()
 
     repo = pathlib.Path(args.repo_root).resolve()
@@ -609,6 +819,11 @@ def main() -> None:
         if args.template
         else repo / pins.get("next_runtime", {}).get("template", "")
     )
+    vite_template = (
+        pathlib.Path(args.vite_template).resolve()
+        if args.vite_template
+        else repo / "lingxi-code" / "local-apps" / "templates" / "vite-react-static-v1"
+    )
     validate_apk_pins(
         pins,
         release=args.release,
@@ -616,9 +831,12 @@ def main() -> None:
     )
     validate_lock(template, pins)
     validate_source_policy(template)
+    validate_vite_template(vite_template)
+    validate_vite_source_policy(vite_template)
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
     validate_create_skill(repo)
+    validate_product_model_name_absence(repo)
     print("local-app supply-chain pins verified")
 
 

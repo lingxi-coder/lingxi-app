@@ -21,9 +21,8 @@ use crate::listings::{
     MemoryEntryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
-    AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppSessionKindDto,
-    AppSessionRowDto, AppRuntimeDetailsDto,
-    AppRuntimeStateDto, AppWorkflowStateDto,
+    AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
+    AppRuntimeStateDto, AppSessionRowDto, AppWorkflowStateDto,
 };
 use crate::message::MessageDto;
 use serde::{Deserialize, Serialize};
@@ -97,6 +96,9 @@ pub enum ClientEvent {
         tool: String,
         /// Tool input as a JSON String.
         input_json: String,
+        /// Pre-derived header. Absent on an older engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<crate::tool_display::ToolHeaderDto>,
     },
 
     /// Periodic heartbeat for a still-running tool call. Additive over
@@ -123,6 +125,9 @@ pub enum ClientEvent {
         result_json: String,
         /// Whether the tool reported failure.
         is_error: bool,
+        /// Pre-derived `⎿` block. Absent on an older engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<crate::tool_display::ToolResultDisplayDto>,
     },
 
     /// The assistant message boundary. SYNTHESIZED by the adapter — there is no
@@ -416,7 +421,8 @@ pub enum ClientEvent {
     /// One page of an app's workspace-scoped session catalog — the reply to
     /// [`ListAppSessions`](crate::commands::ClientCommand::ListAppSessions).
     /// The app's pinned init session (when it falls inside this page) is
-    /// marked with [`AppSessionKindDto::Init`]; clients list it first.
+    /// marked with [`AppSessionKindDto::Init`](crate::local_apps::AppSessionKindDto::Init);
+    /// clients list it first.
     AppSessionsChanged {
         /// App the catalog belongs to.
         app_id: String,
@@ -520,6 +526,16 @@ pub enum ClientEvent {
         max_retries: u32,
         /// Backoff before the next attempt, in ms.
         delay_ms: u64,
+    },
+
+    // ⚠️ APPEND NEW VARIANTS BELOW THIS LINE, NEVER ABOVE IT.
+    // UniFFI lowers this enum by 1-based ORDINAL, so inserting a variant
+    // anywhere but the end silently shifts every later one and both mobile
+    // clients mis-decode every event — with no compile error anywhere.
+    /// The model-managed plan changed. Full-list replace; `[]` clears it.
+    PlanUpdated {
+        /// The complete ordered plan.
+        tasks: Vec<crate::tool_display::PlanTaskDto>,
     },
 }
 

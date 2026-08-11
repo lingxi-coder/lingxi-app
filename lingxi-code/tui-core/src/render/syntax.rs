@@ -19,11 +19,182 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{
     Color as SynColor, FontStyle, Style as SynStyle, Theme as SynTheme, ThemeSet,
 };
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use crate::theme::ThemeName;
+
+/// Theme-independent semantic class of a highlighted run.
+///
+/// This is the *portable* half of syntax highlighting. [`highlight`] resolves
+/// syntect scopes all the way down to concrete RGB against one bundled
+/// `.tmTheme`, which is exactly right for the terminal and exactly wrong for a
+/// client that has its own palette and a light mode — a dark-theme syntect
+/// color painted on a light background is unreadable.
+///
+/// So the wire carries the class and each surface picks its own color.
+/// [`classify_line`] derives these from the TextMate scope stack; the terminal
+/// keeps using the resolved RGB and is unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub enum SyntaxClass {
+    /// No classification — render in the surface's default code color.
+    #[default]
+    Plain,
+    /// Language keywords and storage modifiers (`fn`, `let`, `pub`, `async`).
+    Keyword,
+    /// Type / class / trait / enum / tag names.
+    TypeName,
+    /// Function and method names, at definition and call sites.
+    Function,
+    /// String and character literals.
+    StringLit,
+    /// Numeric literals.
+    Number,
+    /// Comments and doc comments.
+    Comment,
+    /// Brackets, delimiters, and separators.
+    Punctuation,
+    /// Operators.
+    Operator,
+    /// Variable and parameter names.
+    Variable,
+    /// Named constants (`true`, `None`, language builtins).
+    Constant,
+    /// Attributes / annotations / decorators.
+    Attribute,
+}
+
+/// TextMate scope-name prefix → [`SyntaxClass`]. Order matters: the first
+/// matching prefix wins, so more specific prefixes precede their parents
+/// (`constant.numeric` before `constant`, `keyword.operator` before `keyword`).
+const SCOPE_CLASS_TABLE: &[(&str, SyntaxClass)] = &[
+    ("comment", SyntaxClass::Comment),
+    ("string", SyntaxClass::StringLit),
+    ("constant.numeric", SyntaxClass::Number),
+    ("constant.character", SyntaxClass::StringLit),
+    ("constant", SyntaxClass::Constant),
+    ("keyword.operator", SyntaxClass::Operator),
+    ("keyword", SyntaxClass::Keyword),
+    ("storage", SyntaxClass::Keyword),
+    ("entity.name.function", SyntaxClass::Function),
+    ("entity.name.type", SyntaxClass::TypeName),
+    ("entity.name.class", SyntaxClass::TypeName),
+    ("entity.name.struct", SyntaxClass::TypeName),
+    ("entity.name.enum", SyntaxClass::TypeName),
+    ("entity.name.trait", SyntaxClass::TypeName),
+    ("entity.name.namespace", SyntaxClass::TypeName),
+    ("entity.name.tag", SyntaxClass::TypeName),
+    ("entity.other.attribute-name", SyntaxClass::Attribute),
+    ("support.function", SyntaxClass::Function),
+    ("support.type", SyntaxClass::TypeName),
+    ("support.class", SyntaxClass::TypeName),
+    ("support.constant", SyntaxClass::Constant),
+    ("meta.function-call", SyntaxClass::Function),
+    ("meta.annotation", SyntaxClass::Attribute),
+    ("variable.parameter", SyntaxClass::Variable),
+    ("variable", SyntaxClass::Variable),
+    ("punctuation", SyntaxClass::Punctuation),
+];
+
+/// Classify one scope stack by its most specific matching scope.
+///
+/// `punctuation.definition.*` is skipped on the first pass: TextMate scopes a
+/// comment's `//` and a string's quotes as punctuation *nested inside* the
+/// construct they delimit, so a naive most-specific-first walk would paint the
+/// `//` of a comment as [`SyntaxClass::Punctuation`] and only the text after it
+/// as [`SyntaxClass::Comment`]. Delimiters should read as part of what they
+/// delimit, so the walk looks past them for the enclosing construct and only
+/// falls back to punctuation if there is nothing else.
+fn classify_stack(stack: &ScopeStack) -> SyntaxClass {
+    let matched = |name: &str| {
+        SCOPE_CLASS_TABLE
+            .iter()
+            .find(|(prefix, _)| name.starts_with(prefix))
+            .map(|(_, class)| *class)
+    };
+    // Top of the stack is the most specific scope; walk outward.
+    let names: Vec<String> = stack
+        .as_slice()
+        .iter()
+        .rev()
+        .map(|scope| scope.build_string())
+        .collect();
+    for name in &names {
+        if name.starts_with("punctuation.definition.") {
+            continue;
+        }
+        if let Some(class) = matched(name) {
+            return class;
+        }
+    }
+    for name in &names {
+        if let Some(class) = matched(name) {
+            return class;
+        }
+    }
+    SyntaxClass::Plain
+}
+
+/// Semantic classes for one line, as half-open UTF-8 **byte** ranges into
+/// `line`, in order and non-overlapping.
+///
+/// Deliberately independent of [`highlight`]: it re-parses the line rather
+/// than re-splitting the highlighter's spans, so attaching classes can never
+/// move a terminal span boundary. Callers look up the class covering a span's
+/// start offset. Unknown language, or any parse error, yields an empty vec —
+/// treat every run as [`SyntaxClass::Plain`].
+///
+/// `line` is one line WITHOUT a trailing newline; scope state is not carried
+/// across lines, so a multi-line construct (a block comment, a raw string)
+/// classifies only by what is visible on the line. That is acceptable here
+/// because the caller is a diff, which shows lines out of context anyway.
+#[must_use]
+pub fn classify_line(line: &str, lang: Option<&str>) -> Vec<(std::ops::Range<usize>, SyntaxClass)> {
+    if line.is_empty() {
+        return Vec::new();
+    }
+    let ss = syntax_set();
+    let Some(syntax) = lang.and_then(|l| {
+        ss.find_syntax_by_token(l)
+            .or_else(|| ss.find_syntax_by_extension(l))
+    }) else {
+        return Vec::new();
+    };
+    let mut state = ParseState::new(syntax);
+    // The bundled syntaxes are `load_defaults_newlines`, so the parser expects
+    // a trailing newline; feed one and clamp offsets back to `line`.
+    let owned = format!("{line}\n");
+    let Ok(ops) = state.parse_line(&owned, ss) else {
+        return Vec::new();
+    };
+    let mut stack = ScopeStack::new();
+    let mut out: Vec<(std::ops::Range<usize>, SyntaxClass)> = Vec::new();
+    let mut prev = 0usize;
+    for (offset, op) in &ops {
+        let offset = (*offset).min(line.len());
+        if offset > prev {
+            out.push((prev..offset, classify_stack(&stack)));
+        }
+        if stack.apply(op).is_err() {
+            return out;
+        }
+        prev = prev.max(offset);
+    }
+    if prev < line.len() {
+        out.push((prev..line.len(), classify_stack(&stack)));
+    }
+    out
+}
+
+/// The class covering byte offset `at` in a [`classify_line`] result.
+#[must_use]
+pub fn class_at(classes: &[(std::ops::Range<usize>, SyntaxClass)], at: usize) -> SyntaxClass {
+    classes
+        .iter()
+        .find(|(range, _)| range.contains(&at))
+        .map_or(SyntaxClass::Plain, |(_, class)| *class)
+}
 
 fn syntax_set() -> &'static SyntaxSet {
     static SS: OnceLock<SyntaxSet> = OnceLock::new();
@@ -255,6 +426,71 @@ mod tests {
     /// foreground. Parity = equivalent look, not exact colors (§0 Q3).
     fn is_colored(s: &StyledSpan) -> bool {
         s.style.fg != StyleColor::Default
+    }
+
+    /// The class covering the first byte of `needle` in `line`.
+    fn class_of(line: &str, lang: &str, needle: &str) -> SyntaxClass {
+        let classes = classify_line(line, Some(lang));
+        let at = line.find(needle).expect("needle present in line");
+        class_at(&classes, at)
+    }
+
+    #[test]
+    fn classify_line_labels_rust_tokens() {
+        let line = "    let total = compute(1, 2); // sum";
+        assert_eq!(class_of(line, "rs", "let"), SyntaxClass::Keyword);
+        assert_eq!(class_of(line, "rs", "compute"), SyntaxClass::Function);
+        assert_eq!(class_of(line, "rs", "1"), SyntaxClass::Number);
+        assert_eq!(class_of(line, "rs", "// sum"), SyntaxClass::Comment);
+    }
+
+    #[test]
+    fn classify_line_labels_strings_and_types() {
+        let line = "struct Widget { name: String }";
+        assert_eq!(class_of(line, "rs", "struct"), SyntaxClass::Keyword);
+        assert_eq!(class_of(line, "rs", "Widget"), SyntaxClass::TypeName);
+        let s = r#"let s = "hello";"#;
+        assert_eq!(class_of(s, "rs", "hello"), SyntaxClass::StringLit);
+    }
+
+    #[test]
+    fn classify_line_covers_the_whole_line_in_order() {
+        let line = "fn main() {}";
+        let classes = classify_line(line, Some("rs"));
+        assert!(!classes.is_empty());
+        // Ranges are ordered, non-overlapping, and span the full line.
+        let mut cursor = 0usize;
+        for (range, _) in &classes {
+            assert_eq!(range.start, cursor, "gap or overlap at {cursor}");
+            assert!(range.end > range.start);
+            cursor = range.end;
+        }
+        assert_eq!(cursor, line.len(), "classes must cover the whole line");
+    }
+
+    #[test]
+    fn classify_line_degrades_to_empty_for_unknown_language() {
+        assert!(classify_line("whatever", None).is_empty());
+        assert!(classify_line("whatever", Some("not-a-language")).is_empty());
+        // An empty class list means "everything is Plain".
+        assert_eq!(class_at(&[], 0), SyntaxClass::Plain);
+    }
+
+    #[test]
+    fn classify_line_handles_multibyte_text_without_panicking() {
+        // Byte offsets must stay on UTF-8 boundaries: this repo's own sources
+        // are full of CJK comments, so a byte/char confusion here is not
+        // hypothetical.
+        let line = "let 名前 = \"值\"; // 中文注释 🙂";
+        let classes = classify_line(line, Some("rs"));
+        let mut cursor = 0usize;
+        for (range, _) in &classes {
+            assert!(line.is_char_boundary(range.start));
+            assert!(line.is_char_boundary(range.end));
+            assert_eq!(range.start, cursor);
+            cursor = range.end;
+        }
+        assert_eq!(cursor, line.len());
     }
 
     #[test]

@@ -8,6 +8,16 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tui_core::orchestrator_bridge::RunningAgentStatus;
 use tui_core::theme::Theme;
+use tui_core::tool_display::plan;
+
+// The plan model and its pure string logic now live in
+// `tui_core::tool_display::plan` so the terminal, iOS, Android, and the
+// Electron desktop all parse TodoWrite the same way and spell the overflow
+// line identically. Re-exported here so every existing
+// `crate::bottom_pane::input_status::PlanTask` path keeps resolving.
+pub use tui_core::tool_display::plan::{
+    max_visible_tasks, PlanTask, PlanTaskState, MAX_VISIBLE_TASKS,
+};
 
 /// Render transient hook status rows above the composer. These rows are live
 /// state only and deliberately have no transcript representation.
@@ -29,64 +39,17 @@ pub fn hook_lines(
         .collect()
 }
 
-/// Maximum task rows shown before a compact overflow line.
-const MAX_VISIBLE_TASKS: usize = 5;
-
-/// Claude's terminal-height-dependent task-list cap (`rows <= 10 ? 0 :
-/// min(5, max(3, rows - 14))`). Tiny terminals hide the list completely;
-/// normal terminals show three to five task rows.
-#[must_use]
-pub fn max_visible_tasks(terminal_rows: u16) -> usize {
-    if terminal_rows <= 10 {
-        return 0;
-    }
-    usize::from(terminal_rows.saturating_sub(14).clamp(3, 5))
-}
-
-/// Presentation state for one item in the model-managed working plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanTaskState {
-    /// Not started yet.
-    Pending,
-    /// Currently being worked on.
-    InProgress,
-    /// Finished.
-    Completed,
-}
-
-impl PlanTaskState {
-    /// Parse the TodoWrite / Task tool wire status.
-    #[must_use]
-    pub fn from_wire(status: &str) -> Option<Self> {
-        match status {
-            "pending" => Some(Self::Pending),
-            "in_progress" => Some(Self::InProgress),
-            "completed" => Some(Self::Completed),
-            _ => None,
-        }
-    }
-}
-
-/// One planned task displayed above the composer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanTask {
-    /// Stable V2 task id. TodoWrite V1 items have no id.
-    pub id: Option<String>,
-    /// Imperative task title.
-    pub subject: String,
-    /// Present-continuous label used while the task is in progress.
-    pub active_form: Option<String>,
-    /// Current lifecycle state.
-    pub state: PlanTaskState,
-}
-
 fn task_row(task: &PlanTask, theme: &Theme) -> Line<'static> {
     // Claude's normal (non-standalone) task renderer always uses `subject` in
     // the list. `activeForm` belongs to the spinner verb above it.
-    let (glyph, color) = match task.state {
-        PlanTaskState::Pending => ("◻", theme.text),
-        PlanTaskState::InProgress => ("◼", theme.suggestion),
-        PlanTaskState::Completed => ("✔", theme.success),
+    //
+    // The glyph is shared data; the color and the BOLD/CROSSED_OUT modifiers
+    // are terminal styling and stay here.
+    let glyph = task.state.glyph();
+    let color = match task.state {
+        PlanTaskState::Pending => theme.text,
+        PlanTaskState::InProgress => theme.suggestion,
+        PlanTaskState::Completed => theme.success,
     };
     let label_style = match task.state {
         PlanTaskState::Pending => Style::default().fg(crate::style_adapter::to_ratatui(theme.text)),
@@ -130,33 +93,14 @@ pub fn task_lines_with_limit(
         .map(|task| task_row(task, theme))
         .collect::<Vec<_>>();
     if tasks.len() > max_visible {
-        let hidden = &tasks[max_visible..];
-        let mut counts = Vec::new();
-        let in_progress = hidden
-            .iter()
-            .filter(|task| task.state == PlanTaskState::InProgress)
-            .count();
-        let pending = hidden
-            .iter()
-            .filter(|task| task.state == PlanTaskState::Pending)
-            .count();
-        let completed = hidden
-            .iter()
-            .filter(|task| task.state == PlanTaskState::Completed)
-            .count();
-        if in_progress > 0 {
-            counts.push(format!("{in_progress} in progress"));
+        if let Some(summary) = plan::overflow_summary(&tasks[max_visible..]) {
+            // `overflow_summary` returns the leading `+`, so this stays
+            // byte-identical to the previous `format!("  … +{}", …)`.
+            lines.push(Line::from(Span::styled(
+                format!("  … {summary}"),
+                Style::default().fg(dim),
+            )));
         }
-        if pending > 0 {
-            counts.push(format!("{pending} pending"));
-        }
-        if completed > 0 {
-            counts.push(format!("{completed} completed"));
-        }
-        lines.push(Line::from(Span::styled(
-            format!("  … +{}", counts.join(", ")),
-            Style::default().fg(dim),
-        )));
     }
     lines
 }

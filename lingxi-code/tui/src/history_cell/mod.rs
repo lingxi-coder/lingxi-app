@@ -226,13 +226,15 @@ pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
         M::CompactBoundary { summary, .. } => Box::new(system::CompactBoundaryCell::new(summary)),
         M::AssistantToolUse { tool, input, .. } => Box::new(tool::ToolUseCell::new(tool, input)),
         M::UserToolResult {
+            tool,
             result,
             old_string,
             new_string,
             file_path,
+            input,
             ..
         } => Box::new(tool::ToolResultCell::new(
-            result, old_string, new_string, file_path,
+            tool, result, old_string, new_string, file_path, input,
         )),
         M::UserBashOutput { stdout, stderr } | M::UserLocalCommandOutput { stdout, stderr } => {
             Box::new(tool::CommandOutputCell::new(stdout, stderr))
@@ -677,6 +679,7 @@ mod tests {
                 old_string: None,
                 new_string: None,
                 file_path: None,
+                input: None,
             }
         ));
         assert!(maps_to::<tool::CommandOutputCell>(

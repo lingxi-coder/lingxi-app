@@ -261,8 +261,9 @@ fn push_user_block(
             // the pairing call is missing (torn transcript), fall back to an
             // empty tool name and no diff inputs — the result still renders.
             let tool = tool_names.get(tool_use_id).cloned().unwrap_or_default();
-            let (old_string, new_string, file_path) = tool_inputs
-                .get(tool_use_id)
+            let call_input = tool_inputs.get(tool_use_id).cloned();
+            let (old_string, new_string, file_path) = call_input
+                .as_ref()
                 .map_or((None, None, None), |input| {
                     tui_core::active_turn::diff_inputs_for(&tool, input)
                 });
@@ -279,6 +280,7 @@ fn push_user_block(
                 old_string,
                 new_string,
                 file_path,
+                input: call_input,
             });
         }
         // Redacted reasoning replays as the bodyless `✻ Thinking…` placeholder,
@@ -446,6 +448,7 @@ mod tests {
                 old_string,
                 new_string,
                 file_path,
+                ..
             } => {
                 // grouped under its originating tool-use (sourceToolUseID).
                 assert_eq!(*gid, id);

@@ -59,12 +59,16 @@ pub fn render_message(
             tool_use_lines(tool, input, theme, verbose)
         }
         RenderedMessage::UserToolResult {
+            tool,
             result,
             old_string,
             new_string,
             file_path,
+            input,
             ..
         } => tool_result_lines(
+            tool,
+            input.as_ref(),
             result,
             old_string.as_deref(),
             new_string.as_deref(),
@@ -311,16 +315,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_renders_header_and_truncated_args() {
+    fn tool_use_renders_a_parameterized_header() {
         let m = RenderedMessage::AssistantToolUse {
             id: protocol::ToolUseId::new(),
             tool: "Read".to_string(),
             input: serde_json::json!({"file_path": "src/lib.rs"}),
         };
         let lines = render_message(&m, 80, &Theme::dark(), false);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].plain_text().contains("Read"));
-        assert!(lines[1].plain_text().contains("file_path"));
+        // `Read(src/lib.rs)` on one line — the path is IN the header now,
+        // replacing the old header + raw-JSON-argument pair.
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].plain_text().contains("Read(src/lib.rs)"));
     }
 
     #[test]
@@ -371,6 +376,7 @@ mod tests {
             old_string: None,
             new_string: None,
             file_path: None,
+            input: None,
         };
         let lines = render_message(&m, 80, &Theme::dark(), false);
         assert_eq!(lines.len(), 1);
@@ -586,7 +592,8 @@ mod tests {
                     input: serde_json::json!({"file_path": "src/lib.rs"}),
                 },
                 false,
-                Expect::Visible(&["Read", "file_path"]),
+                // The header carries the path's VALUE now, not the JSON key.
+                Expect::Visible(&["Read", "src/lib.rs"]),
             ),
             (
                 "UserToolResult",
@@ -597,6 +604,7 @@ mod tests {
                     old_string: None,
                     new_string: None,
                     file_path: None,
+                    input: None,
                 },
                 false,
                 Expect::Visible(&["hello world"]),

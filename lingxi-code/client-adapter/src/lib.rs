@@ -35,6 +35,7 @@ pub mod output_stream;
 pub mod permission_gate;
 pub mod sink;
 pub mod test_support;
+pub mod tool_display;
 pub mod turn;
 
 pub use ask_user_question_broker::BridgeAskUserQuestionBroker;

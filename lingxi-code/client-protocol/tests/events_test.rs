@@ -50,6 +50,7 @@ fn tool_use_started_round_trips() {
         id: "tu_01".to_string(),
         tool: "Read".to_string(),
         input_json: r#"{"file_path":"/tmp/x"}"#.to_string(),
+        header: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize ToolUseStarted");
     assert_eq!(json["type"], "tool_use_started");
@@ -73,6 +74,7 @@ fn tool_use_result_round_trips() {
         tool: "Read".to_string(),
         result_json: r#"{"content":"ok"}"#.to_string(),
         is_error: false,
+        display: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize ToolUseResult");
     assert_eq!(json["type"], "tool_use_result");
@@ -103,6 +105,7 @@ fn message_complete_round_trips() {
                     id: "tu_01".to_string(),
                     tool: "Read".to_string(),
                     input_json: "{}".to_string(),
+                    header: None,
                 },
             ],
         }),

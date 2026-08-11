@@ -76,6 +76,46 @@ const ASSISTANT_ROLE: &str = "assistant";
 /// compile error — a deliberate gate forcing a lowering decision.
 #[must_use]
 pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
+    lower_content_block_with(block, &mut ToolUseIndex::default())
+}
+
+/// `tool_use_id` → `(tool name, call input)`, for pairing a `ToolResult` with
+/// the `ToolUse` that produced it.
+///
+/// The engine's `ContentBlock::ToolResult` carries only `tool_use_id` and
+/// `content` — no tool name, no input. Without this index a lowered result has
+/// an EMPTY tool name and no diff, which is exactly the bug that made the iOS
+/// client render `chat_tool_returned` as "工具  返回" and left its diff view
+/// permanently unreachable.
+///
+/// The index must be threaded across a WHOLE transcript, never one message: a
+/// `ToolUse` sits in assistant message N and its `ToolResult` in user message
+/// N+1, never in the same message. `tui/src/replay.rs` keeps the same
+/// side-table for the same reason.
+#[derive(Debug, Default)]
+pub struct ToolUseIndex(std::collections::HashMap<String, (String, serde_json::Value)>);
+
+impl ToolUseIndex {
+    /// Record a `ToolUse` so a later `ToolResult` can be paired with it.
+    pub fn record(&mut self, id: &str, tool: &str, input: &serde_json::Value) {
+        self.0
+            .insert(id.to_string(), (tool.to_string(), input.clone()));
+    }
+
+    /// The `(tool, input)` recorded for `id`, if its call was seen.
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<(&str, &serde_json::Value)> {
+        self.0.get(id).map(|(tool, input)| (tool.as_str(), input))
+    }
+}
+
+/// Lower one block, recording a `ToolUse` into `index` and consulting it to
+/// enrich a `ToolResult`. See [`ToolUseIndex`] for the threading requirement.
+#[must_use]
+pub fn lower_content_block_with(
+    block: &ContentBlock,
+    index: &mut ToolUseIndex,
+) -> Option<MessageBlockDto> {
     match block {
         ContentBlock::Text { text } => Some(MessageBlockDto::Text { text: text.clone() }),
         ContentBlock::Thinking {
@@ -87,30 +127,49 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
         }),
         ContentBlock::ToolUse {
             id, name, input, ..
-        } => Some(MessageBlockDto::ToolUse {
-            id: id.to_string(),
-            tool: name.clone(),
-            input_json: value_to_json_string(input),
-        }),
+        } => {
+            index.record(&id.to_string(), name, input);
+            Some(MessageBlockDto::ToolUse {
+                id: id.to_string(),
+                tool: name.clone(),
+                input_json: value_to_json_string(input),
+                header: Some(crate::tool_display::lower_tool_header(name, input)),
+            })
+        }
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
             ..
-        } => Some(MessageBlockDto::ToolResult {
-            id: tool_use_id.to_string(),
-            // The engine `ToolResult` does not echo the tool name; the client
-            // correlates by `id` against the matching `ToolUse` block.
-            tool: String::new(),
+        } => {
+            let id = tool_use_id.to_string();
+            // The engine `ToolResult` echoes neither the tool name nor the
+            // input; both come from the paired `ToolUse` via `index`. An
+            // ORPHAN result (torn or compacted transcript window) keeps the
+            // historical empty name — clients still correlate by `id`.
+            let paired = index.get(&id);
+            let tool = paired.map_or(String::new(), |(tool, _)| tool.to_string());
+            let input = paired.map(|(_, input)| input);
+            let (old_string, new_string, file_path) = input.map_or((None, None, None), |input| {
+                tui_core::active_turn::diff_inputs_for(&tool, input)
+            });
             // `content` is the already-stringified tool output. Lower it through
             // the same JSON-String boundary as `ToolUseResult.result_json` so the
             // wire field is a JSON String (decision §0.4).
-            result_json: value_to_json_string(&serde_json::Value::String(content.clone())),
-            is_error: *is_error,
-            old_string: None,
-            new_string: None,
-            file_path: None,
-        }),
+            let result = serde_json::Value::String(content.clone());
+            Some(MessageBlockDto::ToolResult {
+                id,
+                tool: tool.clone(),
+                result_json: value_to_json_string(&result),
+                is_error: *is_error,
+                old_string,
+                new_string,
+                file_path,
+                display: Some(crate::tool_display::lower_tool_result_display(
+                    &tool, input, &result, *is_error,
+                )),
+            })
+        }
         // No `MessageBlockDto::Image`/`Document` — image and document input are
         // uniform inline wire DTOs elsewhere (decision §0.8), not scrollback
         // blocks. Drop them. The low-frequency server-side blocks
@@ -463,6 +522,7 @@ mod tests {
                 id: gid,
                 tool,
                 input_json,
+                ..
             } => {
                 assert_eq!(gid, id.to_string());
                 assert_eq!(tool, "Read");

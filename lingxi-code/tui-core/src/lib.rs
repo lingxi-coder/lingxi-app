@@ -31,3 +31,4 @@ pub mod terminal_setup;
 pub mod theme;
 pub mod theme_detect;
 pub mod theme_persist;
+pub mod tool_display;

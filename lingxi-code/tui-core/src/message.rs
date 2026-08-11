@@ -59,6 +59,11 @@ pub enum RenderedMessage {
         /// (M7-02) Edited file path (drives diff syntax language). `None` for
         /// non-diff tools.
         file_path: Option<String>,
+        /// The originating call's input, retained so the result renderer can
+        /// derive the SAME headline `client-adapter` ships to the mobile and
+        /// desktop clients. `None` when the pairing call was lost (a torn or
+        /// compacted transcript).
+        input: Option<serde_json::Value>,
     },
     /// (M7-04) Assistant thinking block. Collapsed → `∴ Thinking` + expand hint;
     /// expanded → `∴ Thinking…` + markdown body. `expanded` mirrors
@@ -562,6 +567,7 @@ mod rendered_message_tests {
             old_string: None,
             new_string: None,
             file_path: None,
+            input: None,
         };
         let plain = RenderedMessage::AssistantText {
             body: "hello".to_string(),

@@ -38,6 +38,7 @@ fn message_dto_round_trips() {
                 id: "tu_01".to_string(),
                 tool: "Edit".to_string(),
                 input_json: r#"{"file_path":"/tmp/x"}"#.to_string(),
+                header: None,
             },
             MessageBlockDto::ToolResult {
                 id: "tu_01".to_string(),
@@ -47,6 +48,7 @@ fn message_dto_round_trips() {
                 old_string: Some("before".to_string()),
                 new_string: Some("after".to_string()),
                 file_path: Some("/tmp/x".to_string()),
+                display: None,
             },
         ],
     };
@@ -93,6 +95,7 @@ fn message_block_set_matches_tui_scrollback() {
             id: String::new(),
             tool: String::new(),
             input_json: "null".to_string(),
+            header: None,
         },
         MessageBlockDto::ToolResult {
             id: String::new(),
@@ -102,6 +105,7 @@ fn message_block_set_matches_tui_scrollback() {
             old_string: None,
             new_string: None,
             file_path: None,
+            display: None,
         },
     ];
 
@@ -141,6 +145,7 @@ fn tool_result_diff_fields_skip_when_none() {
         old_string: None,
         new_string: None,
         file_path: None,
+        display: None,
     };
     let json = serde_json::to_value(&block).expect("serialize ToolResult");
     assert!(json.get("old_string").is_none());

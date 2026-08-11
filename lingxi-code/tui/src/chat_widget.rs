@@ -1211,11 +1211,11 @@ impl ChatWidget {
                 // Recover the originating call's input (for diff tools) from the
                 // side-table, mirroring the resume path's correlation, then
                 // render the `⎿ {summary}` result cell (or an Edit/Write diff).
-                let (old_string, new_string, file_path) = self
-                    .tool_inputs
-                    .remove(&id)
+                let call_input = self.tool_inputs.remove(&id);
+                let (old_string, new_string, file_path) = call_input
+                    .as_ref()
                     .map_or((None, None, None), |input| {
-                        tui_core::active_turn::diff_inputs_for(&tool, &input)
+                        tui_core::active_turn::diff_inputs_for(&tool, input)
                     });
                 self.transcript
                     .push_message(RenderedMessage::UserToolResult {
@@ -1225,6 +1225,7 @@ impl ChatWidget {
                         old_string,
                         new_string,
                         file_path,
+                        input: call_input,
                     });
             }
             TurnEvent::TurnEnded(outcome) => {
@@ -4489,18 +4490,9 @@ fn registry_slash_rows(
 
 /// Human label shown in the spinner for an in-flight tool call, mapping the
 /// tool name to a claude-code-style gerund (`Bash` → `Running Bash`).
-fn activity_label(tool: &str) -> String {
-    match tool {
-        "Bash" | "BashOutput" => "Running Bash".to_string(),
-        "Read" => "Reading".to_string(),
-        "Write" => "Writing".to_string(),
-        "Edit" | "MultiEdit" => "Editing".to_string(),
-        "Grep" | "Glob" => "Searching".to_string(),
-        "WebFetch" | "WebSearch" => "Browsing".to_string(),
-        "Task" => "Delegating".to_string(),
-        other => format!("Running {other}"),
-    }
-}
+///
+/// Moved to `tui_core::tool_display::header` alongside the call-header table.
+use tui_core::tool_display::header::activity_label;
 
 /// Whether a tool mutates or snapshots the V2 model-managed task plan.
 fn is_plan_tool(tool: &str) -> bool {
@@ -4535,76 +4527,16 @@ fn agent_status_from_tool_start(
     }
 }
 
-/// Parse TodoWrite's authoritative full-list input for the persistent plan
-/// block above the composer.
-fn planned_tasks_from_todowrite_input(
-    input: &serde_json::Value,
-) -> Vec<crate::bottom_pane::input_status::PlanTask> {
-    use crate::bottom_pane::input_status::{PlanTask, PlanTaskState};
-
-    input
-        .get("todos")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            let subject = item
-                .get("content")
-                .and_then(serde_json::Value::as_str)?
-                .to_string();
-            let state = match item.get("status").and_then(serde_json::Value::as_str) {
-                Some("pending") => PlanTaskState::Pending,
-                Some("completed") => PlanTaskState::Completed,
-                // Matches Spinner.tsx's forward-compatible `!== pending && !==
-                // completed` active predicate for in_progress/unknown states.
-                _ => PlanTaskState::InProgress,
-            };
-            Some(PlanTask {
-                id: None,
-                subject,
-                active_form: item
-                    .get("activeForm")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                state,
-            })
-        })
-        .collect()
-}
-
-fn plan_task_from_v2_value(
-    value: &serde_json::Value,
-) -> Option<crate::bottom_pane::input_status::PlanTask> {
-    use crate::bottom_pane::input_status::{PlanTask, PlanTaskState};
-
-    Some(PlanTask {
-        id: value
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        subject: value
-            .get("subject")
-            .and_then(serde_json::Value::as_str)?
-            .to_string(),
-        active_form: value
-            .get("activeForm")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        state: value
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .and_then(PlanTaskState::from_wire)?,
-    })
-}
+// The TodoWrite / V2-Task parsers moved to `tui_core::tool_display::plan` so
+// the terminal and every client build the plan from one implementation.
+use tui_core::tool_display::plan::{
+    plan_task_from_v2_value, plan_tasks_from_todowrite_input as planned_tasks_from_todowrite_input,
+};
 
 fn current_todo_from_plan(
     tasks: &[crate::bottom_pane::input_status::PlanTask],
 ) -> Option<CurrentTodo> {
-    use crate::bottom_pane::input_status::PlanTaskState;
-
-    let task = tasks
-        .iter()
-        .find(|task| task.state == PlanTaskState::InProgress)?;
+    let task = tui_core::tool_display::plan::current_in_progress(tasks)?;
     Some(CurrentTodo {
         subject: task.subject.clone(),
         active_form: task.active_form.clone(),

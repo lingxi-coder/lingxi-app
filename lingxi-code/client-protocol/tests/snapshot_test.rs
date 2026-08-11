@@ -63,6 +63,10 @@ use client_protocol::local_apps::{
     AppSessionKindDto, AppSessionRowDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
+use client_protocol::tool_display::{
+    CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
+    StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto, ToolVerbDto,
+};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
 };
@@ -172,6 +176,37 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 id: "toolu_01".to_string(),
                 tool: "Read".to_string(),
                 input_json: r#"{"file_path":"/tmp/example.txt"}"#.to_string(),
+                // Populated, not `None`: every new field is
+                // `skip_serializing_if`, so a `None` golden would leave the
+                // added wire shape completely unexercised.
+                header: Some(ToolHeaderDto {
+                    verb: ToolVerbDto::Read,
+                    label: "Read".to_string(),
+                    primary: Some("/tmp/example.txt".to_string()),
+                    qualifier: None,
+                    count: None,
+                    sub_line: None,
+                    title: "Read(/tmp/example.txt)".to_string(),
+                }),
+            },
+        ),
+        (
+            "event/plan_updated.json",
+            ClientEvent::PlanUpdated {
+                tasks: vec![
+                    PlanTaskDto {
+                        id: None,
+                        subject: "Port the diff renderer".to_string(),
+                        active_form: Some("Porting the diff renderer".to_string()),
+                        state: PlanTaskStateDto::InProgress,
+                    },
+                    PlanTaskDto {
+                        id: Some("task_2".to_string()),
+                        subject: "Regenerate the bindings".to_string(),
+                        active_form: None,
+                        state: PlanTaskStateDto::Pending,
+                    },
+                ],
             },
         ),
         (
@@ -189,6 +224,40 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 tool: "Read".to_string(),
                 result_json: r#"{"content":"file body"}"#.to_string(),
                 is_error: false,
+                // Populated so the golden locks the full display shape,
+                // including one diff row and its segments.
+                display: Some(ToolResultDisplayDto {
+                    headline: Some("Added 1 line".to_string()),
+                    headline_kind: Some(HeadlineKindDto::Added),
+                    headline_args: vec![1],
+                    diff: Some(StructuredDiffDto {
+                        file_path: Some("/tmp/example.txt".to_string()),
+                        language: Some("txt".to_string()),
+                        gutter_width: 1,
+                        additions: 1,
+                        removals: 0,
+                        truncated_rows: 0,
+                        rows: vec![DiffRowDto {
+                            kind: DiffLineKindDto::Add,
+                            line_no: 1,
+                            hunk: 0,
+                            word_diffed: false,
+                            segments: vec![CodeSegmentDto {
+                                text: "file body".to_string(),
+                                class: SyntaxClassDto::Plain,
+                                rgb: Some(0x00c0_c5ce),
+                                bold: false,
+                                italic: false,
+                                underline: false,
+                                emph: false,
+                            }],
+                        }],
+                    }),
+                    body: Some("file body".to_string()),
+                    body_lines: 1,
+                    body_truncated: false,
+                    collapsed: false,
+                }),
             },
         ),
         (
@@ -1141,6 +1210,7 @@ fn canonical_message() -> MessageDto {
                 tool: "Edit".to_string(),
                 input_json: r#"{"file_path":"/tmp/x","old_string":"a","new_string":"b"}"#
                     .to_string(),
+                header: None,
             },
             MessageBlockDto::ToolResult {
                 id: "toolu_01".to_string(),
@@ -1150,6 +1220,7 @@ fn canonical_message() -> MessageDto {
                 old_string: Some("a".to_string()),
                 new_string: Some("b".to_string()),
                 file_path: Some("/tmp/x".to_string()),
+                display: None,
             },
         ],
     }
@@ -1259,6 +1330,7 @@ fn canonical_app_manifest() -> AppManifestDto {
         // One representative device capability so the golden pins the
         // manifest-context wire spelling of the new enum family.
         capabilities: vec![AppCapabilityKindDto::Camera],
+        device_context: None,
     }
 }
 

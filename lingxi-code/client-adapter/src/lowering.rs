@@ -325,19 +325,33 @@ pub fn lower_worker_agent(info: &WorkerInfo) -> CoordinatorWorkerDto {
 /// scrollback rendering of the system body.
 #[must_use]
 pub fn lower_conversation_message(message: &ConversationMessage) -> MessageDto {
+    lower_conversation_message_with(message, &mut crate::turn::ToolUseIndex::default())
+}
+
+/// [`lower_conversation_message`] threading a [`crate::turn::ToolUseIndex`] so a
+/// `ToolResult` can be paired with the `ToolUse` from the PREVIOUS message.
+///
+/// Prefer this whenever more than one message is lowered: a tool call and its
+/// result are always in adjacent messages, never the same one, so a per-message
+/// index can never pair them.
+#[must_use]
+pub fn lower_conversation_message_with(
+    message: &ConversationMessage,
+    index: &mut crate::turn::ToolUseIndex,
+) -> MessageDto {
     match message {
         ConversationMessage::User { content, .. } => MessageDto {
             role: "user".to_string(),
             blocks: content
                 .iter()
-                .filter_map(crate::turn::lower_content_block)
+                .filter_map(|block| crate::turn::lower_content_block_with(block, index))
                 .collect(),
         },
         ConversationMessage::Assistant { content, .. } => MessageDto {
             role: "assistant".to_string(),
             blocks: content
                 .iter()
-                .filter_map(crate::turn::lower_content_block)
+                .filter_map(|block| crate::turn::lower_content_block_with(block, index))
                 .collect(),
         },
         ConversationMessage::System {
@@ -376,6 +390,9 @@ pub fn lower_conversation_message(message: &ConversationMessage) -> MessageDto {
 #[must_use]
 pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
     let mut transcript = Vec::with_capacity(history.len());
+    // ONE index for the WHOLE transcript: a `ToolUse` in assistant message N
+    // pairs with its `ToolResult` in user message N+1.
+    let mut tool_uses = crate::turn::ToolUseIndex::default();
     for message in history {
         match message {
             ConversationMessage::User {
@@ -412,7 +429,7 @@ pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 is_visible_in_transcript_only: true,
                 ..
             } => {}
-            _ => transcript.push(lower_conversation_message(message)),
+            _ => transcript.push(lower_conversation_message_with(message, &mut tool_uses)),
         }
     }
     transcript
@@ -830,9 +847,183 @@ mod tests {
                     id: tu.to_string(),
                     tool: "Read".to_string(),
                     input_json: value_to_json_string(&serde_json::json!({"file_path": "/tmp/x"})),
+                    header: Some(crate::tool_display::lower_tool_header(
+                        "Read",
+                        &serde_json::json!({"file_path": "/tmp/x"}),
+                    )),
                 },
             ]
         );
+    }
+
+    /// REGRESSION: a resumed `ToolResult` used to lower with an EMPTY tool
+    /// name and all-`None` diff fields, because `lower_content_block` was
+    /// per-block and context-free. That made the iOS client render
+    /// `chat_tool_returned %@` as "工具  返回" and left its diff view — which
+    /// gates on `old_string`/`new_string`/`file_path` — permanently
+    /// unreachable. The call is in assistant message N and the result in user
+    /// message N+1, so nothing short of a transcript-wide index can pair them.
+    #[test]
+    fn lower_transcript_pairs_a_tool_result_with_its_call_across_messages() {
+        use protocol::{ContentBlock, MessageId, ToolUseId};
+        let tu = ToolUseId::new();
+        let input = serde_json::json!({
+            "file_path": "/tmp/x.rs",
+            "old_string": "fn a() {}\n",
+            "new_string": "fn b() {}\n",
+        });
+        let history = vec![
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: tu.clone(),
+                    name: "Edit".to_string(),
+                    input: input.clone(),
+                    provider_id: None,
+                }],
+                stop_reason: Some("tool_use".to_string()),
+            },
+            ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: tu.clone(),
+                    content: "edited".to_string(),
+                    is_error: false,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            },
+        ];
+
+        let dtos = lower_transcript(&history);
+        let MessageBlockDto::ToolResult {
+            tool,
+            old_string,
+            new_string,
+            file_path,
+            display,
+            ..
+        } = &dtos[1].blocks[0]
+        else {
+            panic!("expected a ToolResult block, got {:?}", dtos[1].blocks[0]);
+        };
+        assert_eq!(tool, "Edit", "the tool name is recovered from the call");
+        assert_eq!(old_string.as_deref(), Some("fn a() {}\n"));
+        assert_eq!(new_string.as_deref(), Some("fn b() {}\n"));
+        assert_eq!(file_path.as_deref(), Some("/tmp/x.rs"));
+        let display = display.as_ref().expect("a display block");
+        assert_eq!(
+            display.headline.as_deref(),
+            Some("Added 1 line, removed 1 line")
+        );
+        let diff = display.diff.as_ref().expect("a structured diff");
+        assert_eq!(diff.rows.len(), 2, "one removed row + one added row");
+    }
+
+    /// REGRESSION: a resumed transcript persists a tool result's MODEL-FACING
+    /// STRING (`ToolCallResult.model_content` — for Bash,
+    /// `bash_model_content(stdout, stderr, …)`), never the `{stdout, stderr}`
+    /// object the LIVE path passes. The per-tool extractors index the result
+    /// as an OBJECT, so every resumed Bash row headlined "(No content)" with
+    /// an empty body: the entire command output was gone from scrollback after
+    /// a restart. Read lost its content the same way.
+    #[test]
+    fn a_resumed_bash_or_read_result_keeps_its_output() {
+        use protocol::{ContentBlock, MessageId, ToolUseId};
+
+        let call = |tu: &ToolUseId, tool: &str, input: serde_json::Value| {
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: tu.clone(),
+                    name: tool.to_string(),
+                    input,
+                    provider_id: None,
+                }],
+                stop_reason: Some("tool_use".to_string()),
+            }
+        };
+        let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tu.clone(),
+                content: content.to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let display_of = |history: &[ConversationMessage]| {
+            let dtos = lower_transcript(history);
+            let MessageBlockDto::ToolResult { display, .. } = &dtos[1].blocks[0] else {
+                panic!("expected a ToolResult block");
+            };
+            display.clone().expect("a display block")
+        };
+
+        let bash_id = ToolUseId::new();
+        let bash = display_of(&[
+            call(&bash_id, "Bash", serde_json::json!({"command": "cargo test"})),
+            persisted(&bash_id, "compiling…\nwarning: unused\ndone"),
+        ]);
+        assert_eq!(bash.headline.as_deref(), Some("compiling…"));
+        assert_eq!(
+            bash.body.as_deref(),
+            Some("compiling…\nwarning: unused\ndone"),
+            "the resumed body must be the command's output, not nothing"
+        );
+
+        let read_id = ToolUseId::new();
+        let read = display_of(&[
+            call(
+                &read_id,
+                "Read",
+                serde_json::json!({"file_path": "/tmp/x.rs"}),
+            ),
+            persisted(&read_id, "     1\tone\n     2\ttwo"),
+        ]);
+        assert_eq!(read.headline.as_deref(), Some("Read 2 lines"));
+        assert_eq!(read.body.as_deref(), Some("     1\tone\n     2\ttwo"));
+    }
+
+    /// An orphan result — its call fell outside the resumed window — must
+    /// still lower, keeping the historical empty tool name so clients can go
+    /// on correlating by `id`.
+    #[test]
+    fn lower_transcript_tolerates_a_tool_result_with_no_paired_call() {
+        use protocol::{ContentBlock, MessageId, ToolUseId};
+        let history = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content: "orphaned".to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }];
+        let dtos = lower_transcript(&history);
+        let MessageBlockDto::ToolResult {
+            tool,
+            old_string,
+            new_string,
+            file_path,
+            ..
+        } = &dtos[0].blocks[0]
+        else {
+            panic!("expected a ToolResult block");
+        };
+        assert!(tool.is_empty());
+        assert!(old_string.is_none() && new_string.is_none() && file_path.is_none());
     }
 
     #[test]

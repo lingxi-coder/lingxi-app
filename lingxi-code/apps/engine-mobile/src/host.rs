@@ -8475,6 +8475,7 @@ mod tests {
                 id: "stale-tool".to_string(),
                 tool: "Read".to_string(),
                 input_json: "{}".to_string(),
+                header: None,
             })
             .await;
         listener

@@ -11,6 +11,7 @@
 use tui_core::render::ansi::parse_ansi;
 use tui_core::render::{diff, SpanStyle, StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::{Theme, ThemeName};
+use tui_core::tool_display;
 
 use super::{colored_lines, dim_span, truncate, StyledCell};
 
@@ -25,14 +26,23 @@ const TOOL_MARKER: &str = if cfg!(target_os = "macos") {
     "\u{25CF} "
 };
 
-/// A tool call: `⏺ {tool}` header + arguments. Collapsed → a dim, truncated
-/// one-line summary; verbose → the pretty-printed JSON input, dim-indented.
+/// A tool call: `⏺ {verb}({arg})` header + arguments.
+///
+/// The header is the shared, parameterized one from
+/// `tui_core::tool_display::header` — `Update(src/host.rs)` rather than the
+/// bare `Edit` this used to print. Collapsed → the header plus the tool's
+/// sub-line (a Bash `$ command`) when it has one, or — when the header names
+/// no argument AND there is no sub-line — the truncated input JSON, so a call
+/// is never printed without its arguments; verbose → the pretty-printed JSON
+/// input, dim-indented.
 pub(crate) fn tool_use_lines(
     tool: &str,
     input: &serde_json::Value,
     theme: &Theme,
     verbose: bool,
 ) -> Vec<StyledLine> {
+    let derived = tool_display::tool_header(tool, input);
+    let header_carries_an_argument = derived.primary.is_some();
     let header = StyledLine {
         spans: vec![
             StyledSpan::styled(
@@ -42,7 +52,7 @@ pub(crate) fn tool_use_lines(
                     ..SpanStyle::default()
                 },
             ),
-            StyledSpan::plain(tool.to_string()),
+            StyledSpan::plain(derived.title()),
         ],
     };
     let mut out = vec![header];
@@ -53,7 +63,21 @@ pub(crate) fn tool_use_lines(
                 spans: vec![dim_span(format!("  {line}"), theme)],
             });
         }
-    } else {
+    } else if let Some(sub) = derived.sub_line {
+        out.push(StyledLine {
+            spans: vec![dim_span(
+                format!("  {} {}", sub.prefix, truncate(&sub.text, 100)),
+                theme,
+            )],
+        });
+    } else if !header_carries_an_argument {
+        // The pre-shared-header fallback, restored for the calls that lost it.
+        // `sub_line` is set only for the shell family and `primary` only from
+        // the header table / `GENERIC_PRIMARY_KEYS`, so a tool with NEITHER —
+        // `TodoWrite`, or an MCP tool whose input carries none of the generic
+        // keys — rendered with no argument information at all. Tools whose
+        // header already names their argument (`Read(src/lib.rs)`) keep the
+        // one-line form the shared header bought.
         out.push(StyledLine {
             spans: vec![dim_span(
                 format!("  {}", truncate(&input.to_string(), 100)),
@@ -69,6 +93,8 @@ pub(crate) fn tool_use_lines(
 /// diff inputs (`old_string`/`new_string`) renders a structured diff instead
 /// (plan Phase 9 step 5): a dim added/removed summary header + the diff rows.
 pub(crate) fn tool_result_lines(
+    tool: &str,
+    input: Option<&serde_json::Value>,
     result: &serde_json::Value,
     old_string: Option<&str>,
     new_string: Option<&str>,
@@ -79,13 +105,21 @@ pub(crate) fn tool_result_lines(
     if old_string.is_some() || new_string.is_some() {
         return edit_write_diff_lines(old_string, new_string, file_path, width, theme);
     }
-    let summary = if let Some(s) = result.as_str() {
-        s.to_string()
-    } else if let Some(s) = result.get("content").and_then(serde_json::Value::as_str) {
-        s.to_string()
-    } else {
-        result.to_string()
-    };
+    // The shared headline (`Read 12 lines`, `Found 3 files`, the first line of
+    // a command's output) — the same string the clients render. Falls back to
+    // the raw payload for a tool with no headline rule.
+    let is_error = tool_display::result_is_error(result);
+    let summary = tool_display::result_headline(tool, input, result, is_error).unwrap_or_else(
+        || {
+            if let Some(s) = result.as_str() {
+                s.to_string()
+            } else if let Some(s) = result.get("content").and_then(serde_json::Value::as_str) {
+                s.to_string()
+            } else {
+                result.to_string()
+            }
+        },
+    );
     vec![StyledLine {
         spans: vec![dim_span(format!("  ⎿  {}", truncate(&summary, 100)), theme)],
     }]
@@ -121,31 +155,10 @@ fn edit_write_diff_lines(
     out
 }
 
-/// claude-code `FileEditToolUpdatedMessage`'s "Added N line(s)[, removed M
-/// line(s)]" summary — `None` when there are no changes at all. `Removed` is
-/// capitalized only when it's the sole clause (no additions). Ported from the
-/// iocraft `user_tool_result` renderer.
-pub(crate) fn added_removed_header(additions: usize, removals: usize) -> Option<String> {
-    let added = (additions > 0).then(|| {
-        format!(
-            "Added {additions} {}",
-            if additions > 1 { "lines" } else { "line" }
-        )
-    });
-    let removed = (removals > 0).then(|| {
-        let cap = if additions == 0 { "R" } else { "r" };
-        format!(
-            "{cap}emoved {removals} {}",
-            if removals > 1 { "lines" } else { "line" }
-        )
-    });
-    match (added, removed) {
-        (Some(a), Some(r)) => Some(format!("{a}, {r}")),
-        (Some(a), None) => Some(a),
-        (None, Some(r)) => Some(r),
-        (None, None) => None,
-    }
-}
+// Moved to `tui_core::tool_display::result` so the terminal and the clients
+// spell the edit summary identically. Re-exported under the old path so
+// `super::added_removed_header` and its byte-lock test keep resolving.
+pub(crate) use tui_core::tool_display::result::added_removed_header;
 
 /// Bash / local-command output: ANSI-parsed stdout lines (SGR colors and
 /// attributes preserved — the bodies carry raw escape codes), then stderr,
@@ -298,27 +311,34 @@ impl StyledCell for ToolUseCell {
 /// the paired `old_string`/`new_string` inputs are present.
 #[derive(Debug)]
 pub struct ToolResultCell {
+    tool: String,
     result: serde_json::Value,
     old_string: Option<String>,
     new_string: Option<String>,
     file_path: Option<String>,
+    input: Option<serde_json::Value>,
 }
 
 impl ToolResultCell {
     /// Wrap one tool result (`old_string`/`new_string`/`file_path` carry the
-    /// paired Edit/Write inputs for diff rendering when present).
+    /// paired Edit/Write inputs for diff rendering when present; `tool` and
+    /// `input` drive the shared result headline).
     #[must_use]
     pub fn new(
+        tool: String,
         result: serde_json::Value,
         old_string: Option<String>,
         new_string: Option<String>,
         file_path: Option<String>,
+        input: Option<serde_json::Value>,
     ) -> Self {
         Self {
+            tool,
             result,
             old_string,
             new_string,
             file_path,
+            input,
         }
     }
 }
@@ -326,6 +346,8 @@ impl ToolResultCell {
 impl StyledCell for ToolResultCell {
     fn styled_lines(&self, width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
         tool_result_lines(
+            &self.tool,
+            self.input.as_ref(),
             &self.result,
             self.old_string.as_deref(),
             self.new_string.as_deref(),
@@ -482,31 +504,63 @@ mod tests {
             serde_json::json!({"file_path": "src/lib.rs"}),
         );
         let lines = plain(&cell, false);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], format!("{TOOL_MARKER}Read"));
-        assert_eq!(lines[1], "  {\"file_path\":\"src/lib.rs\"}");
+        // The header is now parameterized (`Read(src/lib.rs)`), so a tool with
+        // no sub-line renders as a single line instead of a header plus a
+        // truncated raw-JSON line.
+        assert_eq!(lines, vec![format!("{TOOL_MARKER}Read(src/lib.rs)")]);
         assert_eq!(cell.tool(), "Read");
-        // Header marker is success-colored; the tool name is unstyled.
+        // Header marker is success-colored; the title is unstyled.
         let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
         assert_eq!(
             styled[0].spans[0].style.fg,
             Some(rata(Theme::dark().success))
         );
         assert_eq!(styled[0].spans[1].style.fg, None);
-        // The input summary is dim.
-        assert_eq!(styled[1].spans[0].style.fg, Some(rata(Theme::dark().dim)));
+    }
+
+    /// REGRESSION: the shared-header extraction replaced the unconditional
+    /// truncated-input line with `else if let Some(sub) = derived.sub_line`.
+    /// `sub_line` is set only for the shell family and `primary` only from the
+    /// header table / `GENERIC_PRIMARY_KEYS`, so a tool with NEITHER —
+    /// `TodoWrite`, or an MCP tool whose input carries none of the generic
+    /// keys — rendered its call with no argument information at all.
+    #[test]
+    fn a_tool_with_no_header_argument_still_shows_its_input() {
+        let cell = ToolUseCell::new(
+            "TodoWrite".to_string(),
+            serde_json::json!({"todos": [{"content": "Ship it"}]}),
+        );
+        let lines = plain(&cell, false);
+        assert_eq!(lines.len(), 2, "header + arguments, got {lines:?}");
+        assert!(
+            lines[1].contains("Ship it"),
+            "the call's arguments must be visible: {lines:?}"
+        );
+
+        // Same for an MCP tool whose input has none of the generic keys.
+        let mcp = ToolUseCell::new(
+            "mcp__srv__thing".to_string(),
+            serde_json::json!({"widget_id": 42}),
+        );
+        let lines = plain(&mcp, false);
+        assert_eq!(lines.len(), 2, "header + arguments, got {lines:?}");
+        assert!(lines[1].contains("widget_id"), "{lines:?}");
     }
 
     #[test]
-    fn tool_use_cell_truncates_long_input_at_100_chars() {
+    fn tool_use_cell_renders_a_bash_command_sub_line_truncated_at_100_chars() {
         let cell = ToolUseCell::new(
             "Bash".to_string(),
             serde_json::json!({"command": "x".repeat(200)}),
         );
         let lines = plain(&cell, false);
-        let summary = lines[1].trim_start();
-        assert_eq!(summary.chars().count(), 100, "99 chars + ellipsis");
-        assert!(summary.ends_with('…'), "got: {summary}");
+        assert_eq!(lines[0], format!("{TOOL_MARKER}Running 1 shell command…"));
+        // Bash is the one tool with a sub-line: `$ {command}`, truncated.
+        let sub = lines[1].trim_start();
+        assert!(sub.starts_with("$ "), "got: {sub}");
+        let command = sub.trim_start_matches("$ ");
+        assert_eq!(command.chars().count(), 100, "99 chars + ellipsis");
+        assert!(command.ends_with('…'), "got: {command}");
     }
 
     #[test]
@@ -520,7 +574,11 @@ mod tests {
             lines.len() > 2,
             "pretty JSON spans multiple lines: {lines:?}"
         );
-        assert_eq!(lines[0], format!("{TOOL_MARKER}Read"));
+        // `limit: 10` makes it a partial read, which the header qualifies.
+        assert_eq!(
+            lines[0],
+            format!("{TOOL_MARKER}Read(src/lib.rs) (lines 1-10)")
+        );
         assert!(lines[1].starts_with("  {"), "indented JSON: {lines:?}");
         assert!(
             lines.iter().any(|l| l.contains("\"limit\": 10")),
@@ -531,7 +589,9 @@ mod tests {
     #[test]
     fn tool_result_cell_prefers_string_content_field() {
         let cell = ToolResultCell::new(
+            "Whatever".to_string(),
             serde_json::json!({"content": "hello world"}),
+            None,
             None,
             None,
             None,
@@ -546,7 +606,9 @@ mod tests {
         // A bare-string result (replay path) renders directly, newlines
         // flattened into the one-line summary.
         let cell = ToolResultCell::new(
+            "Whatever".to_string(),
             serde_json::Value::String("line one\nline two".to_string()),
+            None,
             None,
             None,
             None,
@@ -559,7 +621,14 @@ mod tests {
 
     #[test]
     fn tool_result_cell_falls_back_to_compact_json() {
-        let cell = ToolResultCell::new(serde_json::json!({"status": "ok"}), None, None, None);
+        let cell = ToolResultCell::new(
+            "Whatever".to_string(),
+            serde_json::json!({"status": "ok"}),
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             plain(&cell, false),
             vec!["  ⎿  {\"status\":\"ok\"}".to_string()]
@@ -648,10 +717,12 @@ mod tests {
     #[test]
     fn tool_result_cell_renders_edit_diff_when_old_and_new_present() {
         let cell = ToolResultCell::new(
+            "Edit".to_string(),
             serde_json::json!({"content": "ok"}),
             Some("alpha\nbeta".to_string()),
             Some("alpha\ngamma".to_string()),
             Some("x.rs".to_string()),
+            None,
         );
         let lines = plain(&cell, false);
         assert_eq!(
@@ -677,10 +748,12 @@ mod tests {
     #[test]
     fn tool_result_cell_renders_write_as_pure_add_diff() {
         let cell = ToolResultCell::new(
+            "Write".to_string(),
             serde_json::json!({"content": "ok"}),
             None,
             Some("line one\nline two".to_string()),
             Some("x.txt".to_string()),
+            None,
         );
         let lines = plain(&cell, false);
         assert_eq!(

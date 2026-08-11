@@ -2,5 +2,11 @@
   "type": "tool_use_started",
   "id": "toolu_01",
   "tool": "Read",
-  "input_json": "{\"file_path\":\"/tmp/example.txt\"}"
+  "input_json": "{\"file_path\":\"/tmp/example.txt\"}",
+  "header": {
+    "verb": "read",
+    "label": "Read",
+    "primary": "/tmp/example.txt",
+    "title": "Read(/tmp/example.txt)"
+  }
 }

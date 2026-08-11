@@ -29,6 +29,7 @@ pub mod listings;
 pub mod local_apps;
 pub mod message;
 pub mod permission;
+pub mod tool_display;
 pub mod version;
 
 // UniFFI scaffolding (F3-01). Under the `uniffi` feature the DTOs above gain

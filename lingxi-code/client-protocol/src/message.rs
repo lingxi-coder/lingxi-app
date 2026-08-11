@@ -73,6 +73,9 @@ pub enum MessageBlockDto {
         tool: String,
         /// Tool input as a JSON String.
         input_json: String,
+        /// Pre-derived header. Absent on an older engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<crate::tool_display::ToolHeaderDto>,
     },
     /// A tool result. `result_json` is the tool output lowered to a JSON
     /// **String** (decision §0.4). The diff fields mirror the TUI
@@ -99,5 +102,9 @@ pub enum MessageBlockDto {
         /// tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_path: Option<String>,
+        /// Pre-derived `⎿` block. Absent on an older engine. Supersedes the
+        /// three legacy diff fields above, which carry only the raw pair.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<crate::tool_display::ToolResultDisplayDto>,
     },
 }

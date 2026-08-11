@@ -220,6 +220,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseStarted.id", "String");
     put("ClientEvent::ToolUseStarted.tool", "String");
     put("ClientEvent::ToolUseStarted.input_json", "String");
+    put("ClientEvent::ToolUseStarted.header", "Option<ToolHeaderDto>");
 
     put("ClientEvent::ToolHeartbeat", "tool_heartbeat");
     put("ClientEvent::ToolHeartbeat.id", "String");
@@ -230,6 +231,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseResult.id", "String");
     put("ClientEvent::ToolUseResult.tool", "String");
     put("ClientEvent::ToolUseResult.result_json", "String");
+    put("ClientEvent::ToolUseResult.display", "Option<ToolResultDisplayDto>");
     put("ClientEvent::ToolUseResult.is_error", "bool");
 
     put("ClientEvent::MessageComplete", "message_complete");
@@ -692,6 +694,7 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::ToolUse.id", "String");
     put("MessageBlockDto::ToolUse.tool", "String");
     put("MessageBlockDto::ToolUse.input_json", "String");
+    put("MessageBlockDto::ToolUse.header", "Option<ToolHeaderDto>");
 
     put("MessageBlockDto::ToolResult", "tool_result");
     put("MessageBlockDto::ToolResult.id", "String");
@@ -701,6 +704,106 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::ToolResult.old_string", "Option<String>");
     put("MessageBlockDto::ToolResult.new_string", "Option<String>");
     put("MessageBlockDto::ToolResult.file_path", "Option<String>");
+    put("MessageBlockDto::ToolResult.display", "Option<ToolResultDisplayDto>");
+
+    put("ClientEvent::PlanUpdated", "plan_updated");
+    put("ClientEvent::PlanUpdated.tasks", "Vec<PlanTaskDto>");
+
+    // ── tool_display.rs — the pre-derived render model ────────────────────
+    put("ToolVerbDto::Update", "update");
+    put("ToolVerbDto::Create", "create");
+    put("ToolVerbDto::Read", "read");
+    put("ToolVerbDto::Search", "search");
+    put("ToolVerbDto::Shell", "shell");
+    put("ToolVerbDto::Output", "output");
+    put("ToolVerbDto::Kill", "kill");
+    put("ToolVerbDto::Fetch", "fetch");
+    put("ToolVerbDto::Task", "task");
+    put("ToolVerbDto::Todo", "todo");
+    put("ToolVerbDto::Skill", "skill");
+    put("ToolVerbDto::Generic", "generic");
+
+    put("ToolSubLineDto.prefix", "String");
+    put("ToolSubLineDto.text", "String");
+
+    put("ToolHeaderDto.verb", "ToolVerbDto");
+    put("ToolHeaderDto.label", "String");
+    put("ToolHeaderDto.primary", "Option<String>");
+    put("ToolHeaderDto.qualifier", "Option<String>");
+    put("ToolHeaderDto.count", "Option<u32>");
+    put("ToolHeaderDto.sub_line", "Option<ToolSubLineDto>");
+    put("ToolHeaderDto.title", "String");
+
+    put("SyntaxClassDto::Plain", "plain");
+    put("SyntaxClassDto::Keyword", "keyword");
+    put("SyntaxClassDto::TypeName", "type_name");
+    put("SyntaxClassDto::Function", "function");
+    put("SyntaxClassDto::StringLit", "string_lit");
+    put("SyntaxClassDto::Number", "number");
+    put("SyntaxClassDto::Comment", "comment");
+    put("SyntaxClassDto::Punctuation", "punctuation");
+    put("SyntaxClassDto::Operator", "operator");
+    put("SyntaxClassDto::Variable", "variable");
+    put("SyntaxClassDto::Constant", "constant");
+    put("SyntaxClassDto::Attribute", "attribute");
+
+    put("DiffLineKindDto::Add", "add");
+    put("DiffLineKindDto::Remove", "remove");
+    put("DiffLineKindDto::Context", "context");
+
+    put("CodeSegmentDto.text", "String");
+    put("CodeSegmentDto.class", "SyntaxClassDto");
+    put("CodeSegmentDto.rgb", "Option<u32>");
+    put("CodeSegmentDto.bold", "bool");
+    put("CodeSegmentDto.italic", "bool");
+    put("CodeSegmentDto.underline", "bool");
+    put("CodeSegmentDto.emph", "bool");
+
+    put("DiffRowDto.kind", "DiffLineKindDto");
+    put("DiffRowDto.line_no", "u32");
+    put("DiffRowDto.hunk", "u32");
+    put("DiffRowDto.word_diffed", "bool");
+    put("DiffRowDto.segments", "Vec<CodeSegmentDto>");
+
+    put("StructuredDiffDto.file_path", "Option<String>");
+    put("StructuredDiffDto.language", "Option<String>");
+    put("StructuredDiffDto.gutter_width", "u32");
+    put("StructuredDiffDto.additions", "u32");
+    put("StructuredDiffDto.removals", "u32");
+    put("StructuredDiffDto.truncated_rows", "u32");
+    put("StructuredDiffDto.rows", "Vec<DiffRowDto>");
+
+    put("HeadlineKindDto::Added", "added");
+    put("HeadlineKindDto::Removed", "removed");
+    put("HeadlineKindDto::AddedRemoved", "added_removed");
+    put("HeadlineKindDto::LinesRead", "lines_read");
+    put("HeadlineKindDto::LinesReadPartial", "lines_read_partial");
+    put("HeadlineKindDto::FilesFound", "files_found");
+    put("HeadlineKindDto::FilesFoundTruncated", "files_found_truncated");
+    put("HeadlineKindDto::LinesFound", "lines_found");
+    put("HeadlineKindDto::MatchesFound", "matches_found");
+    put("HeadlineKindDto::Interrupted", "interrupted");
+    put("HeadlineKindDto::NoContent", "no_content");
+    put("HeadlineKindDto::Failed", "failed");
+    put("HeadlineKindDto::Plain", "plain");
+
+    put("ToolResultDisplayDto.headline", "Option<String>");
+    put("ToolResultDisplayDto.headline_kind", "Option<HeadlineKindDto>");
+    put("ToolResultDisplayDto.headline_args", "Vec<u32>");
+    put("ToolResultDisplayDto.diff", "Option<StructuredDiffDto>");
+    put("ToolResultDisplayDto.body", "Option<String>");
+    put("ToolResultDisplayDto.body_lines", "u32");
+    put("ToolResultDisplayDto.body_truncated", "bool");
+    put("ToolResultDisplayDto.collapsed", "bool");
+
+    put("PlanTaskStateDto::Pending", "pending");
+    put("PlanTaskStateDto::InProgress", "in_progress");
+    put("PlanTaskStateDto::Completed", "completed");
+
+    put("PlanTaskDto.id", "Option<String>");
+    put("PlanTaskDto.subject", "String");
+    put("PlanTaskDto.active_form", "Option<String>");
+    put("PlanTaskDto.state", "PlanTaskStateDto");
 
     // ── PermissionRequest / kinds (permission.rs) ─────────────────────────
     put("PermissionRequest.request_id", "u64");
@@ -967,6 +1070,23 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.collections", "Vec<AppDataCollectionDto>");
     put("AppManifestDto.allowed_domains", "Vec<String>");
     put("AppManifestDto.capabilities", "Vec<AppCapabilityKindDto>");
+    put("AppManifestDto.device_context", "Option<DeviceContextDto>");
+
+    put("DeviceContextDto.os", "String");
+    put("DeviceContextDto.form_factor", "String");
+    put("DeviceContextDto.viewport", "DeviceViewportDto");
+    put("DeviceContextDto.safe_area", "DeviceInsetsDto");
+    put("DeviceContextDto.color_scheme", "String");
+    put("DeviceContextDto.reduced_motion", "bool");
+    put("DeviceContextDto.input_mode", "String");
+
+    put("DeviceViewportDto.width", "u32");
+    put("DeviceViewportDto.height", "u32");
+
+    put("DeviceInsetsDto.top", "u32");
+    put("DeviceInsetsDto.right", "u32");
+    put("DeviceInsetsDto.bottom", "u32");
+    put("DeviceInsetsDto.left", "u32");
 
     put("AppRuntimeDetailsDto.state", "AppRuntimeStateDto");
     put("AppRuntimeDetailsDto.mode", "Option<AppRuntimeModeDto>");
@@ -1373,6 +1493,11 @@ fn contract_index_covers_every_dto() {
     };
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
+    use client_protocol::tool_display::{
+        CodeSegmentDto, DiffLineKindDto, DiffRowDto, PlanTaskDto, PlanTaskStateDto,
+        HeadlineKindDto, StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto,
+        ToolSubLineDto, ToolVerbDto,
+    };
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
@@ -1386,7 +1511,7 @@ fn contract_index_covers_every_dto() {
         AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto, AppManifestDto,
         AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto,
         AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
-        AppUiTargetDto, AppWorkflowStateDto,
+        AppUiTargetDto, AppWorkflowStateDto, DeviceContextDto, DeviceInsetsDto, DeviceViewportDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -1415,6 +1540,67 @@ fn contract_index_covers_every_dto() {
         ClientEvent::SessionEnded,
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
+
+    // tool_display.rs — the pre-derived render model.
+    let _verb = ToolVerbDto::Update;
+    let _sub = ToolSubLineDto {
+        prefix: String::new(),
+        text: String::new(),
+    };
+    let _header = ToolHeaderDto {
+        verb: ToolVerbDto::Generic,
+        label: String::new(),
+        primary: None,
+        qualifier: None,
+        count: None,
+        sub_line: None,
+        title: String::new(),
+    };
+    let _class = SyntaxClassDto::Plain;
+    let _kind = DiffLineKindDto::Add;
+    let _segment = CodeSegmentDto {
+        text: String::new(),
+        class: SyntaxClassDto::Plain,
+        rgb: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        emph: false,
+    };
+    let _row = DiffRowDto {
+        kind: DiffLineKindDto::Context,
+        line_no: 0,
+        hunk: 0,
+        word_diffed: false,
+        segments: vec![],
+    };
+    let _diff = StructuredDiffDto {
+        file_path: None,
+        language: None,
+        gutter_width: 0,
+        additions: 0,
+        removals: 0,
+        truncated_rows: 0,
+        rows: vec![],
+    };
+    let _headline_kind = HeadlineKindDto::Added;
+    let _display = ToolResultDisplayDto {
+        headline: None,
+        headline_kind: None,
+        headline_args: vec![],
+        diff: None,
+        body: None,
+        body_lines: 0,
+        body_truncated: false,
+        collapsed: false,
+    };
+    let _plan_state = PlanTaskStateDto::Pending;
+    let _plan_task = PlanTaskDto {
+        id: None,
+        subject: String::new(),
+        active_form: None,
+        state: PlanTaskStateDto::Pending,
+    };
     let _cost = CostDto {
         total_usd: 0.0,
         input_tokens: 0,
@@ -1618,6 +1804,25 @@ fn contract_index_covers_every_dto() {
         fields: Vec::new(),
         enabled_by_default: false,
     };
+    let device_viewport = DeviceViewportDto {
+        width: 0,
+        height: 0,
+    };
+    let device_insets = DeviceInsetsDto {
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+    };
+    let device_context = DeviceContextDto {
+        os: String::new(),
+        form_factor: String::new(),
+        viewport: device_viewport,
+        safe_area: device_insets,
+        color_scheme: String::new(),
+        reduced_motion: false,
+        input_mode: String::new(),
+    };
     let _app_manifest = AppManifestDto {
         schema_version: 0,
         app_id: String::new(),
@@ -1626,6 +1831,7 @@ fn contract_index_covers_every_dto() {
         collections: Vec::new(),
         allowed_domains: Vec::new(),
         capabilities: Vec::new(),
+        device_context: Some(device_context),
     };
     let _app_runtime_details = AppRuntimeDetailsDto {
         state: AppRuntimeStateDto::Stopped,

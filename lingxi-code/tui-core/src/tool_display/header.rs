@@ -1,0 +1,570 @@
+//! The parameterized tool-call header — `Update(src/host.rs)`.
+//!
+//! This table is NEW code, not a relocation. `tool-api`'s
+//! `user_facing_name_for_input` / `get_activity_description` hooks look like
+//! they should own this, but only a handful of tools override them and no
+//! renderer has ever called them; more importantly the derivation has to run
+//! in `client-adapter`, which has no tool registry to ask. See the divergence
+//! note on [`tool_header`].
+
+use serde_json::Value;
+
+/// A stable, non-localized identifier for a header verb.
+///
+/// Clients that ship localized UI look the verb up by this key; the terminal
+/// and the Electron desktop (neither of which localizes) use
+/// [`ToolVerb::english`]. Shipping only rendered English would be a hard
+/// localization regression on mobile, which ships five languages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolVerb {
+    /// An existing file is being modified.
+    Update,
+    /// A new file is being written.
+    Create,
+    /// A file is being read.
+    Read,
+    /// A search over files or content.
+    Search,
+    /// A shell command.
+    Shell,
+    /// Reading the output of a running shell task.
+    Output,
+    /// Stopping a running shell task.
+    Kill,
+    /// Fetching or searching the web.
+    Fetch,
+    /// Delegating to a subagent.
+    Task,
+    /// Rewriting the todo checklist.
+    Todo,
+    /// Invoking a skill.
+    Skill,
+    /// Anything without a table entry — the raw tool name is the label.
+    Generic,
+}
+
+impl ToolVerb {
+    /// The stable lookup key (`"update"`, `"shell"`, …).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Create => "create",
+            Self::Read => "read",
+            Self::Search => "search",
+            Self::Shell => "shell",
+            Self::Output => "output",
+            Self::Kill => "kill",
+            Self::Fetch => "fetch",
+            Self::Task => "task",
+            Self::Todo => "todo",
+            Self::Skill => "skill",
+            Self::Generic => "generic",
+        }
+    }
+
+    /// The English label. `None` for [`Generic`], whose label is the tool name.
+    ///
+    /// [`Generic`]: ToolVerb::Generic
+    #[must_use]
+    pub const fn english(self) -> Option<&'static str> {
+        match self {
+            Self::Update => Some("Update"),
+            Self::Create => Some("Write"),
+            Self::Read => Some("Read"),
+            Self::Search => Some("Search"),
+            Self::Shell => Some("Running shell command"),
+            Self::Output => Some("Output"),
+            Self::Kill => Some("Kill"),
+            Self::Fetch => Some("Fetch"),
+            Self::Task => Some("Task"),
+            Self::Todo => Some("Update Todos"),
+            Self::Skill => Some("Skill"),
+            Self::Generic => None,
+        }
+    }
+}
+
+/// A header sub-line rendered under the title with its own glyph, e.g.
+/// `("$", "cargo test --all")`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSubLine {
+    /// Leading glyph (`"$"` for a shell command).
+    pub prefix: String,
+    /// Single-line body. Embedded newlines are collapsed to spaces here, so
+    /// no renderer has to.
+    pub text: String,
+}
+
+/// The derived header for one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolHeader {
+    /// Stable verb identity.
+    pub verb: ToolVerb,
+    /// English label — [`ToolVerb::english`], or the raw tool name for
+    /// [`ToolVerb::Generic`]. Never empty.
+    pub label: String,
+    /// The parenthesized primary argument, already shortened of nothing —
+    /// clients elide it to taste. `None` when the tool has no single argument.
+    pub primary: Option<String>,
+    /// Suffix rendered after the parentheses: `" (3 edits)"`, `" (github MCP)"`.
+    pub qualifier: Option<String>,
+    /// Plural slot for verbs that count (shell commands). `None` when the verb
+    /// does not count.
+    pub count: Option<u32>,
+    /// Optional second line.
+    pub sub_line: Option<ToolSubLine>,
+}
+
+impl ToolHeader {
+    /// `"{label}({primary}){qualifier}"` — the one-line English title.
+    #[must_use]
+    pub fn title(&self) -> String {
+        let mut out = self.label.clone();
+        if let Some(primary) = &self.primary {
+            out.push('(');
+            out.push_str(primary);
+            out.push(')');
+        }
+        if let Some(qualifier) = &self.qualifier {
+            out.push_str(qualifier);
+        }
+        out
+    }
+}
+
+/// Collapse whitespace runs (including newlines) into single spaces and trim.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A non-empty string field of `input`.
+fn str_field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// The first non-empty string among `keys`.
+fn first_str<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| str_field(input, key))
+}
+
+/// Probe order for a tool with no table entry. Chosen so a third-party or MCP
+/// tool still gets a meaningful header.
+const GENERIC_PRIMARY_KEYS: &[&str] = &[
+    "file_path",
+    "path",
+    "notebook_path",
+    "pattern",
+    "query",
+    "url",
+    "command",
+    "name",
+    "description",
+];
+
+/// Resolve the `mcp__{server}__{tool}` pair for a namespaced MCP call.
+///
+/// The generic `MCP` dispatcher carries the namespaced name in
+/// `input.full_name` instead of the tool field. Shared with
+/// `crate::collapse::classify` so there is one parser.
+#[must_use]
+pub fn mcp_parts<'a>(tool: &'a str, input: &'a Value) -> Option<(&'a str, &'a str)> {
+    let full_name = if tool == "MCP" {
+        input.get("full_name").and_then(Value::as_str)?
+    } else {
+        tool
+    };
+    full_name.strip_prefix("mcp__")?.split_once("__")
+}
+
+/// Derive the header for one tool call. PURE — the ONE table.
+///
+/// KNOWN DIVERGENCE: `tools/agent`'s `user_facing_name_for_input`
+/// (`agent.rs:1312`) and `tools/worktree`'s two overrides express the same
+/// idea in the tool crates. They cannot be called from here — `tui-core` must
+/// not depend on tool implementations, and the derivation runs where no tool
+/// registry exists — so the `Task`/`Agent` row below reimplements
+/// `agent.rs`'s `subagent_type` read. If either side changes, change both.
+#[must_use]
+pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
+    // MCP calls are namespaced, never table entries.
+    if let Some((server, mcp_tool)) = mcp_parts(tool, input) {
+        return ToolHeader {
+            verb: ToolVerb::Generic,
+            label: mcp_tool.to_string(),
+            primary: first_str(input, GENERIC_PRIMARY_KEYS).map(one_line),
+            qualifier: Some(format!(" ({server} MCP)")),
+            count: None,
+            sub_line: None,
+        };
+    }
+
+    let mut header = ToolHeader {
+        verb: ToolVerb::Generic,
+        // Resolved below: an arm may set `label_override`, otherwise the verb's
+        // English label wins, otherwise the raw tool name.
+        label: String::new(),
+        primary: None,
+        qualifier: None,
+        count: None,
+        sub_line: None,
+    };
+    let mut label_override: Option<String> = None;
+
+    match tool {
+        "Edit" => {
+            header.verb = ToolVerb::Update;
+            header.primary = str_field(input, "file_path").map(str::to_string);
+        }
+        "MultiEdit" => {
+            header.verb = ToolVerb::Update;
+            header.primary = str_field(input, "file_path").map(str::to_string);
+            let edits = input
+                .get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if edits > 1 {
+                header.qualifier = Some(format!(" ({edits} edits)"));
+            }
+        }
+        "Write" => {
+            header.verb = ToolVerb::Create;
+            header.primary = str_field(input, "file_path").map(str::to_string);
+        }
+        "NotebookEdit" => {
+            header.verb = ToolVerb::Update;
+            header.primary = first_str(input, &["notebook_path", "file_path"]).map(str::to_string);
+            if let Some(cell) = str_field(input, "cell_id") {
+                header.qualifier = Some(format!(" (cell {cell})"));
+            }
+        }
+        "Read" => {
+            header.verb = ToolVerb::Read;
+            header.primary = str_field(input, "file_path").map(str::to_string);
+            let offset = input.get("offset").and_then(Value::as_u64);
+            let limit = input.get("limit").and_then(Value::as_u64);
+            if offset.is_some() || limit.is_some() {
+                let start = offset.unwrap_or(1).max(1);
+                header.qualifier = Some(match limit {
+                    // Saturating: `offset`/`limit` come straight off the
+                    // MODEL's tool input, and the header is derived BEFORE the
+                    // tool validates its schema — `offset: u64::MAX` used to
+                    // panic here with "attempt to add with overflow".
+                    Some(limit) if limit > 0 => {
+                        let end = start.saturating_add(limit).saturating_sub(1);
+                        format!(" (lines {start}-{end})")
+                    }
+                    _ => format!(" (from line {start})"),
+                });
+            }
+        }
+        "Bash" | "Shell" | "PowerShell" => {
+            header.verb = ToolVerb::Shell;
+            label_override = Some("Running 1 shell command…".to_string());
+            header.count = Some(1);
+            if let Some(command) = str_field(input, "command") {
+                header.sub_line = Some(ToolSubLine {
+                    prefix: "$".to_string(),
+                    text: one_line(command),
+                });
+            }
+        }
+        "REPL" => {
+            header.verb = ToolVerb::Shell;
+            label_override = Some("REPL".to_string());
+            if let Some(code) = str_field(input, "code") {
+                header.sub_line = Some(ToolSubLine {
+                    prefix: "›".to_string(),
+                    text: one_line(code),
+                });
+            }
+        }
+        // `TaskOutput` and `TaskStop` are registered under claude-code's
+        // legacy names too (`tools/task/src/task.rs` `aliases()`), and the
+        // wire carries whichever name the model used.
+        "TaskOutput" | "BashOutput" | "BashOutputTool" => {
+            header.verb = ToolVerb::Output;
+            header.primary =
+                first_str(input, &["bash_id", "shell_id", "task_id"]).map(str::to_string);
+        }
+        "TaskStop" | "KillShell" | "KillBash" => {
+            header.verb = ToolVerb::Kill;
+            header.primary = first_str(input, &["shell_id", "task_id"]).map(str::to_string);
+        }
+        "Grep" => {
+            header.verb = ToolVerb::Search;
+            header.primary = str_field(input, "pattern").map(one_line);
+            header.qualifier = str_field(input, "path")
+                .map(|path| format!(" in {path}"))
+                .or_else(|| str_field(input, "glob").map(|glob| format!(" ({glob})")));
+        }
+        "Glob" => {
+            header.verb = ToolVerb::Search;
+            header.primary = str_field(input, "pattern").map(one_line);
+            header.qualifier = str_field(input, "path").map(|path| format!(" in {path}"));
+        }
+        "TodoWrite" => header.verb = ToolVerb::Todo,
+        "Task" | "Agent" => {
+            header.verb = ToolVerb::Task;
+            // Mirrors `tools/agent/src/agent.rs:1312`: the subagent type is the
+            // label, except the two generic types which read as plain "Task".
+            label_override = str_field(input, "subagent_type")
+                .filter(|kind| !matches!(*kind, "general-purpose" | "worker"))
+                .map(str::to_string);
+            header.primary = str_field(input, "description").map(one_line);
+        }
+        "WebFetch" => {
+            header.verb = ToolVerb::Fetch;
+            header.primary = str_field(input, "url").map(str::to_string);
+        }
+        "WebSearch" => {
+            header.verb = ToolVerb::Fetch;
+            label_override = Some("Web Search".to_string());
+            header.primary = str_field(input, "query").map(one_line);
+        }
+        "Skill" => {
+            header.verb = ToolVerb::Skill;
+            header.primary = first_str(input, &["command", "name", "skill"]).map(one_line);
+        }
+        _ => header.primary = first_str(input, GENERIC_PRIMARY_KEYS).map(one_line),
+    }
+
+    // Precedence, highest first: an arm's explicit override, the verb's
+    // English label, the raw tool name.
+    header.label = label_override
+        .or_else(|| header.verb.english().map(str::to_string))
+        .unwrap_or_else(|| tool.to_string());
+    header
+}
+
+/// Human label shown in the spinner for an in-flight tool call, mapping the
+/// tool name to a claude-code-style gerund (`Bash` → `Running Bash`).
+#[must_use]
+pub fn activity_label(tool: &str) -> String {
+    match tool {
+        "Bash" | "BashOutput" => "Running Bash".to_string(),
+        "Read" => "Reading".to_string(),
+        "Write" => "Writing".to_string(),
+        "Edit" | "MultiEdit" => "Editing".to_string(),
+        "Grep" | "Glob" => "Searching".to_string(),
+        "WebFetch" | "WebSearch" => "Browsing".to_string(),
+        "Task" => "Delegating".to_string(),
+        other => format!("Running {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn title(tool: &str, input: &Value) -> String {
+        tool_header(tool, input).title()
+    }
+
+    #[test]
+    fn file_tools_render_verb_and_path() {
+        assert_eq!(
+            title("Edit", &json!({"file_path": "src/host.rs"})),
+            "Update(src/host.rs)"
+        );
+        assert_eq!(
+            title("Write", &json!({"file_path": "src/new.rs"})),
+            "Write(src/new.rs)"
+        );
+        assert_eq!(
+            title("Read", &json!({"file_path": "src/host.rs"})),
+            "Read(src/host.rs)"
+        );
+    }
+
+    #[test]
+    fn read_qualifies_a_partial_range() {
+        assert_eq!(
+            title("Read", &json!({"file_path": "a.rs", "offset": 40, "limit": 41})),
+            "Read(a.rs) (lines 40-80)"
+        );
+        assert_eq!(
+            title("Read", &json!({"file_path": "a.rs", "offset": 40})),
+            "Read(a.rs) (from line 40)"
+        );
+    }
+
+    #[test]
+    fn read_range_does_not_overflow_on_unvalidated_model_input() {
+        // The header is derived from the MODEL's raw tool input, BEFORE the
+        // tool validates it against its schema, so any `u64` can land here.
+        // `start + limit - 1` used to panic with "attempt to add with
+        // overflow" on a debug build — a model typo crashed the process.
+        let saturated = u64::MAX - 1;
+        assert_eq!(
+            title(
+                "Read",
+                &json!({"file_path": "a.rs", "offset": u64::MAX, "limit": u64::MAX})
+            ),
+            format!("Read(a.rs) (lines {}-{saturated})", u64::MAX)
+        );
+        assert_eq!(
+            title("Read", &json!({"file_path": "a.rs", "offset": 0, "limit": u64::MAX})),
+            format!("Read(a.rs) (lines 1-{saturated})")
+        );
+        assert_eq!(
+            title("Read", &json!({"file_path": "a.rs", "limit": u64::MAX})),
+            format!("Read(a.rs) (lines 1-{saturated})")
+        );
+    }
+
+    #[test]
+    fn multi_edit_counts_only_when_plural() {
+        assert_eq!(
+            title("MultiEdit", &json!({"file_path": "a.rs", "edits": [1, 2, 3]})),
+            "Update(a.rs) (3 edits)"
+        );
+        assert_eq!(
+            title("MultiEdit", &json!({"file_path": "a.rs", "edits": [1]})),
+            "Update(a.rs)"
+        );
+    }
+
+    #[test]
+    fn bash_uses_the_counted_verb_and_a_dollar_sub_line() {
+        let header = tool_header("Bash", &json!({"command": "cargo test\n  --all"}));
+        assert_eq!(header.verb, ToolVerb::Shell);
+        assert_eq!(header.label, "Running 1 shell command…");
+        assert_eq!(header.count, Some(1));
+        assert!(header.primary.is_none());
+        let sub = header.sub_line.expect("a $ sub-line");
+        assert_eq!(sub.prefix, "$");
+        // Newlines are collapsed so no renderer has to.
+        assert_eq!(sub.text, "cargo test --all");
+    }
+
+    #[test]
+    fn search_tools_qualify_by_path_then_glob() {
+        assert_eq!(
+            title("Grep", &json!({"pattern": "TODO", "path": "src"})),
+            "Search(TODO) in src"
+        );
+        assert_eq!(
+            title("Grep", &json!({"pattern": "TODO", "glob": "*.rs"})),
+            "Search(TODO) (*.rs)"
+        );
+        assert_eq!(title("Glob", &json!({"pattern": "**/*.rs"})), "Search(**/*.rs)");
+    }
+
+    #[test]
+    fn shell_task_aliases_resolve_to_the_same_verbs() {
+        // `tools/task/src/task.rs` registers the claude-code legacy names as
+        // aliases, and the wire carries whichever the model used.
+        for tool in ["TaskOutput", "BashOutput", "BashOutputTool"] {
+            let header = tool_header(tool, &json!({"bash_id": "sh_1"}));
+            assert_eq!(header.verb, ToolVerb::Output, "{tool}");
+            assert_eq!(header.title(), "Output(sh_1)", "{tool}");
+        }
+        for tool in ["TaskStop", "KillShell", "KillBash"] {
+            let header = tool_header(tool, &json!({"shell_id": "sh_1"}));
+            assert_eq!(header.verb, ToolVerb::Kill, "{tool}");
+            assert_eq!(header.title(), "Kill(sh_1)", "{tool}");
+        }
+    }
+
+    #[test]
+    fn todo_write_has_a_verb_but_no_argument() {
+        let header = tool_header("TodoWrite", &json!({"todos": []}));
+        assert_eq!(header.verb, ToolVerb::Todo);
+        assert_eq!(header.title(), "Update Todos");
+        assert!(header.primary.is_none());
+    }
+
+    #[test]
+    fn agent_labels_by_subagent_type_except_the_generic_ones() {
+        assert_eq!(
+            title(
+                "Task",
+                &json!({"subagent_type": "code-reviewer", "description": "review the diff"})
+            ),
+            "code-reviewer(review the diff)"
+        );
+        // `general-purpose` / `worker` read as plain "Task" (agent.rs:1312).
+        assert_eq!(
+            title(
+                "Task",
+                &json!({"subagent_type": "general-purpose", "description": "look around"})
+            ),
+            "Task(look around)"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_are_namespaced_and_qualified_by_server() {
+        assert_eq!(
+            title("mcp__github__search_code", &json!({"query": "fn main"})),
+            "search_code(fn main) (github MCP)"
+        );
+        // The generic dispatcher carries the name in `full_name` instead.
+        assert_eq!(
+            title(
+                "MCP",
+                &json!({"full_name": "mcp__linear__create_issue", "name": "Bug"})
+            ),
+            "create_issue(Bug) (linear MCP)"
+        );
+    }
+
+    #[test]
+    fn unknown_tools_fall_back_to_the_name_and_a_probed_argument() {
+        let header = tool_header("SomeFutureTool", &json!({"query": "hello"}));
+        assert_eq!(header.verb, ToolVerb::Generic);
+        assert_eq!(header.title(), "SomeFutureTool(hello)");
+        // Nothing probeable -> the bare tool name.
+        assert_eq!(
+            tool_header("SomeFutureTool", &json!({"weird": 1})).title(),
+            "SomeFutureTool"
+        );
+    }
+
+    #[test]
+    fn missing_arguments_degrade_to_the_verb_alone() {
+        assert_eq!(title("Edit", &json!({})), "Update");
+        assert_eq!(title("Bash", &json!({})), "Running 1 shell command…");
+        // An empty string is treated as absent, not rendered as `Update()`.
+        assert_eq!(title("Edit", &json!({"file_path": ""})), "Update");
+    }
+
+    #[test]
+    fn verb_keys_are_stable_and_distinct() {
+        // Clients key localized copy off these; a collision would silently
+        // merge two verbs into one translation.
+        let verbs = [
+            ToolVerb::Update,
+            ToolVerb::Create,
+            ToolVerb::Read,
+            ToolVerb::Search,
+            ToolVerb::Shell,
+            ToolVerb::Output,
+            ToolVerb::Kill,
+            ToolVerb::Fetch,
+            ToolVerb::Task,
+            ToolVerb::Todo,
+            ToolVerb::Skill,
+            ToolVerb::Generic,
+        ];
+        let mut keys: Vec<&str> = verbs.iter().map(|v| v.key()).collect();
+        keys.sort_unstable();
+        let count = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), count, "verb keys must be distinct");
+    }
+
+    #[test]
+    fn activity_label_maps_known_tools_to_gerunds() {
+        assert_eq!(activity_label("Bash"), "Running Bash");
+        assert_eq!(activity_label("Read"), "Reading");
+        assert_eq!(activity_label("Edit"), "Editing");
+        assert_eq!(activity_label("Task"), "Delegating");
+        assert_eq!(activity_label("Whatever"), "Running Whatever");
+    }
+}

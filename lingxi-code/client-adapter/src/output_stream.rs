@@ -68,14 +68,64 @@ use crate::sink::ClientEventSink;
 /// per TUI session).
 pub struct AdapterOutputStream {
     sink: Arc<dyn ClientEventSink>,
+    /// `tool_use_id` → `(tool name, call input)` for calls awaiting a result,
+    /// in INSERTION ORDER.
+    ///
+    /// The engine's `emit_tool_result` carries no input, but the result
+    /// display needs it (the diff, and the edit headline's line counts).
+    /// Mirrors the side-tables `ActiveTurn` (`tui-core/src/active_turn.rs`)
+    /// and `ChatWidget` already keep for the same reason.
+    ///
+    /// A `VecDeque` rather than a `HashMap` so [`MAX_PENDING_TOOL_CALLS`] can
+    /// evict the OLDEST entry; it is bounded at 256, so a lookup's linear scan
+    /// is nothing beside what the cap used to cost (see [`Self::remember_call`]).
+    ///
+    /// A `std::sync::Mutex`, never held across an `.await`, so the struct
+    /// stays `Send + Sync` without churning the async signatures.
+    pending: std::sync::Mutex<std::collections::VecDeque<(String, (String, serde_json::Value))>>,
 }
+
+/// Belt-and-braces bound on [`AdapterOutputStream::pending`] so a turn that
+/// never ends cannot grow it without limit.
+const MAX_PENDING_TOOL_CALLS: usize = 256;
 
 impl AdapterOutputStream {
     /// Wrap a sink. The sink is shared with the rest of the connection-scoped
     /// adapter (permission gate, turn wrapper).
     #[must_use]
     pub fn new(sink: Arc<dyn ClientEventSink>) -> Self {
-        Self { sink }
+        Self {
+            sink,
+            pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Record a dispatched call's input for the eventual result.
+    ///
+    /// At [`MAX_PENDING_TOOL_CALLS`] this evicts the OLDEST entry. It used to
+    /// `clear()`, which cost EVERY in-flight call its structured diff and
+    /// headline — one overflow blanked the whole batch instead of the single
+    /// longest-waiting call.
+    fn remember_call(&self, id: &protocol::ToolUseId, tool: &str, input: &serde_json::Value) {
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        let key = id.to_string();
+        // A re-dispatch under the same id replaces its entry rather than
+        // stacking a second one behind it.
+        pending.retain(|(pending_id, _)| pending_id != &key);
+        while pending.len() >= MAX_PENDING_TOOL_CALLS {
+            pending.pop_front();
+        }
+        pending.push_back((key, (tool.to_string(), input.clone())));
+    }
+
+    /// Take back a dispatched call's input, if it is still pending.
+    fn take_call(&self, id: &protocol::ToolUseId) -> Option<(String, serde_json::Value)> {
+        let mut pending = self.pending.lock().ok()?;
+        let key = id.to_string();
+        let at = pending.iter().position(|(pending_id, _)| pending_id == &key)?;
+        pending.remove(at).map(|(_, call)| call)
     }
 
     /// Derive the `is_error` flag from a tool-result payload.
@@ -94,12 +144,20 @@ impl AdapterOutputStream {
         tool: &str,
         result: &serde_json::Value,
     ) {
+        let is_error = Self::result_is_error(result);
+        let call_input = self.take_call(id).map(|(_, input)| input);
         self.sink
             .emit(ClientEvent::ToolUseResult {
                 id: id.to_string(),
                 tool: tool.to_string(),
                 result_json: value_to_json_string(result),
-                is_error: Self::result_is_error(result),
+                is_error,
+                display: Some(crate::tool_display::lower_tool_result_display(
+                    tool,
+                    call_input.as_ref(),
+                    result,
+                    is_error,
+                )),
             })
             .await;
     }
@@ -142,13 +200,20 @@ impl OutputStream for AdapterOutputStream {
         tool: &str,
         input: &serde_json::Value,
     ) {
+        self.remember_call(id, tool, input);
         self.sink
             .emit(ClientEvent::ToolUseStarted {
                 id: id.to_string(),
                 tool: tool.to_string(),
                 input_json: value_to_json_string(input),
+                header: Some(crate::tool_display::lower_tool_header(tool, input)),
             })
             .await;
+        // TodoWrite rewrites the whole plan. Emitted on the CALL, not the
+        // result, matching how the terminal updates its pinned block.
+        if let Some(tasks) = crate::tool_display::plan_from_tool_call(tool, input) {
+            self.sink.emit(ClientEvent::PlanUpdated { tasks }).await;
+        }
     }
 
     async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
@@ -201,6 +266,12 @@ impl OutputStream for AdapterOutputStream {
     }
 
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
+        // Any call still awaiting a result at turn end never gets one; drop
+        // the side-table so it cannot leak across turns. Mirrors
+        // `ActiveTurn`'s `tool_inputs.clear()` on `TurnEvent::TurnEnded`.
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
         // Emit the cumulative cost update BEFORE the turn-end marker so a client
         // can refresh its cost line in the same render pass it ends the turn —
         // exactly the ordering `BridgeOutputStream::emit_end_turn` uses
@@ -384,6 +455,7 @@ mod tests {
                 id: gid,
                 tool,
                 input_json,
+                ..
             } => {
                 assert_eq!(*gid, id.to_string());
                 assert_eq!(tool, "Read");
@@ -414,6 +486,7 @@ mod tests {
                 tool,
                 result_json,
                 is_error,
+                ..
             } => {
                 assert_eq!(*gid, id.to_string());
                 assert_eq!(tool, "Read");
@@ -712,5 +785,142 @@ mod tests {
                 text: "via trait object".to_string()
             }
         );
+    }
+
+    /// The live turn and a resumed transcript must produce the SAME
+    /// `ToolResultDisplayDto` for the same `(tool, input, result)`.
+    ///
+    /// This is the invariant that makes a session look identical before and
+    /// after a restart. They reach the DTO by different routes — the live path
+    /// pairs the call through `AdapterOutputStream`'s pending map, the resume
+    /// path through `turn::ToolUseIndex` across two messages — so nothing but
+    /// a test keeps them from drifting.
+    ///
+    /// The two routes are fed DIFFERENT payloads on purpose, because that is
+    /// what the engine feeds them: the live path gets `ToolCallResult.data`
+    /// (the object), the resumed path the tool's model-facing STRING. Handing
+    /// both the same `Value::String` — as this test used to — never crossed
+    /// the seam it exists to guard, and it stayed green through the whole
+    /// window in which resumed Bash/Read results rendered "(No content)".
+    #[tokio::test]
+    async fn live_and_resumed_paths_produce_identical_tool_result_displays() {
+        use client_protocol::message::MessageBlockDto;
+        use protocol::{ContentBlock, ConversationMessage, MessageId};
+
+        let id = protocol::ToolUseId::new();
+        let tool = "Edit";
+        let input = serde_json::json!({
+            "file_path": "/tmp/x.rs",
+            "old_string": "fn a() {}\n",
+            "new_string": "fn b() {}\nfn c() {}\n",
+        });
+        // The LIVE payload: the literal `data` shape from
+        // `tools/file/src/edit.rs`.
+        let result = serde_json::json!({
+            "filePath": "/tmp/x.rs",
+            "oldString": "fn a() {}\n",
+            "newString": "fn b() {}\nfn c() {}\n",
+            "originalFile": "fn a() {}\n",
+            "structuredPatch": "-fn a() {}\n+fn b() {}\n+fn c() {}\n",
+            "userModified": false,
+            "replaceAll": false,
+        });
+        // What the transcript actually persists for that same call: the
+        // model-facing string (`ToolCallResult.model_content`).
+        let content = "The file /tmp/x.rs has been updated.";
+
+        // ── live ──────────────────────────────────────────────────────────
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream.emit_tool_call(&id, tool, &input).await;
+        stream.emit_tool_result(&id, tool, "", &result).await;
+        let live = sink
+            .events()
+            .await
+            .into_iter()
+            .find_map(|e| match e {
+                ClientEvent::ToolUseResult { display, .. } => display,
+                _ => None,
+            })
+            .expect("a live display");
+
+        // ── resumed ───────────────────────────────────────────────────────
+        let history = vec![
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: tool.to_string(),
+                    input: input.clone(),
+                    provider_id: None,
+                }],
+                stop_reason: Some("tool_use".to_string()),
+            },
+            ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: content.to_string(),
+                    is_error: false,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            },
+        ];
+        let resumed = crate::lowering::lower_transcript(&history)
+            .into_iter()
+            .flat_map(|m| m.blocks)
+            .find_map(|b| match b {
+                MessageBlockDto::ToolResult { display, .. } => display,
+                _ => None,
+            })
+            .expect("a resumed display");
+
+        assert_eq!(live, resumed, "live and resumed displays must be identical");
+        // And it is a real display, not two matching empties.
+        assert_eq!(
+            live.headline.as_deref(),
+            Some("Added 2 lines, removed 1 line")
+        );
+        assert!(live.diff.is_some_and(|d| d.rows.len() == 3));
+        // The diff IS the body for an edit; the pre-edit file never ships as
+        // user-visible text.
+        assert_eq!(live.body, None);
+    }
+
+    /// Overflowing the pending-call cap must cost ONE call, not all of them.
+    ///
+    /// `remember_call` used to `clear()` the whole side-table at the cap, so
+    /// the 257th dispatched call wiped every other in-flight call's input —
+    /// and with it every one of their structured diffs and edit headlines.
+    #[tokio::test]
+    async fn overflowing_the_pending_cap_evicts_only_the_oldest_call() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        let ids: Vec<protocol::ToolUseId> = (0..=MAX_PENDING_TOOL_CALLS)
+            .map(|_| protocol::ToolUseId::new())
+            .collect();
+        for id in &ids {
+            let input = serde_json::json!({
+                "file_path": "/tmp/x.rs",
+                "old_string": "a\n",
+                "new_string": "b\n",
+            });
+            stream.emit_tool_call(id, "Edit", &input).await;
+        }
+
+        // The OLDEST call is the one that fell out.
+        assert!(stream.take_call(&ids[0]).is_none(), "oldest is evicted");
+        // Every other call — including the newest — still has its input.
+        for id in &ids[1..] {
+            assert!(
+                stream.take_call(id).is_some(),
+                "an overflow must not wipe the other in-flight calls"
+            );
+        }
     }
 }

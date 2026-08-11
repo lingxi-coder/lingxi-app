@@ -147,10 +147,10 @@ impl ActiveTurn {
                 self.text_idx = None;
                 self.running_tools.retain(|r| r != &id);
                 self.tool_heartbeats.remove(&id);
-                let (old_string, new_string, file_path) = self
-                    .tool_inputs
-                    .remove(&id)
-                    .map_or((None, None, None), |input| diff_inputs_for(&tool, &input));
+                let call_input = self.tool_inputs.remove(&id);
+                let (old_string, new_string, file_path) = call_input
+                    .as_ref()
+                    .map_or((None, None, None), |input| diff_inputs_for(&tool, input));
                 messages.push(RenderedMessage::UserToolResult {
                     id,
                     tool,
@@ -158,6 +158,7 @@ impl ActiveTurn {
                     old_string,
                     new_string,
                     file_path,
+                    input: call_input,
                 });
             }
             TurnEvent::CompactionCompleted {

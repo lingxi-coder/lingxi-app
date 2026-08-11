@@ -106,11 +106,11 @@ pub use http::{
     HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride, WebSocketConnection,
     WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
+pub use location::{LocationError, LocationFix, LocationProvider};
 pub use lsp::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
     NewDiagnosticsSource,
 };
-pub use location::{LocationError, LocationFix, LocationProvider};
 pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };

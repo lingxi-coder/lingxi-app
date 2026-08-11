@@ -163,7 +163,7 @@ cargo run --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli
 MODULEMAP="${GEN_DIR}/module.modulemap"
 : > "${MODULEMAP}"
 shopt -s nullglob
-for mm in "${GEN_DIR}"/*.modulemap; do
+for mm in "${GEN_DIR}"/*FFI.modulemap; do
   [[ "${mm}" == "${MODULEMAP}" ]] && continue
   cat "${mm}" >> "${MODULEMAP}"
   printf '\n' >> "${MODULEMAP}"

@@ -988,7 +988,6 @@ mod tests {
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
-
     /// S2 (PathAtlas): a guest base directory translates onto its host twin
     /// (untranslated it would fail containment as a nonexistent path).
     #[tokio::test]

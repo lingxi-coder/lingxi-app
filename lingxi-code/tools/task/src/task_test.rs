@@ -871,7 +871,10 @@ mod tests {
                 .expect("update ok");
 
             assert!(
-                !res.model_content.as_deref().unwrap().contains(TEAMMATE_REMINDER),
+                !res.model_content
+                    .as_deref()
+                    .unwrap()
+                    .contains(TEAMMATE_REMINDER),
                 "no reminder for a plain subagent (agent_id without teammate name)"
             );
         }

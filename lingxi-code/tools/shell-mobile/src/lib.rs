@@ -678,7 +678,11 @@ mod tests {
         // an agent-initiated `apk add` ran with no approval at all.
         let (ctx, _, _) = mobile_linux_ctx(ok_output("ok\n"));
         let tool = ShellMobileTool::new(ctx);
-        for command in ["apk add git", "npm i left-pad", "git clone https://example.com/r.git"] {
+        for command in [
+            "apk add git",
+            "npm i left-pad",
+            "git clone https://example.com/r.git",
+        ] {
             let decision = tool
                 .check_permissions(&json!({ "command": command }), &fresh_ctx())
                 .await;
@@ -686,7 +690,11 @@ mod tests {
                 panic!("{command:?} must require approval on the guest shell");
             };
             // once / session / always are what plan item 12 asks for.
-            assert!(prompt.options.len() >= 3, "{command:?} -> {:?}", prompt.options);
+            assert!(
+                prompt.options.len() >= 3,
+                "{command:?} -> {:?}",
+                prompt.options
+            );
         }
     }
 

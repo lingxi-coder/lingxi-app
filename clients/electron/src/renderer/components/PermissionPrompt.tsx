@@ -15,7 +15,66 @@
 
 import { useEffect, useRef } from 'react';
 import type { PermissionRequest } from '@lingxi/bridge-client';
+// Subpath, not the barrel — see the note in `bridge/conversation.ts`.
+import { redactSensitiveText } from '@lingxi/bridge-client/toolview';
 import { useT } from '../theme/ThemeContext';
+
+/**
+ * Execution-bearing keys, shown FIRST. These are what the user is actually
+ * authorizing; everything else in the payload is context.
+ */
+const DANGEROUS_KEYS = ['command', 'code', 'script'] as const;
+
+/** Render one payload value as text: strings raw, anything else as JSON. */
+function renderValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return 'undefined';
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Everything the confirm payload contains, redacted — NOT one probed key.
+ *
+ * The shared `toolInputDetail` returns the FIRST match of a fixed probe order
+ * (`file_path, path, notebook_path, pattern, query, url, command, …`), which is
+ * right for a transcript header and wrong here: a payload carrying both a
+ * path-ish key and a command — an MCP or third-party tool with
+ * `{"path": "/tmp", "command": "curl … | sh"}` — renders as `/tmp`, and the
+ * command being authorized is invisible in the dialog that authorizes it. A
+ * single-key probe cannot honor "show MORE"; only showing the whole payload can.
+ *
+ * A single-entry payload still renders as the bare value, so the overwhelmingly
+ * common `{"command": …}` keeps its clean, unlabeled shell-script look. Nothing
+ * is clamped or collapsed to one line: the detail box is a `pre-wrap` scroller
+ * built to show all of it, and a 40-line script cut at 160 characters hides
+ * exactly the tail worth reading.
+ */
+export function permissionDetail(toolInputJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(toolInputJson) as unknown;
+  } catch {
+    return redactSensitiveText(toolInputJson);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return redactSensitiveText(toolInputJson);
+  }
+  const input = parsed as Record<string, unknown>;
+  const keys = Object.keys(input);
+  if (keys.length === 0) return redactSensitiveText(toolInputJson);
+  if (keys.length === 1) return redactSensitiveText(renderValue(input[keys[0] as string]));
+  const ordered = [
+    ...DANGEROUS_KEYS.filter((key) => keys.includes(key)),
+    ...keys.filter((key) => !(DANGEROUS_KEYS as readonly string[]).includes(key)),
+  ];
+  return redactSensitiveText(
+    ordered.map((key) => `${key}: ${renderValue(input[key])}`).join('\n'),
+  );
+}
 
 /** Human title + detail for each {@link PermissionRequest} kind. */
 function describe(request: PermissionRequest): { title: string; detail: string } {
@@ -24,7 +83,10 @@ function describe(request: PermissionRequest): { title: string; detail: string }
     case 'tool_use_confirm':
       return {
         title: `Allow ${kind.tool_name}?`,
-        detail: previewToolInput(kind.tool_input_json),
+        // The FULL redacted payload — never a preview, and never a single
+        // probed key. This dialog is a security decision, so showing MORE is
+        // the safe failure mode; see `permissionDetail`.
+        detail: permissionDetail(kind.tool_input_json),
       };
     case 'exit_plan_mode':
       return {
@@ -39,25 +101,6 @@ function describe(request: PermissionRequest): { title: string; detail: string }
     default:
       // Exhaustiveness guard — a new kind shows a generic prompt rather than nothing.
       return { title: 'Permission requested', detail: '' };
-  }
-}
-
-/** Best-effort, never-throwing one-line preview of a tool's JSON input. */
-function previewToolInput(inputJson: string): string {
-  if (!inputJson) return '';
-  try {
-    const parsed: unknown = JSON.parse(inputJson);
-    if (parsed && typeof parsed === 'object') {
-      const obj = parsed as Record<string, unknown>;
-      const candidate =
-        obj['command'] ?? obj['file_path'] ?? obj['path'] ?? obj['pattern'] ?? obj['query'];
-      if (typeof candidate === 'string' && candidate.length > 0) {
-        return candidate;
-      }
-    }
-    return inputJson;
-  } catch {
-    return inputJson;
   }
 }
 

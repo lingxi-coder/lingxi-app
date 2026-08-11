@@ -143,12 +143,9 @@ impl IosPlatform {
         // mount table maps them onto their host-backed twins, host paths keep
         // passing through unchanged, and unbacked (fakefs) guest space is
         // refused. Legacy mode keeps the bare host filesystem.
-        let base_fs: Arc<dyn FileSystem> =
-            Arc::new(PosixFileSystem::new(inputs.app_sandbox_root));
+        let base_fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(inputs.app_sandbox_root));
         let fs: Arc<dyn FileSystem> = match (&effective_runtime, mobile_linux_selected) {
-            (Some(runtime), true) => {
-                Arc::new(GuestPathFileSystem::new(base_fs, runtime.clone()))
-            }
+            (Some(runtime), true) => Arc::new(GuestPathFileSystem::new(base_fs, runtime.clone())),
             _ => base_fs,
         };
         Self {
@@ -247,9 +244,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use traits::{
-        CameraError, CapturePhotoOpts, CapturedImage, FsError, SharePayload, ShareError,
-        ShareResult, UnavailableMobileLinuxRuntime, VoiceError, VoiceRecording,
-        VoiceRecordingOpts,
+        CameraError, CapturePhotoOpts, CapturedImage, FsError, ShareError, SharePayload,
+        ShareResult, UnavailableMobileLinuxRuntime, VoiceError, VoiceRecording, VoiceRecordingOpts,
     };
 
     struct StubCamera;

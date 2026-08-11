@@ -316,17 +316,16 @@ final class LXISHNativeRootfsManager {
         return status(for: config)
     }
 
-    func cacheMounts(_ mounts: [LXISHMountSpec], for config: LXISHNativeConfig) throws {
-        try fileManager.createDirectory(at: config.normalizedManagedRoot, withIntermediateDirectories: true)
-        let data = try LXISHBridgeJSON.encoder().encode(mounts)
-        try data.write(to: config.mountsCacheURL, options: .atomic)
-    }
-
-    func cachedMounts(for config: LXISHNativeConfig) -> [LXISHMountSpec] {
-        guard let data = try? Data(contentsOf: config.mountsCacheURL) else {
-            return []
+    /// Request mounts contain installation-specific absolute paths (including
+    /// the app bundle UUID) and per-job build directories. Replaying those
+    /// paths on a later boot can fail before the current request has a chance
+    /// to install its valid mounts. Stable home/workspace mounts are rebuilt
+    /// from `LXISHNativeConfig`, so no request mount belongs on disk.
+    func mountsForBoot(for config: LXISHNativeConfig) throws -> [LXISHMountSpec] {
+        if fileManager.fileExists(atPath: config.mountsCacheURL.path) {
+            try fileManager.removeItem(at: config.mountsCacheURL)
         }
-        return (try? LXISHBridgeJSON.decoder().decode([LXISHMountSpec].self, from: data)) ?? []
+        return []
     }
 
     private func readArchTag(at rootfsURL: URL) -> String? {

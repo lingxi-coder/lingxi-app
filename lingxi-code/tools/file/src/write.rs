@@ -600,7 +600,6 @@ mod tests {
         assert_eq!(written, "from guest");
     }
 
-
     #[tokio::test]
     async fn prompt_is_model_gated() {
         let tmp = TempDir::new().unwrap();

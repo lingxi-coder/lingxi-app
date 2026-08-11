@@ -25,7 +25,7 @@ class ComputerUseSetupUiTest {
                 ComputerUseSetupBanner(
                     status = ComputerUseSetupStatus(
                         accessibilityEnabled = false,
-                        chromeAuthorized = false,
+                        browserAuthorized = false,
                         sessionActive = false,
                     ),
                     onOpenComputerUseSettings = { opened = true },

@@ -211,11 +211,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// File tools call this BEFORE canonicalization/containment so a guest
     /// path validates as its host twin. `write` marks mutating operations.
-    fn translate_model_path(
-        &self,
-        path: &str,
-        write: bool,
-    ) -> Result<Option<String>, FsError> {
+    fn translate_model_path(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let _ = (path, write);
         Ok(None)
     }

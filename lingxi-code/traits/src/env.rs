@@ -30,7 +30,11 @@ pub fn is_env_truthy(value: Option<&str>) -> bool {
 #[must_use]
 pub fn agent_swarms_enabled() -> bool {
     std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
-        || is_env_truthy(std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS").ok().as_deref())
+        || is_env_truthy(
+            std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
+                .ok()
+                .as_deref(),
+        )
 }
 
 /// `isEnvDefinedFalsy(envVar)` (`utils/envUtils.ts:39-47`): a defined,

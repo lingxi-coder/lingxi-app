@@ -342,6 +342,7 @@ struct ProviderEditPage: View {
     let providerId: String
 
     @State private var showKey = false
+    @State private var editingStoredCredential = false
 
     @ViewBuilder
     var body: some View {
@@ -365,11 +366,18 @@ struct ProviderEditPage: View {
 
             FieldLabel(text: String(localized: "settings_api_url"))
             SettingsField(text: binding(\.baseURL), placeholder: preset.defaultUrl)
+                .disabled(repository.oauthProvider(for: editing.profile.presetID) != nil)
             FieldHint(String(localized: "settings_provider_url_hint \(preset.defaultUrl.isEmpty ? "—" : preset.defaultUrl)"))
 
-            FieldLabel(text: "API Key")
-            keyField(editing, preset)
-            FieldHint(editing.maskedCredentialSummary + String(localized: "settings_provider_key_hint_suffix"))
+            if editing.profile.presetID != "openai-chatgpt" {
+                FieldLabel(text: "API Key")
+                keyField(editing, preset)
+                FieldHint(editing.maskedCredentialSummary + String(localized: "settings_provider_key_hint_suffix"))
+            }
+
+            if repository.oauthProvider(for: editing.profile.presetID) != nil {
+                oauthSection(editing)
+            }
 
             if !preset.models.isEmpty { modelPicker(editing, preset) }
             FieldLabel(text: preset.models.isEmpty
@@ -415,6 +423,8 @@ struct ProviderEditPage: View {
                 Task {
                     await repository.applyChanges(providerId)
                     store.llmProviders = repository.legacyProviders()
+                    editingStoredCredential = false
+                    showKey = false
                 }
             } label: {
                 Text("settings_provider_apply_reconnect")
@@ -428,6 +438,7 @@ struct ProviderEditPage: View {
             .padding(.top, 10)
             .disabled(editing.operationInFlight || editing.connectionState == .testing)
             .buttonStyle(.plain)
+
             }
             .task(id: repository.syncRevision) {
                 store.llmProviders = repository.legacyProviders()
@@ -493,44 +504,80 @@ struct ProviderEditPage: View {
 
     private func keyField(_ p: ProviderProfileState, _ preset: ProviderPreset) -> some View {
         HStack(spacing: 0) {
-            Group {
-                if showKey {
-                    TextField(keyPlaceholder(p, preset), text: pendingSecretBinding)
-                } else {
-                    SecureField(keyPlaceholder(p, preset), text: pendingSecretBinding)
+            if let mask = p.credentialFieldMask, !editingStoredCredential {
+                HStack(spacing: 8) {
+                    Text(mask)
+                        .font(.system(size: 13.5, design: .monospaced))
+                        .foregroundColor(t.text)
+                    Text("settings_provider_key_stored_securely")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(t.ok)
+                    Spacer(minLength: 4)
                 }
+                .padding(.leading, 12)
+                .padding(.trailing, 8)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("provider.api-key.stored")
+
+                keyFieldDivider
+
+                Button {
+                    editingStoredCredential = true
+                } label: {
+                    Text("settings_provider_replace_key")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(t.text3)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("provider.api-key.replace")
+
+                keyFieldDivider
+            } else {
+                Group {
+                    if showKey {
+                        TextField(keyPlaceholder(p, preset), text: pendingSecretBinding)
+                    } else {
+                        SecureField(keyPlaceholder(p, preset), text: pendingSecretBinding)
+                    }
+                }
+                .font(.system(size: 13.5, design: .monospaced))
+                .foregroundColor(t.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .lineLimit(1)
+                .padding(.vertical, 11)
+                .padding(.leading, 12)
+                .padding(.trailing, 8)
+                .frame(maxWidth: .infinity)
+                .layoutPriority(1)
+                .accessibilityIdentifier("provider.api-key")
+
+                if p.canRevealCredential {
+                    keyFieldDivider
+
+                    Button { showKey.toggle() } label: {
+                        Text(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key"))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(t.text3)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(showKey ? String(localized: "settings_provider_hide_api_key_accessibility") : String(localized: "settings_provider_show_api_key_accessibility"))
+                    .accessibilityIdentifier("provider.api-key.visibility")
+                }
+
+                keyFieldDivider
             }
-            .font(.system(size: 13.5, design: .monospaced))
-            .foregroundColor(t.text)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .lineLimit(1)
-            .padding(.vertical, 11)
-            .padding(.leading, 12)
-            .padding(.trailing, 8)
-            .frame(maxWidth: .infinity)
-            .layoutPriority(1)
-            .accessibilityIdentifier("provider.api-key")
-
-            keyFieldDivider
-
-            Button { showKey.toggle() } label: {
-                Text(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key"))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(t.text3)
-                    .frame(minWidth: 44, minHeight: 44)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(showKey ? String(localized: "settings_provider_hide_api_key_accessibility") : String(localized: "settings_provider_show_api_key_accessibility"))
-            .accessibilityIdentifier("provider.api-key.visibility")
-
-            keyFieldDivider
 
             Button {
                 if p.clearCredentialOnApply {
                     repository.cancelCredentialClear(for: providerId)
                 } else {
                     repository.clearCredentialRequest(for: providerId)
+                    editingStoredCredential = false
+                    showKey = false
                 }
             } label: {
                 Text(p.clearCredentialOnApply ? String(localized: "settings_provider_keep_key") : String(localized: "settings_provider_clear_key"))
@@ -544,6 +591,85 @@ struct ProviderEditPage: View {
         .background(t.surface)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+    }
+
+    @ViewBuilder
+    private func oauthSection(_ p: ProviderProfileState) -> some View {
+        SettingsSection(label: "OAuth") {
+            VStack(alignment: .leading, spacing: 10) {
+                if let oauth = p.oauthState, oauth.signedIn {
+                    HStack(spacing: 8) {
+                        Circle().fill(t.ok).frame(width: 7, height: 7)
+                        Text("已登录")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(t.text)
+                        if let account = oauth.accountLabel, !account.isEmpty {
+                            Text(account)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundColor(t.text4)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                    Text(p.hasStoredAPIKey ? "当前使用 API Key（OAuth 备用）" : "当前使用 OAuth")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(t.text4)
+                    HStack(spacing: 8) {
+                        Button {
+                            Task {
+                                await repository.testConnection(providerId)
+                                store.llmProviders = repository.legacyProviders()
+                            }
+                        } label: {
+                            Text("测试 OAuth")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(t.text2)
+                                .padding(.horizontal, 10).padding(.vertical, 7)
+                                .background(t.windowBg)
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(t.border, lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(p.operationInFlight || p.connectionState == .testing)
+
+                        Button {
+                            Task {
+                                await repository.logoutOAuth(for: providerId)
+                                store.llmProviders = repository.legacyProviders()
+                            }
+                        } label: {
+                            Text("退出 OAuth")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(t.danger)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(p.operationInFlight)
+                    }
+                } else {
+                    Text("使用系统浏览器登录，不会把 refresh token 交给 Swift UI。")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(t.text4)
+                        .lineSpacing(3)
+                    Button {
+                        Task {
+                            await repository.loginOAuth(for: providerId)
+                            store.llmProviders = repository.legacyProviders()
+                        }
+                    } label: {
+                        Text(p.profile.presetID == "openai-chatgpt" ? "登录 ChatGPT" : "登录 Anthropic")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(p.operationInFlight ? t.text4 : t.accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(p.operationInFlight)
+                }
+            }
+            .padding(.vertical, 3)
+        }
     }
 
     private var pendingSecretBinding: Binding<String> {

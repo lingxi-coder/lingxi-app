@@ -5,12 +5,25 @@ import SwiftUI
 typealias ProviderCommandSubmitter = (ClientCommand) async throws -> Void
 
 typealias ProviderConnectionTester = (ProviderLaunchProfile, String?) async throws -> ProviderConnectionTestResult
+typealias ProviderOAuthLoginHandler = (String) async throws -> ProviderOAuthState
+typealias ProviderOAuthStateLoader = (String) async throws -> ProviderOAuthState
+typealias ProviderOAuthLogoutHandler = (String) async throws -> Void
+typealias ProviderOAuthConnectionTester = (String, ProviderLaunchProfile) async throws -> ProviderConnectionTestResult
 
 typealias ProviderApplyReconnectHandler = (ProviderLaunchSnapshot) async throws -> Void
 
 enum ProviderConnectionTestResult: Equatable {
-    case success(message: String? = nil)
+    case success(message: String? = nil, usedStoredCredential: Bool = true)
     case failure(message: String)
+}
+
+struct ProviderOAuthState: Equatable {
+    let provider: String
+    let signedIn: Bool
+    let accountLabel: String?
+    let accountID: String?
+    let organizationID: String?
+    let fedramp: Bool
 }
 
 enum ProviderProfileValidationError: LocalizedError, Equatable {
@@ -145,6 +158,8 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
 }
 
 struct ProviderProfileState: Identifiable, Equatable {
+    private static let storedCredentialMask = "••••••••••••"
+
     var profile: ProviderStoredProfile
     var credentialState: ProviderCredentialState = .unknown
     var connectionState: ProviderConnectionState = .idle
@@ -154,6 +169,7 @@ struct ProviderProfileState: Identifiable, Equatable {
     var validationMessage: String? = nil
     var operationInFlight = false
     var hasLegacyAnthropicCredential = false
+    var oauthState: ProviderOAuthState? = nil
 
     var id: String { profile.id }
 
@@ -165,11 +181,26 @@ struct ProviderProfileState: Identifiable, Equatable {
         if clearCredentialOnApply {
             return false
         }
-        return credentialState == .configured || hasLegacyAnthropicCredential
+        return hasStoredAPIKey || oauthState?.signedIn == true
+    }
+
+    var hasStoredAPIKey: Bool {
+        !clearCredentialOnApply && (credentialState == .configured || hasLegacyAnthropicCredential)
     }
 
     var effectiveHasCredential: Bool {
         hasPendingSecret || hasStoredCredential
+    }
+
+    /// The secure store never returns credential material to the settings UI.
+    /// Render a fixed sentinel only when a stored credential is confirmed and
+    /// there is no replacement draft that the user can reveal.
+    var credentialFieldMask: String? {
+        hasStoredAPIKey && !hasPendingSecret ? Self.storedCredentialMask : nil
+    }
+
+    var canRevealCredential: Bool {
+        hasPendingSecret
     }
 
     var statusLabel: String {
@@ -210,6 +241,12 @@ struct ProviderProfileState: Identifiable, Equatable {
         }
         if hasLegacyAnthropicCredential {
             return String(localized: "settings_provider_credential_legacy_migrated")
+        }
+        if oauthState?.signedIn == true, hasStoredAPIKey {
+            return "API Key 优先，OAuth 已登录"
+        }
+        if oauthState?.signedIn == true {
+            return "OAuth 已登录"
         }
         if hasStoredCredential {
             return String(localized: "settings_provider_key_stored_securely")
@@ -253,6 +290,7 @@ private enum ProviderRepositoryDefaults {
     static let builtInProfileIDsByPreset: [String: String] = [
         "anthropic": "anthropic",
         "openai": "openai",
+        "openai-chatgpt": "openai-chatgpt",
         "deepseek": "deepseek",
         "kimi": "kimi",
         "kimi-code": "kimi-code",
@@ -274,6 +312,10 @@ final class ProviderRepository {
     private var nextOperationID: UInt64 = 1
     private var commandSubmitter: ProviderCommandSubmitter?
     private var connectionTester: ProviderConnectionTester?
+    private var oauthLoginHandler: ProviderOAuthLoginHandler?
+    private var oauthStateLoader: ProviderOAuthStateLoader?
+    private var oauthLogoutHandler: ProviderOAuthLogoutHandler?
+    private var oauthConnectionTester: ProviderOAuthConnectionTester?
     private var applyReconnectHandler: ProviderApplyReconnectHandler?
     private var lastAppliedRoutingSettings: ProviderRoutingSettings
 
@@ -295,14 +337,16 @@ final class ProviderRepository {
         let loadedEnvelope = Self.loadEnvelope(from: resolvedPersistenceURL, fileManager: fileManager)
         let loadedProfiles = loadedEnvelope?.profiles ?? []
         let migratedProfiles = loadedProfiles.map(Self.migrateLegacyDeepSeekProfile)
+        let normalizedOAuthProfiles = migratedProfiles.map(Self.normalizedOAuthProfile)
         let didMigrateDeepSeek = loadedProfiles != migratedProfiles
+        let didNormalizeOAuthProfiles = migratedProfiles != normalizedOAuthProfiles
         let initialRoutingSettings = loadedEnvelope?.routing ?? ProviderRoutingSettings()
         self.persistenceURL = resolvedPersistenceURL
         self.fileManager = fileManager
         self.credentialOperationTimeout = credentialOperationTimeout
         self.routingSettings = initialRoutingSettings
         self.lastAppliedRoutingSettings = initialRoutingSettings
-        self.profiles = migratedProfiles.map {
+        self.profiles = normalizedOAuthProfiles.map {
             ProviderProfileState(
                 profile: $0,
                 hasLegacyAnthropicCredential: false
@@ -315,7 +359,7 @@ final class ProviderRepository {
         }
         normalizeDefaults()
         sanitizeRoutingSettings(persist: false)
-        if didMigrateDeepSeek {
+        if didMigrateDeepSeek || didNormalizeOAuthProfiles {
             persistProfiles()
         }
     }
@@ -323,7 +367,11 @@ final class ProviderRepository {
     func configure(
         submitCommand: ProviderCommandSubmitter?,
         testConnection: ProviderConnectionTester? = nil,
-        applyReconnect: ProviderApplyReconnectHandler? = nil
+        applyReconnect: ProviderApplyReconnectHandler? = nil,
+        oauthLogin: ProviderOAuthLoginHandler? = nil,
+        oauthState: ProviderOAuthStateLoader? = nil,
+        oauthLogout: ProviderOAuthLogoutHandler? = nil,
+        testOAuthConnection: ProviderOAuthConnectionTester? = nil
     ) {
         if cancelPendingListOperations() {
             bumpSyncRevision()
@@ -331,6 +379,10 @@ final class ProviderRepository {
         commandSubmitter = submitCommand
         connectionTester = testConnection
         applyReconnectHandler = applyReconnect
+        oauthLoginHandler = oauthLogin
+        oauthStateLoader = oauthState
+        oauthLogoutHandler = oauthLogout
+        oauthConnectionTester = testOAuthConnection
     }
 
     func handle(event: ClientEvent) {
@@ -450,6 +502,14 @@ final class ProviderRepository {
         Presets.llm.first(where: { $0.id == presetID }) ?? Presets.llm[Presets.llm.count - 1]
     }
 
+    func oauthProvider(for presetID: String) -> String? {
+        switch presetID {
+        case "anthropic": return "anthropic"
+        case "openai-chatgpt": return "openai-chatgpt"
+        default: return nil
+        }
+    }
+
     func fallbackCandidates() -> [ProviderFallbackCandidate] {
         let orderByProfileID = Dictionary(uniqueKeysWithValues: routingSettings.fallbackProfileIDs.enumerated().map { ($1, $0) })
         return eligibleFallbackProfiles().map { profile in
@@ -523,6 +583,7 @@ final class ProviderRepository {
     func updateProfile(_ id: String, mutate: (inout ProviderStoredProfile) -> Void) {
         guard let index = indexOfProfile(id: id) else { return }
         mutate(&profiles[index].profile)
+        profiles[index].profile = Self.normalizedOAuthProfile(profiles[index].profile)
         profiles[index].validationMessage = nil
         if profiles[index].profile.isDefault, !profiles[index].profile.enabled {
             profiles[index].profile.isDefault = false
@@ -571,8 +632,21 @@ final class ProviderRepository {
         bumpSyncRevision()
     }
 
+    func discardCredentialChanges(for id: String) {
+        guard let index = indexOfProfile(id: id) else { return }
+        profiles[index].pendingSecret = ""
+        profiles[index].clearCredentialOnApply = false
+        profiles[index].validationMessage = nil
+        profiles[index].detailMessage = nil
+        profiles[index].connectionState = .idle
+        bumpSyncRevision()
+    }
+
     func refreshCredentialStatus() async {
-        let targets = profiles.map { state in
+        await refreshOAuthStatus()
+        // Anthropic supports both credential kinds. ChatGPT OAuth is a separate
+        // provider and intentionally has no API-key slot to query.
+        let targets = profiles.filter { $0.profile.presetID != "openai-chatgpt" }.map { state in
             ProviderCredentialTarget(
                 settingsID: state.id,
                 credentialID: engineProfileID(for: state.profile)
@@ -604,8 +678,38 @@ final class ProviderRepository {
         bumpSyncRevision()
     }
 
+    private func refreshOAuthStatus() async {
+        guard let oauthStateLoader else { return }
+        let targets = profiles.compactMap { state -> (String, String)? in
+            guard let provider = oauthProvider(for: state.profile.presetID) else { return nil }
+            return (state.id, provider)
+        }
+        for (settingsID, provider) in targets {
+            do {
+                let state = try await oauthStateLoader(provider)
+                guard let index = indexOfProfile(id: settingsID) else { continue }
+                profiles[index].oauthState = state
+                if state.signedIn {
+                    profiles[index].detailMessage = nil
+                }
+            } catch {
+                guard let index = indexOfProfile(id: settingsID) else { continue }
+                profiles[index].oauthState = nil
+                profiles[index].detailMessage = error.localizedDescription
+            }
+        }
+        bumpSyncRevision()
+    }
+
     func testConnection(_ id: String) async {
         guard let index = indexOfProfile(id: id) else { return }
+        if let provider = oauthProvider(for: profiles[index].profile.presetID),
+           profiles[index].oauthState?.signedIn == true,
+           (profiles[index].profile.presetID == "openai-chatgpt" || !profiles[index].hasStoredAPIKey),
+           !profiles[index].hasPendingSecret {
+            await testOAuthConnection(id, provider: provider)
+            return
+        }
         do {
             let launchProfile = try validateAndBuildLaunchProfile(for: profiles[index])
             profiles[index].validationMessage = nil
@@ -626,9 +730,13 @@ final class ProviderRepository {
             )
             guard let currentIndex = indexOfProfile(id: id) else { return }
             switch result {
-            case .success(let message):
+            case .success(let message, let usedStoredCredential):
                 profiles[currentIndex].connectionState = .connected
-                profiles[currentIndex].detailMessage = message ?? String(localized: "settings_provider_test_success")
+                let successMessage = message ?? String(localized: "settings_provider_test_success")
+                let unsavedSuffix = usedStoredCredential
+                    ? ""
+                    : String(localized: "settings_provider_key_unsaved_suffix")
+                profiles[currentIndex].detailMessage = successMessage + unsavedSuffix
             case .failure(let message):
                 profiles[currentIndex].connectionState = .failed
                 profiles[currentIndex].detailMessage = message
@@ -637,6 +745,104 @@ final class ProviderRepository {
             if let currentIndex = indexOfProfile(id: id) {
                 profiles[currentIndex].connectionState = .failed
                 profiles[currentIndex].validationMessage = error.errorDescription
+            }
+        } catch {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+            }
+        }
+        bumpSyncRevision()
+    }
+
+    func loginOAuth(for id: String) async {
+        guard let index = indexOfProfile(id: id),
+              let provider = oauthProvider(for: profiles[index].profile.presetID),
+              let oauthLoginHandler
+        else { return }
+        profiles[index].operationInFlight = true
+        profiles[index].connectionState = .testing
+        profiles[index].detailMessage = nil
+        do {
+            let state = try await oauthLoginHandler(provider)
+            guard let currentIndex = indexOfProfile(id: id) else { return }
+            profiles[currentIndex].oauthState = state
+            profiles[currentIndex].profile.enabled = true
+            profiles[currentIndex].operationInFlight = false
+            profiles[currentIndex].connectionState = .idle
+            persistProfiles()
+            try await applyReconnectHandler?(makeLaunchSnapshot())
+            // Every `await` in this @MainActor class is a reentrancy point: a
+            // `removeProfile` that lands while the reconnect is in flight shifts
+            // — or deletes — the row `currentIndex` was resolved against, so
+            // writing through the stale index tags the WRONG profile or traps
+            // out of bounds. Re-resolve, exactly as the catch arms below do.
+            guard let reconnectedIndex = indexOfProfile(id: id) else {
+                bumpSyncRevision()
+                return
+            }
+            profiles[reconnectedIndex].detailMessage = "OAuth 登录成功"
+        } catch {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].operationInFlight = false
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+            }
+            lastRepositoryError = error.localizedDescription
+        }
+        bumpSyncRevision()
+    }
+
+    func logoutOAuth(for id: String) async {
+        guard let index = indexOfProfile(id: id),
+              let provider = oauthProvider(for: profiles[index].profile.presetID),
+              let oauthLogoutHandler
+        else { return }
+        profiles[index].operationInFlight = true
+        do {
+            try await oauthLogoutHandler(provider)
+            guard let currentIndex = indexOfProfile(id: id) else { return }
+            profiles[currentIndex].oauthState = nil
+            profiles[currentIndex].operationInFlight = false
+            profiles[currentIndex].connectionState = .idle
+            persistProfiles()
+            try await applyReconnectHandler?(makeLaunchSnapshot())
+            // Re-resolve after the await: the row may have been removed or
+            // reordered while the reconnect was in flight (see `loginOAuth`).
+            guard let reconnectedIndex = indexOfProfile(id: id) else {
+                bumpSyncRevision()
+                return
+            }
+            profiles[reconnectedIndex].detailMessage = "OAuth 已退出"
+        } catch {
+            if let currentIndex = indexOfProfile(id: id) {
+                profiles[currentIndex].operationInFlight = false
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+            }
+            lastRepositoryError = error.localizedDescription
+        }
+        bumpSyncRevision()
+    }
+
+    private func testOAuthConnection(_ id: String, provider: String) async {
+        guard let index = indexOfProfile(id: id) else { return }
+        profiles[index].connectionState = .testing
+        profiles[index].detailMessage = nil
+        do {
+            guard let oauthConnectionTester else {
+                throw ProviderRepositoryOperationError.failed("OAuth 测试回调不可用")
+            }
+            let profile = try validateAndBuildLaunchProfile(for: profiles[index])
+            let result = try await oauthConnectionTester(provider, profile)
+            guard let currentIndex = indexOfProfile(id: id) else { return }
+            switch result {
+            case .success(let message, _):
+                profiles[currentIndex].connectionState = .connected
+                profiles[currentIndex].detailMessage = message ?? "OAuth 认证探测成功"
+            case .failure(let message):
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = message
             }
         } catch {
             if let currentIndex = indexOfProfile(id: id) {
@@ -662,8 +868,9 @@ final class ProviderRepository {
                     credentialID: launchProfile.id
                 )
                 if let updatedIndex = indexOfProfile(id: id) {
-                    profiles[updatedIndex].profile.enabled = false
-                    profiles[updatedIndex].profile.isDefault = false
+                    let keepsOAuth = profiles[updatedIndex].oauthState?.signedIn == true
+                    profiles[updatedIndex].profile.enabled = keepsOAuth
+                    profiles[updatedIndex].profile.isDefault = keepsOAuth
                     normalizeDefaults()
                     persistProfiles()
                 }
@@ -738,6 +945,27 @@ final class ProviderRepository {
     func removeProfile(_ id: String) async {
         guard let index = indexOfProfile(id: id) else { return }
         let state = profiles[index]
+        if state.oauthState?.signedIn == true, let oauthProvider = oauthProvider(for: state.profile.presetID), let oauthLogoutHandler {
+            do {
+                try await oauthLogoutHandler(oauthProvider)
+            } catch {
+                // `index` was resolved BEFORE the await. This @MainActor class
+                // is reentrant across every suspension, so a concurrent
+                // `removeProfile`/reload may have shifted or dropped that row —
+                // re-resolve before writing, like the credential-delete arm
+                // below already does.
+                guard let currentIndex = indexOfProfile(id: id) else {
+                    lastRepositoryError = error.localizedDescription
+                    bumpSyncRevision()
+                    return
+                }
+                profiles[currentIndex].connectionState = .failed
+                profiles[currentIndex].detailMessage = error.localizedDescription
+                lastRepositoryError = error.localizedDescription
+                bumpSyncRevision()
+                return
+            }
+        }
         let shouldDeleteCredential = commandSubmitter != nil || state.hasStoredCredential || state.clearCredentialOnApply
         if shouldDeleteCredential {
             do {
@@ -1053,6 +1281,8 @@ final class ProviderRepository {
             return .init(providerType: "gemini", envVar: "GEMINI_API_KEY")
         case "openai":
             return .init(providerType: "openai-responses", envVar: "OPENAI_API_KEY")
+        case "openai-chatgpt":
+            return .init(providerType: "openai-responses", envVar: "")
         case "deepseek":
             return .init(providerType: "openai", envVar: "DEEPSEEK_API_KEY")
         case "kimi":
@@ -1068,6 +1298,17 @@ final class ProviderRepository {
         default:
             return .init(providerType: "openai", envVar: "CUSTOM_API_KEY")
         }
+    }
+
+    private static func normalizedOAuthProfile(_ profile: ProviderStoredProfile) -> ProviderStoredProfile {
+        guard profile.presetID == "anthropic" || profile.presetID == "openai-chatgpt",
+              let defaultURL = Presets.llm.first(where: { $0.id == profile.presetID })?.defaultUrl
+        else {
+            return profile
+        }
+        var normalized = profile
+        normalized.baseURL = defaultURL
+        return normalized
     }
 
     private func indexOfProfile(id: String) -> Int? {

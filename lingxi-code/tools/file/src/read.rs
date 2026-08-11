@@ -3381,7 +3381,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn empty_file_emits_empty_warning_model_content() {
         let tmp = TempDir::new().unwrap();

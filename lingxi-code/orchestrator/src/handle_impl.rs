@@ -34,6 +34,30 @@ use traits::{
     StatusSnapshot,
 };
 
+/// Keep the session's provider-local wire model separate from the
+/// provider-qualified reference used by client pickers.
+///
+/// An explicit profile is useful routing evidence, but it does not make a
+/// `profile/model` string a valid provider request model. When the catalog
+/// proves that the reference's qualifier and the explicit profile describe the
+/// same route, store only the provider-local remainder. Exact slash-bearing wire
+/// ids such as OpenRouter's `openrouter/auto` do not parse as qualified refs and
+/// therefore remain byte-identical.
+fn normalize_session_model_ref(
+    model: &str,
+    explicit_profile: Option<&str>,
+    listings: &[traits::ModelListing],
+) -> (String, Option<String>) {
+    let (parsed_model, parsed_profile) = traits::parse_model_ref(model, listings);
+    match explicit_profile {
+        Some(profile) if parsed_profile.as_deref() == Some(profile) => {
+            (parsed_model, Some(profile.to_string()))
+        }
+        Some(profile) => (model.to_string(), Some(profile.to_string())),
+        None => (parsed_model, parsed_profile),
+    }
+}
+
 impl ConversationOrchestrator {
     /// Reset state whose lifetime is one conversation rather than one process.
     /// Both `/clear` and in-place resume cross that boundary; keeping any of
@@ -163,19 +187,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if !runtime.model.is_empty() {
             // `session.model` is the WIRE model id; the provider profile rides
             // beside it. A transcript can hand back a provider-QUALIFIED
-            // reference with no profile (an older engine, another client, or a
-            // session whose `modelProfile` was never persisted), and adopting
-            // that verbatim ships `"deepseek/deepseek-v4-flash"` as the wire id
-            // — the provider 404s on every message of the resumed session.
+            // reference either with no profile or with the matching profile
+            // persisted beside the still-qualified model (an older engine,
+            // another client, or a partially migrated session). Adopting that
+            // verbatim ships `"deepseek/deepseek-v4-flash"` as the wire id and
+            // the provider rejects every message of the resumed session.
             // Re-split it exactly as `SetModel` does, so the resumed session
             // lands on the same (model, profile) pair a fresh pick produces.
             // `parse_model_ref` only splits a prefix a real listing claims, so
             // an unknown ref and an id whose own name contains a slash
             // (`openrouter/auto`) are both preserved.
-            let (model, profile) = match &runtime.model_profile {
-                Some(profile) => (runtime.model.clone(), Some(profile.clone())),
-                None => traits::parse_model_ref(&runtime.model, &self.api.list_model_listings()),
-            };
+            let listings = self.api.list_model_listings();
+            let (model, profile) = normalize_session_model_ref(
+                &runtime.model,
+                runtime.model_profile.as_deref(),
+                &listings,
+            );
             s.model = model;
             s.model_profile = profile;
         }
@@ -626,9 +653,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
+        let listings = self.api.list_model_listings();
+        let (model, profile) = normalize_session_model_ref(model, profile, &listings);
         let mut s = self.session.lock().await;
-        s.model = model.to_string();
-        s.model_profile = profile.map(str::to_string);
+        s.model = model;
+        s.model_profile = profile;
         Ok(())
     }
 
@@ -1486,6 +1515,70 @@ mod tests {
         assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
     }
 
+    /// A persisted profile does not make a qualified model reference safe to
+    /// use as the wire id. Some older/mobile session paths recorded BOTH
+    /// `model = "deepseek/deepseek-v4-flash"` and
+    /// `modelProfile = "deepseek"`; trusting the latter left the qualified
+    /// UI reference in `session.model` and every subsequent request failed
+    /// model resolution. Normalize this shape exactly like the profile-less
+    /// legacy row above.
+    #[tokio::test]
+    async fn hot_resume_splits_a_qualified_model_ref_with_matching_profile() {
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        api.set_model_listings(vec![traits::ModelListing {
+            display_model: "deepseek-v4-flash".to_string(),
+            request_model: "deepseek-v4-flash".to_string(),
+            provider_id: "deepseek".to_string(),
+            provider_label: "DeepSeek".to_string(),
+            description: None,
+            supports_reasoning: true,
+        }]);
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot {
+                model: "deepseek/deepseek-v4-flash".to_string(),
+                model_profile: Some("deepseek".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hot resume");
+
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "deepseek-v4-flash");
+        assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
+        drop(session);
+
+        // The lower-level switch seam is also used outside the mobile command
+        // adapter. It must uphold the same invariant even if a caller passes
+        // the UI reference and explicit profile together.
+        traits::OrchestratorHandle::switch_model(
+            &orch,
+            "deepseek/deepseek-v4-flash",
+            Some("deepseek"),
+        )
+        .await
+        .expect("switch model");
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "deepseek-v4-flash");
+        assert_eq!(session.model_profile.as_deref(), Some("deepseek"));
+    }
+
     /// The split must not corrupt a reference that is legitimately un-splittable:
     /// an OpenRouter wire id contains a slash of its own, and a bare id that no
     /// listing claims stays exactly as recorded.
@@ -1502,7 +1595,11 @@ mod tests {
         for (recorded, want_model, want_profile) in [
             // An openrouter wire id whose OWN name contains a slash: the
             // qualified form splits to the full wire id, not to "auto".
-            ("openrouter/openrouter/auto", "openrouter/auto", Some("openrouter")),
+            (
+                "openrouter/openrouter/auto",
+                "openrouter/auto",
+                Some("openrouter"),
+            ),
             // No listing claims this pair ⇒ keep the string verbatim.
             ("someproxy/some-model", "someproxy/some-model", None),
             ("claude-sonnet-5", "claude-sonnet-5", None),

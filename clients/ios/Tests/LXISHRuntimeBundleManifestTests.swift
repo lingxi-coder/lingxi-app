@@ -64,6 +64,52 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         )
     }
 
+    func testMemoryLimitObservationTracksPeakAndFirstExceededSample() {
+        var observation = LXISHMemoryLimitObservation(limitBytes: 800)
+
+        XCTAssertFalse(observation.recordWatchdogSample(residentBytes: 600))
+        XCTAssertTrue(observation.recordWatchdogSample(residentBytes: 900))
+        XCTAssertFalse(observation.recordWatchdogSample(residentBytes: 1_200))
+
+        XCTAssertEqual(observation.observedResidentBytesAtExceed, 900)
+        XCTAssertEqual(observation.peakResidentBytes, 1_200)
+        XCTAssertEqual(
+            observation.resourceLimitMessage,
+            "resource_limit_exceeded: reason=memory_limit observed=900 peak=1200 limit=800 bytes"
+        )
+    }
+
+    func testMemoryWarningProducesDistinctResourceLimitDiagnostic() {
+        var observation = LXISHMemoryLimitObservation(limitBytes: 800)
+        XCTAssertFalse(observation.recordWatchdogSample(residentBytes: 500))
+
+        XCTAssertTrue(observation.recordMemoryWarning(residentBytes: 700))
+        XCTAssertFalse(observation.recordMemoryWarning(residentBytes: 750))
+
+        XCTAssertEqual(observation.observedResidentBytesAtExceed, 700)
+        XCTAssertEqual(observation.peakResidentBytes, 750)
+        XCTAssertEqual(
+            observation.resourceLimitMessage,
+            "resource_limit_exceeded: reason=memory_warning observed=700 peak=750 limit=800 bytes"
+        )
+    }
+
+    func testMemoryWarningObserverCanBeCancelledAfterSynchronousRun() {
+        let center = NotificationCenter()
+        let name = Notification.Name("LXISHRuntimeBundleManifestTests.memory-warning")
+        var notifications = 0
+        let observer = LXISHMemoryWarningObserver(center: center, name: name) {
+            notifications += 1
+        }
+
+        center.post(name: name, object: nil)
+        XCTAssertEqual(notifications, 1)
+
+        observer.cancel()
+        center.post(name: name, object: nil)
+        XCTAssertEqual(notifications, 1, "completed synchronous runs must release their observer")
+    }
+
     /// Byte-for-byte the JSON serde writes for Rust's `NativeConfigPayload`
     /// (`lingxi-code/platforms/ios-ish-runtime/src/lib.rs`), which has no
     /// `rename_all`, so the wire keys are the Rust field names. Every
@@ -341,6 +387,43 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         XCTAssertEqual(
             mounts[1].hostPath,
             URL(fileURLWithPath: config.workspaceHostPath, isDirectory: true).standardizedFileURL.path
+        )
+    }
+
+    func testBootDiscardsLegacyPersistedRequestMounts() throws {
+        let managedRoot = temporaryRoot.appendingPathComponent("managed-root-stale-mounts", isDirectory: true)
+        try FileManager.default.createDirectory(at: managedRoot, withIntermediateDirectories: true)
+        let config = LXISHNativeConfig(
+            managedRoot: managedRoot.path,
+            workspaceHostPath: temporaryRoot.appendingPathComponent("workspace-current", isDirectory: true).path,
+            stableWorkspaceId: "12345678-1234-4abc-8def-1234567890ab",
+            abi: "arm64",
+            rootfsVersion: "3.24.1",
+            archiveSha256: String(repeating: "a", count: 64),
+            authorizationFile: nil
+        )
+        let staleMounts = [
+            LXISHMountSpec(
+                hostPath: "/private/var/containers/Bundle/Application/OLD/LingxiCode.app/local-app-runtime/node_modules",
+                guestPath: "/opt/lingxi/local-app-runtime/node_modules",
+                readOnly: true,
+                purpose: "shared"
+            ),
+            LXISHMountSpec(
+                hostPath: "/private/var/mobile/Containers/Data/Application/CURRENT/Library/Application Support/LingxiCode/apps/old-app/build/store",
+                guestPath: "/var/lingxi/local-app-build/old-app/store",
+                readOnly: false,
+                purpose: "local_app_build"
+            ),
+        ]
+        try LXISHBridgeJSON.encoder().encode(staleMounts).write(to: config.mountsCacheURL, options: .atomic)
+
+        let restored = try LXISHNativeRootfsManager().mountsForBoot(for: config)
+
+        XCTAssertTrue(restored.isEmpty, "boot must rebuild stable mounts from config and wait for the current request")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: config.mountsCacheURL.path),
+            "the one-time legacy cache must not poison later boots"
         )
     }
 

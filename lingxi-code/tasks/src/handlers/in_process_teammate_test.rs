@@ -949,12 +949,8 @@ impl Drop for ClaimEnvGuard {
 }
 
 fn todo(subject: &str, status: engine::TodoState, owner: Option<&str>) -> task_store::TodoTask {
-    let mut t = task_store::TodoTask::new(
-        subject.into(),
-        "desc".into(),
-        None,
-        serde_json::Map::new(),
-    );
+    let mut t =
+        task_store::TodoTask::new(subject.into(), "desc".into(), None, serde_json::Map::new());
     t.status = status;
     t.owner = owner.map(str::to_string);
     t

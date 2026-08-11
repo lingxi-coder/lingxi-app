@@ -444,10 +444,7 @@ mod tests {
 
     fn fs_with(mounts: Vec<MountSpec>) -> (Arc<RecordingFs>, GuestPathFileSystem) {
         let inner = Arc::new(RecordingFs::default());
-        let fs = GuestPathFileSystem::new(
-            inner.clone(),
-            Arc::new(MountsOnlyRuntime { mounts }),
-        );
+        let fs = GuestPathFileSystem::new(inner.clone(), Arc::new(MountsOnlyRuntime { mounts }));
         (inner, fs)
     }
 
@@ -460,13 +457,21 @@ mod tests {
             .expect("workspace read");
         assert_eq!(
             inner.last(),
-            ("read".to_string(), "/host/workspace/abc/src/main.rs".to_string())
+            (
+                "read".to_string(),
+                "/host/workspace/abc/src/main.rs".to_string()
+            )
         );
 
-        fs.write_file("/root/.bashrc", "x").await.expect("home write");
+        fs.write_file("/root/.bashrc", "x")
+            .await
+            .expect("home write");
         assert_eq!(
             inner.last(),
-            ("write".to_string(), "/host/persistent/root/.bashrc".to_string())
+            (
+                "write".to_string(),
+                "/host/persistent/root/.bashrc".to_string()
+            )
         );
 
         // The mount root itself maps to the host root.
@@ -509,7 +514,10 @@ mod tests {
         fs.read_file("/workspace/abc/f", None, None)
             .await
             .expect("read-only read");
-        assert_eq!(inner.last(), ("read".to_string(), "/host/shared/f".to_string()));
+        assert_eq!(
+            inner.last(),
+            ("read".to_string(), "/host/shared/f".to_string())
+        );
 
         let denied = fs.write_file("/workspace/abc/f", "x").await;
         assert!(
@@ -540,7 +548,11 @@ mod tests {
     async fn host_paths_pass_through_unchanged() {
         let (inner, fs) = fs_with(vec![workspace_mount()]);
         // /var/... is guest scratch's parent but NOT guest space itself.
-        for path in ["/host/other/file.txt", "/var/mobile/Containers/x", "relative.txt"] {
+        for path in [
+            "/host/other/file.txt",
+            "/var/mobile/Containers/x",
+            "relative.txt",
+        ] {
             fs.read_file(path, None, None).await.expect("passthrough");
             assert_eq!(inner.last(), ("read".to_string(), path.to_string()));
         }

@@ -46,6 +46,80 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertTrue(snapshot.routingJSON.contains("\"retry\":{\"backoffMs\":500,\"maxAttempts\":10}"))
     }
 
+    func testChatGPTOAuthHasItsOwnBuiltInProfileAndNoAPIKeyEnvironmentBinding() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let chatGPT = repository.addProfile(presetID: "openai-chatgpt")
+
+        let profile = try XCTUnwrap(repository.state(for: chatGPT)?.profile)
+        XCTAssertEqual(repository.oauthProvider(for: profile.presetID), "openai-chatgpt")
+        XCTAssertEqual(profile.baseURL, "https://chatgpt.com/backend-api/codex")
+
+        let snapshot = repository.makeLaunchSnapshot()
+        XCTAssertEqual(snapshot.defaultModelID, "openai-chatgpt/gpt-5.3-codex")
+        XCTAssertEqual(snapshot.enabledProfileIDs, ["openai-chatgpt"])
+        XCTAssertEqual(try jsonObject(from: snapshot.providerProfilesJSON)?.count, 0)
+    }
+
+    func testAnthropicOAuthCountsAsCredentialWithoutReplacingAPIKeyState() throws {
+        let profile = ProviderStoredProfile(
+            id: "anthropic",
+            presetID: "anthropic",
+            name: "Anthropic",
+            baseURL: "https://api.anthropic.com",
+            modelID: "claude-sonnet-4",
+            enabled: true,
+            isDefault: true
+        )
+        var state = ProviderProfileState(profile: profile, credentialState: .configured)
+        state.oauthState = ProviderOAuthState(
+            provider: "anthropic",
+            signedIn: true,
+            accountLabel: "account@example.test",
+            accountID: nil,
+            organizationID: "org-test",
+            fedramp: false
+        )
+
+        XCTAssertTrue(state.hasStoredAPIKey)
+        XCTAssertTrue(state.hasStoredCredential)
+        XCTAssertEqual(state.maskedCredentialSummary, "API Key 优先，OAuth 已登录")
+        XCTAssertEqual(state.credentialFieldMask, "••••••••••••")
+    }
+
+    func testCredentialStatusRefreshIncludesAnthropicAPIKeyAlongsideOAuth() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        _ = repository.addProfile(presetID: "anthropic")
+        _ = repository.addProfile(presetID: "openai-chatgpt")
+        repository.configure(submitCommand: { command in
+            try await recorder.submit(command: command)
+        })
+
+        await repository.refreshCredentialStatus()
+
+        guard case let .listProviderCredentials(_, providerIDs) = try XCTUnwrap(recorder.commands.last) else {
+            return XCTFail("expected list provider credentials")
+        }
+        XCTAssertEqual(providerIDs, ["anthropic"], "Anthropic API Key must be restored independently of OAuth")
+    }
+
+    func testOAuthProfileEndpointCannotBecomeASeparateUserProfile() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let anthropic = repository.addProfile(presetID: "anthropic")
+        let chatGPT = repository.addProfile(presetID: "openai-chatgpt")
+
+        repository.updateProfile(anthropic) {
+            $0.baseURL = "http://untrusted.example.test"
+        }
+        repository.updateProfile(chatGPT) {
+            $0.baseURL = "https://proxy.example.test/v1"
+        }
+
+        XCTAssertEqual(repository.state(for: anthropic)?.profile.baseURL, "https://api.anthropic.com")
+        XCTAssertEqual(repository.state(for: chatGPT)?.profile.baseURL, "https://chatgpt.com/backend-api/codex")
+        XCTAssertEqual(try jsonObject(from: repository.makeLaunchSnapshot().providerProfilesJSON)?.count, 0)
+    }
+
     func testLaunchSnapshotCreatesIndependentProfileForCustomOfficialPresetEndpoint() throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let openAI = repository.addProfile(presetID: "openai")
@@ -168,6 +242,69 @@ final class ProviderRepositoryTests: XCTestCase {
 
         XCTAssertEqual(repository.state(for: openAI)?.credentialState, .configured)
         XCTAssertEqual(repository.state(for: openAI)?.pendingSecret, "")
+    }
+
+    func testStoredCredentialUsesMaskAndOnlyDraftCredentialCanBeRevealed() throws {
+        let profile = ProviderStoredProfile(
+            id: "deepseek",
+            presetID: "deepseek",
+            name: "DeepSeek",
+            baseURL: "https://api.deepseek.com",
+            modelID: "deepseek-v4-flash",
+            enabled: true,
+            isDefault: true
+        )
+        var state = ProviderProfileState(
+            profile: profile,
+            credentialState: .configured
+        )
+
+        XCTAssertEqual(state.credentialFieldMask, "••••••••••••")
+        XCTAssertFalse(state.canRevealCredential)
+
+        state.pendingSecret = "sk-replacement"
+
+        XCTAssertNil(state.credentialFieldMask)
+        XCTAssertTrue(state.canRevealCredential)
+    }
+
+    func testDiscardCredentialChangesKeepsStoredCredential() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let deepSeek = repository.addProfile(presetID: "deepseek")
+        repository.configure(submitCommand: { command in
+            try await recorder.submit(command: command)
+        })
+
+        await repository.refreshCredentialStatus()
+        guard case let .listProviderCredentials(operationId, _) = try XCTUnwrap(recorder.commands.last) else {
+            return XCTFail("expected credential status request")
+        }
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationId,
+            configuredProviderIds: [deepSeek],
+            unavailableProviderIds: [],
+            storageEncrypted: true,
+            error: nil
+        ))
+
+        repository.stageSecret("sk-replacement", for: deepSeek)
+        repository.discardCredentialChanges(for: deepSeek)
+
+        var state = try XCTUnwrap(repository.state(for: deepSeek))
+        XCTAssertEqual(state.pendingSecret, "")
+        XCTAssertEqual(state.credentialState, .configured)
+        XCTAssertEqual(state.credentialFieldMask, "••••••••••••")
+
+        repository.clearCredentialRequest(for: deepSeek)
+
+        repository.discardCredentialChanges(for: deepSeek)
+
+        state = try XCTUnwrap(repository.state(for: deepSeek))
+        XCTAssertEqual(state.pendingSecret, "")
+        XCTAssertFalse(state.clearCredentialOnApply)
+        XCTAssertEqual(state.credentialState, .configured)
+        XCTAssertEqual(state.connectionState, .idle)
     }
 
     func testLegacyDeepSeekProfileMigratesToCurrentEndpointAndModel() throws {
@@ -605,6 +742,33 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertNil(kimiState.detailMessage)
     }
 
+    func testConnectionWithDraftCredentialWarnsThatKeyIsNotSaved() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let deepSeek = repository.addProfile(presetID: "deepseek")
+        repository.stageSecret("sk-deepseek-draft", for: deepSeek)
+        repository.configure(
+            submitCommand: nil,
+            testConnection: { _, credentialOverride in
+                XCTAssertEqual(credentialOverride, "sk-deepseek-draft")
+                return .success(
+                    message: "连接测试成功。 · 12ms",
+                    usedStoredCredential: false
+                )
+            }
+        )
+
+        await repository.testConnection(deepSeek)
+
+        let state = try XCTUnwrap(repository.state(for: deepSeek))
+        XCTAssertEqual(state.connectionState, .connected)
+        XCTAssertEqual(
+            state.detailMessage,
+            "连接测试成功。 · 12ms" + String(localized: "settings_provider_key_unsaved_suffix")
+        )
+        XCTAssertEqual(state.pendingSecret, "sk-deepseek-draft")
+        XCTAssertNotEqual(state.credentialState, .configured)
+    }
+
     // MARK: legacy Anthropic Keychain migration
 
     /// Regression: `Keychain.model` holds the engine's ACTIVE model — written on
@@ -734,6 +898,61 @@ final class ProviderRepositoryTests: XCTestCase {
         for model in preset.models {
             XCTAssertTrue(curated.contains(model), "\(model) is not curated by the engine")
         }
+    }
+
+    // MARK: - Reentrancy: an index captured before an `await` is stale after it
+
+    /// `loginOAuth` resolves the row index, then awaits the reconnect handler.
+    /// This class is `@MainActor`, which serializes but does NOT freeze state
+    /// across a suspension: a `removeProfile` landing inside that window shifts
+    /// every later row down one, so a write through the pre-await index tags the
+    /// WRONG profile (or traps when the array shrank past it). Every post-await
+    /// write must re-resolve through `indexOfProfile(id:)`.
+    func testLoginOAuthReResolvesTheRowAfterTheReconnectAwait() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let removed = repository.addProfile(presetID: "openai")
+        let target = repository.addProfile(presetID: "openai-chatgpt")
+        let bystander = repository.addProfile(presetID: "deepseek")
+
+        // The stale index must point at a row that still EXISTS after the
+        // removal, so the defect shows up as a wrong-row write rather than a
+        // trap — a mis-tagged profile is the quieter, likelier production
+        // symptom.
+        let staleIndex = try XCTUnwrap(repository.profiles.firstIndex { $0.id == target })
+        XCTAssertLessThan(staleIndex, repository.profiles.count - 1, "need a row after the target")
+        let staleVictim = repository.profiles[staleIndex + 1].id
+        XCTAssertEqual(staleVictim, bystander)
+
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { [weak repository] _ in
+                // Runs while `loginOAuth` is suspended on this very await.
+                await repository?.removeProfile(removed)
+            },
+            oauthLogin: { provider in
+                ProviderOAuthState(
+                    provider: provider,
+                    signedIn: true,
+                    accountLabel: nil,
+                    accountID: nil,
+                    organizationID: nil,
+                    fedramp: false
+                )
+            }
+        )
+
+        await repository.loginOAuth(for: target)
+
+        XCTAssertNil(repository.state(for: removed), "the concurrent removal must have landed")
+        XCTAssertEqual(
+            repository.state(for: target)?.detailMessage,
+            "OAuth 登录成功",
+            "the success message belongs to the profile that signed in"
+        )
+        XCTAssertNil(
+            repository.state(for: bystander)?.detailMessage,
+            "a stale pre-await index would have tagged \(bystander) instead"
+        )
     }
 
     private func waitForCommandCount(_ count: Int, recorder: CommandRecorder) async {

@@ -77,7 +77,9 @@ struct MainSettingsPage: View {
                             footer: String(localized: "settings_section_capabilities_footer")) {
                 SettingsRow(icon: .skill, iconColor: Color(srgb: 0,0.7601,0.7664), label: "Skills",
                             sub: String(localized: "settings_skills_sub"),
-                            value: String(localized: "settings_skills_enabled_fraction \(store.skills.filter{$0.enabled}.count) \(store.skills.count)"),
+                            value: store.skillsLoaded
+                                ? String(localized: "settings_skills_enabled_fraction \(store.skills.filter{$0.enabled}.count) \(store.skills.count)")
+                                : "—",
                             onTap: { host.push(.skills) })
                 SettingsRow(icon: .plug, iconColor: Color(srgb: 0,0.78,0.55), label: String(localized: "settings_mcp_servers"),
                             sub: "Model Context Protocol",

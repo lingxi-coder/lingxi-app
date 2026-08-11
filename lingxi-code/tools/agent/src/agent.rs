@@ -65,12 +65,8 @@ pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 /// leaked-TS, 0-hit in every local oracle) was removed, and the Claude-branded
 /// `claude-code-guide` + `claude` catch-all are deliberately excluded — the
 /// multi-provider divergence (user-confirmed 2026-08-06).
-pub const BUILTIN_SUBAGENT_TYPES: &[&str] = &[
-    "general-purpose",
-    "Plan",
-    "Explore",
-    "statusline-setup",
-];
+pub const BUILTIN_SUBAGENT_TYPES: &[&str] =
+    &["general-purpose", "Plan", "Explore", "statusline-setup"];
 
 /// Prefix locked by M3-05 (`cost/src/budget.rs` budget-exceeded test fixtures).
 /// Production constructs the full string via

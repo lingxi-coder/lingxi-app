@@ -74,6 +74,11 @@ const APK_NET_SUBCMDS: &[&str] = &["add", "update", "upgrade", "search", "policy
 /// `npm` subcommands that ordinarily resolve against the registry unless an
 /// offline/no-network option is present.
 const NPM_NET_SUBCMDS: &[&str] = &[
+    // `npm create`/`npm init` resolve a starter package from the registry;
+    // the official Vite scaffold therefore follows the same approval path as
+    // dependency installation instead of silently bypassing the network gate.
+    "create",
+    "init",
     "install",
     // npm accepts a family of aliases for `install`; `i` is the canonical
     // shorthand and by far the most common form an agent actually emits, so
@@ -170,9 +175,7 @@ fn is_env_assignment(word: &str) -> bool {
     };
     !name.is_empty()
         && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// If the command shows network intent, return a human advisory string
@@ -268,10 +271,7 @@ pub fn network_intent(command: &str) -> Option<String> {
 
         if base == "npm" {
             let args: Vec<&str> = words.collect();
-            if args
-                .iter()
-                .any(|arg| matches!(*arg, "--offline" | "--prefer-offline"))
-            {
+            if args.iter().any(|arg| *arg == "--offline") {
                 continue;
             }
             if let Some(sub) = next_positional(&args, NPM_SUBCMD_VALUE_OPTS) {
@@ -460,6 +460,7 @@ mod tests {
             "apk --update-cache search nodejs",
             "npm install",
             "npm --prefix app ci",
+            "npm create vite@latest . -- --template react --no-interactive",
             "npx create-next-app demo",
             "pip install requests",
             "pip3 download black",
@@ -484,6 +485,7 @@ mod tests {
         // most often emits; only the long `install` spelling was detected.
         for command in [
             "npm i left-pad",
+            "npm init vite@latest",
             "npm in left-pad",
             "npm add left-pad",
             "npm up",
@@ -508,6 +510,18 @@ mod tests {
                 "{command:?} should be flagged as network intent"
             );
         }
+    }
+
+    #[test]
+    fn prefer_offline_still_requires_network_approval() {
+        assert!(
+            network_intent("npm install --prefer-offline left-pad").is_some(),
+            "--prefer-offline may still fetch packages on a cache miss"
+        );
+        assert!(
+            network_intent("npm install --offline left-pad").is_none(),
+            "--offline must remain classified as a no-network npm invocation"
+        );
     }
 
     #[test]
@@ -557,4 +571,3 @@ mod tests {
         let _ = network_intent("$(");
     }
 }
-

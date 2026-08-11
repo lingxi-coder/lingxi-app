@@ -1,7 +1,7 @@
 import SwiftUI
 import Observation
 
-// MARK: - Settings domain models + mock data (verbatim from prototype)
+// MARK: - Settings domain models
 
 enum ConnStatus: String {
     case connected, idle, testing, error
@@ -59,17 +59,70 @@ struct Skill: Identifiable, Equatable {
     let triggers: [String]
     var enabled: Bool
     let builtin: Bool
+    let source: String
+
+    var sourceLabel: String {
+        switch source {
+        case "builtin": return String(localized: "skills_source_builtin")
+        case "bundled": return String(localized: "skills_source_bundled")
+        case "user": return String(localized: "skills_source_user")
+        case "project": return String(localized: "skills_source_project")
+        case "local": return String(localized: "skills_source_local")
+        case "plugin": return String(localized: "skills_source_plugin")
+        case "managed": return String(localized: "skills_source_managed")
+        case "mcp": return "MCP"
+        default: return source
+        }
+    }
 }
 
 struct MCPServer: Identifiable, Equatable {
     let id: String
     var name: String
-    var url: String
-    let tools: Int
+    var url: String?
+    var command: String
+    var args: [String]
+    var env: [String: String]
+    var headers: [String: String]
+    var tools: Int?
     var status: ConnStatus
     var enabled: Bool
-    let transport: String
+    var transport: String
     var auth: String? = nil
+    var scope: String? = nil
+
+    static func normalizedTransport(_ value: String) -> String {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "websocket", "ws": return "ws"
+        case "streamable-http": return "http"
+        default: return value.lowercased()
+        }
+    }
+
+    var transportLabel: String {
+        switch Self.normalizedTransport(transport) {
+        case "stdio": return "stdio"
+        case "sse": return "SSE"
+        case "ws": return "WebSocket"
+        case "http": return "HTTP"
+        default: return transport
+        }
+    }
+
+    var endpointSummary: String {
+        if Self.normalizedTransport(transport) == "stdio", !command.isEmpty {
+            return ([command] + args).joined(separator: " ")
+        }
+        if let url, !url.isEmpty { return url }
+        return String(localized: "mcp_endpoint_not_configured")
+    }
+
+    var isConfigured: Bool {
+        if Self.normalizedTransport(transport) == "stdio" {
+            return !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return !(url ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 struct DreamConfig: Equatable {
@@ -193,6 +246,7 @@ enum Presets {
     static let llm: [ProviderPreset] = [
         .init(id: "anthropic",  name: "Anthropic",  sub: "Claude API",     color: Color(srgb: 0.9351, 0.5079, 0.4015), defaultUrl: "https://api.anthropic.com",                       keyPrefix: "sk-ant-",  models: ["claude-sonnet-5", "claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5"]),
         .init(id: "openai",     name: "OpenAI",     sub: "ChatGPT API",    color: Color(srgb: 0.1326, 0.7261, 0.5350), defaultUrl: "https://api.openai.com/v1",                       keyPrefix: "sk-proj-", models: ["gpt-4o", "gpt-4o-mini", "o1-preview"]),
+        .init(id: "openai-chatgpt", name: "ChatGPT", sub: "ChatGPT OAuth", color: Color(srgb: 0.1326, 0.7261, 0.5350), defaultUrl: "https://chatgpt.com/backend-api/codex", keyPrefix: "", models: ["gpt-5.3-codex", "gpt-5-codex"]),
         .init(id: "google",     name: "Google",     sub: "Gemini API",     color: Color(srgb: 0.3503, 0.6649, 0.9741), defaultUrl: "https://generativelanguage.googleapis.com/v1",    keyPrefix: "AIza",     models: ["gemini-2.5-pro", "gemini-2.5-flash"]),
         .init(id: "deepseek",   name: "DeepSeek",   sub: "DeepSeek API",   color: Color(srgb: 0.6451, 0.5662, 1.0000), defaultUrl: "https://api.deepseek.com",                        keyPrefix: "sk-",      models: ["deepseek-v4-flash", "deepseek-v4-pro"]),
         .init(id: "kimi",       name: "Kimi",       sub: "Moonshot AI",    color: Color(srgb: 0.4340, 0.5865, 1.0000), defaultUrl: "https://api.moonshot.cn/v1",                    keyPrefix: "sk-",      models: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"]),
@@ -219,7 +273,7 @@ enum Presets {
 
 }
 
-// MARK: - Settings store (the prototype's useState block in SettingsSheet)
+// MARK: - Settings store
 
 enum ProviderKind: Hashable { case llm, search, fetch
     var title: String { self == .llm ? String(localized: "settings_llm_providers") : self == .search ? String(localized: "settings_web_search") : String(localized: "settings_web_fetch") }
@@ -236,21 +290,14 @@ final class SettingsStore {
     var searchProviders: [GenericProvider] = []
     var fetchProviders: [GenericProvider] = []
     var linuxRuntime = LinuxRuntimeState()
-    var skills: [Skill] = [
-        .init(id: "sk1", name: String(localized: "settings_skill_seed_weekly_report_name"), author: "官方", desc: String(localized: "settings_skill_seed_weekly_report_desc"), triggers: [String(localized: "settings_skill_seed_weekly_report_trigger_1"), String(localized: "settings_skill_seed_weekly_report_trigger_2")], enabled: true, builtin: true),
-        .init(id: "sk2", name: String(localized: "settings_skill_seed_code_review_name"), author: "官方", desc: String(localized: "settings_skill_seed_code_review_desc"), triggers: ["/review", String(localized: "settings_skill_seed_code_review_trigger_2")], enabled: true, builtin: true),
-        .init(id: "sk3", name: String(localized: "settings_skill_seed_meeting_notes_name"), author: "官方", desc: String(localized: "settings_skill_seed_meeting_notes_desc"), triggers: [String(localized: "settings_skill_seed_meeting_notes_trigger_1")], enabled: true, builtin: true),
-        .init(id: "sk4", name: String(localized: "settings_skill_seed_paper_reading_name"), author: "社区 · @arxiv-fan", desc: String(localized: "settings_skill_seed_paper_reading_desc"), triggers: [String(localized: "settings_skill_seed_paper_reading_trigger_1")], enabled: false, builtin: false),
-        .init(id: "sk5", name: "CSS Doctor", author: "社区 · @lin", desc: String(localized: "settings_skill_seed_css_doctor_desc"), triggers: ["/css"], enabled: false, builtin: false),
-        .init(id: "sk6", name: String(localized: "settings_skill_seed_polish_name"), author: "我", desc: String(localized: "settings_skill_seed_polish_desc"), triggers: ["/polish"], enabled: true, builtin: false),
-    ]
-    var mcpServers: [MCPServer] = [
-        .init(id: "mcp1", name: "Filesystem",   url: "stdio://npx -y @modelcontextprotocol/server-filesystem", tools: 8,  status: .connected, enabled: true,  transport: "stdio"),
-        .init(id: "mcp2", name: "GitHub",       url: "https://mcp.github.com",  tools: 14, status: .connected, enabled: true,  transport: "sse", auth: "oauth"),
-        .init(id: "mcp3", name: "Linear",       url: "https://mcp.linear.app",  tools: 6,  status: .connected, enabled: true,  transport: "sse", auth: "oauth"),
-        .init(id: "mcp4", name: "Notion",       url: "https://mcp.notion.com",  tools: 12, status: .idle,      enabled: false, transport: "sse", auth: "oauth"),
-        .init(id: "mcp5", name: String(localized: "settings_mcp_seed_postgres_local_name"), url: "stdio://uvx mcp-server-postgres", tools: 4, status: .error, enabled: true, transport: "stdio"),
-    ]
+    /// Populated only by the engine's SlashCommandCatalog; no placeholder
+    /// skills are shown while the real catalog is still loading.
+    var skills: [Skill] = []
+    var skillsLoaded = false
+    /// Populated from the engine's MCP listing and app-private config file.
+    var mcpServers: [MCPServer] = []
+    var mcpListingLoaded = false
+    var mcpConfigurationError: String?
     var dream = DreamConfig()
     var language = "zh-CN"
     var notifs = NotifConfig()

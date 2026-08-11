@@ -691,10 +691,10 @@ impl AndroidProotRuntime {
         });
         let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let waited = wait_for_child(&mut child, pid, Some(timeout), memory_limit_bytes).await;
-        let (exit_code, timed_out, resource_limit_exceeded) = match waited {
-            Ok(ChildWaitOutcome::Exited(status)) => (status.code().unwrap_or(-1), false, false),
-            Ok(ChildWaitOutcome::TimedOut) => (-1, true, false),
-            Ok(ChildWaitOutcome::MemoryLimitExceeded) => (-1, false, true),
+        let (exit_code, timed_out, memory_limit_exceeded) = match waited {
+            Ok(ChildWaitOutcome::Exited(status)) => (status.code().unwrap_or(-1), false, None),
+            Ok(ChildWaitOutcome::TimedOut) => (-1, true, None),
+            Ok(ChildWaitOutcome::MemoryLimitExceeded(diagnostic)) => (-1, false, Some(diagnostic)),
             Err(error) => {
                 terminate_group(pid, Signal::SIGKILL);
                 let _ = child.wait().await;
@@ -711,7 +711,7 @@ impl AndroidProotRuntime {
         let stdout = join_reader(stdout_task, "stdout").await?;
         let stderr = join_reader(stderr_task, "stderr").await?;
         let cancelled = task.cancel_requested.load(Ordering::Acquire);
-        let status = if resource_limit_exceeded {
+        let status = if memory_limit_exceeded.is_some() {
             MobileLinuxTaskStatus::Failed
         } else if cancelled {
             MobileLinuxTaskStatus::Cancelled
@@ -727,17 +727,17 @@ impl AndroidProotRuntime {
             &task,
             status,
             (!timed_out && !cancelled).then_some(exit_code),
-            if resource_limit_exceeded {
-                Some("resource_limit_exceeded: resident-memory limit exceeded".to_string())
+            if let Some(diagnostic) = &memory_limit_exceeded {
+                Some(diagnostic.detail())
             } else if cancelled {
                 Some("command cancelled".to_string())
             } else {
                 timed_out.then(|| "command timed out".to_string())
             },
         );
-        if resource_limit_exceeded {
+        if let Some(diagnostic) = memory_limit_exceeded {
             return Err(MobileLinuxError::ResourceLimitExceeded(
-                "Android PRoot process group exceeded resident-memory limit".to_string(),
+                diagnostic.summary(),
             ));
         }
         Ok(LinuxCommandResult {
@@ -998,13 +998,13 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
                     None,
                     Some("command timed out".to_string()),
                 ),
-                (Ok(ChildWaitOutcome::MemoryLimitExceeded), None) => {
+                (Ok(ChildWaitOutcome::MemoryLimitExceeded(diagnostic)), None) => {
                     runtime.finish_task(
                         &reaper_id,
                         &task,
                         MobileLinuxTaskStatus::Failed,
                         None,
-                        Some("resource_limit_exceeded: resident-memory limit exceeded".to_string()),
+                        Some(diagnostic.detail()),
                     );
                 }
                 (Err(error), None) => runtime.finish_task(
@@ -1520,7 +1520,51 @@ fn terminate_group(pid: u32, signal: Signal) {
 enum ChildWaitOutcome {
     Exited(std::process::ExitStatus),
     TimedOut,
-    MemoryLimitExceeded,
+    MemoryLimitExceeded(MemoryLimitExceededDiagnostic),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryLimitExceededDiagnostic {
+    observed_rss: u64,
+    peak_rss: u64,
+    limit: u64,
+}
+
+impl MemoryLimitExceededDiagnostic {
+    fn summary(self) -> String {
+        format!(
+            "Android PRoot process group exceeded resident-memory limit: observed_rss_bytes={} peak_rss_bytes={} limit_bytes={}",
+            self.observed_rss, self.peak_rss, self.limit
+        )
+    }
+
+    fn detail(self) -> String {
+        format!("resource_limit_exceeded: {}", self.summary())
+    }
+}
+
+#[derive(Debug)]
+struct MemoryWatchdog {
+    limit: u64,
+    peak_rss: u64,
+}
+
+impl MemoryWatchdog {
+    fn new(limit_bytes: u64) -> Self {
+        Self {
+            limit: limit_bytes,
+            peak_rss: 0,
+        }
+    }
+
+    fn observe(&mut self, observed_rss_bytes: u64) -> Option<MemoryLimitExceededDiagnostic> {
+        self.peak_rss = self.peak_rss.max(observed_rss_bytes);
+        (observed_rss_bytes > self.limit).then_some(MemoryLimitExceededDiagnostic {
+            observed_rss: observed_rss_bytes,
+            peak_rss: self.peak_rss,
+            limit: self.limit,
+        })
+    }
 }
 
 async fn wait_for_network_policy_receipt(
@@ -1578,6 +1622,7 @@ async fn wait_for_child(
     memory_limit_bytes: Option<u64>,
 ) -> Result<ChildWaitOutcome, MobileLinuxError> {
     let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    let mut memory_watchdog = memory_limit_bytes.map(MemoryWatchdog::new);
     let mut memory_poll = tokio::time::interval(MEMORY_POLL_INTERVAL);
     memory_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1587,7 +1632,7 @@ async fn wait_for_child(
                     .map(ChildWaitOutcome::Exited)
                     .map_err(|error| MobileLinuxError::Io(format!("wait for PRoot: {error}")));
             }
-            _ = memory_poll.tick(), if memory_limit_bytes.is_some() => {
+            _ = memory_poll.tick(), if memory_watchdog.is_some() => {
                 let resident = match process_group_rss_bytes(pid) {
                     Ok(resident) => resident,
                     Err(error) => {
@@ -1596,10 +1641,11 @@ async fn wait_for_child(
                         return Err(error);
                     }
                 };
-                if resident > memory_limit_bytes.expect("guarded memory limit") {
+                let watchdog = memory_watchdog.as_mut().expect("guarded memory watchdog");
+                if let Some(diagnostic) = watchdog.observe(resident) {
                     terminate_group(pid, Signal::SIGKILL);
                     let _ = child.wait().await;
-                    return Ok(ChildWaitOutcome::MemoryLimitExceeded);
+                    return Ok(ChildWaitOutcome::MemoryLimitExceeded(diagnostic));
                 }
             }
             () = async {
@@ -1884,6 +1930,44 @@ mod tests {
             network: NetworkPolicy::Allowed,
             resource_limits: Default::default(),
             mounts: vec![],
+        }
+    }
+
+    #[test]
+    fn memory_watchdog_reports_trigger_sample_peak_and_limit() {
+        assert_eq!(MEMORY_POLL_INTERVAL, Duration::from_millis(250));
+        let mut watchdog = MemoryWatchdog::new(10 * 1024 * 1024);
+        assert!(watchdog.observe(4 * 1024 * 1024).is_none());
+        assert!(watchdog.observe(9 * 1024 * 1024).is_none());
+        assert_eq!(watchdog.peak_rss, 9 * 1024 * 1024);
+
+        let exceeded = watchdog
+            .observe(11 * 1024 * 1024)
+            .expect("triggering sample exceeds the limit");
+        assert_eq!(exceeded.observed_rss, 11 * 1024 * 1024);
+        assert_eq!(exceeded.peak_rss, 11 * 1024 * 1024);
+        assert_eq!(exceeded.limit, 10 * 1024 * 1024);
+        let detail = exceeded.detail();
+        assert!(detail.starts_with("resource_limit_exceeded:"));
+        assert!(detail.contains("observed_rss_bytes=11534336"));
+        assert!(detail.contains("peak_rss_bytes=11534336"));
+        assert!(detail.contains("limit_bytes=10485760"));
+        let error = MobileLinuxError::ResourceLimitExceeded(exceeded.summary()).to_string();
+        assert_eq!(error.matches("resource_limit_exceeded:").count(), 1);
+        assert!(error.contains("observed_rss_bytes=11534336"));
+        assert!(error.contains("peak_rss_bytes=11534336"));
+        assert!(error.contains("limit_bytes=10485760"));
+    }
+
+    #[test]
+    fn every_positive_max_memory_mb_value_is_supported() {
+        let mut request = request();
+        for megabytes in [1_u32, 17, u32::MAX] {
+            request.resource_limits.max_memory_mb = Some(megabytes);
+            assert_eq!(
+                requested_memory_limit_bytes(&request).expect("positive memory limit"),
+                Some(u64::from(megabytes) * 1024 * 1024),
+            );
         }
     }
 

@@ -28,12 +28,18 @@ struct SettingsHost: View {
     @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
-    /// The conversation model — its `mcpServers` carry the engine's REAL MCP
-    /// listing (out-of-band). When populated we mirror it into the settings store
-    /// so the MCP page renders real servers; empty keeps the mock list.
+    /// The conversation model — its `mcpServers` carry the engine's real MCP
+    /// listing (out-of-band). The settings store starts with persisted config
+    /// and is replaced by the engine's authoritative live listing on refresh.
     @ObservedObject var convo: ConversationModel
+    /// Active project root used to read/write the engine's project `.mcp.json`.
+    var projectCwd: String? = nil
+    @State private var providerRepository = ProviderRepository.shared
     /// Pull the real MCP listing from the engine (`RefreshListings(.mcp)`).
     var onRefreshMcp: () -> Void = {}
+    /// Pull the engine's live slash-command/skill catalog.
+    var onRefreshSkills: () -> Void = {}
+    let mcpRepository: MCPConfigurationRepository = .shared
     /// Promote the runtime's PTY surface to the app-owned full-screen route.
     var openTerminal: () -> Void = {}
     let onClose: () -> Void
@@ -69,11 +75,63 @@ struct SettingsHost: View {
         .buttonStyle(.plain)
         // Pull the real MCP listing when the sheet opens; mirror it into the store
         // (so the existing MCP page renders real servers) once it arrives.
-        .onAppear { onRefreshMcp() }
+        .onAppear {
+            // Configured rows are useful before the first engine event; the
+            // event itself remains authoritative for connection health.
+            if convo.mcpServersLoaded {
+                syncMcpServers(convo.mcpServers)
+            } else if store.mcpServers.isEmpty {
+                store.mcpServers = mcpRepository.loadServers(projectCwd: projectCwd)
+            }
+            store.skills = convo.skills
+            store.skillsLoaded = convo.skillsLoaded
+            onRefreshMcp()
+            onRefreshSkills()
+        }
         .onChange(of: convo.mcpServers) { _, servers in
-            if !servers.isEmpty { store.mcpServers = servers }
+            syncMcpServers(servers)
+        }
+        .onChange(of: convo.mcpServersLoaded) { _, _ in
+            syncMcpServers(convo.mcpServers)
+        }
+        .onChange(of: convo.skills) { _, skills in
+            store.skills = skills
+        }
+        .onChange(of: convo.skillsLoaded) { _, loaded in
+            store.skillsLoaded = loaded
+        }
+        .alert(
+            String(localized: "mcp_configuration_error_title"),
+            isPresented: Binding(
+                get: { store.mcpConfigurationError != nil },
+                set: { if !$0 { store.mcpConfigurationError = nil } }
+            )
+        ) {
+            Button("settings_done") { store.mcpConfigurationError = nil }
+        } message: {
+            Text(store.mcpConfigurationError ?? String(localized: "mcp_configuration_save_failed"))
         }
         .accessibilityIdentifier("settings.root")
+    }
+
+    private func syncMcpServers(_ servers: [MCPServer]) {
+        let configured = Dictionary(
+            uniqueKeysWithValues: mcpRepository.loadServers(projectCwd: projectCwd).map { ($0.id, $0) }
+        )
+        store.mcpServers = servers.map { live in
+            guard let saved = configured[live.id] else { return live }
+            var merged = live
+            merged.url = saved.url
+            merged.command = saved.command
+            merged.args = saved.args
+            merged.env = saved.env
+            merged.headers = saved.headers
+            merged.enabled = saved.enabled
+            merged.auth = saved.auth
+            merged.scope = saved.scope
+            return merged
+        }
+        store.mcpListingLoaded = convo.mcpServersLoaded
     }
 
     private func pageContent(for page: SettingsPage) -> some View {
@@ -97,8 +155,17 @@ struct SettingsHost: View {
                                 .frame(width: 34, height: 34)
                         }
                         .accessibilityLabel(String(localized: "settings_close_accessibility"))
+                    } else if case .providerEdit(let box, let providerID) = page,
+                              box.kind == .llm {
+                        Button("settings_save") { saveProviderAndClose(providerID) }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(t.accent)
+                    } else if case .mcpEdit(let serverID) = page {
+                        Button("settings_save") { saveMcpAndClose(serverID) }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(t.accent)
                     } else {
-                        Button("settings_done") { reset() }
+                        Button("settings_done") { handleDone(for: page) }
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(t.accent)
                     }
@@ -108,6 +175,86 @@ struct SettingsHost: View {
 
     private func pageKey(for page: SettingsPage) -> String {
         "\(navigation.settingsPath.count)-\(title(of: page))"
+    }
+
+    private func handleDone(for page: SettingsPage) {
+        reset()
+    }
+
+    func addMcpServer() {
+        let id = "new-" + UUID().uuidString.lowercased()
+        store.mcpServers.append(
+            MCPServer(
+                id: id,
+                name: "",
+                url: nil,
+                command: "",
+                args: [],
+                env: [:],
+                headers: [:],
+                tools: nil,
+                status: .idle,
+                enabled: true,
+                transport: "http"
+            )
+        )
+        push(.mcpEdit(id))
+    }
+
+    func refreshMcp() {
+        onRefreshMcp()
+    }
+
+    func refreshSkills() {
+        onRefreshSkills()
+    }
+
+    @discardableResult
+    func saveMcpServer(_ server: MCPServer) -> Bool {
+        do {
+            try mcpRepository.save(server, projectCwd: projectCwd)
+            onRefreshMcp()
+            return true
+        } catch {
+            store.mcpConfigurationError = String(localized: "mcp_configuration_save_failed")
+            return false
+        }
+    }
+
+    func removeMcpServer(_ server: MCPServer) {
+        if !server.id.hasPrefix("new-") {
+            do {
+                try mcpRepository.delete(server, projectCwd: projectCwd)
+            } catch {
+                store.mcpConfigurationError = String(localized: "mcp_configuration_save_failed")
+                return
+            }
+        }
+        store.mcpServers.removeAll { $0.id == server.id }
+        onRefreshMcp()
+        pop()
+    }
+
+    private func saveProviderAndClose(_ providerID: String) {
+        Task {
+            await providerRepository.applyChanges(providerID)
+            store.llmProviders = providerRepository.legacyProviders()
+            guard providerRepository.state(for: providerID)?.connectionState != .failed else {
+                return
+            }
+            reset()
+        }
+    }
+
+    private func saveMcpAndClose(_ serverID: String) {
+        guard let server = store.mcpServers.first(where: { $0.id == serverID }) else { return }
+        guard !server.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              server.isConfigured else {
+            store.mcpConfigurationError = String(localized: "mcp_configuration_invalid")
+            return
+        }
+        guard saveMcpServer(server) else { return }
+        reset()
     }
 
     // MARK: titles

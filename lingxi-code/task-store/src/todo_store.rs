@@ -545,12 +545,7 @@ impl TodoStore {
     /// console logs are not reproduced — this module, like the rest of the
     /// store, does not log; `rIp`'s `[inProcessRunner]` logs live with the
     /// runner.)
-    pub async fn claim_task(
-        &self,
-        task_id: &str,
-        owner: &str,
-        opts: ClaimOptions,
-    ) -> ClaimResult {
+    pub async fn claim_task(&self, task_id: &str, owner: &str, opts: ClaimOptions) -> ClaimResult {
         // Oracle order: the unlocked existence pre-check runs BEFORE the
         // checkAgentBusy dispatch.
         if self.get(task_id).await.is_none() {
@@ -923,7 +918,12 @@ mod tests {
 
     // ── claim cluster (oracle 2.1.223 QOd / uTy / RSr) ──────────────────────
 
-    async fn seed(store: &TodoStore, subject: &str, status: TodoState, owner: Option<&str>) -> String {
+    async fn seed(
+        store: &TodoStore,
+        subject: &str,
+        status: TodoState,
+        owner: Option<&str>,
+    ) -> String {
         let mut t = TodoTask::new(subject.into(), "desc".into(), None, Map::new());
         t.status = status;
         t.owner = owner.map(str::to_string);
@@ -934,7 +934,9 @@ mod tests {
     async fn claim_success_sets_owner_and_only_owner() {
         let (store, dir) = temp_store();
         let id = seed(&store, "open", TodoState::Pending, None).await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         let ClaimResult::Success { task } = &res else {
             panic!("expected Success, got {res:?}");
         };
@@ -955,7 +957,9 @@ mod tests {
     async fn reclaiming_your_own_task_succeeds() {
         let (store, dir) = temp_store();
         let id = seed(&store, "mine", TodoState::Pending, Some("worker-a")).await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         assert!(matches!(res, ClaimResult::Success { .. }), "{res:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -965,7 +969,9 @@ mod tests {
         // JS `l.owner && l.owner !== r` — "" is falsy.
         let (store, dir) = temp_store();
         let id = seed(&store, "empty-owner", TodoState::Pending, Some("")).await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         assert!(matches!(res, ClaimResult::Success { .. }), "{res:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -974,7 +980,9 @@ mod tests {
     async fn claim_of_foreign_task_is_already_claimed() {
         let (store, dir) = temp_store();
         let id = seed(&store, "theirs", TodoState::Pending, Some("worker-b")).await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         let ClaimResult::AlreadyClaimed { task } = &res else {
             panic!("expected AlreadyClaimed, got {res:?}");
         };
@@ -992,8 +1000,13 @@ mod tests {
     async fn claim_of_completed_task_is_already_resolved() {
         let (store, dir) = temp_store();
         let id = seed(&store, "done", TodoState::Completed, None).await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
-        assert!(matches!(res, ClaimResult::AlreadyResolved { .. }), "{res:?}");
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
+        assert!(
+            matches!(res, ClaimResult::AlreadyResolved { .. }),
+            "{res:?}"
+        );
         assert_eq!(res.reason(), Some("already_resolved"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1017,7 +1030,9 @@ mod tests {
         let id = seed(&store, "target", TodoState::Pending, None).await;
         store.block_task(&done_blocker, &id).await;
         store.block_task(&open_blocker, &id).await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         let ClaimResult::Blocked {
             blocked_by_tasks, ..
         } = &res
@@ -1040,7 +1055,9 @@ mod tests {
         store
             .update(&blocker, |t| t.status = TodoState::Completed)
             .await;
-        let res = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let res = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         assert!(matches!(res, ClaimResult::Success { .. }), "{res:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1048,7 +1065,13 @@ mod tests {
     #[tokio::test]
     async fn busy_check_rejects_owner_with_other_open_tasks() {
         let (store, dir) = temp_store();
-        let other = seed(&store, "other open", TodoState::InProgress, Some("worker-a")).await;
+        let other = seed(
+            &store,
+            "other open",
+            TodoState::InProgress,
+            Some("worker-a"),
+        )
+        .await;
         let done = seed(&store, "other done", TodoState::Completed, Some("worker-a")).await;
         let id = seed(&store, "target", TodoState::Pending, None).await;
         let res = store
@@ -1076,7 +1099,13 @@ mod tests {
     #[tokio::test]
     async fn busy_check_free_owner_claims_successfully() {
         let (store, dir) = temp_store();
-        seed(&store, "someone elses", TodoState::InProgress, Some("worker-b")).await;
+        seed(
+            &store,
+            "someone elses",
+            TodoState::InProgress,
+            Some("worker-b"),
+        )
+        .await;
         let id = seed(&store, "target", TodoState::Pending, None).await;
         let res = store
             .claim_task(
@@ -1098,7 +1127,9 @@ mod tests {
     async fn claim_leaves_no_stale_lock_directories() {
         let (store, dir) = temp_store();
         let id = seed(&store, "open", TodoState::Pending, None).await;
-        let _ = store.claim_task(&id, "worker-a", ClaimOptions::default()).await;
+        let _ = store
+            .claim_task(&id, "worker-a", ClaimOptions::default())
+            .await;
         let _ = store
             .claim_task(
                 &id,
@@ -1121,7 +1152,13 @@ mod tests {
     #[tokio::test]
     async fn unassign_matches_agent_id_or_name_and_resets_to_pending() {
         let (store, dir) = temp_store();
-        let by_id = seed(&store, "Fix parser", TodoState::InProgress, Some("agent-uuid-1")).await;
+        let by_id = seed(
+            &store,
+            "Fix parser",
+            TodoState::InProgress,
+            Some("agent-uuid-1"),
+        )
+        .await;
         let by_name = seed(&store, "Write docs", TodoState::Pending, Some("nova")).await;
         let done = seed(&store, "Shipped", TodoState::Completed, Some("nova")).await;
         let foreign = seed(&store, "Other", TodoState::Pending, Some("someone-else")).await;

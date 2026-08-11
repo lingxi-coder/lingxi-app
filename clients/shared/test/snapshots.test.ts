@@ -108,6 +108,105 @@ function validateTaskStatus(v: unknown): void {
   );
 }
 
+// ── tool_display.rs — the pre-derived render model ────────────────────────────
+
+const TOOL_VERBS = [
+  'update', 'create', 'read', 'search', 'shell', 'output',
+  'kill', 'fetch', 'task', 'todo', 'skill', 'generic',
+];
+
+const SYNTAX_CLASSES = [
+  'plain', 'keyword', 'type_name', 'function', 'string_lit', 'number',
+  'comment', 'punctuation', 'operator', 'variable', 'constant', 'attribute',
+];
+
+const HEADLINE_KINDS = [
+  'added', 'removed', 'added_removed', 'lines_read', 'lines_read_partial',
+  'files_found', 'files_found_truncated', 'lines_found', 'matches_found',
+  'interrupted', 'no_content', 'failed', 'plain',
+];
+
+const PLAN_TASK_STATES = ['pending', 'in_progress', 'completed'];
+
+function validateToolHeader(v: unknown): void {
+  const o = rec(v);
+  assert.ok(TOOL_VERBS.includes(o['verb'] as string), `unknown ToolVerbDto "${String(o['verb'])}"`);
+  assert.ok(isString(o['label']) && isString(o['title']));
+  for (const opt of ['primary', 'qualifier']) {
+    if (opt in o) assert.ok(isString(o[opt]));
+  }
+  if ('count' in o) assert.ok(isNumber(o['count']));
+  if ('sub_line' in o) {
+    const sub = rec(o['sub_line']);
+    assert.ok(isString(sub['prefix']) && isString(sub['text']));
+  }
+}
+
+function validateStructuredDiff(v: unknown): void {
+  const o = rec(v);
+  for (const opt of ['file_path', 'language']) {
+    if (opt in o) assert.ok(isString(o[opt]));
+  }
+  assert.ok(
+    isNumber(o['gutter_width']) &&
+      isNumber(o['additions']) &&
+      isNumber(o['removals']) &&
+      isNumber(o['truncated_rows']),
+  );
+  assert.ok(Array.isArray(o['rows']));
+  for (const row of o['rows'] as unknown[]) {
+    const r = rec(row);
+    assert.ok(['add', 'remove', 'context'].includes(r['kind'] as string));
+    assert.ok(isNumber(r['line_no']) && isNumber(r['hunk']));
+    if ('word_diffed' in r) assert.ok(isBool(r['word_diffed']));
+    assert.ok(Array.isArray(r['segments']));
+    for (const segment of r['segments'] as unknown[]) {
+      const s = rec(segment);
+      assert.ok(isString(s['text']));
+      assert.ok(
+        SYNTAX_CLASSES.includes(s['class'] as string),
+        `unknown SyntaxClassDto "${String(s['class'])}"`,
+      );
+      if ('rgb' in s) assert.ok(isNumber(s['rgb']));
+      for (const flag of ['bold', 'italic', 'underline', 'emph']) {
+        if (flag in s) assert.ok(isBool(s[flag]));
+      }
+    }
+  }
+}
+
+function validateToolResultDisplay(v: unknown): void {
+  const o = rec(v);
+  if ('headline' in o) assert.ok(isString(o['headline']));
+  if ('headline_kind' in o) {
+    assert.ok(
+      HEADLINE_KINDS.includes(o['headline_kind'] as string),
+      `unknown HeadlineKindDto "${String(o['headline_kind'])}"`,
+    );
+  }
+  if ('headline_args' in o) {
+    assert.ok(Array.isArray(o['headline_args']));
+    for (const arg of o['headline_args'] as unknown[]) assert.ok(isNumber(arg));
+  }
+  if ('diff' in o) validateStructuredDiff(o['diff']);
+  if ('body' in o) assert.ok(isString(o['body']));
+  assert.ok(isNumber(o['body_lines']));
+  for (const flag of ['body_truncated', 'collapsed']) {
+    if (flag in o) assert.ok(isBool(o[flag]));
+  }
+}
+
+function validatePlanTask(v: unknown): void {
+  const o = rec(v);
+  if ('id' in o) assert.ok(isString(o['id']));
+  assert.ok(isString(o['subject']));
+  if ('active_form' in o) assert.ok(isString(o['active_form']));
+  assert.ok(
+    PLAN_TASK_STATES.includes(o['state'] as string),
+    `unknown PlanTaskStateDto "${String(o['state'])}"`,
+  );
+}
+
 function validateMessageBlock(v: unknown): void {
   const o = rec(v);
   switch (o['type']) {
@@ -130,6 +229,7 @@ function validateMessageBlock(v: unknown): void {
       break;
     case 'tool_use':
       assert.ok(isString(o['id']) && isString(o['tool']) && isString(o['input_json']));
+      if ('header' in o) validateToolHeader(o['header']);
       break;
     case 'tool_result':
       assert.ok(
@@ -141,6 +241,7 @@ function validateMessageBlock(v: unknown): void {
       for (const opt of ['old_string', 'new_string', 'file_path']) {
         if (opt in o) assert.ok(isString(o[opt]));
       }
+      if ('display' in o) validateToolResultDisplay(o['display']);
       break;
     default:
       assert.fail(`unknown MessageBlockDto type: ${String(o['type'])}`);
@@ -313,6 +414,22 @@ function validateAppManifest(v: unknown): void {
   assert.ok(Array.isArray(o['capabilities']));
   for (const cap of o['capabilities'] as unknown[]) {
     assert.ok(APP_CAPABILITY_KINDS.includes(cap as string));
+  }
+  if ('device_context' in o) {
+    const context = rec(o['device_context']);
+    assert.ok(['ios', 'android', 'desktop', 'unknown'].includes(context['os'] as string));
+    assert.ok(
+      ['iphone', 'ipad', 'phone', 'tablet', 'desktop', 'unknown'].includes(
+        context['formFactor'] as string,
+      ),
+    );
+    const viewport = rec(context['viewport']);
+    assert.ok(isNumber(viewport['width']) && isNumber(viewport['height']));
+    const safeArea = rec(context['safeArea']);
+    for (const side of ['top', 'right', 'bottom', 'left']) assert.ok(isNumber(safeArea[side]));
+    assert.ok(['light', 'dark', 'unknown'].includes(context['colorScheme'] as string));
+    assert.ok(isBool(context['reducedMotion']));
+    assert.ok(['touch', 'pointer', 'hybrid', 'unknown'].includes(context['inputMode'] as string));
   }
 }
 
@@ -672,6 +789,7 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'tool_use_started':
       assert.ok(isString(o['id']) && isString(o['tool']) && isString(o['input_json']));
+      if ('header' in o) validateToolHeader(o['header']);
       break;
     case 'tool_heartbeat':
       assert.ok(isString(o['id']) && isString(o['tool']) && isNumber(o['elapsed_ms']));
@@ -683,6 +801,11 @@ function validateEvent(name: string, v: unknown): void {
           isString(o['result_json']) &&
           isBool(o['is_error']),
       );
+      if ('display' in o) validateToolResultDisplay(o['display']);
+      break;
+    case 'plan_updated':
+      assert.ok(Array.isArray(o['tasks']));
+      for (const task of o['tasks'] as unknown[]) validatePlanTask(task);
       break;
     case 'message_complete':
       if ('stop_reason' in o) assert.ok(isString(o['stop_reason']));
@@ -985,7 +1108,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 51, `expected 51 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 52, `expected 52 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

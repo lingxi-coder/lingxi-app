@@ -3,6 +3,10 @@ import SwiftUI
 struct ConversationExecutionRunCard: View {
     @Environment(\.theme) private var t
     let run: ConversationExecutionRun
+    /// Which tool rows are expanded, keyed by tool-use id. Owned by
+    /// `ConversationModel` — never by the row, which is recycled on scroll.
+    var expandedToolCalls: Set<String> = []
+    var onToggleToolCall: (String) -> Void = { _ in }
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
 
     var body: some View {
@@ -52,38 +56,16 @@ struct ConversationExecutionRunCard: View {
             }
 
             if !run.tools.isEmpty {
+                // One renderer for every tool row, live or restored: it consumes
+                // the engine's derived header/display and falls back to the old
+                // summaries only when an older engine ships neither.
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(run.tools) { tool in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(tool.tool)
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundColor(t.text)
-                                StatusChip(text: tool.status.label, accent: toolColor(tool.status))
-                                if let elapsed = ConversationExecutionParsing.formatDuration(tool.elapsedMs) {
-                                    Text(elapsed)
-                                        .font(.system(size: 11.5))
-                                        .foregroundColor(t.text4)
-                                }
-                            }
-                            if let input = tool.inputSummary, !input.isEmpty {
-                                Text(input)
-                                    .font(.system(size: 12.5))
-                                    .foregroundColor(t.text2)
-                                    .lineLimit(3)
-                            }
-                            if let output = tool.outputSummary, !output.isEmpty {
-                                Text(output)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(t.text3)
-                                    .lineLimit(4)
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(t.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+                        ToolCallView(
+                            trace: tool,
+                            isExpanded: expandedToolCalls.contains(tool.id),
+                            onToggle: { onToggleToolCall(tool.id) }
+                        )
                     }
                 }
             }
@@ -175,15 +157,6 @@ struct ConversationExecutionRunCard: View {
         case .completed: return t.ok
         case .failed: return t.danger
         case .cancelled, .maxTurns: return t.text3
-        }
-    }
-
-    private func toolColor(_ status: ConversationToolStatus) -> Color {
-        switch status {
-        case .running: return t.accent
-        case .completed: return t.ok
-        case .failed: return t.danger
-        case .cancelled: return t.text3
         }
     }
 

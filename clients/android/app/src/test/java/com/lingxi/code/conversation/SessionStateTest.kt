@@ -323,10 +323,10 @@ class SessionStateTest {
             listOf(
                 MessageBlockDto.Text("正文"),
                 MessageBlockDto.Text("   "), // blank → dropped
-                MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}"),
+                MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}", header = null),
                 MessageBlockDto.ToolResult(
                     id = "t1", tool = "bash", resultJson = "ok", isError = false,
-                    oldString = null, newString = null, filePath = null,
+                    oldString = null, newString = null, filePath = null, display = null,
                 ),
                 MessageBlockDto.RedactedThinking(data = "opaque"),
                 MessageBlockDto.CompactBoundary(

@@ -13,6 +13,7 @@ import {
 import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
+import { PlanTasks } from './components/PlanTasks';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
 import { tokens, type ThemeMode } from './theme/tokens';
@@ -70,7 +71,21 @@ export function App() {
             <div role="status" style={{ flex: 1, display: 'grid', placeItems: 'center', color: palette.text3, fontSize: 13 }}>Loading secure desktop state…</div>
           ) : ready ? (
             <>
-              <Stage liveItems={bridge.conversation.items} running={bridge.running} emptyMessage={emptyMessage} />
+              {/*
+                Three flex siblings in a column: the Stage takes the remaining
+                height, the plan strip and the composer keep theirs. Making the
+                plan a SIBLING rather than an overlay is the point — it shrinks
+                the scroll viewport instead of covering the newest tool output.
+              */}
+              <Stage
+                liveItems={bridge.conversation.items}
+                running={bridge.running}
+                emptyMessage={emptyMessage}
+                // Item ids restart at `i1` in every session; the Stage's
+                // collapse map is scoped by this and dropped when it changes.
+                sessionKey={bridge.conversation.sessionKey}
+              />
+              <PlanTasks tasks={bridge.conversation.plan} />
               <BetaComposer bridge={bridge} ready={ready} />
             </>
           ) : (

@@ -69,40 +69,10 @@ export const PROJECTS: Project[] = [
   },
 ];
 
-// agent run = the "Ran an agent" receipt cards in the screenshot
-// types: dispatch (heading), narration (plain text), agent (card), thinking
-export type RunItem =
-  | { type: 'narration'; text: string; tone?: 'muted'; strong?: boolean; role?: 'user' | 'assistant' }
-  | { type: 'agent'; state: 'done' | 'running'; title: string; sub?: string; detail?: string; error?: boolean; expandable?: boolean; link?: boolean }
-  | { type: 'meta'; dur: string; tokens: string }
-  | { type: 'audio'; bars: number[]; duration: number }
-  // The assistant's streamed reasoning (`thinking_delta`), rendered as a dim,
-  // italic, collapsible block above the answer. `done` flips true once the
-  // reasoning stream closes (message_complete / turn_ended).
-  | { type: 'thinking'; text: string; done?: boolean };
-
-export const RUN: RunItem[] = [
-  { type: 'narration', text: 'Dispatching Task 1: Bootstrap workspace', tone: 'muted' },
-  { type: 'agent', state: 'done', title: 'Ran an agent', expandable: true },
-  { type: 'narration', text: 'Task 1 implementer DONE. Dispatching spec compliance reviewer.' },
-  { type: 'agent', state: 'done', title: 'Ran agent', sub: 'Spec review Task 1' },
-  { type: 'narration', text: 'Spec compliance ✓. Dispatching code quality reviewer.' },
-  { type: 'agent', state: 'done', title: 'Ran agent', sub: 'Code quality review Task 1' },
-  { type: 'narration', text: 'Task 1 complete: ✓ Spec compliant + ✓ Code quality approved.', strong: true },
-
-  { type: 'narration', text: 'Dispatching Task 2: Create lingxi-protocol crate skeleton', tone: 'muted' },
-  { type: 'agent', state: 'done', title: 'Ran an agent', expandable: true },
-  { type: 'narration', text: "Task 2 implementer DONE_WITH_CONCERNS — concern is about plan-sequencing (the validation command can't run until all 5 members have Cargo.tomls due to Cargo's workspace resolution). The files themselves match spec; concern is an observation about the plan, not a correctness issue. The implementer verified files are syntactically valid by isolating them in /tmp. Proceeding to spec review." },
-  { type: 'agent', state: 'done', title: 'Ran agent', sub: 'Spec review Task 2' },
-  { type: 'narration', text: 'Spec compliance ✓. Dispatching code quality reviewer for Task 2.' },
-  { type: 'agent', state: 'done', title: 'Ran an agent', expandable: true },
-  { type: 'narration', text: 'Task 2 ✓ complete. Moving to Task 3.', strong: true },
-
-  { type: 'narration', text: 'Dispatching Task 3: IDs (newtype wrappers)', tone: 'muted' },
-  { type: 'agent', state: 'running', title: 'Running agent', sub: 'Implement Task 3: ID newtypes', link: true },
-
-  { type: 'meta', dur: '13m 54s', tokens: '281.8k tokens' },
-];
+// NOTE: the live transcript view-model (`RunItem`) used to live here, inside a
+// module that declares itself MOCK DATA. It moved to `../model/runItem` — the
+// prototype's static `RUN` fixture that motivated it was referenced nowhere and
+// is deleted rather than ported.
 
 export interface FileChange {
   path: string;

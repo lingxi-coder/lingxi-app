@@ -184,6 +184,131 @@ export type ClientCommand =
   | { type: 'request_exit' };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// tool_display.rs — the pre-derived render model for one tool call
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Derived ONCE in Rust and shipped to every client, so the terminal, iOS,
+// Android, and this desktop app cannot drift apart on how a tool call reads.
+//
+// Two shape decisions matter when consuming these:
+//
+//  1. Diff rows ship PRE-SPLIT segments, never string offsets. Rust indexes
+//     strings by UTF-8 byte and JS by UTF-16 code unit, so a `(start, end)`
+//     pair would silently mis-slice any non-ASCII line — and this repo's own
+//     sources are full of CJK. Concatenating a row's `segments[].text`
+//     reproduces the line exactly.
+//  2. `CodeSegmentDto.class` is a semantic token class; `rgb` is the terminal's
+//     resolved color, baked against ONE dark theme. Use `class` with the
+//     active palette — `rgb` on a light background is unreadable, and it
+//     cannot follow a runtime theme toggle.
+
+/** Stable, non-localized verb identity for a tool-call header. */
+export type ToolVerbDto =
+  | 'update' | 'create' | 'read' | 'search' | 'shell' | 'output'
+  | 'kill' | 'fetch' | 'task' | 'todo' | 'skill' | 'generic';
+
+/** A second header line with its own glyph, e.g. `$ cargo test`. */
+export interface ToolSubLineDto {
+  prefix: string;
+  text: string;
+}
+
+/** The parameterized tool-call header — `Update(src/host.rs)`. */
+export interface ToolHeaderDto {
+  verb: ToolVerbDto;
+  /** English label. Localizing clients key off `verb` instead. */
+  label: string;
+  primary?: string;
+  qualifier?: string;
+  count?: number;
+  sub_line?: ToolSubLineDto;
+  /** Pre-composed `label(primary)qualifier`. */
+  title: string;
+}
+
+/** Theme-independent semantic class of one code run. */
+export type SyntaxClassDto =
+  | 'plain' | 'keyword' | 'type_name' | 'function' | 'string_lit' | 'number'
+  | 'comment' | 'punctuation' | 'operator' | 'variable' | 'constant' | 'attribute';
+
+/** Add / remove / context classification of a diff row. */
+export type DiffLineKindDto = 'add' | 'remove' | 'context';
+
+/** One pre-split run of a diff row's text. */
+export interface CodeSegmentDto {
+  text: string;
+  class: SyntaxClassDto;
+  /** Terminal-resolved foreground packed `0x00RRGGBB`. Prefer `class`. */
+  rgb?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  /** A changed word of a word-diffed pair — stronger emphasis background. */
+  emph?: boolean;
+}
+
+/** One diff row: gutter metadata plus its content runs. */
+export interface DiffRowDto {
+  kind: DiffLineKindDto;
+  /** New-file line number for add/context; old-file for remove. */
+  line_no: number;
+  /** 0-based hunk index; a change between rows is where `⋯` belongs. */
+  hunk: number;
+  word_diffed?: boolean;
+  segments: CodeSegmentDto[];
+}
+
+/** A complete structured diff. */
+export interface StructuredDiffDto {
+  file_path?: string;
+  language?: string;
+  /** Gutter width across ALL hunks, so it does not jitter between them. */
+  gutter_width: number;
+  additions: number;
+  removals: number;
+  /** Rows dropped by the wire cap; `0` when complete. */
+  truncated_rows: number;
+  rows: DiffRowDto[];
+}
+
+/** What a result headline says, for clients that localize. */
+export type HeadlineKindDto =
+  | 'added' | 'removed' | 'added_removed' | 'lines_read' | 'lines_read_partial'
+  | 'files_found' | 'files_found_truncated' | 'lines_found' | 'matches_found'
+  | 'interrupted' | 'no_content' | 'failed' | 'plain';
+
+/** Everything needed to render one completed call's `⎿` block. */
+export interface ToolResultDisplayDto {
+  /** English headline. Absent when there is nothing to say (TodoWrite). */
+  headline?: string;
+  headline_kind?: HeadlineKindDto;
+  /** Numeric slots for `headline_kind`, in the order it documents. */
+  headline_args?: number[];
+  diff?: StructuredDiffDto;
+  /** Plain-text body for the expanded view, clamped to the wire caps. */
+  body?: string;
+  /** Line count BEFORE clamping — drives "show N more lines". */
+  body_lines: number;
+  /** `body` was clamped; the full text remains in `result_json`. */
+  body_truncated?: boolean;
+  /** The body exceeds the inline budget — render it collapsed. */
+  collapsed?: boolean;
+}
+
+/** Lifecycle state of one plan task. */
+export type PlanTaskStateDto = 'pending' | 'in_progress' | 'completed';
+
+/** One item of the model-managed working plan. */
+export interface PlanTaskDto {
+  /** Stable V2 task id. TodoWrite V1 items have none. */
+  id?: string;
+  subject: string;
+  /** Present-continuous label, for the status line — not the list row. */
+  active_form?: string;
+  state: PlanTaskStateDto;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // message.rs
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -198,16 +323,24 @@ export type MessageBlockDto =
       messages_after: number;
       summary: string;
     }
-  | { type: 'tool_use'; id: string; tool: string; input_json: string }
+  | {
+      type: 'tool_use';
+      id: string;
+      tool: string;
+      input_json: string;
+      header?: ToolHeaderDto;
+    }
   | {
       type: 'tool_result';
       id: string;
       tool: string;
       result_json: string;
       is_error: boolean;
+      /** Legacy raw diff pair; `display.diff` supersedes it. */
       old_string?: string;
       new_string?: string;
       file_path?: string;
+      display?: ToolResultDisplayDto;
     };
 
 /** A complete conversation message (message.rs `MessageDto`). */
@@ -581,6 +714,18 @@ export interface AppManifestDto {
   allowed_domains: string[];
   /** Capabilities the confirmed plan declared; empty for pre-capability manifests. */
   capabilities: AppCapabilityKindDto[];
+  /** Native host context used by platform-aware generated shells. */
+  device_context?: DeviceContextDto;
+}
+
+export interface DeviceContextDto {
+  os: 'ios' | 'android' | 'desktop' | 'unknown' | string;
+  formFactor: 'iphone' | 'ipad' | 'phone' | 'tablet' | 'desktop' | 'unknown' | string;
+  viewport: { width: number; height: number };
+  safeArea: { top: number; right: number; bottom: number; left: number };
+  colorScheme: 'light' | 'dark' | 'unknown' | string;
+  reducedMotion: boolean;
+  inputMode: 'touch' | 'pointer' | 'hybrid' | 'unknown' | string;
 }
 
 /** Runtime snapshot inside an app detail response (local_apps.rs `AppRuntimeDetailsDto`). */
@@ -760,9 +905,23 @@ export type ClientEvent =
   | { type: 'ask_user_question_resolved'; request_id: number }
   // ── Live-turn streaming events ──────────────────────────────────────────────
   | { type: 'text_delta'; text: string }
-  | { type: 'tool_use_started'; id: string; tool: string; input_json: string }
+  | {
+      type: 'tool_use_started';
+      id: string;
+      tool: string;
+      input_json: string;
+      header?: ToolHeaderDto;
+    }
   | { type: 'tool_heartbeat'; id: string; tool: string; elapsed_ms: number }
-  | { type: 'tool_use_result'; id: string; tool: string; result_json: string; is_error: boolean }
+  | {
+      type: 'tool_use_result';
+      id: string;
+      tool: string;
+      result_json: string;
+      is_error: boolean;
+      display?: ToolResultDisplayDto;
+    }
+  | { type: 'plan_updated'; tasks: PlanTaskDto[] }
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
   | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }

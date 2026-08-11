@@ -23,10 +23,29 @@ enum class AgentRunNoticeKind {
 data class AgentToolRunState(
     val id: String,
     val tool: String,
+    /**
+     * The LEGACY one-line input summary from [summarizeToolInput]. Retained
+     * only as the fallback for an engine that predates [header]; the derived
+     * header supersedes it entirely.
+     */
     val summary: String? = null,
     val status: AgentToolStatus = AgentToolStatus.Running,
     val elapsedMs: Long? = null,
-)
+    /** Engine-derived call header (`ToolUseStarted.header`). Null on an older engine. */
+    val header: ToolHeaderUi? = null,
+    /** Engine-derived `⎿` block (`ToolUseResult.display`). Null until the call returns. */
+    val display: ToolResultDisplayUi? = null,
+) {
+    /** This row as the shared [ToolCallUi] both render surfaces consume. */
+    fun toToolCall(): ToolCallUi = ToolCallUi(
+        id = id,
+        tool = tool,
+        header = header,
+        display = display,
+        status = status,
+        fallbackSummary = summary,
+    )
+}
 
 data class AgentRunNotice(
     val text: String,
@@ -47,6 +66,13 @@ data class AgentRunUsage(
  * for the conversation transcript, while transient reasoning, heartbeats and
  * retries stay visible until the next turn without being written back as fake
  * chat messages.
+ *
+ * [tools] is the one part that does NOT stay here. A live turn's tool calls
+ * exist nowhere else — the engine keeps `ToolUse` out of the assistant message
+ * it sends back — so `ChatState.settleTurn` moves them into the transcript
+ * message when the turn settles, which is exactly what a resumed transcript
+ * shows. What is left here afterwards is the shell rows, which have their own
+ * persistent terminal cards.
  */
 data class AgentRunState(
     val turnId: Long,
@@ -115,11 +141,22 @@ internal fun AgentRunState.reduceTool(event: ReplyEvent.ToolActivity): AgentRunS
         summary = event.inputSummary ?: existing?.summary,
         status = status,
         elapsedMs = event.elapsedMs ?: existing?.elapsedMs,
+        // The header rides the CALL, the display rides the RESULT — two separate
+        // wire events for one row. Each must survive the other's arrival, so
+        // neither is ever overwritten with the null the other event carries.
+        header = event.header ?: existing?.header,
+        display = event.display ?: existing?.display,
     )
+    // NOTHING is dropped here. `tools` is the ONLY record of this turn's tool
+    // calls — `ChatState.settleTurn` moves it into the transcript message — so a
+    // cap applied at this layer would DELETE transcript content, permanently and
+    // unrecoverably (the engine keeps `ToolUse` out of the assistant message,
+    // which is why `settleTurn` exists at all). The 50-row budget that used to
+    // live here is a RENDER window now; see [toolDisplayWindow].
     val updated = if (existingIndex >= 0) {
         tools.toMutableList().apply { this[existingIndex] = replacement }
     } else {
-        (tools + replacement).takeLast(MAX_TOOL_ROWS).toMutableList()
+        (tools + replacement).toMutableList()
     }
     return copy(
         active = true,
@@ -129,6 +166,25 @@ internal fun AgentRunState.reduceTool(event: ReplyEvent.ToolActivity): AgentRunS
         revision = revision + 1,
     )
 }
+
+/**
+ * The newest [MAX_TOOL_ROWS] rows — the LIVE card's display budget, and ONLY
+ * that.
+ *
+ * The live trace is drawn into a plain `Column`, not a lazy list, so every row
+ * it holds is composed; a 300-call turn would compose 300 rows on every
+ * revision. Windowing here is safe precisely because it is not storage:
+ * [AgentRunState.tools] still holds every call, `settleTurn` still absorbs
+ * every call into the transcript, and a late `ToolUseResult` for a row that has
+ * scrolled out of the window still finds it (`reduceTool` searches the FULL
+ * list by id).
+ */
+internal fun AgentRunState.toolDisplayWindow(): List<AgentToolRunState> =
+    if (tools.size <= MAX_TOOL_ROWS) tools else tools.takeLast(MAX_TOOL_ROWS)
+
+/** How many rows [toolDisplayWindow] left out. They are in the transcript. */
+internal fun AgentRunState.hiddenToolCount(): Int =
+    (tools.size - MAX_TOOL_ROWS).coerceAtLeast(0)
 
 internal fun AgentRunState.addNotice(notice: AgentRunNotice): AgentRunState = copy(
     notices = (notices + notice).takeLast(MAX_NOTICE_ROWS),
@@ -170,6 +226,14 @@ internal fun AgentRunState.finish(outcome: AgentRunOutcome): AgentRunState {
     )
 }
 
+/**
+ * LEGACY one-line input summary, scraped from `input_json` by regex.
+ *
+ * The engine now derives the real header once and ships it on
+ * `ToolUseStarted.header` — client-side re-parsing of tool JSON is precisely the
+ * four-way drift that change deletes. This survives ONLY as the fallback for an
+ * engine build that predates the field, and must not grow new keys or callers.
+ */
 internal fun summarizeToolInput(inputJson: String): String? {
     for (key in SAFE_TOOL_INPUT_KEYS) {
         val match = Regex(
@@ -216,7 +280,12 @@ private val SAFE_TOOL_INPUT_KEYS = listOf(
     "description",
 )
 private const val MAX_REASONING_CHARS = 64 * 1024
-private const val MAX_TOOL_ROWS = 50
+
+/**
+ * How many tool rows the live run card DRAWS. Never how many it KEEPS — see
+ * [toolDisplayWindow].
+ */
+internal const val MAX_TOOL_ROWS = 50
 private const val MAX_NOTICE_ROWS = 20
 private const val MAX_TOOL_SUMMARY_CHARS = 160
 private const val AUTO_SCROLL_REASONING_CHARS = 256

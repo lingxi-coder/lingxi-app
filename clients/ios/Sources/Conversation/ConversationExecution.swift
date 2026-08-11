@@ -3,6 +3,12 @@ import Foundation
 enum ConversationRenderItem: Identifiable, Equatable {
     case message(Message)
     case run(ConversationExecutionRun)
+    /// One restored tool call — the `toolUse` block of an assistant turn merged
+    /// with the `toolResult` block that answers it from the FOLLOWING user turn.
+    /// Live turns render their tools inside the run card instead; this case
+    /// exists so a resumed transcript can interleave tool rows between messages
+    /// without a `tool_result` ever reaching the right-aligned user bubble.
+    case toolCall(ConversationToolTrace)
     /// An interactive `AskUserQuestion` questionnaire waiting for the user,
     /// appended after the messages while pending.
     case question(ConversationPendingQuestion)
@@ -16,12 +22,175 @@ enum ConversationRenderItem: Identifiable, Equatable {
             return "message:\(message.id.uuidString)"
         case let .run(run):
             return "run:\(run.id)"
+        case let .toolCall(trace):
+            return "tool:\(trace.id)"
         case let .question(question):
             return "question:\(question.requestId)"
         case let .notice(notice):
             return "notice:\(notice.id)"
         }
     }
+}
+
+// MARK: - Engine-derived tool presentation
+//
+// The engine derives — ONCE, in Rust — how every tool call should be presented
+// and ships it on additive wire fields (`ToolHeaderDto` / `ToolResultDisplayDto`
+// / `PlanTaskDto`). The types below mirror those DTOs WITHOUT importing the
+// generated bindings, exactly like `ConversationAskOption` above, so the views
+// and previews still compile in a checkout that has not built the xcframework.
+// The lowering lives in `EngineConversationSource` behind the FFI guard.
+//
+// Clients must NOT re-parse `input_json` / `result_json` to rebuild any of this:
+// four independent re-derivations drifting apart is the bug this deletes.
+
+/// Stable verb identity for a tool header. Mirrors `ToolVerbDto`; localizing
+/// clients key their strings off this instead of the English `label`.
+enum ConversationToolVerb: Equatable, Hashable {
+    case update, create, read, search, shell, output, kill, fetch, task, todo, skill, generic
+}
+
+/// A header sub-line with its own glyph, e.g. `("$", "cargo test --all")`.
+/// Mirrors `ToolSubLineDto`. `text` is already collapsed to a single line.
+struct ConversationToolSubLine: Equatable, Hashable {
+    let prefix: String
+    let text: String
+}
+
+/// The parameterized tool-call header — `Update(src/host.rs)`. Mirrors
+/// `ToolHeaderDto`.
+struct ConversationToolHeader: Equatable, Hashable {
+    let verb: ConversationToolVerb
+    /// English label. Localizing clients compose from `verb` instead — EXCEPT
+    /// when the engine set an override the verb cannot express (a subagent
+    /// type, `REPL`, `Web Search`, an MCP tool name), which is why the raw
+    /// label is retained here.
+    let label: String
+    let primary: String?
+    /// Suffix rendered after the parentheses; carries its own leading space.
+    let qualifier: String?
+    let count: UInt32?
+    let subLine: ConversationToolSubLine?
+    /// Pre-composed English `label(primary)qualifier`, for non-localizing surfaces.
+    let title: String
+}
+
+/// Syntax class of one diff segment. Mirrors `SyntaxClassDto`; `op` is the
+/// mirror spelling of the DTO's backticked `` `operator` `` case.
+enum ConversationSyntaxClass: Equatable, Hashable {
+    case plain, keyword, typeName, function, stringLit, number
+    case comment, punctuation, op, variable, constant, attribute
+}
+
+/// One PRE-SPLIT run of a diff row's text. Mirrors `CodeSegmentDto`.
+///
+/// Concatenating a row's `segments[].text` reproduces the line EXACTLY — never
+/// index into the string. Rust indexes by UTF-8 byte, Swift by grapheme; that
+/// mismatch is precisely why no offsets cross the wire.
+struct ConversationCodeSegment: Equatable, Hashable {
+    let text: String
+    /// The syntax class — the ONLY correct source of foreground color.
+    let syntax: ConversationSyntaxClass
+    /// Terminal-resolved foreground packed `0x00RRGGBB`, baked against ONE dark
+    /// theme. Usable only as a dark-mode fallback for `plain`.
+    let rgb: UInt32?
+    let bold: Bool
+    let italic: Bool
+    let underline: Bool
+    /// A changed word of a word-diffed pair — gets the stronger intra-line
+    /// emphasis background.
+    let emph: Bool
+}
+
+/// Whether a diff row was added, removed, or is unchanged context.
+enum ConversationDiffLineKind: Equatable, Hashable {
+    case add, remove, context
+}
+
+/// One diff row: gutter metadata plus its content runs. Mirrors `DiffRowDto`.
+struct ConversationDiffRow: Equatable, Hashable {
+    let kind: ConversationDiffLineKind
+    /// New-file line number for add/context; old-file for remove.
+    let lineNo: UInt32
+    /// 0-based hunk index. A CHANGE between consecutive rows is where the `⋯`
+    /// separator belongs — there is no separator row kind on the wire.
+    let hunk: UInt32
+    let wordDiffed: Bool
+    let segments: [ConversationCodeSegment]
+}
+
+/// A complete structured diff. Mirrors `StructuredDiffDto`.
+struct ConversationStructuredDiff: Equatable, Hashable {
+    let filePath: String?
+    let language: String?
+    /// Width of the right-aligned line-number gutter, across ALL hunks.
+    let gutterWidth: UInt32
+    let additions: UInt32
+    let removals: UInt32
+    /// Rows dropped by the wire cap; `0` when complete.
+    let truncatedRows: UInt32
+    let rows: [ConversationDiffRow]
+}
+
+/// What a result headline says, for clients that localize. Mirrors
+/// `HeadlineKindDto`; the numeric slots arrive in `headlineArgs`.
+enum ConversationResultHeadlineKind: Equatable, Hashable {
+    case added, removed, addedRemoved
+    case linesRead, linesReadPartial
+    case filesFound, filesFoundTruncated, linesFound, matchesFound
+    case interrupted, noContent, failed, plain
+}
+
+/// The pre-derived `⎿` block for one tool result. Mirrors `ToolResultDisplayDto`.
+struct ConversationToolResultDisplay: Equatable, Hashable {
+    /// English headline. Absent when there is nothing to say.
+    let headline: String?
+    let headlineKind: ConversationResultHeadlineKind?
+    let headlineArgs: [UInt32]
+    let diff: ConversationStructuredDiff?
+    /// Plain-text body for the expanded view, already clamped to the wire caps.
+    let body: String?
+    /// Line count BEFORE clamping — drives "show N more lines" with no measuring.
+    let bodyLines: UInt32
+    let bodyTruncated: Bool
+    /// The body exceeds the inline budget — render it collapsed.
+    let collapsed: Bool
+}
+
+/// Lifecycle state of one plan item. Mirrors `PlanTaskStateDto`.
+enum ConversationPlanTaskState: Equatable, Hashable {
+    case pending, inProgress, completed
+
+    /// The checklist glyph, matching the terminal exactly.
+    var glyph: String {
+        switch self {
+        case .pending: return "◻"
+        case .inProgress: return "◼"
+        case .completed: return "✔"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .pending: return String(localized: "chat_plan_state_pending")
+        case .inProgress: return String(localized: "chat_plan_state_in_progress")
+        case .completed: return String(localized: "chat_plan_state_completed")
+        }
+    }
+}
+
+/// One item of the model-managed working plan. Mirrors `PlanTaskDto`.
+///
+/// `taskId` is the stable V2 id; TodoWrite V1 items have none, so the render
+/// identity falls back to the position-independent subject.
+struct ConversationPlanTask: Identifiable, Equatable, Hashable {
+    let taskId: String?
+    let subject: String
+    /// Present-continuous label, for the status line — not the list row.
+    let activeForm: String?
+    let state: ConversationPlanTaskState
+
+    var id: String { taskId ?? subject }
 }
 
 // MARK: - AskUserQuestion (FFI-independent mirror of the wire payload)
@@ -92,7 +261,15 @@ enum ConversationMessageBlock: Equatable {
     case thinking(text: String, signature: String?)
     case redactedThinking
     case compactBoundary(messagesBefore: Int, messagesAfter: Int, summary: String)
-    case toolUse(id: String, tool: String, inputSummary: String, inputJson: String)
+    case toolUse(
+        id: String,
+        tool: String,
+        inputSummary: String,
+        inputJson: String,
+        /// Engine-derived header; `nil` on an older engine, where `inputSummary`
+        /// (the legacy client-side summarizer) is the fallback.
+        header: ConversationToolHeader?
+    )
     case toolResult(
         id: String,
         tool: String,
@@ -101,7 +278,10 @@ enum ConversationMessageBlock: Equatable {
         resultJson: String,
         oldString: String?,
         newString: String?,
-        filePath: String?
+        filePath: String?,
+        /// Engine-derived `⎿` block; `nil` on an older engine. Supersedes the
+        /// three legacy diff fields above, which carry only the raw pair.
+        display: ConversationToolResultDisplay?
     )
 }
 
@@ -143,9 +323,18 @@ struct ConversationToolTrace: Identifiable, Equatable {
     let id: String
     var tool: String
     var status: ConversationToolStatus
+    /// LEGACY fallback, produced by `summarizeToolInput` when the engine ships
+    /// no `header`. Never used to rebuild a header when one is present.
     var inputSummary: String?
+    /// LEGACY fallback, produced by `summarizeToolResult` when the engine ships
+    /// no `display`.
     var outputSummary: String?
     var elapsedMs: UInt64?
+    /// The engine-derived header. Present on a current engine.
+    var header: ConversationToolHeader? = nil
+    /// The engine-derived `⎿` result block. Present once the tool returns on a
+    /// current engine.
+    var display: ConversationToolResultDisplay? = nil
 }
 
 enum ConversationShellStatus: Equatable {

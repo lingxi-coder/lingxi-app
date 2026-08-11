@@ -273,6 +273,17 @@ final class ConversationModel: ObservableObject {
     /// source and starts empty. Drives the pinned tasks panel above the
     /// composer.
     @Published var backgroundTasks: [BackgroundTaskSnapshot] = []
+    /// The model's own working plan (TodoWrite / Task checklist), replaced
+    /// WHOLESALE on every `PlanUpdated` — the engine emits the complete ordered
+    /// list and an empty list clears it. Drives `PlanTasksPanel`, pinned closest
+    /// to the composer. Distinct from `backgroundTasks`, which are engine jobs.
+    @Published var planTasks: [ConversationPlanTask] = []
+    /// Tool-use ids whose result body/diff the user expanded.
+    ///
+    /// This lives HERE and not in the row: every transcript list recycles its
+    /// rows, so row-local `@State` is dropped on scroll and then reappears on
+    /// whichever row happens to reuse the storage.
+    @Published var expandedToolCalls: Set<String> = []
     #if canImport(engine_mobileFFI)
         /// FIFO queue of engine-parked permission requests (SHIP-BLOCKER #3). The
         /// chat view renders the head (`first`) as a modal prompt; answering it pops
@@ -1175,12 +1186,10 @@ final class MockConversationSource: ConversationSource {
             // the abandoned session/connection. If the target session still
             // has one pending, the broker replays it after the switch.
             model.pendingQuestions = []
-            // The task panel is a view of THIS conversation's background work.
-            // The engine's task registry is host-wide, so keeping the rows
-            // would show the new session tasks it never started (and grow
-            // without bound across a long app run). The bootstrap `TaskList`
-            // on the next handle build re-seeds anything still live.
-            model.backgroundTasks = []
+            // The plan and the expanded-row set belong to the transcript we're
+            // dropping; the next `PlanUpdated` re-establishes a plan.
+            model.planTasks = []
+            model.expandedToolCalls = []
         }
 
         private func invalidateTurnContext() {
@@ -1397,14 +1406,16 @@ final class MockConversationSource: ConversationSource {
 
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
             switch event {
-            case .askUserQuestion, .askUserQuestionResolved, .taskStatusChanged, .taskRow:
+            case .askUserQuestion, .askUserQuestionResolved, .taskStatusChanged, .taskRow,
+                 .planUpdated:
                 // Deliberately OUTSIDE the turn gate: the engine's broker
                 // replays a still-pending AskUserQuestion (and resolves it)
                 // after a foreground re-connect, a background task's status
-                // change lands after its turn already ended, and `TaskRow`
-                // rows answer an out-of-band `TaskList` — all of these
-                // arrive with no turn in flight and must not be dropped as
-                // out-of-turn strays.
+                // change lands after its turn already ended, `TaskRow`
+                // rows answer an out-of-band `TaskList`, and a `PlanUpdated`
+                // is the authoritative full-list replace of a block that
+                // outlives its turn — all of these arrive with no turn in
+                // flight and must not be dropped as out-of-turn strays.
                 return true
             default:
                 break
@@ -1917,42 +1928,25 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        /// Rows kept in the panel. The engine's registry is host-wide and
-        /// never prunes, so the client bounds its own view: past the cap the
-        /// oldest FINISHED rows are dropped (an active row is never dropped —
-        /// it is the thing the user is waiting on).
-        private static let backgroundTaskLimit = 40
-
         /// Upsert one background-task row. `description: nil` keeps whatever
         /// text is already known (a status push carries no description).
-        /// Returns the status the row held before this update, or `nil` when
-        /// the row is new — callers use it to fire terminal-state side
-        /// effects exactly once (a broker replay repeats the same status).
-        @discardableResult
         private func upsertBackgroundTask(
             id: String,
             description: String?,
             status: BackgroundTaskSnapshot.Status
-        ) -> BackgroundTaskSnapshot.Status? {
+        ) {
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
-                let previous = model.backgroundTasks[index].status
                 model.backgroundTasks[index].status = status
                 if let description, !description.isEmpty {
                     model.backgroundTasks[index].descriptionText = description
                 }
-                return previous
+            } else {
+                model.backgroundTasks.append(BackgroundTaskSnapshot(
+                    id: id,
+                    descriptionText: description ?? "",
+                    status: status
+                ))
             }
-            model.backgroundTasks.append(BackgroundTaskSnapshot(
-                id: id,
-                descriptionText: description ?? "",
-                status: status
-            ))
-            if model.backgroundTasks.count > Self.backgroundTaskLimit {
-                if let oldestFinished = model.backgroundTasks.firstIndex(where: { $0.status.isTerminal }) {
-                    model.backgroundTasks.remove(at: oldestFinished)
-                }
-            }
-            return nil
         }
 
         private static func backgroundTaskStatus(
@@ -2055,18 +2049,23 @@ final class MockConversationSource: ConversationSource {
                     )
                 }
 
+            case let .planUpdated(tasks):
+                // The model's working plan. FULL-LIST replace — an empty list
+                // is the engine clearing it, never "no news". Allowlisted
+                // through the turn gate like `taskRow` above: the plan block
+                // outlives the turn that wrote it, and a dropped update would
+                // strand a stale checklist above the composer.
+                guard acceptTurnEvent(event) else { return }
+                model.planTasks = tasks.map(Self.planTask(from:))
+
             case let .taskStatusChanged(taskId, status):
                 // Allowlisted through the turn gate: a background task
                 // normally finishes after its spawning turn already ended.
                 guard acceptTurnEvent(event) else { return }
-                var isRepeat = false
                 if let mapped = Self.backgroundTaskStatus(status) {
-                    let previous = upsertBackgroundTask(
-                        id: taskId, description: nil, status: mapped)
-                    // Same terminal status seen twice = a broker replay after
-                    // a foreground reconnect, not a second completion.
-                    isRepeat = previous == mapped
-                    if previous == nil {
+                    let known = model.backgroundTasks.contains { $0.id == taskId }
+                    upsertBackgroundTask(id: taskId, description: nil, status: mapped)
+                    if !known {
                         // First sighting via a push — pull the row list so
                         // the panel can show the human description instead
                         // of the bare id.
@@ -2081,7 +2080,7 @@ final class MockConversationSource: ConversationSource {
                 case .pending, .running: text = nil
                 @unknown default: text = nil
                 }
-                if let text, !isRepeat {
+                if let text {
                     model.items.append(.notice(ConversationExecutionNotice(
                         id: "task-\(taskId)-\(UUID().uuidString)",
                         kind: status == .failed ? .error : .info,
@@ -2089,12 +2088,16 @@ final class MockConversationSource: ConversationSource {
                     )))
                 }
 
-            case let .toolUseStarted(id, tool, inputJson):
+            case let .toolUseStarted(id, tool, inputJson, header):
                 let accepted = acceptTurnEvent(event)
                 Self.turnLog.debug(
                     "tool started id=\(id, privacy: .public) name=\(tool, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public)"
                 )
                 guard accepted else { return }
+                // The engine derived the header once; we render THAT. The old
+                // client-side summarizer below survives only as the fallback for
+                // an engine too old to send one.
+                let derivedHeader = header.map(Self.toolHeader(from:))
                 if ConversationExecutionParsing.isShellTool(tool) {
                     let started = ConversationExecutionParsing.shellStarted(id: id, inputJson: inputJson)
                     upsertShellCard(id: id, create: {
@@ -2114,6 +2117,7 @@ final class MockConversationSource: ConversationSource {
                         trace.tool = "Shell"
                         trace.status = .running
                         trace.inputSummary = started.command
+                        trace.header = derivedHeader
                     }
                     model.statusLine = String(localized: "chat_shell_running")
                 } else {
@@ -2122,6 +2126,7 @@ final class MockConversationSource: ConversationSource {
                         trace.tool = tool
                         trace.status = .running
                         trace.inputSummary = summary
+                        trace.header = derivedHeader
                     }
                     model.statusLine = String(localized: "chat_tool_calling \(tool)")
                 }
@@ -2158,12 +2163,15 @@ final class MockConversationSource: ConversationSource {
                     model.statusLine = String(localized: "chat_tool_running \(tool)")
                 }
 
-            case let .toolUseResult(id, tool, resultJson, isError):
+            case let .toolUseResult(id, tool, resultJson, isError, display):
                 let accepted = acceptTurnEvent(event)
                 Self.turnLog.debug(
                     "tool result id=\(id, privacy: .public) name=\(tool, privacy: .public) is_error=\(isError, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public)"
                 )
                 guard accepted else { return }
+                // The pre-derived `⎿` block (headline / diff / clamped body).
+                // `summarizeToolResult` below stays only as the older-engine path.
+                let derivedDisplay = display.map(Self.resultDisplay(from:))
                 let wasCancelled = ConversationExecutionParsing.isCancellationResult(resultJson)
                 if ConversationExecutionParsing.isShellTool(tool) {
                     let finished = ConversationExecutionParsing.shellFinished(id: id, resultJson: resultJson, isError: isError)
@@ -2192,6 +2200,7 @@ final class MockConversationSource: ConversationSource {
                     upsertTool(id: id, tool: "Shell", fallbackSummary: nil) { trace in
                         trace.tool = "Shell"
                         trace.status = resolvedShellStatus.asToolStatus
+                        trace.display = derivedDisplay
                         trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
                         trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
                     }
@@ -2200,6 +2209,7 @@ final class MockConversationSource: ConversationSource {
                     upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
                         trace.tool = tool
                         trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
+                        trace.display = derivedDisplay
                         trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
                             resultJson,
                             isError: isError,
@@ -2399,14 +2409,21 @@ final class MockConversationSource: ConversationSource {
                 invalidateTurnContext()
                 model.activeSessionId = sessionId
                 setPendingSessionTransition(nil)
-                let restored = messages.map(Self.message(from:))
-                model.messages = restored.map(\.message)
-                model.items = restored.map { .message($0.message) }
-                model.messageDetails = Dictionary(
-                    uniqueKeysWithValues: restored.compactMap { item in
-                        item.detail.map { (item.message.id, $0) }
-                    }
-                )
+                // BUG FIX: a restored message is NOT one render row. In the
+                // Anthropic protocol a `tool_result` block lives in the USER
+                // turn, so mapping each `MessageDto` to a single `.message`
+                // rendered every restored tool result as a right-aligned user
+                // bubble — and `MessageBubble`'s user branch draws only
+                // `message.text`, never `detail`, so the payload was invisible
+                // too. `restoredTranscript` interleaves instead: narrative
+                // blocks stay a `.message`, each tool call becomes its own
+                // `.toolCall` row with its result merged onto it.
+                let restored = Self.restoredTranscript(from: messages)
+                model.messages = restored.messages
+                model.items = restored.items
+                model.messageDetails = restored.details
+                model.expandedToolCalls = []
+                model.planTasks = []
                 model.isNew = messages.isEmpty
                 model.streaming = false
                 model.turnCompletion = nil
@@ -2427,6 +2444,8 @@ final class MockConversationSource: ConversationSource {
                 // A pending questionnaire belongs to the ended session; its
                 // request id can never be answered now.
                 model.pendingQuestions = []
+                // The plan belonged to that session too.
+                model.planTasks = []
 
             case let .mcpServers(servers):
                 // Out-of-band MCP listing → the UI `MCPServer` model. The wire
@@ -2564,6 +2583,175 @@ final class MockConversationSource: ConversationSource {
             let detail: ConversationMessageDetail?
         }
 
+        // MARK: engine-derived tool presentation (lowering)
+        //
+        // Straight field-for-field lowering of the additive wire DTOs onto the
+        // FFI-independent mirrors the views render. NOTHING here re-parses
+        // `input_json` / `result_json`: the engine already derived all of it,
+        // and a second derivation on this side is exactly the drift the wire
+        // fields exist to delete.
+
+        fileprivate static func toolHeader(from dto: ToolHeaderDto) -> ConversationToolHeader {
+            ConversationToolHeader(
+                verb: toolVerb(from: dto.verb),
+                label: dto.label,
+                primary: dto.primary,
+                qualifier: dto.qualifier,
+                count: dto.count,
+                subLine: dto.subLine.map {
+                    ConversationToolSubLine(prefix: $0.prefix, text: $0.text)
+                },
+                title: dto.title
+            )
+        }
+
+        private static func toolVerb(from dto: ToolVerbDto) -> ConversationToolVerb {
+            switch dto {
+            case .update: return .update
+            case .create: return .create
+            case .read: return .read
+            case .search: return .search
+            case .shell: return .shell
+            case .output: return .output
+            case .kill: return .kill
+            case .fetch: return .fetch
+            case .task: return .task
+            case .todo: return .todo
+            case .skill: return .skill
+            case .generic: return .generic
+            @unknown default:
+                // `#[non_exhaustive]`: a verb this build does not know still
+                // renders — as the engine's English label, via `.generic`.
+                return .generic
+            }
+        }
+
+        fileprivate static func resultDisplay(
+            from dto: ToolResultDisplayDto
+        ) -> ConversationToolResultDisplay {
+            ConversationToolResultDisplay(
+                headline: dto.headline,
+                headlineKind: dto.headlineKind.map(headlineKind(from:)),
+                headlineArgs: dto.headlineArgs,
+                diff: dto.diff.map(structuredDiff(from:)),
+                body: dto.body,
+                bodyLines: dto.bodyLines,
+                bodyTruncated: dto.bodyTruncated,
+                collapsed: dto.collapsed
+            )
+        }
+
+        private static func headlineKind(
+            from dto: HeadlineKindDto
+        ) -> ConversationResultHeadlineKind {
+            switch dto {
+            case .added: return .added
+            case .removed: return .removed
+            case .addedRemoved: return .addedRemoved
+            case .linesRead: return .linesRead
+            case .linesReadPartial: return .linesReadPartial
+            case .filesFound: return .filesFound
+            case .filesFoundTruncated: return .filesFoundTruncated
+            case .linesFound: return .linesFound
+            case .matchesFound: return .matchesFound
+            case .interrupted: return .interrupted
+            case .noContent: return .noContent
+            case .failed: return .failed
+            case .plain: return .plain
+            @unknown default:
+                // An unknown kind falls back to the engine's own English
+                // `headline` string, which `.plain` renders verbatim.
+                return .plain
+            }
+        }
+
+        private static func structuredDiff(
+            from dto: StructuredDiffDto
+        ) -> ConversationStructuredDiff {
+            ConversationStructuredDiff(
+                filePath: dto.filePath,
+                language: dto.language,
+                gutterWidth: dto.gutterWidth,
+                additions: dto.additions,
+                removals: dto.removals,
+                truncatedRows: dto.truncatedRows,
+                rows: dto.rows.map(diffRow(from:))
+            )
+        }
+
+        private static func diffRow(from dto: DiffRowDto) -> ConversationDiffRow {
+            ConversationDiffRow(
+                kind: diffLineKind(from: dto.kind),
+                lineNo: dto.lineNo,
+                hunk: dto.hunk,
+                wordDiffed: dto.wordDiffed,
+                segments: dto.segments.map(codeSegment(from:))
+            )
+        }
+
+        private static func diffLineKind(
+            from dto: DiffLineKindDto
+        ) -> ConversationDiffLineKind {
+            switch dto {
+            case .add: return .add
+            case .remove: return .remove
+            case .context: return .context
+            @unknown default: return .context
+            }
+        }
+
+        private static func codeSegment(from dto: CodeSegmentDto) -> ConversationCodeSegment {
+            ConversationCodeSegment(
+                text: dto.text,
+                // `class` is a Swift keyword; the generated property is backticked.
+                syntax: syntaxClass(from: dto.`class`),
+                rgb: dto.rgb,
+                bold: dto.bold,
+                italic: dto.italic,
+                underline: dto.underline,
+                emph: dto.emph
+            )
+        }
+
+        private static func syntaxClass(from dto: SyntaxClassDto) -> ConversationSyntaxClass {
+            switch dto {
+            case .plain: return .plain
+            case .keyword: return .keyword
+            case .typeName: return .typeName
+            case .function: return .function
+            case .stringLit: return .stringLit
+            case .number: return .number
+            case .comment: return .comment
+            case .punctuation: return .punctuation
+            // `operator` is a Swift keyword; the generated case is backticked.
+            case .`operator`: return .op
+            case .variable: return .variable
+            case .constant: return .constant
+            case .attribute: return .attribute
+            @unknown default: return .plain
+            }
+        }
+
+        fileprivate static func planTask(from dto: PlanTaskDto) -> ConversationPlanTask {
+            ConversationPlanTask(
+                taskId: dto.id,
+                subject: dto.subject,
+                activeForm: dto.activeForm,
+                state: planTaskState(from: dto.state)
+            )
+        }
+
+        private static func planTaskState(
+            from dto: PlanTaskStateDto
+        ) -> ConversationPlanTaskState {
+            switch dto {
+            case .pending: return .pending
+            case .inProgress: return .inProgress
+            case .completed: return .completed
+            @unknown default: return .pending
+            }
+        }
+
         /// Lower one wire `AskUserQuestionRequestDto` onto the FFI-independent
         /// model the chat surface renders.
         fileprivate static func pendingQuestion(
@@ -2597,48 +2785,167 @@ final class MockConversationSource: ConversationSource {
         }
 
         private static func detail(from blocks: [MessageBlockDto]) -> ConversationMessageDetail? {
-            let lowered = blocks.compactMap { block -> ConversationMessageBlock? in
-                switch block {
-                case let .text(text):
-                    return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(text)
-                case let .thinking(thinking, signature):
-                    return thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil :
-                        .thinking(text: thinking, signature: signature)
-                case .redactedThinking:
-                    return .redactedThinking
-                case let .compactBoundary(messagesBefore, messagesAfter, summary):
-                    return .compactBoundary(
-                        messagesBefore: Int(messagesBefore),
-                        messagesAfter: Int(messagesAfter),
-                        summary: summary
-                    )
-                case let .toolUse(id, tool, inputJson):
-                    return .toolUse(
-                        id: id,
-                        tool: tool,
-                        inputSummary: ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson,
-                        inputJson: inputJson
-                    )
-                case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath):
-                    return .toolResult(
-                        id: id,
-                        tool: tool,
-                        isError: isError,
-                        summary: ConversationExecutionParsing.summarizeToolResult(
-                            resultJson,
-                            isError: isError,
-                            tool: tool
-                        ),
-                        resultJson: resultJson,
-                        oldString: oldString,
-                        newString: newString,
-                        filePath: filePath
-                    )
-                @unknown default:
-                    return nil
-                }
-            }
+            let lowered = blocks.compactMap(messageBlock(from:))
             return lowered.isEmpty ? nil : ConversationMessageDetail(blocks: lowered)
+        }
+
+        /// Lower ONE wire block. `nil` for a block with nothing to show (blank
+        /// text) or one this build does not understand.
+        private static func messageBlock(
+            from block: MessageBlockDto
+        ) -> ConversationMessageBlock? {
+            switch block {
+            case let .text(text):
+                return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(text)
+            case let .thinking(thinking, signature):
+                return thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil :
+                    .thinking(text: thinking, signature: signature)
+            case .redactedThinking:
+                return .redactedThinking
+            case let .compactBoundary(messagesBefore, messagesAfter, summary):
+                return .compactBoundary(
+                    messagesBefore: Int(messagesBefore),
+                    messagesAfter: Int(messagesAfter),
+                    summary: summary
+                )
+            case let .toolUse(id, tool, inputJson, header):
+                return .toolUse(
+                    id: id,
+                    tool: tool,
+                    // Legacy fallback only — the header is what renders when present.
+                    inputSummary: ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson,
+                    inputJson: inputJson,
+                    header: header.map(toolHeader(from:))
+                )
+            case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath, display):
+                return .toolResult(
+                    id: id,
+                    tool: tool,
+                    isError: isError,
+                    summary: ConversationExecutionParsing.summarizeToolResult(
+                        resultJson,
+                        isError: isError,
+                        tool: tool
+                    ),
+                    resultJson: resultJson,
+                    oldString: oldString,
+                    newString: newString,
+                    filePath: filePath,
+                    display: display.map(resultDisplay(from:))
+                )
+            @unknown default:
+                return nil
+            }
+        }
+
+        // MARK: restored-transcript rebuild (BUG FIX)
+
+        /// The interleaved render list a resumed session produces.
+        fileprivate struct RestoredTranscript {
+            var messages: [Message] = []
+            var items: [ConversationRenderItem] = []
+            var details: [UUID: ConversationMessageDetail] = [:]
+        }
+
+        /// Rebuild the scrollback from `SessionResumed.messages`.
+        ///
+        /// One `MessageDto` is NOT one row. In the Anthropic protocol a
+        /// `tool_result` block lives in the USER turn, so a 1:1 mapping put every
+        /// restored tool result inside a right-aligned user bubble whose renderer
+        /// only ever draws `message.text` — the result payload was both misplaced
+        /// and invisible. Here, narrative blocks (text / thinking / compaction)
+        /// accumulate into a `.message`, and each tool call becomes its own
+        /// `.toolCall` row.
+        ///
+        /// The pair spans two turns, so a `toolResult` MERGES onto the row its
+        /// `toolUse` opened (matched by tool-use id) rather than adding a second
+        /// row. An orphan result — the assistant turn was compacted away — still
+        /// gets a row of its own.
+        fileprivate static func restoredTranscript(
+            from dtos: [MessageDto]
+        ) -> RestoredTranscript {
+            var out = RestoredTranscript()
+            var toolItemIndex: [String: Int] = [:]
+
+            for dto in dtos {
+                let role: Role = (dto.role == "user") ? .user : .ai
+                var narrative: [ConversationMessageBlock] = []
+
+                func flushNarrative() {
+                    guard !narrative.isEmpty else { return }
+                    let detail = ConversationMessageDetail(blocks: narrative)
+                    let message = Message(role: role, text: text(from: narrative))
+                    out.messages.append(message)
+                    out.items.append(.message(message))
+                    out.details[message.id] = detail
+                    narrative = []
+                }
+
+                for block in dto.blocks {
+                    switch block {
+                    case let .toolUse(id, tool, inputJson, header):
+                        flushNarrative()
+                        let lowered = header.map(toolHeader(from:))
+                        let trace = ConversationToolTrace(
+                            id: id,
+                            tool: tool,
+                            // A restored call whose result never arrived stays
+                            // visibly unfinished rather than claiming success.
+                            status: .running,
+                            inputSummary: lowered == nil
+                                ? (ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson)
+                                : nil,
+                            outputSummary: nil,
+                            elapsedMs: nil,
+                            header: lowered,
+                            display: nil
+                        )
+                        toolItemIndex[id] = out.items.count
+                        out.items.append(.toolCall(trace))
+
+                    case let .toolResult(id, tool, resultJson, isError, _, _, _, display):
+                        flushNarrative()
+                        let lowered = display.map(resultDisplay(from:))
+                        let status: ConversationToolStatus =
+                            ConversationExecutionParsing.isCancellationResult(resultJson)
+                                ? .cancelled
+                                : (isError ? .failed : .completed)
+                        let fallback = lowered == nil
+                            ? ConversationExecutionParsing.summarizeToolResult(
+                                resultJson, isError: isError, tool: tool)
+                            : nil
+                        if let index = toolItemIndex[id],
+                           out.items.indices.contains(index),
+                           case let .toolCall(existing) = out.items[index] {
+                            var merged = existing
+                            merged.status = status
+                            merged.display = lowered
+                            merged.outputSummary = fallback
+                            out.items[index] = .toolCall(merged)
+                        } else {
+                            let trace = ConversationToolTrace(
+                                id: id,
+                                tool: tool,
+                                status: status,
+                                inputSummary: nil,
+                                outputSummary: fallback,
+                                elapsedMs: nil,
+                                header: nil,
+                                display: lowered
+                            )
+                            toolItemIndex[id] = out.items.count
+                            out.items.append(.toolCall(trace))
+                        }
+
+                    default:
+                        if let lowered = messageBlock(from: block) {
+                            narrative.append(lowered)
+                        }
+                    }
+                }
+                flushNarrative()
+            }
+            return out
         }
 
         /// Flatten structured blocks into the plain transcript text the rest of
@@ -2655,10 +2962,14 @@ final class MockConversationSource: ConversationSource {
                     return String(localized: "chat_redacted_thinking")
                 case .compactBoundary:
                     return String(localized: "chat_compacted_label")
-                case let .toolUse(_, tool, _, _):
-                    return String(localized: "chat_tool_calling \(tool)")
-                case let .toolResult(_, _, isError, summary, _, _, _, _):
-                    return isError ? summary : String(localized: "chat_tool_result_summary \(summary)")
+                case let .toolUse(_, tool, _, _, header):
+                    // Prefer the engine's derived title so the compatibility
+                    // transcript (voice / setup surfaces) reads the same as the UI.
+                    return header.map(ToolDisplayText.title)
+                        ?? String(localized: "chat_tool_calling \(tool)")
+                case let .toolResult(_, _, isError, summary, _, _, _, _, display):
+                    let body = display.flatMap(ToolDisplayText.headline) ?? summary
+                    return isError ? body : String(localized: "chat_tool_result_summary \(body)")
                 }
             }
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }

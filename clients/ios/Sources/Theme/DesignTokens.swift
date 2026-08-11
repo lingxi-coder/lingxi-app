@@ -67,6 +67,23 @@ struct Palette {
     let statusTesting: Color     // oklch(75% 0.15 75)
     let statusError: Color       // oklch(65% 0.20 25)
     let danger: Color            // oklch(65% 0.20 25)
+
+    // MARK: Diff + code rendering
+    //
+    /// Which appearance this palette is. `SyntaxPalette` needs the ramp and a
+    /// segment's baked `rgb` is only usable on the dark ground it was resolved
+    /// against, so the palette carries its own identity rather than making every
+    /// call site read `@Environment(\.colorScheme)`.
+    let isDark: Bool
+    // Diff row/word backgrounds. These are deliberately NOT on the wire: the
+    // terminal's blends are alpha-over-BLACK and are unreadable over a light
+    // ground, so each client derives its own from `kind` / `emph`.
+    let diffAddBg: Color
+    let diffRemoveBg: Color
+    let diffAddWordBg: Color
+    let diffRemoveWordBg: Color
+    let diffAddGutter: Color
+    let diffRemoveGutter: Color
 }
 
 /// Helper carrying the ambient gradient color + the window bg fade target.
@@ -103,7 +120,14 @@ enum DesignTokens {
         statusIdle:      Color(srgb: 0.2434, 0.2591, 0.3034),              // text4
         statusTesting:   Color(srgb: 0.8959, 0.6198, 0.1315),              // oklch(75% 0.15 75)
         statusError:     Color(srgb: 0.9436, 0.3038, 0.2990),              // oklch(65% 0.20 25)
-        danger:          Color(srgb: 0.9436, 0.3038, 0.2990)               // oklch(65% 0.20 25)
+        danger:          Color(srgb: 0.9436, 0.3038, 0.2990),              // oklch(65% 0.20 25)
+        isDark:          true,
+        diffAddBg:       Color(srgb: 0.2305, 0.7257, 0.4545, 0.13),
+        diffRemoveBg:    Color(srgb: 0.9436, 0.3038, 0.2990, 0.12),
+        diffAddWordBg:   Color(srgb: 0.2305, 0.7257, 0.4545, 0.32),
+        diffRemoveWordBg: Color(srgb: 0.9436, 0.3038, 0.2990, 0.30),
+        diffAddGutter:   Color(srgb: 0.3600, 0.8000, 0.5400),
+        diffRemoveGutter: Color(srgb: 0.9600, 0.4600, 0.4500)
     )
 
     // MARK: Light palette  (tokens(false))
@@ -132,7 +156,14 @@ enum DesignTokens {
         statusIdle:      Color(srgb: 0.6062, 0.6203, 0.6592),
         statusTesting:   Color(srgb: 0.8959, 0.6198, 0.1315),
         statusError:     Color(srgb: 0.9436, 0.3038, 0.2990),
-        danger:          Color(srgb: 0.9436, 0.3038, 0.2990)
+        danger:          Color(srgb: 0.9436, 0.3038, 0.2990),
+        isDark:          false,
+        diffAddBg:       Color(srgb: 0.0000, 0.5455, 0.2695, 0.11),
+        diffRemoveBg:    Color(srgb: 0.7800, 0.1400, 0.1400, 0.09),
+        diffAddWordBg:   Color(srgb: 0.0000, 0.5455, 0.2695, 0.26),
+        diffRemoveWordBg: Color(srgb: 0.7800, 0.1400, 0.1400, 0.22),
+        diffAddGutter:   Color(srgb: 0.0000, 0.4400, 0.2200),
+        diffRemoveGutter: Color(srgb: 0.7000, 0.1200, 0.1200)
     )
 
     static func palette(dark isDark: Bool) -> Palette { isDark ? dark : light }

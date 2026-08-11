@@ -1132,6 +1132,10 @@ fun RootScreen(
                         },
                         onAnswerQuestion = chatViewModel::answerQuestion,
                         onCancelQuestion = chatViewModel::cancelQuestion,
+                        // Tool-call expansion and the plan panel keep their state in
+                        // the ViewModel, not in the recycled rows that render them.
+                        onToggleToolCall = chatViewModel::toggleToolCall,
+                        onTogglePlan = chatViewModel::togglePlanExpanded,
                     )
                 }
             }

@@ -1,11 +1,14 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '../theme/ThemeContext';
-import type { RunItem } from '../data';
+import type { RunItem } from '../model/runItem';
+import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './collapseStore';
 import { Icon } from './Icon';
+import { Disclosure } from './Disclosure';
 import { MarkdownContent } from './MarkdownContent';
+import { ToolCall } from './ToolCall';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
-function GutterRule() {
+const GutterRule = memo(function GutterRule() {
   const t = useT();
   // a small monospace tick column like the screenshot's "—" marks
   return (
@@ -19,90 +22,9 @@ function GutterRule() {
       <span className="mono" style={{ fontSize: 11, lineHeight: 1 }}>—</span>
     </div>
   );
-}
+});
 
-function AgentCard({ item }: { item: Extract<RunItem, { type: 'agent' }> }) {
-  const t = useT();
-  const running = item.state === 'running';
-  const [expanded, setExpanded] = useState(false);
-  const expandable = Boolean(item.detail);
-  return (
-    <div
-      style={{
-        background: t.surface, border: `0.5px solid ${t.border}`,
-        borderRadius: 10, padding: '10px 14px',
-        display: 'flex', flexDirection: 'column', gap: 4,
-        maxWidth: 640, position: 'relative', overflow: 'hidden',
-      }}
-    >
-      {running && (
-        <div
-          style={{
-            position: 'absolute', inset: 0, pointerEvents: 'none',
-            background: `linear-gradient(180deg, transparent, ${t.accentBg}, transparent)`,
-            animation: 'scan 2.4s linear infinite',
-          }}
-        />
-      )}
-      <button
-        type="button"
-        onClick={() => expandable && setExpanded((value) => !value)}
-        aria-expanded={expandable ? expanded : undefined}
-        style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', border: 0, padding: 0, background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: expandable ? 'pointer' : 'default' }}
-      >
-        {running ? (
-          <span
-            style={{
-              width: 12, height: 12, borderRadius: 99, background: t.accent,
-              boxShadow: `0 0 0 4px color-mix(in oklab, ${t.accent} 22%, transparent)`,
-              animation: 'shimmer 1.3s infinite', flexShrink: 0,
-            }}
-          />
-        ) : (
-          <span
-            style={{
-              width: 16, height: 16, borderRadius: 4, flexShrink: 0,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              background: item.error ? t.danger : t.text3, color: t.windowBg,
-            }}
-          >
-            <Icon name="check" size={11} stroke={3} />
-          </span>
-        )}
-        <span style={{ fontSize: 14, fontWeight: 500, color: t.text }}>{item.title}</span>
-        {expandable && <Icon name={expanded ? 'chevron' : 'chevronR'} size={13} color={t.text3} stroke={2} />}
-      </button>
-      {item.sub && (
-        <div
-          style={{
-            fontSize: 14, color: item.link ? t.accent : t.text2,
-            marginLeft: 24, fontWeight: 500,
-            textDecoration: item.link ? 'underline' : 'none',
-            textDecorationColor: item.link ? t.accentBorder : 'transparent',
-            textUnderlineOffset: 3,
-          }}
-        >
-          {item.sub}
-        </div>
-      )}
-      {expanded && item.detail && (
-        <pre
-          className="mono"
-          style={{
-            margin: '6px 0 0 24px', padding: 10, maxHeight: 240, overflow: 'auto',
-            whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', borderRadius: 7,
-            background: t.windowBg, color: item.error ? t.danger : t.text2,
-            border: `0.5px solid ${t.border}`, fontSize: 11.5, lineHeight: 1.5,
-          }}
-        >
-          {item.detail}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function NarrationLine({ item }: { item: Extract<RunItem, { type: 'narration' }> }) {
+const NarrationLine = memo(function NarrationLine({ item }: { item: Extract<RunItem, { type: 'narration' }> }) {
   const t = useT();
   const user = item.role === 'user';
   const color = item.tone === 'muted' ? t.text3 : t.text;
@@ -118,38 +40,35 @@ function NarrationLine({ item }: { item: Extract<RunItem, { type: 'narration' }>
       <MarkdownContent text={item.text} />
     </div>
   );
-}
+});
 
 // ─── THINKING BLOCK (collapsible, dim/italic reasoning stream) ──────
-function ThinkingBlock({ item }: { item: Extract<RunItem, { type: 'thinking' }> }) {
+//
+// The open/closed state lives in the Stage's store, keyed by the block's stable
+// id — NOT in this component. It used to auto-collapse the instant the block
+// sealed, which fought a user who had deliberately opened it to read along; the
+// DEFAULT now comes from `streamed` (a field that never flips) and any explicit
+// user choice wins over it forever.
+const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
+  item: Extract<RunItem, { type: 'thinking' }>;
+  open: boolean;
+  onSetOpen(id: string, next: boolean): void;
+}) {
   const t = useT();
-  // Auto-expanded while streaming so the reasoning is visible live; the user
-  // can collapse it once sealed. We default-collapse a completed block.
-  const [open, setOpen] = useState(!item.done);
-  const wasDone = useRef(item.done);
-  // Collapse automatically the moment the block seals (done flips true).
-  useEffect(() => {
-    if (item.done && !wasDone.current) setOpen(false);
-    wasDone.current = item.done;
-  }, [item.done]);
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 880 }}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
-          padding: '2px 6px 2px 2px', borderRadius: 6, border: 'none', cursor: 'pointer',
-          background: 'transparent', color: t.text3, fontSize: 12.5, fontWeight: 500,
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = t.text2)}
-        onMouseLeave={(e) => (e.currentTarget.style.color = t.text3)}
+      <Disclosure
+        id={item.id}
+        open={open}
+        onToggle={() => onSetOpen(item.id, !open)}
+        buttonStyle={{ padding: '2px 6px 2px 2px', borderRadius: 6, fontSize: 12.5, fontWeight: 500 }}
+        summary={
+          <>
+            <Icon name="spark" size={12} stroke={1.8} />
+            <span>{item.done ? 'Thought' : 'Thinking…'}</span>
+          </>
+        }
       >
-        <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
-        <Icon name="spark" size={12} stroke={1.8} />
-        <span>{item.done ? 'Thought' : 'Thinking…'}</span>
-      </button>
-      {open && (
         <div
           style={{
             borderLeft: `2px solid ${t.border}`, paddingLeft: 12, marginLeft: 6,
@@ -162,9 +81,14 @@ function ThinkingBlock({ item }: { item: Extract<RunItem, { type: 'thinking' }> 
             <span style={{ animation: 'cursor-blink 1.1s step-end infinite' }}>▍</span>
           )}
         </div>
-      )}
+      </Disclosure>
     </div>
   );
+});
+
+/** Whether a thinking block starts open, before any user choice. */
+function thinkingDefaultOpen(item: Extract<RunItem, { type: 'thinking' }>): boolean {
+  return item.streamed === true;
 }
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
@@ -175,12 +99,43 @@ interface StageProps {
   running?: boolean;
   /** Truthful empty/onboarding copy supplied by the host state. */
   emptyMessage?: string;
+  /**
+   * Which session `liveItems` belongs to (`ConversationState.sessionKey`).
+   * Item ids restart at `i1` on every session change, so the collapse map is
+   * scoped by this and dropped when it changes.
+   */
+  sessionKey?: string;
 }
 
-export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.' }: StageProps) {
+export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '' }: StageProps) {
   const t = useT();
   const tailRef = useRef<HTMLDivElement>(null);
   const items: RunItem[] = liveItems;
+
+  /**
+   * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
+   * session. This has to live above the rows: the list recycles them, so a
+   * `useState` inside a row would hand its state to whatever item later
+   * occupies that position. Absent key ⇒ fall back to the item's own default.
+   *
+   * The session scope is not decoration — the reducer's ids restart at `i1`
+   * for every new session, so an unscoped map applied the previous session's
+   * choices to whatever landed at the same id in the next one.
+   */
+  const [collapse, setCollapse] = useState(() => collapseInitial(sessionKey));
+  // Derived during render — no effect, so the very first paint of a new
+  // session is already clean rather than clean one frame later.
+  const visible = collapseFor(collapse, sessionKey);
+  // The setter must not change identity (a per-row arrow function would defeat
+  // the rows' React.memo), so the live session key reaches it through a ref.
+  const sessionRef = useRef(sessionKey);
+  sessionRef.current = sessionKey;
+  // ONE stable callback for every row. Rows pass the value they want rather
+  // than a bare "toggle", because only the row knows the default it started
+  // from.
+  const setOpen = useCallback((id: string, next: boolean) => {
+    setCollapse((previous) => collapseSet(previous, sessionRef.current, id, next));
+  }, []);
 
   // Keep the newest content in view as deltas stream in.
   useEffect(() => {
@@ -207,10 +162,15 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
             {emptyMessage}
           </div>
         )}
-        {items.map((item, i) => {
+        {/*
+          Keyed on the item's stable id, never the array index. An index key
+          silently reassigns every row's collapse state the moment an item is
+          inserted, which is exactly what a streaming transcript does.
+        */}
+        {items.map((item) => {
           if (item.type === 'narration') {
             return (
-              <div key={i} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
+              <div key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
                 {item.role !== 'user' && <GutterRule />}
                 <NarrationLine item={item} />
               </div>
@@ -218,20 +178,24 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           if (item.type === 'thinking') {
             return (
-              <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <GutterRule />
-                <div style={{ flex: 1 }}>
-                  <ThinkingBlock item={item} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <ThinkingBlock
+                    item={item}
+                    open={collapseOpen(visible, sessionKey, item.id) ?? thinkingDefaultOpen(item)}
+                    onSetOpen={setOpen}
+                  />
                 </div>
               </div>
             );
           }
-          if (item.type === 'agent') {
+          if (item.type === 'tool') {
             return (
-              <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <GutterRule />
-                <div style={{ flex: 1 }}>
-                  <AgentCard item={item} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <ToolCall item={item} open={collapseOpen(visible, sessionKey, item.id)} onSetOpen={setOpen} />
                 </div>
               </div>
             );
@@ -239,7 +203,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           if (item.type === 'meta') {
             return (
               <div
-                key={i}
+                key={item.id}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0 6px',
                   fontSize: 11.5, color: t.text4, marginTop: 8,
@@ -247,8 +211,12 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
               >
                 <span style={{ width: 8, height: 8, borderRadius: 99, background: `color-mix(in oklab, ${t.warn} 50%, transparent)` }} />
                 <span className="mono">{item.dur}</span>
-                <span>·</span>
-                <span className="mono">{item.tokens}</span>
+                {item.tokens && (
+                  <>
+                    <span>·</span>
+                    <span className="mono">{item.tokens}</span>
+                  </>
+                )}
               </div>
             );
           }

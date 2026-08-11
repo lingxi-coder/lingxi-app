@@ -43,14 +43,24 @@ import com.lingxi.code.components.UiTags
 /**
  * Bounded, latest-turn execution trace backed by real engine events.
  *
- * Reasoning and tool summaries are intentionally transient UI state. They are
- * not reconstructed as chat messages and are not written into the session
- * JSONL. The card stays available after completion until the next turn starts.
+ * Reasoning, notices, usage and cost are intentionally transient UI state: not
+ * reconstructed as chat messages, not written into the session JSONL. The card
+ * stays available after completion until the next turn starts.
+ *
+ * TOOL ROWS ARE THE EXCEPTION. They are the only record of a live turn's tool
+ * calls, and the next turn replaces this whole state — so when a turn settles,
+ * [ChatState.settleTurn] MOVES its non-shell rows into the transcript message
+ * and this card is left without them (a resumed transcript rebuilds the same
+ * rows inline, so the two now agree). Shell calls stay: they own a persistent
+ * terminal card of their own.
  */
 @Composable
 internal fun AgentRunTimeline(
     state: AgentRunState,
     modifier: Modifier = Modifier,
+    /** Tool-use ids whose result body/diff is expanded — owned by [ChatState]. */
+    expandedToolCalls: Set<String> = emptySet(),
+    onToggleToolCall: (String) -> Unit = {},
 ) {
     var expanded by rememberSaveable(state.turnId) { mutableStateOf(true) }
     val title = when (state.outcome) {
@@ -62,11 +72,15 @@ internal fun AgentRunTimeline(
     val statusColor = runStatusColor(state.outcome)
     val runAccessibilityLabel = stringResource(R.string.chat_run_accessibility_label, title)
     Card(
+        // The card-wide `clickable` used to live HERE, which swallowed every tap
+        // inside it: a per-tool-call expand toggle nested in the body could never
+        // fire, because the card's own gesture consumed it first. The collapse
+        // gesture now lives on the header Row below, so the tool rows own their
+        // own taps.
         modifier = modifier
             .fillMaxWidth()
             .testTag(UiTags.AGENT_RUN_TIMELINE)
-            .semantics { contentDescription = runAccessibilityLabel }
-            .clickable(role = Role.Button) { expanded = !expanded },
+            .semantics { contentDescription = runAccessibilityLabel },
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -77,7 +91,9 @@ internal fun AgentRunTimeline(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(role = Role.Button) { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (state.active) {
@@ -156,7 +172,39 @@ internal fun AgentRunTimeline(
                         }
                     }
 
-                    state.tools.forEach { tool -> ToolTraceRow(tool) }
+                    // A DISPLAY window, not storage: this card is a plain
+                    // `Column`, so every row it lists is composed. The rows it
+                    // leaves out are still in `state.tools` and still settle
+                    // into the transcript — dropping them from the state was a
+                    // permanent transcript loss, this is only a scroll budget.
+                    val hiddenTools = state.hiddenToolCount()
+                    if (hiddenTools > 0) {
+                        Text(
+                            text = stringResource(
+                                R.string.chat_run_tools_windowed,
+                                hiddenTools,
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    state.toolDisplayWindow().forEach { tool ->
+                        if (tool.header != null || tool.display != null) {
+                            // The engine derived this row's presentation already —
+                            // header, `⎿` headline, diff/body, collapse verdict.
+                            ToolCallView(
+                                call = tool.toToolCall(),
+                                expanded = tool.id in expandedToolCalls,
+                                onToggleExpanded = { onToggleToolCall(tool.id) },
+                                // Liveness only matters on the RUNNING trace; the
+                                // settled transcript has no elapsed column.
+                                trailing = tool.elapsedMs?.let(::formatElapsed),
+                            )
+                        } else {
+                            // Older engine: the pre-derivation row.
+                            ToolTraceRow(tool)
+                        }
+                    }
 
                     state.notices.forEach { notice ->
                         NoticeTraceRow(notice)

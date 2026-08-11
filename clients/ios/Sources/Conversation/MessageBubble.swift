@@ -92,17 +92,28 @@ private struct StructuredAIBlocks: View {
                     panel(title: String(localized: "chat_thinking"), body: String(localized: "chat_redacted_thinking"), icon: .brain)
                 case let .compactBoundary(messagesBefore, messagesAfter, _):
                     compactBoundary(before: messagesBefore, after: messagesAfter)
-                case let .toolUse(_, tool, inputSummary, _):
-                    panel(title: String(localized: "chat_tool_call_title \(tool)"), body: inputSummary, icon: .workflow)
-                case let .toolResult(_, tool, isError, summary, _, oldString, newString, filePath):
+                case let .toolUse(_, tool, inputSummary, _, header):
+                    // The engine's derived header, localized. `inputSummary` is
+                    // the older-engine fallback, never a re-derivation.
+                    panel(
+                        title: header.map(ToolDisplayText.title)
+                            ?? String(localized: "chat_tool_call_title \(tool)"),
+                        body: header?.subLine?.text ?? inputSummary,
+                        icon: .workflow
+                    )
+                case let .toolResult(_, tool, isError, summary, _, _, _, _, display):
                     VStack(alignment: .leading, spacing: 6) {
                         panel(
                             title: isError ? String(localized: "chat_tool_failed \(tool)") : String(localized: "chat_tool_returned \(tool)"),
-                            body: summary,
+                            body: display.flatMap(ToolDisplayText.headline) ?? summary,
                             icon: isError ? .warning : .check
                         )
-                        if let filePath, let oldString, let newString {
-                            diffPreview(path: filePath, oldString: oldString, newString: newString)
+                        // BUG FIX: the old flat `- old / + new` preview never
+                        // rendered a pixel (the engine hard-coded its inputs to
+                        // nil) and is obsolete now that a real structured diff
+                        // arrives on `display`. Render THAT.
+                        if let diff = display?.diff {
+                            DiffView(diff: diff, showsFilePath: true)
                         }
                     }
                 }
@@ -150,22 +161,6 @@ private struct StructuredAIBlocks: View {
         .overlay(Capsule().stroke(t.border, lineWidth: 0.5))
     }
 
-    private func diffPreview(path: String, oldString: String, newString: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(path)
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundColor(t.text4)
-            Text("- \(oldString)\n+ \(newString)")
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundColor(t.text2)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-        }
-        .padding(10)
-        .background(t.windowBg.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
-    }
 }
 
 // AI bubble shape: rounded 18 with one corner sharpened to 6.

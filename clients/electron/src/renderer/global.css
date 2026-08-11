@@ -19,6 +19,21 @@ body {
 @keyframes scan { 0% { transform: translateY(-100%); } 100% { transform: translateY(100%); } }
 @keyframes beta-spin { to { transform: rotate(360deg); } }
 .mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
+/*
+ * Code that is laid out in COLUMNS (diff rows use white-space: pre).
+ *
+ * The .mono chain above has no CJK glyphs, so a Chinese comment inside a diff
+ * row silently falls back to a proportional face and the gutter, sigil and
+ * content columns visibly stop lining up. This repo's own sources are full of
+ * Chinese comments, so the fallback is not hypothetical. Appending a CJK-capable
+ * monospace family keeps the fallback monospaced.
+ */
+.mono-code {
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Sarasa Mono SC',
+    'Noto Sans Mono CJK SC', 'Source Han Mono SC', 'PingFang SC', 'Microsoft YaHei Mono',
+    monospace;
+  font-variant-ligatures: none;
+}
 .beta-spinner { width: 12px; height: 12px; display: inline-block; flex: 0 0 auto; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: beta-spin 700ms linear infinite; }
 .beta-rich-prompt[data-empty='true']::before {
   content: attr(data-placeholder);

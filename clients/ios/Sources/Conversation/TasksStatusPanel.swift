@@ -78,7 +78,11 @@ struct TasksStatusPanel: View {
                 .foregroundStyle(theme.text2)
                 Spacer(minLength: 0)
                 // Points the way the tap goes: down-chevron opens the list,
-                // up-chevron folds it away.
+                // up-chevron folds it away. Matches the transcript's own
+                // disclosure toggle (`ToolCallView.disclosure`, whose
+                // `LXIcon(.chevron)` points down at rest and flips 180° once
+                // expanded) and `PlanTasksPanel`, the panel stacked directly
+                // below this one.
                 Image(systemName: collapsed ? "chevron.down" : "chevron.up")
                     .font(.caption2)
                     .foregroundStyle(theme.text4)

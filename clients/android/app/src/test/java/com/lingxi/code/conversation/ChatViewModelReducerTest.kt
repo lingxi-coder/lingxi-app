@@ -1,6 +1,17 @@
 package com.lingxi.code.conversation
 
 import androidx.lifecycle.SavedStateHandle
+import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.CostDto
+import com.lingxi.code.bindings.HeadlineKindDto
+import com.lingxi.code.bindings.MessageBlockDto
+import com.lingxi.code.bindings.MessageDto
+import com.lingxi.code.bindings.PlanTaskDto
+import com.lingxi.code.bindings.PlanTaskStateDto
+import com.lingxi.code.bindings.ToolHeaderDto
+import com.lingxi.code.bindings.ToolResultDisplayDto
+import com.lingxi.code.bindings.ToolVerbDto
+import com.lingxi.code.bindings.TurnOutcomeDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
@@ -14,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -840,4 +852,357 @@ class ChatViewModelReducerTest {
         assertFalse(vm.state.value.sessionTransitioning)
         assertTrue(vm.state.value.error!!.message.contains("failed to boot"))
     }
+
+    // --- pre-derived tool presentation ------------------------------------
+
+    @Test
+    fun toolRow_keepsItsHeaderWhenTheResultArrives_andGainsTheDisplay() {
+        // The header rides the CALL and the display rides the RESULT — two wire
+        // events for one row. Neither may be erased by the other's null.
+        val vm = newVm()
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "调用工具 Edit…",
+                id = "e1",
+                tool = "Edit",
+                status = AgentToolStatus.Running,
+                header = header(),
+            ),
+        )
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "工具 Edit 完成",
+                id = "e1",
+                tool = "Edit",
+                status = AgentToolStatus.Completed,
+                display = display(),
+            ),
+        )
+
+        val row = vm.state.value.agentRun!!.tools.single()
+        assertEquals("e1", row.id)
+        assertEquals(AgentToolStatus.Completed, row.status)
+        assertEquals(ToolVerbUi.Update, row.header?.verb)
+        assertEquals(HeadlineKindUi.Added, row.display?.headlineKind)
+
+        val call = row.toToolCall()
+        assertEquals("e1", call.id)
+        assertEquals(AgentToolStatus.Completed, call.status)
+        assertEquals(ToolVerbUi.Update, call.header?.verb)
+    }
+
+    @Test
+    fun toolHeartbeat_withoutHeader_doesNotEraseTheOneTheCallDelivered() {
+        val vm = newVm()
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "调用工具 Edit…", id = "e1", tool = "Edit",
+                status = AgentToolStatus.Running, header = header(),
+            ),
+        )
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "工具 Edit 运行中…", id = "e1", tool = "Edit",
+                status = AgentToolStatus.Running, elapsedMs = 1_500L,
+            ),
+        )
+
+        val row = vm.state.value.agentRun!!.tools.single()
+        assertEquals(ToolVerbUi.Update, row.header?.verb)
+        assertEquals(1_500L, row.elapsedMs)
+    }
+
+    @Test
+    fun toggleToolCall_livesInTheViewModel_soRecycledRowsCannotLoseIt() {
+        val vm = newVm()
+        assertTrue(vm.state.value.expandedToolCalls.isEmpty())
+
+        vm.toggleToolCall("e1")
+        assertEquals(setOf("e1"), vm.state.value.expandedToolCalls)
+
+        vm.toggleToolCall("e2")
+        assertEquals(setOf("e1", "e2"), vm.state.value.expandedToolCalls)
+
+        vm.toggleToolCall("e1")
+        assertEquals(setOf("e2"), vm.state.value.expandedToolCalls)
+    }
+
+    @Test
+    fun settledTurn_absorbsItsToolCalls_drivenThroughTheRealMessageCompletePath() = runTest(dispatcher) {
+        // Every event here is a WIRE event, mapped by the same `mapReplyStream` /
+        // `clientEventToReply` the engine source uses. The MessageComplete payload
+        // is deliberately text-only because that is the ONLY shape the engine can
+        // produce: `streaming_loop.rs` accumulates text/thinking into
+        // `assistant_blocks` and routes ToolUse to a separate `tool_uses` field,
+        // and `synthesize_message` lowers `assistant_blocks` alone. So the turn's
+        // tool calls can only come from the live run trace.
+        val vm = newVm()
+        vm.driveWire(
+            ClientEvent.TurnStarted(turnId = null),
+            ClientEvent.TextDelta("好的"),
+            ClientEvent.ToolUseStarted(
+                id = "e1",
+                tool = "Edit",
+                inputJson = """{"file_path":"src/host.rs"}""",
+                header = wireHeader(),
+            ),
+            ClientEvent.ToolUseResult(
+                id = "e1", tool = "Edit", resultJson = """"ok"""", isError = false,
+                display = wireDisplay(),
+            ),
+            ClientEvent.MessageComplete(
+                stopReason = "end_turn",
+                message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的"))),
+            ),
+        )
+
+        // Premise check: the wire message really does arrive with no tool block.
+        val wireOnly = messageDtoToMessage(
+            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的"))),
+        )
+        assertTrue(wireOnly.blocks.none { it is MessageContent.Tool })
+
+        val settled = vm.state.value.messages.single()
+        assertEquals(listOf("好的"), settled.blocks.filterIsInstance<MessageContent.Text>().map { it.text })
+        val call = settled.blocks.filterIsInstance<MessageContent.Tool>().single().call
+        assertEquals("e1", call.id)
+        assertEquals(ToolVerbUi.Update, call.header?.verb)
+        assertEquals(HeadlineKindUi.Added, call.display?.headlineKind)
+        assertEquals(AgentToolStatus.Completed, call.status)
+        // Moved, not copied: the run card must not draw the same row again.
+        assertTrue("the run trace hands its rows over", vm.state.value.agentRun!!.tools.isEmpty())
+    }
+
+    @Test
+    fun settledTurn_absorbsItsToolCalls_onTheTurnEndedPathTheMobileEngineActuallyTakes() =
+        runTest(dispatcher) {
+            // The mobile host never emits MessageComplete — `TurnWrapper::complete`
+            // has no production caller there — so a real turn settles on TurnEnded.
+            val vm = newVm()
+            vm.driveWire(
+                ClientEvent.TurnStarted(turnId = null),
+                ClientEvent.TextDelta("查完了"),
+                ClientEvent.ToolUseStarted(id = "g1", tool = "Grep", inputJson = "{}", header = wireHeader()),
+                ClientEvent.ToolUseResult(
+                    id = "g1", tool = "Grep", resultJson = """"ok"""", isError = false,
+                    display = wireDisplay(),
+                ),
+                ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost()),
+            )
+
+            val settled = vm.state.value.messages.single()
+            assertEquals("查完了", settled.text)
+            assertEquals(listOf("查完了"), settled.blocks.filterIsInstance<MessageContent.Text>().map { it.text })
+            assertEquals("g1", settled.blocks.filterIsInstance<MessageContent.Tool>().single().call.id)
+            assertTrue(vm.state.value.agentRun!!.tools.isEmpty())
+        }
+
+    @Test
+    fun aSettledTurnsToolCalls_surviveTheNextTurnStarting() = runTest(dispatcher) {
+        // The user-visible outcome: `send()` replaces `agentRun` wholesale, so a
+        // turn whose tool calls live only there loses them the moment the user
+        // asks the next question — and the conversation then reads differently
+        // before and after a restart.
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.driveWire(
+            ClientEvent.TurnStarted(turnId = null),
+            ClientEvent.TextDelta("改好了"),
+            ClientEvent.ToolUseStarted(id = "e1", tool = "Edit", inputJson = "{}", header = wireHeader()),
+            ClientEvent.ToolUseResult(
+                id = "e1", tool = "Edit", resultJson = """"ok"""", isError = false, display = wireDisplay(),
+            ),
+            ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost()),
+        )
+        val turnOne = vm.state.value.messages.single()
+
+        vm.send("再改一处")
+
+        assertTrue("the fresh run starts empty", vm.state.value.agentRun!!.tools.isEmpty())
+        val kept = vm.state.value.messages.first { it.id == turnOne.id }
+        assertEquals(
+            "turn N-1 keeps its tool call after turn N starts",
+            "e1",
+            kept.blocks.filterIsInstance<MessageContent.Tool>().single().call.id,
+        )
+    }
+
+    @Test
+    fun aToolOnlyTurn_stillLandsItsCallsInTheTranscript() = runTest(dispatcher) {
+        // No text at all: a resume would rebuild this as an assistant bubble of
+        // tool rows, so the live path must not silently drop them.
+        val vm = newVm()
+        vm.driveWire(
+            ClientEvent.TurnStarted(turnId = null),
+            ClientEvent.ToolUseStarted(id = "r1", tool = "Read", inputJson = "{}", header = wireHeader()),
+            ClientEvent.ToolUseResult(
+                id = "r1", tool = "Read", resultJson = """"ok"""", isError = false, display = wireDisplay(),
+            ),
+            ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost()),
+        )
+
+        val settled = vm.state.value.messages.single()
+        assertEquals(Role.Ai, settled.role)
+        assertEquals("r1", settled.blocks.filterIsInstance<MessageContent.Tool>().single().call.id)
+    }
+
+    @Test
+    fun shellCalls_stayInTheirTerminalCard_andAreNotAbsorbedTwice() = runTest(dispatcher) {
+        val vm = newVm()
+        vm.driveWire(
+            ClientEvent.TurnStarted(turnId = null),
+            ClientEvent.TextDelta("跑一下"),
+            ClientEvent.ToolUseStarted(
+                id = "sh1",
+                tool = "bash",
+                inputJson = """{"command":"echo ok","cwd":"/workspace"}""",
+                header = null,
+            ),
+            ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost()),
+        )
+
+        assertEquals(1, vm.state.value.shellTools.size)
+        assertTrue(
+            "a shell call already owns a terminal card — it must not become a bubble row too",
+            vm.state.value.messages.single().blocks.none { it is MessageContent.Tool },
+        )
+        assertEquals(listOf("sh1"), vm.state.value.agentRun!!.tools.map { it.id })
+    }
+
+    @Test
+    fun settlingTwice_doesNotDuplicateTheAbsorbedRows() {
+        // MessageComplete then TurnEnded (the shape a non-mobile host emits) must
+        // settle once — the MOVE out of the run trace is what makes it idempotent.
+        val vm = newVm()
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "调用工具 Edit…", id = "e1", tool = "Edit",
+                status = AgentToolStatus.Running, header = header(),
+            ),
+        )
+        vm.reduce(ReplyEvent.Completed(Message(role = Role.Ai, text = "好的")))
+        vm.reduce(ReplyEvent.End)
+
+        assertEquals(1, vm.state.value.messages.size)
+        assertEquals(
+            listOf("e1"),
+            vm.state.value.messages.single().blocks
+                .filterIsInstance<MessageContent.Tool>().map { it.call.id },
+        )
+    }
+
+    @Test
+    fun completedMessageWithNoBlocks_isLeftExactlyAsItArrived() {
+        val vm = newVm()
+        val message = Message(role = Role.Ai, text = "plain")
+        vm.reduce(ReplyEvent.Completed(message))
+        assertSame(message, vm.state.value.messages.single())
+    }
+
+    // --- plan checklist ---------------------------------------------------
+
+    @Test
+    fun planUpdated_replacesTheWholeChecklist_andAnEmptyListClearsIt() {
+        val vm = newVm()
+        vm.reduceClientEvent(
+            ClientEvent.PlanUpdated(
+                tasks = listOf(
+                    PlanTaskDto(id = null, subject = "写代码", activeForm = null, state = PlanTaskStateDto.IN_PROGRESS),
+                    PlanTaskDto(id = null, subject = "跑测试", activeForm = null, state = PlanTaskStateDto.PENDING),
+                ),
+            ),
+        )
+        assertEquals(listOf("写代码", "跑测试"), vm.state.value.planTasks.map { it.subject })
+
+        // FULL-LIST replace, not a merge.
+        vm.reduceClientEvent(
+            ClientEvent.PlanUpdated(
+                tasks = listOf(
+                    PlanTaskDto(id = null, subject = "只剩这个", activeForm = null, state = PlanTaskStateDto.COMPLETED),
+                ),
+            ),
+        )
+        assertEquals(listOf("只剩这个"), vm.state.value.planTasks.map { it.subject })
+
+        vm.reduceClientEvent(ClientEvent.PlanUpdated(tasks = emptyList()))
+        assertTrue(vm.state.value.planTasks.isEmpty())
+    }
+
+    @Test
+    fun newChat_clearsThePlanAndEveryToolExpansion() {
+        val vm = newVm()
+        vm.reduceClientEvent(
+            ClientEvent.PlanUpdated(
+                tasks = listOf(
+                    PlanTaskDto(id = null, subject = "旧会话的任务", activeForm = null, state = PlanTaskStateDto.PENDING),
+                ),
+            ),
+        )
+        vm.toggleToolCall("e1")
+        vm.togglePlanExpanded()
+        assertTrue(vm.state.value.planTasks.isNotEmpty())
+
+        vm.newChat()
+
+        assertTrue("a plan belongs to the session that produced it", vm.state.value.planTasks.isEmpty())
+        assertTrue(vm.state.value.expandedToolCalls.isEmpty())
+        assertFalse(vm.state.value.planExpanded)
+    }
+
+    private fun header() = ToolHeaderUi(
+        verb = ToolVerbUi.Update,
+        label = "Update",
+        primary = "src/host.rs",
+        title = "Update(src/host.rs)",
+    )
+
+    private fun display() = ToolResultDisplayUi(
+        headline = "Added 2 lines",
+        headlineKind = HeadlineKindUi.Added,
+        headlineArgs = listOf(2),
+    )
+
+    // --- real-wire fixtures ------------------------------------------------
+
+    /**
+     * Drive REAL engine events the way `EngineConversationSource.submit` does —
+     * through [mapReplyStream], which maps each [ClientEvent] with
+     * [clientEventToReply] (including the `MessageDto` → [Message] lowering) and
+     * stops at the first terminal reply. Nothing about the resulting transcript
+     * is hand-shaped, so a test written against it cannot pass on a [Message]
+     * the engine could never emit.
+     */
+    private suspend fun ChatViewModel.driveWire(vararg events: ClientEvent) {
+        mapReplyStream(flowOf(*events)).collect { reduce(it) }
+    }
+
+    private fun wireHeader() = ToolHeaderDto(
+        verb = ToolVerbDto.UPDATE,
+        label = "Update",
+        primary = "src/host.rs",
+        qualifier = null,
+        count = null,
+        subLine = null,
+        title = "Update(src/host.rs)",
+    )
+
+    private fun wireDisplay() = ToolResultDisplayDto(
+        headline = "Added 2 lines",
+        headlineKind = HeadlineKindDto.ADDED,
+        headlineArgs = listOf(2u),
+        diff = null,
+        body = null,
+        bodyLines = 0u,
+        bodyTruncated = false,
+        collapsed = false,
+    )
+
+    private fun cost() = CostDto(
+        totalUsd = 0.0,
+        inputTokens = 0u,
+        outputTokens = 0u,
+        apiCalls = 0u,
+        sessionDurationSecs = 0u,
+        formatted = "$0.00",
+    )
 }

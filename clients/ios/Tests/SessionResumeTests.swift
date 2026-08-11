@@ -313,21 +313,21 @@ import XCTest
                            "a non-empty restored transcript is not the empty-state")
         }
 
-        /// An assistant message carrying multiple block kinds (text + thinking +
-        /// tool_use + tool_result) must flatten into the single display string the
-        /// iOS `Message` model carries — text/thinking bodies plus a labeled line
-        /// for the tool blocks (the conversation surface has no tool cards yet), so
-        /// no restored content silently vanishes.
-        func testSessionResumedFlattensRichAssistantBlocks() {
+        /// An assistant message carrying multiple block kinds must SPLIT: the
+        /// narrative blocks (text + thinking + compaction) flatten into one
+        /// bubble, while the tool call leaves the bubble entirely and becomes its
+        /// own `.toolCall` render row. Nothing may silently vanish.
+        func testSessionResumedSplitsRichAssistantBlocks() {
             let source = makeSource()
             let assistant = MessageDto(role: "assistant", blocks: [
                 .text(text: "正文"),
                 .thinking(thinking: "推理", signature: nil),
                 .compactBoundary(messagesBefore: 8, messagesAfter: 2,
                                  summary: "hidden compact summary"),
-                .toolUse(id: "t1", tool: "Read", inputJson: "{\"path\":\"a\"}"),
+                .toolUse(id: "t1", tool: "Read", inputJson: "{\"path\":\"a\"}", header: nil),
                 .toolResult(id: "t1", tool: "", resultJson: "\"ok\"",
-                            isError: false, oldString: nil, newString: nil, filePath: nil),
+                            isError: false, oldString: nil, newString: nil, filePath: nil,
+                            display: nil),
             ])
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: [assistant]))
 
@@ -339,10 +339,60 @@ import XCTest
                           "compact boundary must remain visible after resume")
             XCTAssertFalse(text.contains("hidden compact summary"),
                            "internal compact summary must not be rendered as user text")
-            XCTAssertTrue(text.contains("调用工具 Read"),
-                          "a tool_use block must surface a labeled line, not vanish")
             XCTAssertEqual(source.model.messages[0].role, .ai,
                            "assistant role maps to the AI side")
+
+            // The tool_use/tool_result pair becomes ONE dedicated row, not text
+            // inside the bubble and not a second row.
+            let toolTraces: [ConversationToolTrace] = source.model.items.compactMap {
+                if case let .toolCall(trace) = $0 { return trace }
+                return nil
+            }
+            XCTAssertEqual(toolTraces.count, 1, "the pair merges onto one row")
+            XCTAssertEqual(toolTraces.first?.id, "t1")
+            XCTAssertEqual(toolTraces.first?.tool, "Read")
+            XCTAssertEqual(toolTraces.first?.status, .completed,
+                           "the tool_result settles the row its tool_use opened")
+        }
+
+        /// THE SCROLLBACK BUG: in the Anthropic protocol a `tool_result` block
+        /// lives in the USER turn. Restoring one message per `MessageDto` put it
+        /// in a right-aligned user bubble whose renderer only draws
+        /// `message.text` — so every restored tool result was both misplaced and
+        /// invisible. A user turn made ONLY of tool results must produce no user
+        /// bubble at all.
+        func testSessionResumedNeverRendersAToolResultAsAUserBubble() {
+            let source = makeSource()
+            let assistant = MessageDto(role: "assistant", blocks: [
+                .text(text: "我来读一下"),
+                .toolUse(id: "t9", tool: "Read", inputJson: "{\"file_path\":\"a.rs\"}", header: nil),
+            ])
+            let toolTurn = MessageDto(role: "user", blocks: [
+                .toolResult(id: "t9", tool: "Read", resultJson: "{\"result\":\"ok\"}",
+                            isError: false, oldString: nil, newString: nil, filePath: nil,
+                            display: nil),
+            ])
+            let followUp = MessageDto(role: "user", blocks: [.text(text: "继续")])
+
+            source.applyForTesting(
+                .sessionResumed(sessionId: uuid(), messages: [assistant, toolTurn, followUp]))
+
+            let userMessages = source.model.messages.filter { $0.role == .user }
+            XCTAssertEqual(userMessages.count, 1,
+                           "the tool-result-only turn must not become a user bubble")
+            XCTAssertEqual(userMessages.first?.text, "继续")
+
+            // Order is preserved: assistant text, the tool row, then the follow-up.
+            let kinds = source.model.items.map { item -> String in
+                switch item {
+                case .message: return "message"
+                case .toolCall: return "tool"
+                case .run: return "run"
+                case .question: return "question"
+                case .notice: return "notice"
+                }
+            }
+            XCTAssertEqual(kinds, ["message", "tool", "message"])
         }
 
         /// A zero-message resume (a session with no transcript) must still adopt

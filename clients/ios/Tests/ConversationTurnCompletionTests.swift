@@ -131,7 +131,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     stopReason: "end_turn",
                     message: MessageDto(role: "assistant", blocks: [
                         .thinking(thinking: "private reasoning", signature: nil),
-                        .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#),
+                        .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: nil),
                         .text(text: "  spoken answer  "),
                         .toolResult(
                             id: "tool-1",
@@ -140,7 +140,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
                             isError: false,
                             oldString: nil,
                             newString: nil,
-                            filePath: nil
+                            filePath: nil,
+                            display: nil
                         ),
                     ])
                 )

@@ -83,7 +83,11 @@ data class ChatState(
     val shellTools: List<ShellToolCardState> = emptyList(),
     /** Latest android_use invocation, used to reopen setup guidance after dismissal. */
     val computerUseRequestKey: String? = null,
-    /** The latest turn's live CLI-like execution trace (not persisted as chat). */
+    /**
+     * The latest turn's live CLI-like execution trace. Transient — the next turn
+     * replaces it — EXCEPT for its tool rows, which [settleTurn] moves into the
+     * settled transcript message so they outlive the run that produced them.
+     */
     val agentRun: AgentRunState? = null,
     /**
      * A persistent, dismissible turn error. Unlike [statusLine] (which the next
@@ -102,6 +106,24 @@ data class ChatState(
      * turn's stream, so `TurnEnded` deliberately does NOT clear it.
      */
     val pendingQuestions: List<AskUserQuestionRequestDto> = emptyList(),
+    /**
+     * The model-managed working plan, pinned above the composer. Driven by
+     * `ClientEvent.PlanUpdated`, a FULL-LIST REPLACE emitted on the TodoWrite
+     * CALL — an empty list is a real payload meaning "clear the panel".
+     */
+    val planTasks: List<PlanTaskUi> = emptyList(),
+    /** Whether the plan panel shows every row instead of the capped window. */
+    val planExpanded: Boolean = false,
+    /**
+     * Tool-use ids whose result body/diff the user expanded.
+     *
+     * This lives in the MODEL layer on purpose. Both surfaces that render a tool
+     * call — the transcript `LazyColumn` and the run timeline's row list —
+     * RECYCLE their rows, so `rememberSaveable` inside the row would drop the
+     * expansion the moment it scrolled out of view. Holding it here also makes
+     * it assertable from a plain JVM reducer test.
+     */
+    val expandedToolCalls: Set<String> = emptySet(),
 ) {
     /** True while a turn is in flight — gates the composer (Stop vs Send). */
     val isStreaming: Boolean get() = streaming
@@ -378,8 +400,15 @@ class ChatViewModel(
      *    events: a question deliberately survives `TurnEnded`, because the
      *    engine keeps the questionnaire parked across the turn boundary.
      *  - `TaskStatusChanged` surfaces as the transient status line.
+     *  - `PlanUpdated` replaces the pinned plan checklist WHOLESALE (an empty
+     *    list clears it). It rides here, not the per-turn reply stream, because
+     *    the plan outlives the turn that rewrote it.
      */
     internal fun reduceClientEvent(event: ClientEvent) {
+        planTasksFrom(event)?.let { tasks ->
+            _state.update { it.copy(planTasks = tasks) }
+            return
+        }
         when (event) {
             is ClientEvent.AskUserQuestion -> _state.update { s ->
                 if (s.pendingQuestions.any { it.requestId == event.request.requestId }) {
@@ -717,6 +746,12 @@ class ChatViewModel(
                 shellTools = emptyList(),
                 agentRun = null,
                 error = null,
+                // The plan and every expansion belong to the session that was
+                // just replaced; carrying them across would attribute one
+                // session's checklist to another.
+                planTasks = emptyList(),
+                planExpanded = false,
+                expandedToolCalls = emptySet(),
             )
         }
     }
@@ -803,6 +838,9 @@ class ChatViewModel(
                 shellTools = emptyList(),
                 agentRun = null,
                 error = null,
+                planTasks = emptyList(),
+                planExpanded = false,
+                expandedToolCalls = emptySet(),
             )
         }
         sessionTransitionJob = viewModelScope.launch {
@@ -948,13 +986,16 @@ class ChatViewModel(
         // round-trip must not re-open streaming on the now-idle transcript.
         val job = abandonLocalTurn()
         _state.update {
-            val settledMessages = it.streamingMessage?.let { live -> it.messages + live } ?: it.messages
+            val settled = it.settleTurn(
+                run = it.agentRun?.finish(AgentRunOutcome.Cancelled),
+                settling = it.streamingMessage,
+            )
             it.copy(
                 streaming = false,
-                messages = settledMessages,
+                messages = settled.messages,
                 streamingMessage = null,
                 statusLine = strings.resolve(R.string.chat_stopping, "正在停止…"),
-                agentRun = it.agentRun?.finish(AgentRunOutcome.Cancelled),
+                agentRun = settled.run,
             )
         }
         val cancellation = viewModelScope.async {
@@ -992,6 +1033,33 @@ class ChatViewModel(
     /** Dismiss the persistent error banner (its × affordance). */
     fun dismissError() {
         _state.update { it.copy(error = null) }
+    }
+
+    /**
+     * Expand / collapse one tool call's result body or diff, keyed by its stable
+     * tool-use id.
+     *
+     * Deliberately a ViewModel intent rather than row-local `rememberSaveable`:
+     * every list that renders a tool call recycles its rows, so row-local state
+     * is lost on scroll. Keeping it in [ChatState] also makes the toggle
+     * assertable from a plain JVM reducer test.
+     */
+    fun toggleToolCall(id: String) {
+        if (id.isEmpty()) return
+        _state.update { s ->
+            s.copy(
+                expandedToolCalls = if (id in s.expandedToolCalls) {
+                    s.expandedToolCalls - id
+                } else {
+                    s.expandedToolCalls + id
+                },
+            )
+        }
+    }
+
+    /** Show the whole plan instead of the capped window (and back). */
+    fun togglePlanExpanded() {
+        _state.update { it.copy(planExpanded = !it.planExpanded) }
     }
 
     /**
@@ -1207,16 +1275,21 @@ class ChatViewModel(
                 // overwritable statusLine. Clear the status line so a stale tool
                 // label doesn't linger beneath the error.
                 _state.update {
-                    val settledMessages = it.streamingMessage?.let { live -> it.messages + live } ?: it.messages
+                    // A failed turn still ran its tools; they settle the same way
+                    // so the next turn cannot erase them either.
+                    val settled = it.settleTurn(
+                        run = (it.agentRun ?: AgentRunState(turnId = token))
+                            .addNotice(AgentRunNotice(event.message, AgentRunNoticeKind.Error))
+                            .finish(AgentRunOutcome.Failed),
+                        settling = it.streamingMessage,
+                    )
                     it.copy(
                         streaming = false,
-                        messages = settledMessages,
+                        messages = settled.messages,
                         streamingMessage = null,
                         statusLine = null,
                         error = ChatError(event.message, classifyError(event.message)),
-                        agentRun = (it.agentRun ?: AgentRunState(turnId = token))
-                            .addNotice(AgentRunNotice(event.message, AgentRunNoticeKind.Error))
-                            .finish(AgentRunOutcome.Failed),
+                        agentRun = settled.run,
                     )
                 }
             }
@@ -1224,15 +1297,23 @@ class ChatViewModel(
             is ReplyEvent.Completed -> {
                 turnJob = null
                 _state.update { s ->
-                    val completed = s.streamingMessage?.let { live ->
-                        event.message.copy(id = live.id)
-                    } ?: event.message
+                    val completed = s.streamingMessage
+                        ?.let { live -> event.message.copy(id = live.id) }
+                        ?: event.message
+                    // `MessageComplete` carries the assistant's text blocks ONLY —
+                    // the engine keeps this turn's ToolUse in a separate field — so
+                    // the turn's tool calls have to come out of the live run trace
+                    // or they die with it when the next turn starts.
+                    val settled = s.settleTurn(
+                        run = (s.agentRun ?: AgentRunState(turnId = token))
+                            .finish(AgentRunOutcome.Completed),
+                        settling = completed,
+                    )
                     s.copy(
                         streaming = false,
-                        messages = s.messages + completed,
+                        messages = settled.messages,
                         streamingMessage = null,
-                        agentRun = (s.agentRun ?: AgentRunState(turnId = token))
-                            .finish(AgentRunOutcome.Completed),
+                        agentRun = settled.run,
                     )
                 }
             }
@@ -1241,16 +1322,22 @@ class ChatViewModel(
                 turnJob = null
                 _state.update {
                     val run = it.agentRun ?: AgentRunState(turnId = token)
-                    val settledMessages = it.streamingMessage?.let { live -> it.messages + live } ?: it.messages
-                    it.copy(
-                        streaming = false,
-                        messages = settledMessages,
-                        streamingMessage = null,
-                        agentRun = if (run.outcome == AgentRunOutcome.Running) {
+                    // The engine's mobile host never emits `MessageComplete`, so
+                    // THIS is the settle point a real turn takes — it has to
+                    // absorb the run's tool calls too, not just `Completed`.
+                    val settled = it.settleTurn(
+                        run = if (run.outcome == AgentRunOutcome.Running) {
                             run.finish(AgentRunOutcome.Completed)
                         } else {
                             run
                         },
+                        settling = it.streamingMessage,
+                    )
+                    it.copy(
+                        streaming = false,
+                        messages = settled.messages,
+                        streamingMessage = null,
+                        agentRun = settled.run,
                     )
                 }
             }
@@ -1348,6 +1435,96 @@ class ChatViewModel(
         const val KEY_SESSION_TITLE = "chat.session.title" // String
         const val KEY_IS_NEW = "chat.isNew" // Boolean — empty-state hero vs list
     }
+}
+
+/** A settled turn: the transcript it produced, and what is left of its run trace. */
+internal data class SettledTurn(
+    val messages: List<Message>,
+    val run: AgentRunState?,
+)
+
+/**
+ * Settle a finished turn: MOVE its tool calls out of the transient run trace and
+ * into the transcript message that settles with it.
+ *
+ * ### Why they have to move
+ *
+ * A live turn's tool calls exist in exactly ONE place — [ChatState.agentRun] —
+ * and [ChatViewModel.send] overwrites that with a fresh [AgentRunState] the
+ * instant the next turn starts. So turn N-1's tool rows were destroyed by turn
+ * N, and the same conversation read completely differently before and after a
+ * restart (a resumed transcript rebuilds every call inline, via
+ * [transcriptFromDtos]).
+ *
+ * ### Why they must be APPENDED, not merged
+ *
+ * The engine SPLITS the model stream (`orchestrator/src/streaming_loop.rs`):
+ * text and thinking accumulate into `PumpedTurn::assistant_blocks`, while a
+ * `ToolUse` goes to a separate `tool_uses` field and is explicitly NOT pushed to
+ * `assistant_blocks`. `MessageComplete`'s payload is
+ * `synthesize_message(turn)` over `assistant_blocks` alone
+ * (`client-adapter/src/turn.rs`), so its `blocks` NEVER contain a `ToolUse` and
+ * [messageDtoToMessage] never yields a [MessageContent.Tool]. A merge keyed on
+ * an existing tool block therefore matched nothing, ever. The rows themselves
+ * must be added. (The by-id merge is still done first, so the day the engine
+ * does ship `ToolUse` in `assistant_blocks` its header/display are honored in
+ * place instead of being duplicated.)
+ *
+ * ### Why it is a MOVE
+ *
+ * Copying would draw every row twice — once in the bubble, once in the run card
+ * that stays on screen until the next turn. Removing what was absorbed also
+ * makes this idempotent: `MessageComplete` followed by `TurnEnded` settles once.
+ *
+ * Shell calls are the exception and are left in the run trace: they already own
+ * a persistent [ChatRenderItem.Shell] terminal card of their own, so absorbing
+ * them would be a third copy.
+ *
+ * PURE, for JVM tests.
+ */
+internal fun ChatState.settleTurn(run: AgentRunState?, settling: Message?): SettledTurn {
+    val shellBacked = shellTools.mapTo(mutableSetOf()) { it.taskId }
+    val absorbed = run?.tools.orEmpty().filterNot { it.id in shellBacked }
+    if (absorbed.isEmpty()) {
+        return SettledTurn(settling?.let { messages + it } ?: messages, run)
+    }
+    // A turn can end with tool calls and no prose at all; a resume would render
+    // those as an assistant bubble, so mint one rather than drop them.
+    val settled = (settling ?: Message(role = Role.Ai, text = "")).absorbToolCalls(absorbed)
+    return SettledTurn(
+        messages = messages + settled,
+        run = run?.copy(
+            tools = run.tools.filter { it.id in shellBacked },
+            revision = run.revision + 1,
+        ),
+    )
+}
+
+/** Merge [rows] into this message's own tool blocks by id, then append the rest. */
+private fun Message.absorbToolCalls(rows: List<AgentToolRunState>): Message {
+    val byId = rows.associateBy { it.id }
+    val mergedIds = mutableSetOf<String>()
+    val existing = blocks.map { block ->
+        val call = (block as? MessageContent.Tool)?.call ?: return@map block
+        val live = byId[call.id] ?: return@map block
+        mergedIds += call.id
+        MessageContent.Tool(
+            call.copy(
+                header = call.header ?: live.header,
+                display = call.display ?: live.display,
+                status = if (call.display != null) call.status else live.status,
+            ),
+        )
+    }
+    // A streamed message carries prose in `text` and no blocks. Once blocks
+    // exist the bubble renders THOSE and ignores `text`, so the prose has to be
+    // seeded as a block or it would vanish behind the tool rows.
+    val prose = existing.ifEmpty {
+        if (text.isBlank()) emptyList() else listOf(MessageContent.Text(text))
+    }
+    val appended = rows.filterNot { it.id in mergedIds }
+        .map { MessageContent.Tool(it.toToolCall()) }
+    return copy(blocks = prose + appended)
 }
 
 /**

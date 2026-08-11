@@ -60,6 +60,9 @@ fun MessageBubble(
     dimmed: Boolean = false,
     onShare: (String) -> Unit = {},
     onOpenLink: (String) -> Unit = {},
+    /** Tool-use ids whose result body/diff is expanded — owned by `ChatState`. */
+    expandedToolCalls: Set<String> = emptySet(),
+    onToggleToolCall: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     if (message.role == Role.User) {
@@ -96,7 +99,25 @@ fun MessageBubble(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 message.tag?.let { Pill(text = it, color = t.accent) }
-                AIText(markdown = message.text, onOpenLink = onOpenLink)
+                // A message the engine supplied structure for renders its blocks
+                // IN ORDER — prose as Markdown, tool calls as their derived
+                // header + `⎿` result. Everything else (a user turn, a message
+                // still streaming) has no blocks and renders its text as before.
+                if (message.blocks.isEmpty()) {
+                    AIText(markdown = message.text, onOpenLink = onOpenLink)
+                } else {
+                    message.blocks.forEach { block ->
+                        when (block) {
+                            is MessageContent.Text ->
+                                AIText(markdown = block.text, onOpenLink = onOpenLink)
+                            is MessageContent.Tool -> ToolCallView(
+                                call = block.call,
+                                expanded = block.call.id in expandedToolCalls,
+                                onToggleExpanded = { onToggleToolCall(block.call.id) },
+                            )
+                        }
+                    }
+                }
                 // Share affordance: surfaces the native chooser for this reply's
                 // text through the same ShareController the engine bridges onto
                 // `traits::SharingService` — so a bubble share and a `tool-share`

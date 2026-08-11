@@ -84,8 +84,18 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
+                // Two DISTINCT pinned panels, stacked rather than merged:
+                // engine background tasks (Workflow builds, background jobs)
+                // above, and the model's own working plan closest to the
+                // composer — the same ordering the terminal uses.
                 if !convo.backgroundTasks.isEmpty {
                     TasksStatusPanel(tasks: convo.backgroundTasks)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 4)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                if !convo.planTasks.isEmpty {
+                    PlanTasksPanel(tasks: convo.planTasks)
                         .padding(.horizontal, 14)
                         .padding(.bottom, 4)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -235,7 +245,19 @@ struct ChatView: View {
                     )
                     .equatable()
                 case let .run(run):
-                    ConversationExecutionRunCard(run: run, onOpenShellTask: onOpenShellTask)
+                    ConversationExecutionRunCard(
+                        run: run,
+                        expandedToolCalls: convo.expandedToolCalls,
+                        onToggleToolCall: toggleToolCall,
+                        onOpenShellTask: onOpenShellTask
+                    )
+                case let .toolCall(trace):
+                    ToolCallView(
+                        trace: trace,
+                        isExpanded: convo.expandedToolCalls.contains(trace.id),
+                        onToggle: { toggleToolCall(trace.id) }
+                    )
+                    .padding(.bottom, 14)
                 case let .question(question):
                     AskUserQuestionCard(
                         question: question,
@@ -387,6 +409,18 @@ struct ChatView: View {
     }
 
     // MARK: actions
+
+    /// Flip a tool row's expanded state. The set lives in the MODEL, not in the
+    /// row: this list recycles its rows, so row-local state is lost on scroll
+    /// and would then reappear on whichever row reused the storage.
+    private func toggleToolCall(_ id: String) {
+        if convo.expandedToolCalls.contains(id) {
+            convo.expandedToolCalls.remove(id)
+        } else {
+            convo.expandedToolCalls.insert(id)
+        }
+    }
+
     private func newChat() {
         voiceInteraction.handleContextChange()
         source.startNewConversation()

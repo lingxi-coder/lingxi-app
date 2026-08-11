@@ -4,6 +4,7 @@
  */
 
 export * from './protocol.js';
+export * from './toolview.js';
 export * from './lockfile.js';
 export { versionCompatible } from './version.js';
 export {

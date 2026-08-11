@@ -467,32 +467,236 @@ fun sessionActivationFrom(
     )
     is ClientEvent.SessionResumed -> ActivatedSession(
         sessionId = canonicalSessionId(event.sessionId),
-        transcript = event.messages.map { messageDtoToMessage(it, strings) },
+        transcript = transcriptFromDtos(event.messages, strings),
         kind = SessionActivationKind.Resumed,
     )
     else -> null
 }
 
 /**
- * Lower one wire [MessageDto] to the UI [Message] model. The UI bubble is
- * TEXT-ONLY (assistant text renders as Markdown; user text is plain), so the
- * ordered content [MessageBlockDto]s are flattened to a single body string via
- * [messageDtoText]. The wire `role` ("user" / "assistant" / "system") maps to
- * [Role]: "user" → [Role.User]; everything else (assistant / system) → [Role.Ai]
- * (the avatar+markdown bubble). PURE — no engine / Android dependency.
+ * PURE recognizer for `PlanUpdated` — the model-managed todo checklist.
+ *
+ * A FULL-LIST REPLACE, emitted on the TodoWrite CALL (not its result), so an
+ * empty list is a legitimate payload meaning "clear the panel" — distinct from
+ * the `null` this returns for every other event. It rides the OUT-OF-BAND
+ * `clientEvents` stream (next to `AskUserQuestion` / `TaskStatusChanged`), not
+ * the per-turn reply stream: the plan outlives the turn that rewrote it.
+ */
+fun planTasksFrom(event: ClientEvent): List<PlanTaskUi>? = when (event) {
+    is ClientEvent.PlanUpdated -> event.tasks.map { it.toUi() }
+    else -> null
+}
+
+/**
+ * Lower one wire [MessageDto] to the UI [Message] model.
+ *
+ * The assistant bubble is no longer text-only: alongside the flattened prose in
+ * [Message.text] the message now carries ORDERED [MessageContent] blocks, so a
+ * tool call renders as its derived header + `⎿` result instead of collapsing to
+ * the one-line `"调用工具 X…"` placeholder that discarded every diff and body.
+ *
+ * `ToolUse` and `ToolResult` are paired by id WITHIN this one message here; the
+ * engine actually splits them across two messages (call in assistant N, result
+ * in user N+1), which is why a whole transcript must go through
+ * [transcriptFromDtos] instead of mapping each DTO independently.
+ *
+ * The wire `role` ("user" / "assistant" / "system") maps to [Role]: "user" →
+ * [Role.User]; everything else → [Role.Ai]. PURE — no engine dependency.
  */
 fun messageDtoToMessage(
     dto: MessageDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): Message {
-    val role = if (dto.role.equals("user", ignoreCase = true)) Role.User else Role.Ai
-    return Message(role = role, text = messageDtoText(dto.blocks, strings))
+    val build = MessageBuild(dto.role)
+    val index = mutableMapOf<String, ToolBlockRef>()
+    dto.blocks.forEach { block ->
+        // One DTO in isolation has no preceding turn to hand an orphan result
+        // to, and a user build can never render one (see [orphanHostFor]), so
+        // an assistant DTO keeps its own orphans and a user DTO drops them.
+        build.fold(block, strings, index) { build.takeIf { it.role == Role.Ai } }
+    }
+    return build.toMessage()
 }
 
 /**
- * Flatten a message's ordered content [MessageBlockDto]s into the single body
- * string the UI bubble renders, mirroring how the engine's live MessageComplete
- * synthesis collapses a turn to text. Each block kind folds to a readable line:
+ * Lower a WHOLE transcript, threading the tool-use index across messages.
+ *
+ * A `ToolUse` sits in assistant message N and its `ToolResult` in user message
+ * N+1 — never in the same message (see `client-adapter`'s `ToolUseIndex`, which
+ * keeps the same side-table for the same reason). Mapping each [MessageDto]
+ * independently therefore renders every restored tool call as a header with no
+ * result, and leaves a content-free user bubble holding the orphaned results.
+ *
+ * So: results are folded BACK into the message that made the call, and any
+ * message left with neither prose nor a tool block is dropped rather than
+ * rendered as an empty bubble. PURE — exercised on the JVM.
+ */
+fun transcriptFromDtos(
+    dtos: List<MessageDto>,
+    strings: ConversationStrings = DefaultConversationStrings,
+): List<Message> {
+    val builds = mutableListOf<MessageBuild>()
+    val index = mutableMapOf<String, ToolBlockRef>()
+    dtos.forEach { dto ->
+        val build = MessageBuild(dto.role)
+        builds.add(build)
+        dto.blocks.forEach { block ->
+            build.fold(block, strings, index) { orphanHostFor(builds, build) }
+        }
+    }
+    return builds.filter { it.isRenderable() }.map { it.toMessage() }
+}
+
+/**
+ * Which build an ORPHAN `ToolResult` — one whose `ToolUse` fell outside a torn
+ * or compacted transcript window — is folded into.
+ *
+ * NEVER the user build it arrived in. [MessageBubble] renders a user turn from
+ * [Message.text] alone and ignores its blocks, so a tool block parked there is
+ * invisible AND makes [MessageBuild.isRenderable] answer `true`, producing the
+ * empty bordered bubble that predicate exists to prevent. The old
+ * `previous ?: this` fallback did exactly that whenever the orphan landed in
+ * the FIRST message of the window (no `previous` at all) or right after another
+ * user message.
+ *
+ * The host is the IMMEDIATELY preceding build when that is an assistant turn —
+ * the one that made the call in every window torn only at the block level.
+ * Otherwise the calling turn itself fell outside the window, and a build is
+ * MINTED and spliced in right where it used to be, so the row renders in its
+ * own position instead of being retro-fitted into an unrelated older bubble. A
+ * minted build that never receives a block stays empty and is dropped by the
+ * `isRenderable` filter, so this can never introduce a blank bubble of its own;
+ * a second orphan in the same message finds the mint and reuses it.
+ */
+private fun orphanHostFor(builds: MutableList<MessageBuild>, current: MessageBuild): MessageBuild {
+    if (current.role == Role.Ai) return current
+    val at = builds.indexOf(current).coerceAtLeast(0)
+    builds.getOrNull(at - 1)?.takeIf { it.role == Role.Ai }?.let { return it }
+    val minted = MessageBuild(ASSISTANT_WIRE_ROLE)
+    builds.add(at, minted)
+    return minted
+}
+
+/** The wire `role` a minted assistant build carries. */
+private const val ASSISTANT_WIRE_ROLE = "assistant"
+
+/** Where a recorded `ToolUse` block lives, so its later `ToolResult` can reach it. */
+private class ToolBlockRef(val build: MessageBuild, val blockIndex: Int)
+
+/** Mutable accumulator for one message's prose + ordered content blocks. */
+private class MessageBuild(wireRole: String) {
+    val role: Role = if (wireRole.equals("user", ignoreCase = true)) Role.User else Role.Ai
+    val textParts = mutableListOf<String>()
+    val blocks = mutableListOf<MessageContent>()
+
+    /**
+     * True when the message has anything to show — i.e. exactly what
+     * [MessageBubble] would actually draw for this role. A user turn carrying
+     * ONLY the previous assistant turn's tool results has neither prose nor a
+     * tool block of its own (they were folded back), and must not render as an
+     * empty bubble.
+     *
+     * The role check is not redundant with [orphanHostFor]: the user branch of
+     * the bubble renders [Message.text] and nothing else, so "has a tool block"
+     * can only mean "renderable" for an assistant turn. Answering `true` for a
+     * text-less user build is what produced the empty bordered bubble.
+     */
+    fun isRenderable(): Boolean =
+        textParts.any { it.isNotBlank() } ||
+            (role == Role.Ai && blocks.any { it is MessageContent.Tool })
+
+    fun toMessage(): Message = Message(
+        role = role,
+        text = textParts.filter { it.isNotBlank() }.joinToString("\n\n"),
+        blocks = blocks.toList(),
+    )
+
+    private fun addText(text: String) {
+        textParts.add(text)
+        if (text.isNotBlank()) blocks.add(MessageContent.Text(text))
+    }
+
+    /**
+     * Fold one wire block in. The `when` is exhaustive over the generated
+     * [MessageBlockDto] subclasses — a regen that adds a block kind is a compile
+     * error here, mirroring the engine's exhaustive `ContentBlock` match.
+     */
+    fun fold(
+        block: MessageBlockDto,
+        strings: ConversationStrings,
+        index: MutableMap<String, ToolBlockRef>,
+        /**
+         * Resolved LAZILY, and only for an orphan result, because resolving it
+         * can MINT a build ([orphanHostFor]) — doing that eagerly per message
+         * would splice an empty build ahead of every user turn.
+         */
+        orphanHost: () -> MessageBuild?,
+    ) {
+        when (block) {
+            is MessageBlockDto.Text -> addText(block.text)
+            is MessageBlockDto.Thinking -> addText(block.thinking)
+            is MessageBlockDto.RedactedThinking ->
+                addText(strings.resolve(R.string.chat_redacted_thinking, "[已折叠的思考]"))
+            is MessageBlockDto.CompactBoundary ->
+                addText(strings.resolve(R.string.chat_compacted_label, "对话已压缩"))
+            is MessageBlockDto.ToolUse -> {
+                index[block.id] = ToolBlockRef(this, blocks.size)
+                blocks.add(
+                    MessageContent.Tool(
+                        ToolCallUi(
+                            id = block.id,
+                            tool = block.tool,
+                            header = block.header?.toUi(),
+                            status = AgentToolStatus.Running,
+                            // Older engine (no header): the legacy scrape is the floor.
+                            fallbackSummary = if (block.header == null) {
+                                summarizeToolInput(block.inputJson)
+                            } else {
+                                null
+                            },
+                        ),
+                    ),
+                )
+            }
+            is MessageBlockDto.ToolResult -> {
+                val status =
+                    if (block.isError) AgentToolStatus.Failed else AgentToolStatus.Completed
+                val display = block.display?.toUi()
+                val ref = index.remove(block.id)
+                if (ref != null) {
+                    val existing = ref.build.blocks[ref.blockIndex] as MessageContent.Tool
+                    ref.build.blocks[ref.blockIndex] = MessageContent.Tool(
+                        existing.call.copy(display = display, status = status),
+                    )
+                } else {
+                    // ORPHAN result — a torn or compacted transcript window. It
+                    // belongs to an ASSISTANT turn, never to the user bubble it
+                    // arrived in (which renders text only).
+                    orphanHost()?.blocks?.add(
+                        MessageContent.Tool(
+                            ToolCallUi(
+                                id = block.id,
+                                tool = block.tool,
+                                display = display,
+                                status = status,
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * LEGACY: flatten a message's ordered content [MessageBlockDto]s into ONE body
+ * string, collapsing every tool call to a `"调用工具 X…"` placeholder.
+ *
+ * The bubble no longer renders this — [messageDtoToMessage] and
+ * [transcriptFromDtos] now emit ordered [MessageContent] blocks so a tool call
+ * keeps its derived header and `⎿` result instead of being erased into one line.
+ * This remains as the plain-text projection of a message (and as the shape a
+ * pre-structure client produced), so it must keep folding EVERY block kind:
  *  - Text             → the text verbatim.
  *  - Thinking         → the reasoning text (the bubble has no separate thinking
  *                       region for restored scrollback; it reads inline).
@@ -549,8 +753,21 @@ sealed interface ReplyEvent {
         val id: String? = null,
         val tool: String? = null,
         val status: AgentToolStatus? = null,
+        /** LEGACY input scrape — the fallback when [header] is null (older engine). */
         val inputSummary: String? = null,
         val elapsedMs: Long? = null,
+        /**
+         * The engine's PRE-DERIVED call header, carried straight through from
+         * `ToolUseStarted.header`. Absent on an older engine, and absent on the
+         * result/heartbeat events (which carry no header) — the reducer keeps the
+         * one the call already delivered.
+         */
+        val header: ToolHeaderUi? = null,
+        /**
+         * The engine's PRE-DERIVED `⎿` block from `ToolUseResult.display`. This
+         * is the payload the non-shell result arm used to THROW AWAY entirely.
+         */
+        val display: ToolResultDisplayUi? = null,
     ) : ReplyEvent
 
     /** Correlated shell lifecycle update rendered as an expandable terminal card. */
@@ -622,7 +839,10 @@ fun clientEventToReply(
                 id = event.id,
                 tool = event.tool,
                 status = AgentToolStatus.Running,
+                // The legacy scrape stays ONLY as the older-engine fallback; when
+                // `header` is present the renderer ignores it entirely.
                 inputSummary = summarizeToolInput(event.inputJson),
+                header = event.header?.toUi(),
             )
         }
     is ClientEvent.ToolHeartbeat ->
@@ -642,19 +862,21 @@ fun clientEventToReply(
     is ClientEvent.ToolUseResult ->
         if (isShellTool(event.tool)) {
             ReplyEvent.ShellTool(shellFinished(event.id, event.resultJson, event.isError))
-        } else if (event.isError) {
-            ReplyEvent.ToolActivity(
-                label = strings.resolve(R.string.chat_tool_failed_label, "工具 %1\$s 失败", event.tool),
-                id = event.id,
-                tool = event.tool,
-                status = AgentToolStatus.Failed,
-            )
         } else {
+            // This arm used to DISCARD the whole payload — a completed tool call
+            // rendered as one dim status line and nothing else. The engine's
+            // pre-derived `display` (headline, structured diff, clamped body,
+            // collapse verdict) now rides through to the renderer intact.
             ReplyEvent.ToolActivity(
-                label = strings.resolve(R.string.chat_tool_completed_label, "工具 %1\$s 完成", event.tool),
+                label = if (event.isError) {
+                    strings.resolve(R.string.chat_tool_failed_label, "工具 %1\$s 失败", event.tool)
+                } else {
+                    strings.resolve(R.string.chat_tool_completed_label, "工具 %1\$s 完成", event.tool)
+                },
                 id = event.id,
                 tool = event.tool,
-                status = AgentToolStatus.Completed,
+                status = if (event.isError) AgentToolStatus.Failed else AgentToolStatus.Completed,
+                display = event.display?.toUi(),
             )
         }
     is ClientEvent.UsageUpdate -> ReplyEvent.Usage(

@@ -52,6 +52,26 @@ data class Palette(
     val statusTesting: Color,   // oklch(75% 0.15 75)
     val statusError: Color,     // oklch(65% 0.20 25)
     val danger: Color,          // oklch(65% 0.20 25)
+    // MARK: Structured-diff tokens
+    //
+    // The engine deliberately ships NO diff backgrounds: the terminal's are
+    // alpha-over-black blends that are only valid over a black terminal. These
+    // are the client-side derivation, keyed off the row kind and the word-diff
+    // `emph` flag, and they must stay legible under BOTH appearances.
+    /** Ground the diff rows are painted on (a code surface, not the chat surface). */
+    val diffSurface: Color,
+    /** Added-row wash. */
+    val diffAddBg: Color,
+    /** Removed-row wash. */
+    val diffRemoveBg: Color,
+    /** Changed WORD inside an added row — the stronger intra-line emphasis. */
+    val diffAddEmphBg: Color,
+    /** Changed WORD inside a removed row. */
+    val diffRemoveEmphBg: Color,
+    /** Line-number gutter foreground. */
+    val diffGutter: Color,
+    /** The dim `⋯` hunk separator and the diff's hairline rules. */
+    val diffRule: Color,
     /** True when this palette is the dark appearance. */
     val isDark: Boolean,
 ) {
@@ -90,6 +110,13 @@ object DesignTokens {
         statusTesting = Color(red = 0.8959f, green = 0.6198f, blue = 0.1315f),         // oklch(75% 0.15 75)
         statusError = Color(red = 0.9436f, green = 0.3038f, blue = 0.2990f),           // oklch(65% 0.20 25)
         danger = Color(red = 0.9436f, green = 0.3038f, blue = 0.2990f),                // oklch(65% 0.20 25)
+        diffSurface = Color(0xFF0D1117),
+        diffAddBg = Color(0x3326A641),
+        diffRemoveBg = Color(0x33F85149),
+        diffAddEmphBg = Color(0x6626A641),
+        diffRemoveEmphBg = Color(0x66F85149),
+        diffGutter = Color(0xFF6E7681),
+        diffRule = Color(0xFF30363D),
         isDark = true,
     )
 
@@ -121,6 +148,13 @@ object DesignTokens {
         statusTesting = Color(red = 0.8959f, green = 0.6198f, blue = 0.1315f),
         statusError = Color(red = 0.9436f, green = 0.3038f, blue = 0.2990f),
         danger = Color(red = 0.9436f, green = 0.3038f, blue = 0.2990f),
+        diffSurface = Color(0xFFF6F8FA),
+        diffAddBg = Color(0x2E2DA44E),
+        diffRemoveBg = Color(0x2ECF222E),
+        diffAddEmphBg = Color(0x5C2DA44E),
+        diffRemoveEmphBg = Color(0x5CCF222E),
+        diffGutter = Color(0xFF8C959F),
+        diffRule = Color(0xFFD0D7DE),
         isDark = false,
     )
 

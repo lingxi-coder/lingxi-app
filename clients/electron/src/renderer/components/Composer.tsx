@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useT } from '../theme/ThemeContext';
-import { SLASH_COMMANDS, type Model, type Project, type RunItem } from '../data';
+import { SLASH_COMMANDS, type Model, type Project } from '../data';
+import type { RunItem } from '../model/runItem';
 import { Icon } from './Icon';
 import { iconBtn } from './primitives';
 import { PermissionPicker, ModelPicker, ContextPicker } from './pickers';
@@ -352,7 +353,7 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
                 onClick={() => {
                   const bars = (barsRef.current || []).slice();
                   const duration = Math.max(1, recSecs);
-                  appendMessage({ type: 'audio', bars, duration });
+                  appendMessage({ type: 'audio', id: `audio-${Date.now()}`, bars, duration });
                   setRecording(false);
                 }}
                 style={{

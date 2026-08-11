@@ -144,6 +144,18 @@ data class Message(
     val text: String,
     val tag: String? = null,
     val id: String = UUID.randomUUID().toString(),
+    /**
+     * The message's ORDERED content, when the engine supplied structure.
+     *
+     * Empty for every locally-composed message (a user turn, a streamed
+     * assistant turn) — those render [text] as before. A restored or completed
+     * engine message fills this so its tool calls render as the engine's derived
+     * header + `⎿` result block instead of being flattened into [text], which is
+     * what discarded every diff, body, and file path before.
+     *
+     * Only the assistant bubble renders these; a user bubble stays text-only.
+     */
+    val blocks: List<com.lingxi.code.conversation.MessageContent> = emptyList(),
 )
 
 /** A unified "session" reference used by the conversation title bar. */

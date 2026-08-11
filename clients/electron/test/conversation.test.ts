@@ -10,8 +10,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type {
+  ClientEvent,
+  StructuredDiffDto,
+  ToolHeaderDto,
+  ToolResultDisplayDto,
+} from '@lingxi/bridge-client';
 import {
+  conversationFromMessages,
   emptyConversation,
   reduceEvent,
   reduceEvents,
@@ -19,9 +25,11 @@ import {
   appendUserPrompt,
   type ConversationState,
 } from '../src/renderer/bridge/conversation';
+import type { ToolRunItem } from '../src/renderer/model/runItem';
+import { INLINE_DIFF_ROW_BUDGET, toolDefaultOpen, toolHasBody } from '../src/renderer/model/runItem';
 
 type Narration = Extract<ConversationState['items'][number], { type: 'narration' }>;
-type Agent = Extract<ConversationState['items'][number], { type: 'agent' }>;
+type Tool = ToolRunItem;
 type Meta = Extract<ConversationState['items'][number], { type: 'meta' }>;
 type Thinking = Extract<ConversationState['items'][number], { type: 'thinking' }>;
 
@@ -34,11 +42,43 @@ const COST = {
   formatted: '0m 5s · 30 tokens · $0.01',
 };
 
+const READ_HEADER: ToolHeaderDto = {
+  verb: 'read',
+  label: 'Read',
+  primary: 'src/main.rs',
+  title: 'Read(src/main.rs)',
+};
+
+const DIFF: StructuredDiffDto = {
+  file_path: 'src/main.rs',
+  language: 'rs',
+  gutter_width: 3,
+  additions: 1,
+  removals: 1,
+  truncated_rows: 0,
+  rows: [
+    { kind: 'remove', line_no: 12, hunk: 0, segments: [{ text: 'let a = 1;', class: 'plain' }] },
+    { kind: 'add', line_no: 12, hunk: 0, segments: [{ text: 'let a = 2;', class: 'plain' }] },
+  ],
+};
+
+const DISPLAY: ToolResultDisplayDto = {
+  headline: 'Added 1 line, removed 1 line',
+  headline_kind: 'added_removed',
+  headline_args: [1, 1],
+  diff: DIFF,
+  body: 'ok',
+  body_lines: 1,
+};
+
+const firstTool = (s: ConversationState): Tool => s.items.find((i) => i.type === 'tool') as Tool;
+
 test('empty conversation is not running and has no items', () => {
   const s = emptyConversation();
   assert.equal(s.running, false);
   assert.deepEqual(s.items, []);
   assert.equal(s.lastError, null);
+  assert.deepEqual(s.plan, []);
 });
 
 test('turn_started flips running on; turn_ended flips it off and appends a meta row', () => {
@@ -50,6 +90,20 @@ test('turn_started flips running on; turn_ended flips it off and appends a meta 
   const meta = s.items.at(-1) as Meta;
   assert.equal(meta.type, 'meta');
   assert.equal(meta.dur, COST.formatted);
+});
+
+test('every item carries a distinct stable id, so the Stage never keys on an index', () => {
+  let s = appendUserPrompt(emptyConversation(), 'go');
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'hmm' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'toolu_1', tool: 'Read', input_json: '{}' });
+  s = reduceEvent(s, { type: 'text_delta', text: 'done' });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  const ids = s.items.map((item) => item.id);
+  assert.equal(ids.length, 5);
+  assert.equal(new Set(ids).size, 5, `duplicate item ids: ${ids.join(', ')}`);
+  // A tool card is addressed by the engine's tool-use id — that is the key the
+  // collapse store and every later tool event use.
+  assert.equal(firstTool(s).id, 'toolu_1');
 });
 
 test('text_delta accumulates into a single open assistant narration line', () => {
@@ -72,18 +126,21 @@ test('message_complete closes the open line so the next delta starts a new one',
   assert.deepEqual(lines.map((l) => l.text), ['first', 'second']);
 });
 
-test('tool_use_started adds a running agent card; tool_use_result flips it to done', () => {
+// ── The engine's derived view is consumed, never rebuilt ─────────────────────
+
+test('tool_use_started stores the engine header verbatim; tool_use_result stores the display', () => {
   let s = emptyConversation();
   s = reduceEvent(s, {
     type: 'tool_use_started',
     id: 'tu-1',
     tool: 'Read',
     input_json: '{"file_path":"src/main.rs"}',
+    header: READ_HEADER,
   });
-  let card = s.items.find((i) => i.type === 'agent') as Agent;
-  assert.equal(card.state, 'running');
-  assert.equal(card.title, 'Read');
-  assert.equal(card.sub, 'src/main.rs');
+  let card = firstTool(s);
+  assert.equal(card.status, 'running');
+  assert.equal(card.view, READ_HEADER, 'the header must be passed through, not rebuilt');
+  assert.equal(card.result, undefined);
 
   s = reduceEvent(s, {
     type: 'tool_use_result',
@@ -91,9 +148,91 @@ test('tool_use_started adds a running agent card; tool_use_result flips it to do
     tool: 'Read',
     result_json: '"ok"',
     is_error: false,
+    display: DISPLAY,
   });
-  card = s.items.find((i) => i.type === 'agent') as Agent;
-  assert.equal(card.state, 'done');
+  card = firstTool(s);
+  assert.equal(card.status, 'done');
+  assert.equal(card.result, DISPLAY);
+  // With a `display`, the degraded body must NOT also be computed.
+  assert.equal(card.note, undefined);
+});
+
+test('an older engine (no header/display) still renders through the shared fallback', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, {
+    type: 'tool_use_started',
+    id: 'tu-1',
+    tool: 'Read',
+    input_json: '{"file_path":"src/main.rs"}',
+  });
+  let card = firstTool(s);
+  assert.equal(card.view.verb, 'read');
+  assert.equal(card.view.title, 'Read(src/main.rs)');
+
+  s = reduceEvent(s, {
+    type: 'tool_use_result',
+    id: 'tu-1',
+    tool: 'Read',
+    result_json: '"file contents"',
+    is_error: false,
+  });
+  card = firstTool(s);
+  assert.equal(card.result, undefined);
+  assert.equal(card.note, 'file contents');
+  assert.equal(toolHasBody(card), true);
+  // No engine verdict on the inline budget ⇒ stay collapsed.
+  assert.equal(toolDefaultOpen(card), false);
+});
+
+test('a result with neither body nor diff offers no disclosure at all', () => {
+  let s = reduceEvent(emptyConversation(), {
+    type: 'tool_use_started', id: 'tu-1', tool: 'TodoWrite', input_json: '{}',
+  });
+  s = reduceEvent(s, {
+    type: 'tool_use_result',
+    id: 'tu-1',
+    tool: 'TodoWrite',
+    result_json: '""',
+    is_error: false,
+    display: { body_lines: 0 },
+  });
+  const card = firstTool(s);
+  assert.equal(toolHasBody(card), false);
+  assert.equal(toolDefaultOpen(card), false);
+});
+
+test("the engine's `collapsed` verdict decides the default state of a body-only result", () => {
+  const inline: ToolRunItem = {
+    type: 'tool', id: 'a', tool: 'Read', status: 'done',
+    view: READ_HEADER,
+    result: { body: 'short', body_lines: 2 },
+  };
+  const overflowing: ToolRunItem = {
+    ...inline,
+    result: { body: 'long', body_lines: 400, collapsed: true },
+  };
+  assert.equal(toolDefaultOpen(inline), true);
+  assert.equal(toolDefaultOpen(overflowing), false);
+});
+
+test('a diff opens on its own, but only within the client row budget', () => {
+  // `collapsed` is derived from the BODY line count alone, so it cannot speak
+  // for a diff; the wire cap is 400 rows and mounting that per edit is the
+  // blow-up the collapse design avoids.
+  const rowsFor = (n: number): StructuredDiffDto => ({
+    ...DIFF,
+    rows: Array.from({ length: n }, (_, i) => ({
+      kind: 'add' as const, line_no: i + 1, hunk: 0, segments: [{ text: 'x', class: 'plain' as const }],
+    })),
+  });
+  const withDiff = (n: number): ToolRunItem => ({
+    type: 'tool', id: 'a', tool: 'Edit', status: 'done',
+    view: READ_HEADER,
+    // A long body would otherwise force `collapsed`; the diff still wins.
+    result: { diff: rowsFor(n), body_lines: 900, collapsed: true },
+  });
+  assert.equal(toolDefaultOpen(withDiff(INLINE_DIFF_ROW_BUDGET)), true);
+  assert.equal(toolDefaultOpen(withDiff(INLINE_DIFF_ROW_BUDGET + 1)), false);
 });
 
 test('a tool that interrupts streaming text reopens a fresh line afterwards', () => {
@@ -103,9 +242,86 @@ test('a tool that interrupts streaming text reopens a fresh line afterwards', ()
   s = reduceEvent(s, { type: 'text_delta', text: 'after' });
   const lines = s.items.filter((i) => i.type === 'narration') as Narration[];
   assert.deepEqual(lines.map((l) => l.text), ['before', 'after']);
-  const card = s.items.find((i) => i.type === 'agent') as Agent;
-  assert.equal(card.sub, 'ls');
+  const card = firstTool(s);
+  assert.deepEqual(card.view.sub_line, { prefix: '$', text: 'ls' });
 });
+
+// ── tool_heartbeat: the identity rule ────────────────────────────────────────
+
+test('tool_heartbeat returns the IDENTICAL state whenever nothing changed', () => {
+  // The Stage is not virtualized and heartbeats arrive at ~1 Hz per in-flight
+  // tool. A fresh state object per beat repaints the whole transcript once a
+  // second, so identity — not deep equality — is the contract.
+  let s = reduceEvent(emptyConversation(), {
+    type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 5"}',
+  });
+
+  // 1. Unknown tool id.
+  assert.equal(reduceEvent(s, { type: 'tool_heartbeat', id: 'nope', tool: 'Bash', elapsed_ms: 1_000 }), s);
+
+  // 2. A real advance DOES produce new state.
+  const ticked = reduceEvent(s, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 1_000 });
+  assert.notEqual(ticked, s);
+  assert.equal(firstTool(ticked).elapsedMs, 1_000);
+
+  // 3. Same displayed second — including sub-second jitter within it.
+  assert.equal(reduceEvent(ticked, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 1_000 }), ticked);
+  assert.equal(reduceEvent(ticked, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 1_998 }), ticked);
+
+  // 4. A settled tool ignores late heartbeats entirely.
+  s = reduceEvent(ticked, {
+    type: 'tool_use_result', id: 'tu-1', tool: 'Bash', result_json: '""', is_error: false,
+  });
+  assert.equal(reduceEvent(s, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 9_000 }), s);
+});
+
+test('a heartbeat leaves every untouched item at its original identity', () => {
+  let s = appendUserPrompt(emptyConversation(), 'go');
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{}' });
+  const untouched = s.items[0];
+  const after = reduceEvent(s, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 3_000 });
+  assert.equal(after.items[0], untouched, 'React.memo relies on untouched items keeping identity');
+});
+
+// ── plan_updated ─────────────────────────────────────────────────────────────
+
+test('plan_updated replaces the whole list and an empty list clears it', () => {
+  let s = reduceEvent(emptyConversation(), {
+    type: 'plan_updated',
+    tasks: [
+      { subject: 'Port the renderer', active_form: 'Porting the renderer', state: 'in_progress' },
+      { id: 'task_2', subject: 'Regenerate bindings', state: 'pending' },
+    ],
+  });
+  assert.equal(s.plan.length, 2);
+  assert.equal(s.plan[0].state, 'in_progress');
+  // A full-list replace, not a merge.
+  s = reduceEvent(s, { type: 'plan_updated', tasks: [{ subject: 'Only this', state: 'pending' }] });
+  assert.deepEqual(s.plan.map((task) => task.subject), ['Only this']);
+  s = reduceEvent(s, { type: 'plan_updated', tasks: [] });
+  assert.deepEqual(s.plan, []);
+  // The plan emits no scrollback item of its own.
+  assert.deepEqual(s.items, []);
+});
+
+test('an identical plan payload returns the identical state', () => {
+  const tasks = [{ id: 't1', subject: 'Ship it', state: 'pending' as const }];
+  const s = reduceEvent(emptyConversation(), { type: 'plan_updated', tasks });
+  assert.equal(reduceEvent(s, { type: 'plan_updated', tasks: [{ ...tasks[0] }] }), s);
+});
+
+test('turn_ended keeps the plan; a session change clears it', () => {
+  let s = reduceEvent(emptyConversation(), {
+    type: 'plan_updated', tasks: [{ subject: 'Keep me', state: 'in_progress' }],
+  });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  assert.equal(s.plan.length, 1, 'the terminal keeps the checklist pinned across turns');
+
+  assert.deepEqual(reduceEvent(s, { type: 'session_started', session_id: 'n' }).plan, []);
+  assert.deepEqual(reduceEvent(s, { type: 'session_ended' }).plan, []);
+});
+
+// ── errors / notices ─────────────────────────────────────────────────────────
 
 test('error event records lastError but only turn_ended releases the running turn', () => {
   let s = emptyConversation();
@@ -140,12 +356,12 @@ test('system_notice remains non-terminal while surfacing its severity', () => {
   assert.equal((s.items.at(-1) as Narration).text, 'Recovered persisted state.');
 });
 
-test('failing tool_use_result surfaces an error line', () => {
+test('failing tool_use_result marks the card errored and surfaces an error line', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'tool_use_started', id: 't', tool: 'Bash', input_json: '{"command":"x"}' });
   s = reduceEvent(s, { type: 'tool_use_result', id: 't', tool: 'Bash', result_json: '""', is_error: true });
-  const card = s.items.find((i) => i.type === 'agent') as Agent;
-  assert.equal(card.state, 'done');
+  const card = firstTool(s);
+  assert.equal(card.status, 'error');
   assert.equal(s.lastError, 'Bash failed');
 });
 
@@ -172,8 +388,9 @@ test('reduceEvents folds a full turn end-to-end', () => {
   const events: ClientEvent[] = [
     { type: 'turn_started', turn_id: 7 },
     { type: 'text_delta', text: 'Looking at the code… ' },
-    { type: 'tool_use_started', id: 'a', tool: 'Read', input_json: '{"file_path":"a.rs"}' },
-    { type: 'tool_use_result', id: 'a', tool: 'Read', result_json: '"…"', is_error: false },
+    { type: 'tool_use_started', id: 'a', tool: 'Read', input_json: '{"file_path":"a.rs"}', header: READ_HEADER },
+    { type: 'tool_heartbeat', id: 'a', tool: 'Read', elapsed_ms: 1_200 },
+    { type: 'tool_use_result', id: 'a', tool: 'Read', result_json: '"…"', is_error: false, display: DISPLAY },
     { type: 'text_delta', text: 'Done.' },
     { type: 'message_complete' },
     { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST },
@@ -181,7 +398,8 @@ test('reduceEvents folds a full turn end-to-end', () => {
   const s = reduceEvents(emptyConversation(), events);
   assert.equal(s.running, false);
   const kinds = s.items.map((i) => i.type);
-  assert.deepEqual(kinds, ['narration', 'agent', 'narration', 'meta']);
+  assert.deepEqual(kinds, ['narration', 'tool', 'narration', 'meta']);
+  assert.equal(firstTool(s).result?.diff?.rows.length, 2);
 });
 
 test('thinking_delta accumulates into a single open, streaming thinking block', () => {
@@ -195,6 +413,9 @@ test('thinking_delta accumulates into a single open, streaming thinking block', 
   assert.equal(blocks[0].text, 'Let me consider the options.');
   // Still streaming — not yet sealed.
   assert.notEqual(blocks[0].done, true);
+  // `streamed` is what decides the DEFAULT disclosure state, and unlike `done`
+  // it never flips — so sealing the block cannot slam it shut.
+  assert.equal(blocks[0].streamed, true);
 });
 
 test('thinking_delta is a distinct block from the assistant answer text', () => {
@@ -206,6 +427,7 @@ test('thinking_delta is a distinct block from the assistant answer text', () => 
   const block = s.items[0] as Thinking;
   // The arrival of answer text seals the reasoning block.
   assert.equal(block.done, true);
+  assert.equal(block.streamed, true);
   const line = s.items[1] as Narration;
   assert.equal(line.text, 'the answer');
 });
@@ -275,8 +497,21 @@ test('session_resumed atomically replaces the transcript with lowered history', 
         role: 'assistant',
         blocks: [
           { type: 'thinking', thinking: 'considering' },
-          { type: 'tool_use', id: 'tool-1', tool: 'Read', input_json: '{"file_path":"src/lib.rs"}' },
-          { type: 'tool_result', id: 'tool-1', tool: 'Read', result_json: '"contents"', is_error: false },
+          {
+            type: 'tool_use',
+            id: 'tool-1',
+            tool: 'Read',
+            input_json: '{"file_path":"src/lib.rs"}',
+            header: READ_HEADER,
+          },
+          {
+            type: 'tool_result',
+            id: 'tool-1',
+            tool: 'Read',
+            result_json: '"contents"',
+            is_error: false,
+            display: DISPLAY,
+          },
           { type: 'text', text: 'prior answer' },
         ],
       },
@@ -288,7 +523,7 @@ test('session_resumed atomically replaces the transcript with lowered history', 
     'narration',
     'narration',
     'thinking',
-    'agent',
+    'tool',
     'narration',
   ]);
   const user = s.items[0] as Narration;
@@ -297,25 +532,171 @@ test('session_resumed atomically replaces the transcript with lowered history', 
   const boundary = s.items[1] as Narration;
   assert.equal(boundary.text, 'Conversation compacted (12 messages)');
   assert.doesNotMatch(boundary.text, /hidden compact summary/);
-  const tool = s.items[3] as Agent;
-  assert.equal(tool.state, 'done');
-  assert.equal(tool.detail, 'contents');
+  // A rehydrated reasoning block is NOT `streamed`, so it starts collapsed.
+  assert.equal((s.items[2] as Thinking).streamed, undefined);
+  const tool = s.items[3] as Tool;
+  assert.equal(tool.status, 'done');
+  assert.equal(tool.view, READ_HEADER);
+  assert.equal(tool.result, DISPLAY);
+});
+
+test('a resumed tool_use without a header falls back to the shared summarizer', () => {
+  const s = reduceEvent(emptyConversation(), {
+    type: 'session_resumed',
+    session_id: 'abc',
+    messages: [{
+      role: 'assistant',
+      blocks: [
+        { type: 'tool_use', id: 'x', tool: 'Bash', input_json: '{"command":"cargo test"}' },
+        { type: 'tool_result', id: 'x', tool: 'Bash', result_json: '"passed"', is_error: false },
+      ],
+    }],
+  });
+  const tool = firstTool(s);
+  assert.equal(tool.view.label, 'Running 1 shell command…');
+  assert.deepEqual(tool.view.sub_line, { prefix: '$', text: 'cargo test' });
+  assert.equal(tool.note, 'passed');
 });
 
 test('session_started and session_ended clear stale conversation state', () => {
   const populated = appendUserPrompt(emptyConversation(), 'old');
-  assert.deepEqual(reduceEvent(populated, { type: 'session_started', session_id: 'new' }), emptyConversation());
+  const started = reduceEvent(populated, { type: 'session_started', session_id: 'new' });
+  // Everything except the session identity is the empty conversation…
+  assert.deepEqual({ ...started, sessionKey: '' }, emptyConversation());
+  // …and that identity is the NEW session's.
+  assert.equal(started.sessionKey, 'new');
   assert.deepEqual(reduceEvent(populated, { type: 'session_ended' }), emptyConversation());
 });
 
-test('tool result details redact common credential shapes', () => {
+test('a session change is identifiable, because item ids are NOT unique across one', () => {
+  // The Stage keys per-item UI state (collapse) by item id, and `nextId`
+  // restarts at 1 whenever the transcript is replaced — so the same `i1` means
+  // two different blocks in two sessions. `sessionKey` is what lets the Stage
+  // tell them apart; without it a block collapsed in session A silently
+  // toggled whatever landed at that id in session B.
+  const a = reduceEvent(emptyConversation(), { type: 'session_started', session_id: 'A' });
+  const aItems = reduceEvent(a, { type: 'text_delta', text: 'first answer' });
+  const b = reduceEvent(aItems, { type: 'session_started', session_id: 'B' });
+  const bItems = reduceEvent(b, { type: 'text_delta', text: 'unrelated answer' });
+
+  assert.equal(aItems.items[0]?.id, bItems.items[0]?.id, 'ids really do collide across sessions');
+  assert.notEqual(aItems.sessionKey, bItems.sessionKey, 'so the session must be distinguishable');
+  assert.equal(bItems.sessionKey, 'B');
+
+  // A resume is the same replacement, and carries the resumed session's id.
+  const resumed = reduceEvent(bItems, {
+    type: 'session_resumed',
+    session_id: 'C',
+    messages: [{ role: 'assistant', blocks: [{ type: 'text', text: 'history' }] }],
+  });
+  assert.equal(resumed.sessionKey, 'C');
+  assert.equal(resumed.items[0]?.id, aItems.items[0]?.id);
+});
+
+test('the degraded fallback redacts common credential shapes', () => {
   let s = reduceEvent(emptyConversation(), {
     type: 'tool_use_started', id: 'secret', tool: 'Bash', input_json: '{"command":"curl -H Authorization:Bearer sk-ant-example123456789"}',
   });
   s = reduceEvent(s, {
     type: 'tool_use_result', id: 'secret', tool: 'Bash', result_json: '"token=super-secret-value"', is_error: false,
   });
-  const tool = s.items[0] as Agent;
-  assert.doesNotMatch(tool.sub ?? '', /sk-ant-example/);
-  assert.doesNotMatch(tool.detail ?? '', /super-secret-value/);
+  const tool = firstTool(s);
+  assert.doesNotMatch(tool.view.sub_line?.text ?? '', /sk-ant-example/);
+  assert.doesNotMatch(tool.note ?? '', /super-secret-value/);
+});
+
+// ── A turn boundary settles every in-flight tool card ────────────────────────
+
+test('turn_ended settles a tool card that never reported a result', () => {
+  // The stranded-spinner case: nothing after `turn_ended` can ever clear a
+  // `running` card — `tool_heartbeat` ignores it and the result is not coming —
+  // so the Stage shimmered a live clock over work that had stopped.
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 1 });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 900"}' });
+  assert.equal(firstTool(s).status, 'running');
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  assert.equal(firstTool(s).status, 'done');
+  assert.equal(s.items.filter((i) => i.type === 'tool' && i.status === 'running').length, 0);
+});
+
+test('a cancelled turn settles its in-flight card as interrupted, not successful', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 2 });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 900"}' });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'cancelled' }, cost: COST });
+  assert.equal(firstTool(s).status, 'error');
+});
+
+test('an error during a turn settles in-flight cards; one between turns touches nothing', () => {
+  // `turn_ended` is exactly what a died engine fails to send, so the error
+  // path has to settle too — but only while a turn is actually in flight, or
+  // an unrelated listing failure would fail a card it has nothing to do with.
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 3 });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{}' });
+  s = reduceEvent(s, { type: 'error', message: 'engine died' });
+  assert.equal(firstTool(s).status, 'error');
+  assert.equal(s.lastError, 'engine died');
+
+  // Between turns: a settled transcript must not be rewritten by a listing error.
+  const settled = reduceEvents(emptyConversation(), [
+    { type: 'turn_started', turn_id: 4 },
+    { type: 'tool_use_started', id: 'tu-2', tool: 'Read', input_json: '{}' },
+    { type: 'tool_use_result', id: 'tu-2', tool: 'Read', result_json: '"ok"', is_error: false },
+    { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST },
+  ]);
+  const after = reduceEvent(settled, { type: 'error', message: 'could not list models' });
+  assert.equal(firstTool(after).status, 'done');
+});
+
+test('a resumed transcript settles a tool_use that has no tool_result', () => {
+  // A session killed mid-tool: the `tool_use` block was written, the paired
+  // `tool_result` never was. Nothing in a rehydrated transcript can settle it
+  // later, so it shimmered for the life of the window.
+  const s = conversationFromMessages([{
+    role: 'assistant',
+    blocks: [
+      { type: 'tool_use', id: 'live', tool: 'Bash', input_json: '{"command":"sleep 900"}' },
+    ],
+  }]);
+  const tool = firstTool(s);
+  assert.notEqual(tool.status, 'running');
+  assert.equal(tool.status, 'error');
+  // A tool that DID report is untouched by the sweep.
+  const paired = conversationFromMessages([{
+    role: 'assistant',
+    blocks: [
+      { type: 'tool_use', id: 'a', tool: 'Read', input_json: '{}', header: READ_HEADER },
+      { type: 'tool_result', id: 'a', tool: 'Read', result_json: '"ok"', is_error: false, display: DISPLAY },
+    ],
+  }]);
+  assert.equal(firstTool(paired).status, 'done');
+});
+
+// ── An unpaired result is upserted, never dropped ────────────────────────────
+
+test('tool_use_result with no matching start upserts the card and keeps its display', () => {
+  // Reachable client-side: `host.onEvent` is registered in a mount effect, so
+  // a renderer reload during an in-flight turn misses the start event. Dropping
+  // the result discarded the card AND the engine's whole `display` block.
+  const s = reduceEvent(emptyConversation(), {
+    type: 'tool_use_result', id: 'orphan', tool: 'Read', result_json: '"…"', is_error: false, display: DISPLAY,
+  });
+  const tool = firstTool(s);
+  assert.ok(tool, 'the orphaned result must still produce a card');
+  assert.equal(tool.id, 'orphan');
+  assert.equal(tool.status, 'done');
+  assert.equal(tool.result, DISPLAY);
+  // Addressable afterwards, exactly like a paired card.
+  assert.equal(s.toolIndex['orphan'], s.items.indexOf(tool));
+  // The header is the degraded fallback — no start event means no input.
+  assert.equal(tool.view.label, 'Read');
+});
+
+test('an unpaired FAILING result upserts the card and still surfaces the error line', () => {
+  const s = reduceEvent(emptyConversation(), {
+    type: 'tool_use_result', id: 'orphan', tool: 'Bash', result_json: '"boom"', is_error: true,
+  });
+  const tool = firstTool(s);
+  assert.equal(tool.status, 'error');
+  assert.equal(tool.note, 'boom');
+  assert.equal(s.lastError, 'Bash failed');
 });

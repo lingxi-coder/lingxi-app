@@ -16,6 +16,10 @@
     "./protocol": {
       "types": "./dist/protocol.d.ts",
       "import": "./dist/protocol.js"
+    },
+    "./toolview": {
+      "types": "./dist/toolview.d.ts",
+      "import": "./dist/toolview.js"
     }
   },
   "files": [

@@ -89,6 +89,12 @@ object UiTags {
     /** The offline banner's dismiss (×) affordance. */
     const val OFFLINE_DISMISS = "tag.offlineDismiss"
 
+    /** A tool call's show-more / show-less affordance for its body or diff. */
+    const val TOOL_CALL_TOGGLE = "tag.toolCallToggle"
+
+    /** The model-managed plan checklist pinned above the composer. */
+    const val PLAN_TASKS_PANEL = "tag.planTasksPanel"
+
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
 

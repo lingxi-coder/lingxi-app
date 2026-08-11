@@ -126,6 +126,14 @@ fun ChatScreen(
     onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
     /** Dismiss the pending questionnaire card. */
     onCancelQuestion: (requestId: ULong) -> Unit = {},
+    /**
+     * Expand / collapse one tool call's result body or diff, by tool-use id.
+     * The expanded set lives in [ChatState] (not row-local state) because every
+     * list rendering a tool call recycles its rows.
+     */
+    onToggleToolCall: (String) -> Unit = {},
+    /** Expand / collapse the pinned plan checklist above the composer. */
+    onTogglePlan: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
@@ -187,6 +195,7 @@ fun ChatScreen(
                 onOpenTerminal = onOpenTerminal,
                 onAnswerQuestion = onAnswerQuestion,
                 onCancelQuestion = onCancelQuestion,
+                onToggleToolCall = onToggleToolCall,
                 modifier = Modifier.weight(1f),
             )
             OfflineBanner(
@@ -207,6 +216,13 @@ fun ChatScreen(
                 state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
             state.statusLine?.let { StatusRow(text = it) }
+            // The model-managed plan sits between the transient status line and
+            // the composer — the same slot the terminal pins it in.
+            PlanTasksPanel(
+                tasks = state.planTasks,
+                expanded = state.planExpanded,
+                onToggleExpanded = onTogglePlan,
+            )
             flowModePanel?.invoke()
             Composer(
                 text = draft,
@@ -364,9 +380,12 @@ private fun MessageList(
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
     onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
     onCancelQuestion: (requestId: ULong) -> Unit = {},
+    onToggleToolCall: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val currentOnShare by rememberUpdatedState(onShare)
+    val currentOnToggleToolCall by rememberUpdatedState(onToggleToolCall)
+    val stableOnToggleToolCall = remember { { id: String -> currentOnToggleToolCall(id) } }
     val stableOnShare = remember { { text: String -> currentOnShare(text) } }
     val currentOnOpenTerminal by rememberUpdatedState(onOpenTerminal)
     val currentSessionId by rememberUpdatedState(state.session.id)
@@ -407,11 +426,15 @@ private fun MessageList(
                     message = item.message,
                     onShare = stableOnShare,
                     onOpenLink = stableOnOpenLink,
+                    expandedToolCalls = state.expandedToolCalls,
+                    onToggleToolCall = stableOnToggleToolCall,
                 )
                 is ChatRenderItem.Streaming -> MessageBubble(
                     message = item.message,
                     onShare = stableOnShare,
                     onOpenLink = stableOnOpenLink,
+                    expandedToolCalls = state.expandedToolCalls,
+                    onToggleToolCall = stableOnToggleToolCall,
                 )
                 is ChatRenderItem.Shell -> ShellToolCard(
                     state = item.shell,
@@ -421,6 +444,8 @@ private fun MessageList(
                 is ChatRenderItem.AgentRun -> AgentRunTimeline(
                     state = item.run,
                     modifier = Modifier.padding(vertical = 4.dp),
+                    expandedToolCalls = state.expandedToolCalls,
+                    onToggleToolCall = stableOnToggleToolCall,
                 )
                 ChatRenderItem.StreamingIndicator -> StreamingRow()
                 is ChatRenderItem.Question -> AskUserQuestionCard(

@@ -218,10 +218,10 @@ fun ChatScreen(
                 state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
             state.statusLine?.let { StatusRow(text = it) }
-            // Asynchronous agent execution is transient status, so keep it in
-            // the same persistent bottom stack as Tasks/Todos instead of
-            // interleaving it with durable transcript messages.
-            state.agentRun?.let { run ->
+            // Agent work stays pinned with Tasks/Todos until asynchronous
+            // coordinator workers also report idle. Only then does its outcome
+            // move into the transcript after the assistant message.
+            agentRunForBottomPanel(state)?.let { run ->
                 AgentRunTimeline(
                     state = run,
                     modifier = Modifier
@@ -469,6 +469,12 @@ private fun MessageList(
                     message = item.message,
                     onShare = stableOnShare,
                     onOpenLink = stableOnOpenLink,
+                    expandedToolCalls = state.expandedToolCalls,
+                    onToggleToolCall = stableOnToggleToolCall,
+                )
+                is ChatRenderItem.AgentRun -> AgentRunTimeline(
+                    state = item.run,
+                    modifier = Modifier.padding(vertical = 4.dp),
                     expandedToolCalls = state.expandedToolCalls,
                     onToggleToolCall = stableOnToggleToolCall,
                 )

@@ -39,6 +39,19 @@ pub const GENERATION_JOBS_FILE: &str = "generation-jobs.json";
 pub const MAILBOX_FILE: &str = "mailbox.json";
 
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+/// Maximum UTF-8 byte length for manifest, collection and field display names.
+pub const MAX_MANIFEST_DISPLAY_NAME_BYTES: usize = 200;
+/// Maximum number of native data collections in one manifest.
+pub const MAX_MANIFEST_COLLECTIONS: usize = 64;
+/// Maximum number of fields in one native data collection.
+pub const MAX_COLLECTION_FIELDS: usize = 128;
+/// Maximum number of options declared by an enum field.
+pub const MAX_ENUM_OPTIONS: usize = 100;
+/// Maximum UTF-8 byte length of one enum option.
+pub const MAX_ENUM_OPTION_BYTES: usize = 500;
+/// Record properties supplied by the host rather than stored in `document`.
+pub const HOST_OWNED_RECORD_FIELD_IDS: [&str; 4] =
+    ["recordId", "revision", "createdAtMs", "updatedAtMs"];
 
 /// Supported native collection field types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,21 +242,23 @@ impl AppManifest {
                 "manifest name must not be empty".into(),
             ));
         }
-        if self.name.len() > 200 {
-            return Err(AppError::InvalidRequest(
-                "manifest name exceeds 200 bytes".into(),
-            ));
+        if self.name.len() > MAX_MANIFEST_DISPLAY_NAME_BYTES {
+            return Err(AppError::InvalidRequest(format!(
+                "manifest name exceeds {MAX_MANIFEST_DISPLAY_NAME_BYTES} bytes"
+            )));
         }
-        if self.collections.len() > 64 {
-            return Err(AppError::InvalidRequest(
-                "manifest has more than 64 collections".into(),
-            ));
+        if self.collections.len() > MAX_MANIFEST_COLLECTIONS {
+            return Err(AppError::InvalidRequest(format!(
+                "manifest has more than {MAX_MANIFEST_COLLECTIONS} collections"
+            )));
         }
 
         let mut collection_ids = BTreeSet::new();
         for collection in &self.collections {
             validate_identifier("collection", &collection.id)?;
-            if collection.name.trim().is_empty() || collection.name.len() > 200 {
+            if collection.name.trim().is_empty()
+                || collection.name.len() > MAX_MANIFEST_DISPLAY_NAME_BYTES
+            {
                 return Err(AppError::InvalidRequest(format!(
                     "collection {:?} has an invalid display name",
                     collection.id
@@ -255,16 +270,24 @@ impl AppManifest {
                     collection.id
                 )));
             }
-            if collection.fields.len() > 128 {
+            if collection.fields.len() > MAX_COLLECTION_FIELDS {
                 return Err(AppError::InvalidRequest(format!(
-                    "collection {:?} has more than 128 fields",
+                    "collection {:?} has more than {MAX_COLLECTION_FIELDS} fields",
                     collection.id
                 )));
             }
             let mut field_ids = BTreeSet::new();
             for field in &collection.fields {
+                if HOST_OWNED_RECORD_FIELD_IDS.contains(&field.id.as_str()) {
+                    return Err(AppError::InvalidRequest(format!(
+                        "field {:?}.{:?} uses host-owned record metadata",
+                        collection.id, field.id
+                    )));
+                }
                 validate_identifier("field", &field.id)?;
-                if field.label.trim().is_empty() || field.label.len() > 200 {
+                if field.label.trim().is_empty()
+                    || field.label.len() > MAX_MANIFEST_DISPLAY_NAME_BYTES
+                {
                     return Err(AppError::InvalidRequest(format!(
                         "field {:?}.{:?} has an invalid label",
                         collection.id, field.id
@@ -278,18 +301,19 @@ impl AppManifest {
                 }
                 match field.kind {
                     DataFieldKind::Enum => {
-                        if field.enum_options.is_empty() || field.enum_options.len() > 100 {
+                        if field.enum_options.is_empty()
+                            || field.enum_options.len() > MAX_ENUM_OPTIONS
+                        {
                             return Err(AppError::InvalidRequest(format!(
-                                "enum field {:?}.{:?} must declare 1..=100 options",
+                                "enum field {:?}.{:?} must declare 1..={MAX_ENUM_OPTIONS} options",
                                 collection.id, field.id
                             )));
                         }
                         let unique: BTreeSet<_> = field.enum_options.iter().collect();
                         if unique.len() != field.enum_options.len()
-                            || field
-                                .enum_options
-                                .iter()
-                                .any(|option| option.is_empty() || option.len() > 500)
+                            || field.enum_options.iter().any(|option| {
+                                option.is_empty() || option.len() > MAX_ENUM_OPTION_BYTES
+                            })
                         {
                             return Err(AppError::InvalidRequest(format!(
                                 "enum field {:?}.{:?} has duplicate or invalid options",
@@ -712,6 +736,71 @@ mod tests {
 
         let mut candidate = manifest();
         candidate.allowed_domains = vec!["https://example.com/path".into()];
+        assert!(candidate.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_host_owned_record_metadata_as_collection_fields() {
+        for reserved in HOST_OWNED_RECORD_FIELD_IDS {
+            let mut candidate = manifest();
+            candidate.collections[0].fields[0].id = reserved.into();
+            let error = candidate.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("host-owned record metadata"),
+                "{reserved:?} returned an unrelated validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_limits_count_fields_and_utf8_bytes_at_the_documented_boundaries() {
+        let mut candidate = manifest();
+        candidate.collections = (0..MAX_MANIFEST_COLLECTIONS)
+            .map(|index| DataCollectionSchema {
+                id: format!("collection_{index}"),
+                name: format!("Collection {index}"),
+                fields: Vec::new(),
+            })
+            .collect();
+        candidate.validate().unwrap();
+        candidate.collections.push(DataCollectionSchema {
+            id: "overflow".into(),
+            name: "Overflow".into(),
+            fields: Vec::new(),
+        });
+        assert!(candidate.validate().is_err());
+
+        let mut candidate = manifest();
+        candidate.collections[0].fields = (0..MAX_COLLECTION_FIELDS)
+            .map(|index| DataFieldSchema {
+                id: format!("field_{index}"),
+                label: "x".repeat(MAX_MANIFEST_DISPLAY_NAME_BYTES),
+                kind: DataFieldKind::Text,
+                required: false,
+                enum_options: Vec::new(),
+            })
+            .collect();
+        candidate.validate().unwrap();
+
+        candidate.collections[0].fields.push(DataFieldSchema {
+            id: "overflow".into(),
+            label: "Overflow".into(),
+            kind: DataFieldKind::Text,
+            required: false,
+            enum_options: Vec::new(),
+        });
+        assert!(candidate.validate().is_err());
+
+        let mut candidate = manifest();
+        candidate.collections[0].fields[0].label = "é".repeat(100);
+        candidate.collections[0].fields[0].enum_options = vec!["é".repeat(250)];
+        candidate.validate().unwrap();
+
+        candidate.collections[0].fields[0].label.push('é');
+        assert!(candidate.validate().is_err());
+
+        let mut candidate = manifest();
+        candidate.collections[0].fields[0].enum_options = vec!["é".repeat(251)];
         assert!(candidate.validate().is_err());
     }
 

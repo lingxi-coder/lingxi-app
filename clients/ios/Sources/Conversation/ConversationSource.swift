@@ -298,6 +298,41 @@ final class ConversationModel: ObservableObject {
         self.items = messages.map(ConversationRenderItem.message)
         self.model = model
     }
+
+    /// Whether user-started work still needs iOS's finite background assertion.
+    /// A turn can hand work to an engine task before its text stream settles, so
+    /// `streaming` alone is not a sufficient lifetime signal.
+    var requiresBackgroundExecution: Bool {
+        Self.requiresBackgroundExecution(
+            streaming: streaming,
+            backgroundTasks: backgroundTasks,
+            items: items
+        )
+    }
+
+    var backgroundExecutionActivity: AnyPublisher<Bool, Never> {
+        Publishers.CombineLatest3($streaming, $backgroundTasks, $items)
+            .map(Self.requiresBackgroundExecution)
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+
+    private static func requiresBackgroundExecution(
+        streaming: Bool,
+        backgroundTasks: [BackgroundTaskSnapshot],
+        items: [ConversationRenderItem]
+    ) -> Bool {
+        if streaming || backgroundTasks.contains(where: { !$0.status.isTerminal }) {
+            return true
+        }
+        return items.contains { item in
+            guard case let .run(run) = item else { return false }
+            return run.status == .running
+                || run.activeWorkers > 0
+                || run.tools.contains(where: { $0.status == .running })
+                || run.shellCards.contains(where: { $0.status == .running })
+        }
+    }
 }
 
 // MARK: - ConversationSource seam
@@ -338,10 +373,9 @@ protocol ConversationSource: AnyObject {
     /// already active.
     func openSession(_ session: SessionRef)
     /// Lifecycle: the app moved to the background (`scenePhase == .background`).
-    /// MUST clear any stuck `streaming` flag (and the engine's per-turn
-    /// bookkeeping) so a turn parked mid-stream when the user backgrounded the app
-    /// is not left "streaming" forever, and persist any state worth restoring.
-    /// The in-flight engine turn is cancelled so a late delta can't resurrect it.
+    /// This hook may persist state, but MUST NOT cancel an active turn or change
+    /// its streaming bookkeeping. UIKit owns suspension; backgrounding is not a
+    /// user Stop action.
     func handleBackground()
     /// Lifecycle: the app returned to the foreground (`scenePhase == .active`). A
     /// hook to restore/refresh state; the default is a no-op.
@@ -406,12 +440,14 @@ protocol ConversationSource: AnyObject {
 }
 
 /// Default `warmUp` for sources with nothing to pre-build (the mock). The engine
-/// source overrides it to eagerly build the handle + list models. `handleForeground`
-/// is a no-op by default; the engine source may override to refresh state.
+/// source overrides it to eagerly build the handle + list models. Lifecycle
+/// hooks are no-ops by default; the engine source may override foregrounding to
+/// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
     func warmUp() {}
     func prepare() async throws {}
     func cancelAndWait() async throws { cancel() }
+    func handleBackground() {}
     func handleForeground() {}
     /// Default session ops for sources with no engine catalog (the mock): no-ops,
     /// so the mock keeps its canned drawer lists and ignores resume requests.
@@ -761,21 +797,6 @@ final class MockConversationSource: ConversationSource {
         model.notice = nil
     }
 
-    /// Background: drop any in-flight canned reply so a turn isn't left
-    /// "streaming" forever after the app is backgrounded.
-    func handleBackground() {
-        guard model.streaming else { return }
-        turnToken &+= 1
-        model.streaming = false
-        if let activeTurnToken {
-            model.turnCompletion = ConversationTurnCompletion(
-                token: activeTurnToken,
-                outcome: .cancelled,
-                finalAssistantText: ""
-            )
-        }
-        activeTurnToken = nil
-    }
 }
 
 // MARK: - Engine source (real, over UniFFI)
@@ -1372,9 +1393,9 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        /// Close every transient row owned by the active turn. This mirrors
-        /// Android's `AgentRunState.finish`: a terminal turn must never retain a
-        /// tool, shell process, or coordinator count that still claims to run.
+        /// Close transient tool and shell rows owned by the active turn. A
+        /// coordinator worker may legitimately outlive that turn, so its count
+        /// remains live until the engine publishes a later idle status.
         private func finishActiveRun(_ status: ConversationExecutionStatus) {
             let toolStatus: ConversationToolStatus
             let shellStatus: ConversationShellStatus
@@ -1382,7 +1403,7 @@ final class MockConversationSource: ConversationSource {
             case .running:
                 toolStatus = .running
                 shellStatus = .running
-            case .completed, .maxTurns:
+            case .completed, .maxTurns, .restored:
                 toolStatus = .completed
                 shellStatus = .completed
             case .failed:
@@ -1394,7 +1415,6 @@ final class MockConversationSource: ConversationSource {
             }
             updateActiveRun { run in
                 run.status = status
-                run.activeWorkers = 0
                 for index in run.tools.indices where run.tools[index].status == .running {
                     run.tools[index].status = toolStatus
                 }
@@ -1402,12 +1422,81 @@ final class MockConversationSource: ConversationSource {
                     run.shellCards[index].status = shellStatus
                 }
             }
+            // The run starts before the assistant message and is pinned while
+            // live. Once terminal, move it after that message so the outcome is
+            // a durable, chronological transcript result instead of a stale
+            // bottom status panel.
+            guard status != .running,
+                  let itemIndex = activeRunItemIndex,
+                  model.items.indices.contains(itemIndex),
+                  case let .run(run) = model.items[itemIndex]
+            else { return }
+            let assistantMessageID: UUID? = streamingItemIndex.flatMap { index in
+                guard model.items.indices.contains(index),
+                      case let .message(message) = model.items[index]
+                else { return nil }
+                return message.id
+            }
+            model.items.remove(at: itemIndex)
+            if let streamingItemIndex, streamingItemIndex > itemIndex {
+                self.streamingItemIndex = streamingItemIndex - 1
+            }
+            if let assistantMessageID,
+               let anchorIndex = model.items.firstIndex(where: { item in
+                   guard case let .message(message) = item else { return false }
+                   return message.id == assistantMessageID
+               }) {
+                let insertionIndex = model.items.index(after: anchorIndex)
+                model.items.insert(.run(run), at: insertionIndex)
+                activeRunItemIndex = insertionIndex
+            } else {
+                model.items.append(.run(run))
+                activeRunItemIndex = model.items.count - 1
+            }
+        }
+
+        private func updateCoordinatorStatus(activeWorkers: UInt32, team: String?) {
+            if activeWorkers == 0 {
+                // CoordinatorStatus is a global snapshot, not a turn-scoped
+                // delta. A newer user turn may already own the active pointer,
+                // so clear every older run that still carries a worker count.
+                for itemIndex in model.items.indices {
+                    guard case var .run(run) = model.items[itemIndex],
+                          run.activeWorkers > 0
+                    else { continue }
+                    run.activeWorkers = 0
+                    if let team { run.coordinatorTeam = team }
+                    model.items[itemIndex] = .run(run)
+                }
+                return
+            }
+            if let itemIndex = activeRunItemIndex,
+               model.items.indices.contains(itemIndex),
+               case var .run(run) = model.items[itemIndex] {
+                run.activeWorkers = activeWorkers
+                run.coordinatorTeam = team
+                model.items[itemIndex] = .run(run)
+                return
+            }
+
+            // `TurnEnded` clears the active-turn pointers, but coordinator
+            // workers are asynchronous and can report their final idle state
+            // afterward. Update the latest run that still owns workers instead
+            // of creating a detached synthetic run.
+            guard let itemIndex = model.items.lastIndex(where: { item in
+                guard case let .run(run) = item else { return false }
+                return run.activeWorkers > 0
+            }), case var .run(run) = model.items[itemIndex]
+            else { return }
+            run.activeWorkers = activeWorkers
+            run.coordinatorTeam = team
+            model.items[itemIndex] = .run(run)
         }
 
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
             switch event {
             case .askUserQuestion, .askUserQuestionResolved, .taskStatusChanged, .taskRow,
-                 .planUpdated:
+                 .planUpdated, .coordinatorStatus:
                 // Deliberately OUTSIDE the turn gate: the engine's broker
                 // replays a still-pending AskUserQuestion (and resolves it)
                 // after a foreground re-connect, a background task's status
@@ -2262,10 +2351,7 @@ final class MockConversationSource: ConversationSource {
 
             case let .coordinatorStatus(activeWorkers, team):
                 guard acceptTurnEvent(event) else { return }
-                updateActiveRun {
-                    $0.activeWorkers = activeWorkers
-                    $0.coordinatorTeam = team
-                }
+                updateCoordinatorStatus(activeWorkers: activeWorkers, team: team)
 
             case let .coordinatorWorker(worker):
                 guard acceptTurnEvent(event) else { return }
@@ -2418,7 +2504,10 @@ final class MockConversationSource: ConversationSource {
                 // too. `restoredTranscript` interleaves instead: narrative
                 // blocks stay a `.message`, each tool call becomes its own
                 // `.toolCall` row with its result merged onto it.
-                let restored = Self.restoredTranscript(from: messages)
+                let restored = Self.restoredTranscript(
+                    from: messages,
+                    sessionID: sessionId
+                )
                 model.messages = restored.messages
                 model.items = restored.items
                 model.messageDetails = restored.details
@@ -2854,21 +2943,79 @@ final class MockConversationSource: ConversationSource {
         /// restored tool result inside a right-aligned user bubble whose renderer
         /// only ever draws `message.text` — the result payload was both misplaced
         /// and invisible. Here, narrative blocks (text / thinking / compaction)
-        /// accumulate into a `.message`, and each tool call becomes its own
-        /// `.toolCall` row.
+        /// accumulate into a `.message`, and a whole user-initiated turn becomes
+        /// one terminal `.run` row anchored after its final assistant message.
         ///
         /// The pair spans two turns, so a `toolResult` MERGES onto the row its
         /// `toolUse` opened (matched by tool-use id) rather than adding a second
-        /// row. An orphan result — the assistant turn was compacted away — still
-        /// gets a row of its own.
+        /// run. An orphan result — the assistant turn was compacted away — still
+        /// gets a terminal run of its own.
         fileprivate static func restoredTranscript(
-            from dtos: [MessageDto]
+            from dtos: [MessageDto],
+            sessionID: String
         ) -> RestoredTranscript {
             var out = RestoredTranscript()
-            var toolItemIndex: [String: Int] = [:]
+            var pendingRun: ConversationExecutionRun?
+            var pendingRunAnchorMessageID: UUID?
+            var restoredRunSequence = 0
+
+            func ensurePendingRun() {
+                guard pendingRun == nil else { return }
+                restoredRunSequence += 1
+                pendingRun = ConversationExecutionRun(
+                    id: "restored-\(sessionID)-\(restoredRunSequence)",
+                    sessionId: sessionID,
+                    turnId: nil,
+                    status: .restored
+                )
+            }
+
+            func finishPendingRun() {
+                guard var run = pendingRun else { return }
+                // A resumed session has no live turn owner. A call without a
+                // persisted result is terminally incomplete, never live work in
+                // this process.
+                if run.tools.contains(where: { $0.status == .running }) {
+                    for index in run.tools.indices where run.tools[index].status == .running {
+                        run.tools[index].status = .failed
+                    }
+                }
+                // MessageDto does not carry the turn outcome. Do not promote a
+                // failed/cancelled tool into the whole Agent result: an Agent can
+                // recover and finish after either. The run is only known to be a
+                // settled history row; individual tool colors retain the facts
+                // that are actually present on the wire.
+                run.status = .restored
+
+                if let pendingRunAnchorMessageID,
+                   let anchorIndex = out.items.firstIndex(where: { item in
+                       guard case let .message(message) = item else { return false }
+                       return message.id == pendingRunAnchorMessageID
+                   }) {
+                    out.items.insert(.run(run), at: out.items.index(after: anchorIndex))
+                } else {
+                    out.items.append(.run(run))
+                }
+                pendingRun = nil
+                pendingRunAnchorMessageID = nil
+            }
 
             for dto in dtos {
                 let role: Role = (dto.role == "user") ? .user : .ai
+                let isAssistant = dto.role == "assistant"
+                let containsToolResult = dto.blocks.contains { block in
+                    if case .toolResult = block { return true }
+                    return false
+                }
+                let startsNewUserTurn = dto.role == "user"
+                    && !containsToolResult
+                    && dto.blocks.contains { messageBlock(from: $0) != nil }
+                if startsNewUserTurn {
+                    finishPendingRun()
+                }
+                if isAssistant {
+                    ensurePendingRun()
+                }
                 var narrative: [ConversationMessageBlock] = []
 
                 func flushNarrative() {
@@ -2878,6 +3025,9 @@ final class MockConversationSource: ConversationSource {
                     out.messages.append(message)
                     out.items.append(.message(message))
                     out.details[message.id] = detail
+                    if isAssistant {
+                        pendingRunAnchorMessageID = message.id
+                    }
                     narrative = []
                 }
 
@@ -2885,12 +3035,13 @@ final class MockConversationSource: ConversationSource {
                     switch block {
                     case let .toolUse(id, tool, inputJson, header):
                         flushNarrative()
+                        ensurePendingRun()
                         let lowered = header.map(toolHeader(from:))
                         let trace = ConversationToolTrace(
                             id: id,
                             tool: tool,
-                            // A restored call whose result never arrived stays
-                            // visibly unfinished rather than claiming success.
+                            // Temporarily running until the matching result is
+                            // seen; finalization marks an orphan as failed.
                             status: .running,
                             inputSummary: lowered == nil
                                 ? (ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson)
@@ -2900,11 +3051,15 @@ final class MockConversationSource: ConversationSource {
                             header: lowered,
                             display: nil
                         )
-                        toolItemIndex[id] = out.items.count
-                        out.items.append(.toolCall(trace))
+                        if let index = pendingRun?.tools.firstIndex(where: { $0.id == id }) {
+                            pendingRun?.tools[index] = trace
+                        } else {
+                            pendingRun?.tools.append(trace)
+                        }
 
                     case let .toolResult(id, tool, resultJson, isError, _, _, _, display):
                         flushNarrative()
+                        ensurePendingRun()
                         let lowered = display.map(resultDisplay(from:))
                         let status: ConversationToolStatus =
                             ConversationExecutionParsing.isCancellationResult(resultJson)
@@ -2914,14 +3069,13 @@ final class MockConversationSource: ConversationSource {
                             ? ConversationExecutionParsing.summarizeToolResult(
                                 resultJson, isError: isError, tool: tool)
                             : nil
-                        if let index = toolItemIndex[id],
-                           out.items.indices.contains(index),
-                           case let .toolCall(existing) = out.items[index] {
+                        if let index = pendingRun?.tools.firstIndex(where: { $0.id == id }),
+                           let existing = pendingRun?.tools[index] {
                             var merged = existing
                             merged.status = status
                             merged.display = lowered
                             merged.outputSummary = fallback
-                            out.items[index] = .toolCall(merged)
+                            pendingRun?.tools[index] = merged
                         } else {
                             let trace = ConversationToolTrace(
                                 id: id,
@@ -2933,18 +3087,22 @@ final class MockConversationSource: ConversationSource {
                                 header: nil,
                                 display: lowered
                             )
-                            toolItemIndex[id] = out.items.count
-                            out.items.append(.toolCall(trace))
+                            pendingRun?.tools.append(trace)
                         }
 
                     default:
                         if let lowered = messageBlock(from: block) {
                             narrative.append(lowered)
+                            if isAssistant,
+                               case let .thinking(text, _) = lowered {
+                                pendingRun?.reasoning += text
+                            }
                         }
                     }
                 }
                 flushNarrative()
             }
+            finishPendingRun()
             return out
         }
 
@@ -3093,15 +3251,6 @@ final class MockConversationSource: ConversationSource {
                 allowsMissingSessionReplacement: emptySessionTitle == nil,
                 isNew: false
             )
-        }
-
-        /// Background: the user left the app while a turn was streaming. Cancel the
-        /// in-flight turn so it isn't left "streaming" forever and a late delta
-        /// can't resurrect it; the cancel narrows to `currentTurnId`. Idempotent /
-        /// no-op when nothing is in flight.
-        func handleBackground() {
-            guard model.streaming else { return }
-            cancel()
         }
 
         // MARK: permission gating (SHIP-BLOCKER #3)

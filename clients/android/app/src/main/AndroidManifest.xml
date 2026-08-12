@@ -26,6 +26,13 @@
          and returns PermissionDenied when not granted. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- A user-started LLM/agent turn is not cancelled when the Activity moves
+         behind another app. `specialUse` is used because the work can combine
+         local inference, network streaming, shell tools, and file processing;
+         no narrower Android foreground-service type covers that whole turn. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <!-- Native offloads: the shared permission gate must authorize each call
          before these Android runtime permissions are requested or consumed. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
@@ -69,6 +76,16 @@
         android:networkSecurityConfig="@xml/local_apps_network_security"
         android:supportsRtl="true"
         android:theme="@style/Theme.LingXiCode">
+
+        <service
+            android:name=".conversation.ConversationTurnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started LLM inference and agent tool execution" />
+        </service>
 
         <activity
             android:name=".MainActivity"

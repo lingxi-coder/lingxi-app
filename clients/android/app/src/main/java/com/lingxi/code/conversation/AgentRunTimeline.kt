@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,13 +40,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.components.UiTags
+import com.lingxi.code.theme.LingXiTheme
 
 /**
  * Bounded, latest-turn execution trace backed by real engine events.
  *
- * Reasoning, notices, usage and cost are intentionally transient UI state: not
- * reconstructed as chat messages, not written into the session JSONL. The card
- * stays available after completion until the next turn starts.
+ * Reasoning, notices, usage and cost are UI state rather than session JSONL.
+ * While running the card is pinned above the composer; once terminal it is
+ * anchored after the assistant message so a later turn cannot hide the result.
  *
  * TOOL ROWS ARE THE EXCEPTION. They are the only record of a live turn's tool
  * calls, and the next turn replaces this whole state — so when a turn settles,
@@ -70,6 +72,7 @@ internal fun AgentRunTimeline(
         AgentRunOutcome.Completed -> stringResource(R.string.chat_run_status_completed)
         AgentRunOutcome.Failed -> stringResource(R.string.chat_run_status_failed)
         AgentRunOutcome.Cancelled -> stringResource(R.string.chat_run_status_cancelled)
+        AgentRunOutcome.Finished -> stringResource(R.string.chat_run_status_finished)
     }
     val statusColor = runStatusColor(state.outcome)
     val runAccessibilityLabel = stringResource(R.string.chat_run_accessibility_label, title)
@@ -81,6 +84,7 @@ internal fun AgentRunTimeline(
         // own taps.
         modifier = modifier
             .fillMaxWidth()
+            .border(0.5.dp, statusColor.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
             .testTag(UiTags.AGENT_RUN_TIMELINE)
             .semantics { contentDescription = runAccessibilityLabel },
         shape = RoundedCornerShape(16.dp),
@@ -116,6 +120,7 @@ internal fun AgentRunTimeline(
                     text = title,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
+                    color = statusColor,
                     modifier = Modifier.weight(1f),
                 )
                 val activity = when {
@@ -334,10 +339,11 @@ private fun TraceFooter(state: AgentRunState) {
 
 @Composable
 private fun runStatusColor(outcome: AgentRunOutcome): Color = when (outcome) {
-    AgentRunOutcome.Running -> MaterialTheme.colorScheme.primary
-    AgentRunOutcome.Completed -> MaterialTheme.colorScheme.tertiary
-    AgentRunOutcome.Failed -> MaterialTheme.colorScheme.error
-    AgentRunOutcome.Cancelled -> MaterialTheme.colorScheme.onSurfaceVariant
+    AgentRunOutcome.Running -> LingXiTheme.palette.accent
+    AgentRunOutcome.Completed -> LingXiTheme.palette.ok
+    AgentRunOutcome.Failed -> LingXiTheme.palette.danger
+    AgentRunOutcome.Cancelled -> LingXiTheme.palette.statusTesting
+    AgentRunOutcome.Finished -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
 @Composable

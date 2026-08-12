@@ -973,6 +973,7 @@
     <string name="chat_run_status_completed">実行完了</string>
     <string name="chat_run_status_failed">実行失敗</string>
     <string name="chat_run_status_cancelled">停止済み</string>
+    <string name="chat_run_status_finished">終了</string>
     <string name="chat_run_accessibility_label">Agent の実行状況、%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 人の協力者</string>
     <string name="chat_run_tool_executing">ツール実行中</string>
@@ -1604,4 +1605,8 @@
     <string name="session_details_tasks_subtitle">ツール呼び出しとシェルコマンド</string>
     <string name="session_details_title">セッションの詳細</string>
     <string name="session_details_workspace">ワークスペース</string>
+    <string name="chat_background_service_channel">会話の生成</string>
+    <string name="chat_background_service_channel_description">バックグラウンドで実行中の LLM とエージェント作業を表示します</string>
+    <string name="chat_background_service_title">Lingxi が生成中です</string>
+    <string name="chat_background_service_text">別のアプリに切り替えても処理は続行します。タップして戻ります。</string>
 </resources>

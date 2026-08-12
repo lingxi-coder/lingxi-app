@@ -94,6 +94,76 @@ import XCTest
             XCTAssertFalse(source.model.streaming)
         }
 
+        func testTerminalRunStaysAnchoredBeforeLaterOutOfBandNotice() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 33, sessionId: "session-a")
+
+            source.applyForTesting(.turnStarted(turnId: 33))
+            source.applyForTesting(.messageComplete(
+                stopReason: "end_turn",
+                message: MessageDto(role: "assistant", blocks: [.text(text: "完成")])
+            ))
+            source.applyForTesting(.taskStatusChanged(taskId: "late-task", status: .completed))
+            source.applyForTesting(
+                .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+
+            let kinds = source.model.items.map { item -> String in
+                switch item {
+                case .message: return "message"
+                case .run: return "run"
+                case .notice: return "notice"
+                case .toolCall: return "tool"
+                }
+            }
+            XCTAssertEqual(
+                kinds,
+                ["message", "run", "notice"],
+                "the terminal result belongs to its assistant message, not the list tail")
+        }
+
+        func testCoordinatorWorkersKeepBackgroundExecutionAfterTurnEndsUntilIdlePush() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 34, sessionId: "session-a")
+
+            source.applyForTesting(.turnStarted(turnId: 34))
+            source.applyForTesting(.coordinatorStatus(activeWorkers: 1, team: "review"))
+            source.applyForTesting(.messageComplete(
+                stopReason: "end_turn",
+                message: MessageDto(role: "assistant", blocks: [.text(text: "Delegated")])
+            ))
+            source.applyForTesting(
+                .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+
+            XCTAssertTrue(
+                source.model.requiresBackgroundExecution,
+                "a worker can outlive the assistant turn that started it")
+
+            source.applyForTesting(.coordinatorStatus(activeWorkers: 0, team: "review"))
+            XCTAssertFalse(source.model.requiresBackgroundExecution)
+        }
+
+        func testCoordinatorIdlePushClearsWorkersFromAnEarlierTurn() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 35, sessionId: "session-a")
+            source.applyForTesting(.turnStarted(turnId: 35))
+            source.applyForTesting(.coordinatorStatus(activeWorkers: 1, team: "review"))
+            source.applyForTesting(
+                .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+
+            source.beginTurnForTesting(turnId: 36, sessionId: "session-a")
+            source.applyForTesting(.turnStarted(turnId: 36))
+            source.applyForTesting(.coordinatorStatus(activeWorkers: 0, team: "review"))
+            source.applyForTesting(
+                .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+
+            let workerCounts = source.model.items.compactMap { item -> UInt32? in
+                guard case let .run(run) = item else { return nil }
+                return run.activeWorkers
+            }
+            XCTAssertTrue(workerCounts.allSatisfy { $0 == 0 })
+            XCTAssertFalse(source.model.requiresBackgroundExecution)
+        }
+
         func testPendingSessionTransitionDoesNotRequestPrematureCatalogRefresh() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 32, sessionId: "session-a")

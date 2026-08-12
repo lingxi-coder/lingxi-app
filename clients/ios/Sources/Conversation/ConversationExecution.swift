@@ -28,13 +28,18 @@ enum ConversationRenderItem: Identifiable, Equatable {
 }
 
 /// Splits transient asynchronous agent execution from durable transcript rows.
-/// The latest run is pinned with Tasks/Todos above the composer. Earlier run
-/// cards remain in their original transcript positions because live-only
-/// reasoning, notices, usage, and shell output are not reconstructed elsewhere.
+/// Only the latest execution with live asynchronous work is pinned with
+/// Tasks/Todos above the composer. Once all work is terminal, its result
+/// remains in the transcript so the user can see the outcome after a later
+/// turn begins.
 enum ConversationRenderLayout {
+    private static func hasLiveWork(_ run: ConversationExecutionRun) -> Bool {
+        run.status == .running || run.activeWorkers > 0
+    }
+
     static func transcriptItems(_ items: [ConversationRenderItem]) -> [ConversationRenderItem] {
         guard let pinnedIndex = items.lastIndex(where: {
-            if case .run = $0 { return true }
+            if case let .run(run) = $0 { return hasLiveWork(run) }
             return false
         }) else { return items }
 
@@ -45,7 +50,7 @@ enum ConversationRenderLayout {
 
     static func pinnedRun(_ items: [ConversationRenderItem]) -> ConversationExecutionRun? {
         for item in items.reversed() {
-            if case let .run(run) = item { return run }
+            if case let .run(run) = item, hasLiveWork(run) { return run }
         }
         return nil
     }
@@ -316,6 +321,9 @@ enum ConversationExecutionStatus: String, Equatable {
     case failed
     case cancelled
     case maxTurns
+    /// A terminal row rebuilt from SessionResumed history whose exact live
+    /// outcome was not persisted by MessageDto.
+    case restored
 
     var label: String {
         switch self {
@@ -324,8 +332,32 @@ enum ConversationExecutionStatus: String, Equatable {
         case .failed: return String(localized: "chat_status_failed")
         case .cancelled: return String(localized: "chat_status_cancelled")
         case .maxTurns: return String(localized: "chat_status_max_turns")
+        case .restored: return String(localized: "chat_status_restored")
         }
     }
+
+    var tone: ConversationExecutionTone {
+        switch self {
+        case .running: return .running
+        case .completed: return .completed
+        case .failed: return .failed
+        case .cancelled: return .cancelled
+        case .maxTurns: return .maxTurns
+        case .restored: return .restored
+        }
+    }
+}
+
+/// Semantic visual role for one run status. Keeping this separate from raw
+/// colors makes the one-tone-per-status contract unit-testable, including the
+/// neutral historical state whose exact outcome was not persisted.
+enum ConversationExecutionTone: Hashable {
+    case running
+    case completed
+    case failed
+    case cancelled
+    case maxTurns
+    case restored
 }
 
 enum ConversationToolStatus: Equatable {

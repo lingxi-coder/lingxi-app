@@ -8,6 +8,8 @@ import com.lingxi.code.bindings.MessageBlockDto
 import com.lingxi.code.bindings.MessageDto
 import com.lingxi.code.bindings.PlanTaskDto
 import com.lingxi.code.bindings.PlanTaskStateDto
+import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.TaskRowDto
 import com.lingxi.code.bindings.ToolHeaderDto
 import com.lingxi.code.bindings.ToolResultDisplayDto
 import com.lingxi.code.bindings.ToolVerbDto
@@ -84,6 +86,14 @@ class ChatViewModelReducerTest {
             return never.asSharedFlow() // a turn that streams forever until cancelled
         }
         override suspend fun cancel() { cancelCount++ }
+    }
+
+    private class RecordingBackgroundExecution : ConversationBackgroundExecution {
+        val activeStates = mutableListOf<Boolean>()
+
+        override fun setTurnActive(active: Boolean) {
+            if (activeStates.lastOrNull() != active) activeStates += active
+        }
     }
 
     /**
@@ -166,6 +176,175 @@ class ChatViewModelReducerTest {
     }
 
     private fun newVm() = ChatViewModel(StubSource())
+
+    @Test
+    fun activeTurnHoldsBackgroundExecutionUntilTerminalEvent() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+
+        vm.send("keep running")
+        runCurrent()
+        assertEquals(listOf(true), execution.activeStates)
+
+        vm.reduce(ReplyEvent.End)
+        runCurrent()
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun backgroundTaskKeepsExecutionLeaseAfterTurnEnds() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+
+        vm.send("start an asynchronous task")
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING))
+        vm.reduce(ReplyEvent.End)
+        runCurrent()
+
+        assertEquals(listOf(true), execution.activeStates)
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED))
+        runCurrent()
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun backgroundTaskLeaseSurvivesSessionSwitchUntilTaskFinishes() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val source = EmittingSource()
+        val vm = ChatViewModel(
+            source = source,
+            backgroundExecution = execution,
+        )
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING))
+        runCurrent()
+        assertEquals(listOf(true), execution.activeStates)
+
+        vm.openSession(SessionRef(id = "B", title = "B"))
+        runCurrent()
+        assertTrue(vm.state.value.activeBackgroundTaskIds.contains("task-1"))
+        assertEquals(
+            "engine-scoped work must keep its lease across a conversation switch",
+            listOf(true),
+            execution.activeStates,
+        )
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED))
+        runCurrent()
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun taskRowBootstrapKeepsExecutionLeaseUntilTerminalRow() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+
+        vm.reduceClientEvent(
+            ClientEvent.TaskRow(
+                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test"),
+            ),
+        )
+        runCurrent()
+        assertEquals(listOf(true), execution.activeStates)
+
+        vm.reduceClientEvent(
+            ClientEvent.TaskRow(
+                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test"),
+            ),
+        )
+        runCurrent()
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun shellAndWorkerKeepExecutionLeaseAfterTurnEnds() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+
+        vm.send("run in parallel")
+        vm.reduce(ReplyEvent.Coordinator(activeWorkers = 1, team = "review"))
+        vm.reduce(
+            ReplyEvent.ShellTool(
+                ShellToolUpdate.Started("shell-1", "npm test", null),
+            ),
+        )
+        vm.reduce(ReplyEvent.End)
+        runCurrent()
+        assertEquals(listOf(true), execution.activeStates)
+
+        vm.reduce(ReplyEvent.Coordinator(activeWorkers = 0, team = "review"))
+        vm.reduce(
+            ReplyEvent.ShellTool(
+                ShellToolUpdate.Finished(
+                    taskId = "shell-1",
+                    stdout = "ok",
+                    stderr = "",
+                    exitCode = 0,
+                    elapsedMs = 10,
+                    status = ShellToolStatus.Completed,
+                    truncated = false,
+                ),
+            ),
+        )
+        runCurrent()
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun workerKeepsExecutionLeaseAfterTurnEndsUntilCoordinatorReportsIdle() =
+        runTest(dispatcher) {
+            val execution = RecordingBackgroundExecution()
+            val vm = ChatViewModel(
+                source = RecordingSource(),
+                backgroundExecution = execution,
+            )
+
+            vm.send("delegate work")
+            vm.reduce(ReplyEvent.Coordinator(activeWorkers = 1, team = "review"))
+            vm.reduce(ReplyEvent.End)
+            runCurrent()
+            assertEquals(listOf(true), execution.activeStates)
+
+            // Coordinator transitions are also delivered on the source's
+            // out-of-band event feed after the per-turn ReplyEvent flow ended.
+            vm.reduceClientEvent(ClientEvent.CoordinatorStatus(activeWorkers = 0u, team = "review"))
+            runCurrent()
+            assertEquals(listOf(true, false), execution.activeStates)
+            assertTrue(vm.state.value.agentRunsByMessageId.values.all { it.activeWorkers == 0 })
+        }
+
+    @Test
+    fun coordinatorIdleClearsWorkersFromAnEarlierTurn() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+
+        vm.send("delegate work")
+        vm.reduce(ReplyEvent.Coordinator(activeWorkers = 1, team = "review"))
+        vm.reduce(ReplyEvent.End)
+        vm.send("follow up")
+        vm.reduceClientEvent(ClientEvent.CoordinatorStatus(activeWorkers = 0u, team = "review"))
+        vm.reduce(ReplyEvent.End)
+        runCurrent()
+
+        assertTrue(vm.state.value.agentRunsByMessageId.values.all { it.activeWorkers == 0 })
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
 
     // --- delta accumulation ----------------------------------------------
 
@@ -757,6 +936,11 @@ class ChatViewModelReducerTest {
         assertTrue(vm.state.value.sessionReady)
         assertFalse(vm.state.value.sessionTransitioning)
         assertEquals(listOf("engine question", "engine answer"), vm.state.value.messages.map { it.text })
+        val restoredAnswer = vm.state.value.messages.last()
+        assertEquals(
+            AgentRunOutcome.Finished,
+            vm.state.value.agentRunsByMessageId[restoredAnswer.id]?.outcome,
+        )
     }
 
     @Test

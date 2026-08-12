@@ -32,6 +32,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -83,12 +85,12 @@ data class ChatState(
     val shellTools: List<ShellToolCardState> = emptyList(),
     /** Latest android_use invocation, used to reopen setup guidance after dismissal. */
     val computerUseRequestKey: String? = null,
-    /**
-     * The latest turn's live CLI-like execution trace. Transient — the next turn
-     * replaces it — EXCEPT for its tool rows, which [settleTurn] moves into the
-     * settled transcript message so they outlive the run that produced them.
-     */
+    /** The latest turn's live trace; terminal copies are anchored in the transcript. */
     val agentRun: AgentRunState? = null,
+    /** Terminal Agent results, anchored after the assistant message they produced. */
+    val agentRunsByMessageId: Map<String, AgentRunState> = emptyMap(),
+    /** Out-of-band tasks that remain alive after their initiating turn ended. */
+    val activeBackgroundTaskIds: Set<String> = emptySet(),
     /**
      * A persistent, dismissible turn error. Unlike [statusLine] (which the next
      * tool-activity event overwrites and a turn clears), this survives until the
@@ -127,6 +129,15 @@ data class ChatState(
 ) {
     /** True while a turn is in flight — gates the composer (Stop vs Send). */
     val isStreaming: Boolean get() = streaming
+
+    /** Every engine workload that needs the Android foreground-service lease. */
+    val requiresBackgroundExecution: Boolean
+        get() = streaming ||
+            activeBackgroundTaskIds.isNotEmpty() ||
+            shellTools.any { it.status == ShellToolStatus.Running } ||
+            agentRun?.activeWorkers?.let { it > 0 } == true ||
+            agentRunsByMessageId.values.any { it.activeWorkers > 0 } ||
+            agentRun?.tools?.any { it.status == AgentToolStatus.Running } == true
 }
 
 /**
@@ -202,6 +213,8 @@ class ChatViewModel(
      * ([com.lingxi.code.RootScreen]) passes one backed by a real `Context`.
      */
     private val strings: ConversationStrings = DefaultConversationStrings,
+    private val backgroundExecution: ConversationBackgroundExecution =
+        ConversationBackgroundExecution.None,
 ) : ViewModel() {
     /** Provider reconnect token is independent from workspace-source swaps. */
     private var reconnectGeneration: Int = sourceGeneration
@@ -286,6 +299,7 @@ class ChatViewModel(
 
     /** Collector for the active reply stream. */
     private var turnJob: Job? = null
+    private var backgroundTurnActive = false
 
     /** Best-effort explicit Stop operation that a later session switch must await. */
     private var explicitCancellation: Deferred<Result<Unit>>? = null
@@ -319,6 +333,12 @@ class ChatViewModel(
         // state save so large legacy Bundles naturally shrink after one launch.
         savedState?.remove<ArrayList<String>>(LEGACY_KEY_TRANSCRIPT)
         bindSource()
+        viewModelScope.launch {
+            _state
+                .map { it.requiresBackgroundExecution }
+                .distinctUntilChanged()
+                .collect(::setBackgroundTurnActive)
+        }
         // Keep the lightweight navigation state in lock-step with the UI.
         if (savedState != null) {
             viewModelScope.launch {
@@ -420,11 +440,48 @@ class ChatViewModel(
             is ClientEvent.AskUserQuestionResolved -> _state.update { s ->
                 s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == event.requestId })
             }
-            is ClientEvent.SessionEnded -> _state.update { it.copy(pendingQuestions = emptyList()) }
-            is ClientEvent.TaskStatusChanged -> _state.update {
-                it.copy(statusLine = taskStatusLine(event.taskId, event.status, strings))
+            is ClientEvent.SessionEnded -> _state.update {
+                it.copy(pendingQuestions = emptyList())
             }
+            is ClientEvent.TaskRow -> _state.update {
+                it.copy(
+                    activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
+                        event.task.taskId,
+                        event.task.status,
+                    ),
+                )
+            }
+            is ClientEvent.TaskStatusChanged -> _state.update {
+                it.copy(
+                    statusLine = taskStatusLine(event.taskId, event.status, strings),
+                    activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
+                        event.taskId,
+                        event.status,
+                    ),
+                )
+            }
+            is ClientEvent.CoordinatorStatus -> updateCoordinatorWorkers(
+                event.activeWorkers.toInt(),
+                event.team,
+            )
             else -> Unit
+        }
+    }
+
+    private fun updateCoordinatorWorkers(activeWorkers: Int, team: String?) {
+        _state.update { state ->
+            val updated = state.agentRun?.updateWorkers(activeWorkers, team)
+            state.copy(
+                agentRun = updated,
+                agentRunsByMessageId = state.agentRunsByMessageId.mapValues { (_, run) ->
+                    when {
+                        activeWorkers == 0 && run.activeWorkers > 0 ->
+                            run.updateWorkers(activeWorkers, team)
+                        updated != null && run.turnId == updated.turnId -> updated
+                        else -> run
+                    }
+                },
+            )
         }
     }
 
@@ -508,7 +565,12 @@ class ChatViewModel(
         _mcpServers.value = emptyList()
         // A questionnaire's request_id is a CONNECTION-scoped correlator, so a
         // replaced engine source invalidates every parked card.
-        _state.update { it.copy(pendingQuestions = emptyList()) }
+        _state.update {
+            it.copy(
+                pendingQuestions = emptyList(),
+                activeBackgroundTaskIds = emptySet(),
+            )
+        }
         bindSource()
         previous.close()
 
@@ -632,7 +694,12 @@ class ChatViewModel(
         _pendingPermission.value = null
         _mcpServers.value = emptyList()
         // Parked questionnaires die with the connection they were parked on.
-        _state.update { it.copy(pendingQuestions = emptyList()) }
+        _state.update {
+            it.copy(
+                pendingQuestions = emptyList(),
+                activeBackgroundTaskIds = emptySet(),
+            )
+        }
         bindSource()
         onCommitted()
         previous.close()
@@ -745,6 +812,7 @@ class ChatViewModel(
                 statusLine = null,
                 shellTools = emptyList(),
                 agentRun = null,
+                agentRunsByMessageId = reconstructTerminalAgentRuns(restored.transcript),
                 error = null,
                 // The plan and every expansion belong to the session that was
                 // just replaced; carrying them across would attribute one
@@ -837,6 +905,7 @@ class ChatViewModel(
                 statusLine = status,
                 shellTools = emptyList(),
                 agentRun = null,
+                agentRunsByMessageId = emptyMap(),
                 error = null,
                 planTasks = emptyList(),
                 planExpanded = false,
@@ -967,6 +1036,10 @@ class ChatViewModel(
                 agentRun = AgentRunState(turnId = token),
             )
         }
+        // Start while this user action still has a visible Activity. Android 12+
+        // generally rejects foreground-service starts attempted only after the
+        // process has already crossed into the background.
+        setBackgroundTurnActive(true)
 
         turnJob = viewModelScope.launch {
             source.submit(trimmed).collect { event -> reduce(event, token) }
@@ -996,6 +1069,7 @@ class ChatViewModel(
                 streamingMessage = null,
                 statusLine = strings.resolve(R.string.chat_stopping, "正在停止…"),
                 agentRun = settled.run,
+                agentRunsByMessageId = settled.agentRunsByMessageId,
             )
         }
         val cancellation = viewModelScope.async {
@@ -1262,11 +1336,11 @@ class ChatViewModel(
                 )
             }
 
-            is ReplyEvent.Coordinator -> _state.update {
-                it.copy(
-                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
-                        .updateWorkers(event.activeWorkers, event.team),
-                )
+            is ReplyEvent.Coordinator -> {
+                if (_state.value.agentRun == null) {
+                    _state.update { it.copy(agentRun = AgentRunState(turnId = token)) }
+                }
+                updateCoordinatorWorkers(event.activeWorkers, event.team)
             }
 
             is ReplyEvent.Error -> {
@@ -1290,6 +1364,7 @@ class ChatViewModel(
                         statusLine = null,
                         error = ChatError(event.message, classifyError(event.message)),
                         agentRun = settled.run,
+                        agentRunsByMessageId = settled.agentRunsByMessageId,
                     )
                 }
             }
@@ -1314,6 +1389,7 @@ class ChatViewModel(
                         messages = settled.messages,
                         streamingMessage = null,
                         agentRun = settled.run,
+                        agentRunsByMessageId = settled.agentRunsByMessageId,
                     )
                 }
             }
@@ -1338,6 +1414,7 @@ class ChatViewModel(
                         messages = settled.messages,
                         streamingMessage = null,
                         agentRun = settled.run,
+                        agentRunsByMessageId = settled.agentRunsByMessageId,
                     )
                 }
             }
@@ -1420,11 +1497,18 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        setBackgroundTurnActive(false)
         abandonLocalTurn()?.cancel()
         sessionTransitionJob?.cancel()
         sourceBindingJob?.cancel()
         source.close()
         super.onCleared()
+    }
+
+    private fun setBackgroundTurnActive(active: Boolean) {
+        if (backgroundTurnActive == active) return
+        backgroundTurnActive = active
+        backgroundExecution.setTurnActive(active)
     }
 
     private companion object {
@@ -1441,7 +1525,36 @@ class ChatViewModel(
 internal data class SettledTurn(
     val messages: List<Message>,
     val run: AgentRunState?,
+    val agentRunsByMessageId: Map<String, AgentRunState>,
 )
+
+/**
+ * Restore the durable terminal row that follows each assistant transcript
+ * message. Live-only trace details are not part of SessionResumed, but the
+ * persisted assistant result is sufficient to reconstruct its terminal status
+ * without letting the row disappear after reconnect/process restoration.
+ */
+internal fun reconstructTerminalAgentRuns(messages: List<Message>): Map<String, AgentRunState> =
+    buildMap {
+        var restoredTurn = -1L
+        messages.forEach { message ->
+            if (message.role != Role.Ai) return@forEach
+            // SessionResumed persists the assistant result but not the overall
+            // turn outcome. A failed child tool does not imply a failed Agent —
+            // the model may have recovered — so use the neutral Finished state
+            // until the wire carries an explicit outcome.
+            put(
+                message.id,
+                AgentRunState(turnId = restoredTurn--).finish(AgentRunOutcome.Finished),
+            )
+        }
+    }
+
+private fun Set<String>.withTaskStatus(taskId: String, status: TaskStatusDto): Set<String> =
+    when (status) {
+        TaskStatusDto.PENDING, TaskStatusDto.RUNNING -> this + taskId
+        TaskStatusDto.COMPLETED, TaskStatusDto.FAILED, TaskStatusDto.CANCELLED -> this - taskId
+    }
 
 /**
  * Settle a finished turn: MOVE its tool calls out of the transient run trace and
@@ -1485,18 +1598,31 @@ internal data class SettledTurn(
 internal fun ChatState.settleTurn(run: AgentRunState?, settling: Message?): SettledTurn {
     val shellBacked = shellTools.mapTo(mutableSetOf()) { it.taskId }
     val absorbed = run?.tools.orEmpty().filterNot { it.id in shellBacked }
-    if (absorbed.isEmpty()) {
-        return SettledTurn(settling?.let { messages + it } ?: messages, run)
+    val terminalRun = run?.takeUnless { it.active || it.outcome == AgentRunOutcome.Running }
+    val terminalAlreadySettled = terminalRun != null &&
+        agentRunsByMessageId.values.any { it.turnId == terminalRun.turnId }
+    if (absorbed.isEmpty() && settling == null && (terminalRun == null || terminalAlreadySettled)) {
+        return SettledTurn(messages, run, agentRunsByMessageId)
     }
-    // A turn can end with tool calls and no prose at all; a resume would render
-    // those as an assistant bubble, so mint one rather than drop them.
-    val settled = (settling ?: Message(role = Role.Ai, text = "")).absorbToolCalls(absorbed)
+    // A turn can end with tools or status and no prose at all. Mint a hidden
+    // anchor message so the terminal result still has a stable transcript slot.
+    val base = settling ?: Message(role = Role.Ai, text = "")
+    val settled = if (absorbed.isEmpty()) base else base.absorbToolCalls(absorbed)
+    val remainingRun = run?.let { existing ->
+        if (absorbed.isEmpty()) existing else existing.copy(
+            tools = existing.tools.filter { it.id in shellBacked },
+            revision = existing.revision + 1,
+        )
+    }
+    val settledRuns = if (terminalRun != null && !terminalAlreadySettled) {
+        agentRunsByMessageId + (settled.id to (remainingRun ?: terminalRun))
+    } else {
+        agentRunsByMessageId
+    }
     return SettledTurn(
         messages = messages + settled,
-        run = run?.copy(
-            tools = run.tools.filter { it.id in shellBacked },
-            revision = run.revision + 1,
-        ),
+        run = remainingRun,
+        agentRunsByMessageId = settledRuns,
     )
 }
 

@@ -18,10 +18,10 @@ struct ConversationExecutionRunCard: View {
                 withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
             } label: {
                 HStack(spacing: 8) {
-                    LXIcon(name: .workflow, size: 14, color: t.accent, stroke: 1.8)
+                    LXIcon(name: .workflow, size: 14, color: statusColor, stroke: 1.8)
                     Text("chat_agent_run")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(t.text)
+                        .foregroundColor(statusColor)
                     StatusChip(text: run.status.label, accent: statusColor)
                     Spacer(minLength: 6)
                     if let cost = run.costFormatted, !cost.isEmpty {
@@ -151,7 +151,7 @@ struct ConversationExecutionRunCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(t.surface.opacity(0.72))
         .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(t.border, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(statusColor.opacity(0.35), lineWidth: 0.5))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation.agent-run")
     }
@@ -175,11 +175,13 @@ struct ConversationExecutionRunCard: View {
     }
 
     private var statusColor: Color {
-        switch run.status {
+        switch run.status.tone {
         case .running: return t.accent
         case .completed: return t.ok
         case .failed: return t.danger
-        case .cancelled, .maxTurns: return t.text3
+        case .cancelled: return t.statusTesting
+        case .maxTurns: return t.accent2
+        case .restored: return t.text3
         }
     }
 

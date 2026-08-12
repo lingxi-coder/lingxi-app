@@ -973,6 +973,7 @@
     <string name="chat_run_status_completed">Run complete</string>
     <string name="chat_run_status_failed">Run failed</string>
     <string name="chat_run_status_cancelled">Stopped</string>
+    <string name="chat_run_status_finished">Finished</string>
     <string name="chat_run_accessibility_label">Agent run in progress, %1$s</string>
     <string name="chat_run_active_collaborators">%1$d collaborators</string>
     <string name="chat_run_tool_executing">Running tool</string>
@@ -1604,4 +1605,8 @@
     <string name="session_details_tasks_subtitle">Tool calls and shell commands</string>
     <string name="session_details_title">Session Details</string>
     <string name="session_details_workspace">Workspace</string>
+    <string name="chat_background_service_channel">Conversation generation</string>
+    <string name="chat_background_service_channel_description">Shows LLM and agent work running in the background</string>
+    <string name="chat_background_service_title">Lingxi is generating</string>
+    <string name="chat_background_service_text">Work continues when you switch apps. Tap to return.</string>
 </resources>

@@ -5102,6 +5102,40 @@
         }
       }
     },
+    "chat_status_restored": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已结束"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已結束"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ended"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "終了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "종료됨"
+          }
+        }
+      }
+    },
     "chat_status_new_project_session": {
       "localizations": {
         "zh-Hans": {
@@ -20713,31 +20747,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请使用 create-local-app 技能开始创建这个应用。\n\n应用简介：%@\n\n先用问卷向我确认需求。"
+            "value": "请使用 create-local-app 技能开始创建这个应用。\n\n应用简介：%@\n\n如有未决的关键需求，请调用 AskUserQuestion 通过原生问卷向我确认，不要把问题写在普通消息中；若简介和设备上下文已足够，请直接推断并继续。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "請使用 create-local-app 技能開始建立這個應用。\n\n應用簡介：%@\n\n先用問卷向我確認需求。"
+            "value": "請使用 create-local-app 技能開始建立這個應用。\n\n應用簡介：%@\n\n如有未決的關鍵需求，請呼叫 AskUserQuestion 透過原生問卷向我確認，不要把問題寫在一般訊息中；若簡介和裝置上下文已足夠，請直接推斷並繼續。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use the create-local-app skill to start building this app.\n\nBrief: %@\n\nBegin by confirming requirements with me via questions."
+            "value": "Use the create-local-app skill to start building this app.\n\nBrief: %@\n\nIf a material requirement is unresolved, call AskUserQuestion so the native questionnaire sheet asks me; never leave the question in an ordinary message. If the brief and device context are sufficient, infer and continue."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "create-local-app スキルでこのアプリの作成を開始してください。\n\n概要：%@\n\nまず質問で要件を確認してください。"
+            "value": "create-local-app スキルでこのアプリの作成を開始してください。\n\n概要：%@\n\n重要な要件が未確定なら AskUserQuestion を呼び出し、ネイティブの質問シートで確認してください。通常のメッセージに質問を残さないでください。概要とデバイス情報で十分なら推測して続行してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "create-local-app 스킬로 이 앱 생성을 시작하세요.\n\n소개: %@\n\n먼저 질문으로 요구 사항을 확인해 주세요."
+            "value": "create-local-app 스킬로 이 앱 생성을 시작하세요.\n\n소개: %@\n\n중요한 요구 사항이 미정이면 AskUserQuestion을 호출해 네이티브 질문 시트로 확인하고 일반 메시지에 질문을 남기지 마세요. 소개와 기기 컨텍스트로 충분하면 추론하여 계속하세요."
           }
         }
       }

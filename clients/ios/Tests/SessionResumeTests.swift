@@ -344,15 +344,98 @@ import XCTest
 
             // The tool_use/tool_result pair becomes ONE dedicated row, not text
             // inside the bubble and not a second row.
-            let toolTraces: [ConversationToolTrace] = source.model.items.compactMap {
-                if case let .toolCall(trace) = $0 { return trace }
+            let restoredRuns: [ConversationExecutionRun] = source.model.items.compactMap {
+                if case let .run(run) = $0 { return run }
                 return nil
             }
-            XCTAssertEqual(toolTraces.count, 1, "the pair merges onto one row")
-            XCTAssertEqual(toolTraces.first?.id, "t1")
-            XCTAssertEqual(toolTraces.first?.tool, "Read")
-            XCTAssertEqual(toolTraces.first?.status, .completed,
+            XCTAssertEqual(restoredRuns.count, 1, "the pair merges onto one terminal run")
+            XCTAssertEqual(restoredRuns.first?.tools.first?.id, "t1")
+            XCTAssertEqual(restoredRuns.first?.tools.first?.tool, "Read")
+            XCTAssertEqual(restoredRuns.first?.tools.first?.status, .completed,
                            "the tool_result settles the row its tool_use opened")
+        }
+
+        func testSessionResumedReconstructsTerminalRunAfterItsFinalAssistantMessage() {
+            let source = makeSource()
+            let messages: [MessageDto] = [
+                MessageDto(role: "user", blocks: [.text(text: "执行检查")]),
+                MessageDto(role: "assistant", blocks: [
+                    .text(text: "开始"),
+                    .toolUse(
+                        id: "tool-restore",
+                        tool: "Read",
+                        inputJson: #"{"file_path":"a.rs"}"#,
+                        header: nil),
+                ]),
+                MessageDto(role: "user", blocks: [
+                    .toolResult(
+                        id: "tool-restore",
+                        tool: "Read",
+                        resultJson: #"{"result":"ok"}"#,
+                        isError: false,
+                        oldString: nil,
+                        newString: nil,
+                        filePath: nil,
+                        display: nil),
+                ]),
+                MessageDto(role: "assistant", blocks: [.text(text: "检查完成")]),
+            ]
+
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+
+            let kinds = source.model.items.map { item -> String in
+                switch item {
+                case .message: return "message"
+                case .run: return "run"
+                case .notice: return "notice"
+                case .toolCall: return "tool"
+                }
+            }
+            XCTAssertEqual(kinds, ["message", "message", "message", "run"])
+            guard case let .run(run)? = source.model.items.last else {
+                return XCTFail("the restored turn must retain its terminal result")
+            }
+            XCTAssertEqual(run.status, .restored)
+            XCTAssertEqual(run.tools.map(\.id), ["tool-restore"])
+            XCTAssertEqual(run.tools.first?.status, .completed)
+        }
+
+        func testSessionResumedDoesNotPromoteAToolOutcomeToTheAgentOutcome() {
+            let source = makeSource()
+            let messages: [MessageDto] = [
+                MessageDto(role: "user", blocks: [.text(text: "继续尝试")]),
+                MessageDto(role: "assistant", blocks: [
+                    .toolUse(
+                        id: "cancelled-tool",
+                        tool: "Shell",
+                        inputJson: #"{"command":"long job"}"#,
+                        header: nil),
+                ]),
+                MessageDto(role: "user", blocks: [
+                    .toolResult(
+                        id: "cancelled-tool",
+                        tool: "Shell",
+                        resultJson: #"{"error":"interrupted","tool_denial_kind":"interrupted"}"#,
+                        isError: true,
+                        oldString: nil,
+                        newString: nil,
+                        filePath: nil,
+                        display: nil),
+                ]),
+                MessageDto(role: "assistant", blocks: [.text(text: "已改用其他方法")]),
+            ]
+
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+
+            let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
+                guard case let .run(run) = item else { return nil }
+                return run
+            }
+            XCTAssertEqual(runs.first?.status, .restored)
+            XCTAssertEqual(
+                runs.first?.tools.first?.status,
+                .cancelled,
+                "the wire-preserved tool outcome keeps its own color")
         }
 
         /// THE SCROLLBACK BUG: in the Anthropic protocol a `tool_result` block
@@ -391,7 +474,7 @@ import XCTest
                 case .notice: return "notice"
                 }
             }
-            XCTAssertEqual(kinds, ["message", "tool", "message"])
+            XCTAssertEqual(kinds, ["message", "run", "message"])
         }
 
         /// A zero-message resume (a session with no transcript) must still adopt

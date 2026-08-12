@@ -973,6 +973,7 @@
     <string name="chat_run_status_completed">运行完成</string>
     <string name="chat_run_status_failed">运行失败</string>
     <string name="chat_run_status_cancelled">已停止</string>
+    <string name="chat_run_status_finished">已结束</string>
     <string name="chat_run_accessibility_label">Agent 运行过程，%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 个协作者</string>
     <string name="chat_run_tool_executing">工具执行中</string>
@@ -1604,4 +1605,8 @@
     <string name="session_details_tasks_subtitle">工具调用与 Shell 命令</string>
     <string name="session_details_title">会话详情</string>
     <string name="session_details_workspace">工作区</string>
+    <string name="chat_background_service_channel">对话生成</string>
+    <string name="chat_background_service_channel_description">显示正在后台运行的 LLM 和 Agent 任务</string>
+    <string name="chat_background_service_title">灵犀正在生成</string>
+    <string name="chat_background_service_text">切换到其他应用后仍会继续。点按可返回。</string>
 </resources>

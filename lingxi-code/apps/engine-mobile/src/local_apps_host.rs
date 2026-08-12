@@ -1995,6 +1995,7 @@ impl LocalAppsHostBroker {
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
              ## Workspace contract\n\
+             - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `mcp__local_apps__list` or `mcp__local_apps__get` to rediscover or confirm it, and do not call `mcp__local_apps__create` again.\n\
              - Edit ONLY files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
              - The normal new-app path is the official Vite CLI through the existing Mobile Linux `Shell`: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
              - If registry/network access is unavailable, use only `.lingxi/vite-fallback/` as the explicit offline fallback and report that mode/reason. Do not add a Vite wrapper or scaffold API.\n\
@@ -2005,7 +2006,8 @@ impl LocalAppsHostBroker {
              (see `lib/lingxi-bridge.js`).\n\
              - Declare data collections / network domains / capabilities through \
              `mcp__local_apps__update_manifest` BEFORE the page relies on them; runtime \
-             authorization still prompts the user.\n\n\
+             authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
+             - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
              ## Build & preview\n\
              - `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
              (30-minute budget); an ordinary project may also use `npm run build` \

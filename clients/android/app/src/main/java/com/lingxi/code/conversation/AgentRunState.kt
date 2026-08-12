@@ -12,6 +12,26 @@ enum class AgentRunOutcome {
     Completed,
     Failed,
     Cancelled,
+    /** Restored terminal turn whose exact live outcome was not persisted. */
+    Finished;
+
+    val tone: AgentRunTone
+        get() = when (this) {
+            Running -> AgentRunTone.Running
+            Completed -> AgentRunTone.Completed
+            Failed -> AgentRunTone.Failed
+            Cancelled -> AgentRunTone.Cancelled
+            Finished -> AgentRunTone.Finished
+        }
+}
+
+/** Unit-testable semantic color role for each terminal/live run outcome. */
+enum class AgentRunTone {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Finished,
 }
 
 enum class AgentRunNoticeKind {
@@ -212,13 +232,16 @@ internal fun AgentRunState.finish(outcome: AgentRunOutcome): AgentRunState {
         AgentRunOutcome.Failed -> AgentToolStatus.Failed
         AgentRunOutcome.Cancelled -> AgentToolStatus.Cancelled
         AgentRunOutcome.Completed -> AgentToolStatus.Completed
+        AgentRunOutcome.Finished -> AgentToolStatus.Completed
         AgentRunOutcome.Running -> AgentToolStatus.Running
     }
     return copy(
         active = outcome == AgentRunOutcome.Running,
         outcome = outcome,
         reasoningActive = false,
-        activeWorkers = 0,
+        // Coordinator workers can outlive the reply stream. Keep the last
+        // reported count until a later Coordinator(0) arrives so Android does
+        // not release its foreground-service lease while they are still busy.
         tools = tools.map {
             if (it.status == AgentToolStatus.Running) it.copy(status = terminalToolStatus) else it
         },

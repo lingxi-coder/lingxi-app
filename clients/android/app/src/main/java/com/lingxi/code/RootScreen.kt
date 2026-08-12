@@ -33,6 +33,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
+import com.lingxi.code.conversation.AndroidConversationBackgroundExecution
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComputerUseSetupStatus
@@ -190,6 +191,7 @@ fun RootScreen(
                     savedState = createSavedStateHandle(),
                     sourceGeneration = reconnectToken,
                     strings = conversationStrings(appContext),
+                    backgroundExecution = AndroidConversationBackgroundExecution(appContext),
                 )
             }
         },

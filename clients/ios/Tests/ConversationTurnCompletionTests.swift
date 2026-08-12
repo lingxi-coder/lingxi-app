@@ -1,4 +1,5 @@
 import Combine
+import UIKit
 import XCTest
 
 @testable import LingxiCode
@@ -9,6 +10,17 @@ import XCTest
 
 @MainActor
 final class ConversationTurnCompletionTests: XCTestCase {
+    func testMockBackgroundingKeepsActiveTurnRunning() {
+        let source = MockConversationSource()
+
+        XCTAssertNotNil(source.send("hello"))
+        source.handleBackground()
+
+        XCTAssertTrue(source.model.streaming)
+        XCTAssertNil(source.model.turnCompletion)
+        source.cancel()
+    }
+
     func testMockSendReturnsTokenAndCancellationPublishesMatchingTerminal() {
         let source = MockConversationSource()
 
@@ -83,6 +95,20 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     finalAssistantText: "final answer"
                 )
             )
+        }
+
+        func testEngineBackgroundingKeepsActiveTurnRunning() {
+            let source = makeSource()
+
+            guard let token = source.send("question") else {
+                return XCTFail("expected a turn token")
+            }
+            source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
+            source.handleBackground()
+
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertNil(source.model.turnCompletion)
+            source.cancel()
         }
 
         func testEnginePublishesSequencedSpeechDeltasForOwnedTurn() {
@@ -233,4 +259,109 @@ final class ConversationTurnCompletionTests: XCTestCase {
         }
 
     #endif
+}
+
+@MainActor
+final class ConversationBackgroundExecutionControllerTests: XCTestCase {
+    func testActiveTurnHoldsFiniteBackgroundTaskUntilItSettles() {
+        var expirationHandler: (() -> Void)?
+        var endedTasks: [UIBackgroundTaskIdentifier] = []
+        let controller = ConversationBackgroundExecutionController(
+            beginTask: { handler in
+                expirationHandler = handler
+                return UIBackgroundTaskIdentifier(rawValue: 42)
+            },
+            endTask: { endedTasks.append($0) }
+        )
+
+        controller.setTurnActive(true)
+        controller.setTurnActive(true)
+        XCTAssertNotNil(expirationHandler)
+        XCTAssertTrue(endedTasks.isEmpty)
+
+        controller.setTurnActive(false)
+        XCTAssertEqual(endedTasks.map(\.rawValue), [42])
+    }
+
+    func testExpirationEndsLeaseWithoutCancellingAndCanRearm() {
+        var expirationHandlers: [() -> Void] = []
+        var nextTask = 0
+        var endedTasks: [UIBackgroundTaskIdentifier] = []
+        let controller = ConversationBackgroundExecutionController(
+            beginTask: { handler in
+                nextTask += 1
+                expirationHandlers.append(handler)
+                return UIBackgroundTaskIdentifier(rawValue: nextTask)
+            },
+            endTask: { endedTasks.append($0) }
+        )
+
+        controller.setTurnActive(true)
+        expirationHandlers[0]()
+        XCTAssertEqual(endedTasks.map(\.rawValue), [1])
+
+        controller.setTurnActive(true)
+        XCTAssertEqual(expirationHandlers.count, 2)
+    }
+
+    func testInvalidBackgroundTaskIdentifierDoesNotLatchAndCanRetry() {
+        var beginCount = 0
+        var endedTasks: [UIBackgroundTaskIdentifier] = []
+        let controller = ConversationBackgroundExecutionController(
+            beginTask: { _ in
+                beginCount += 1
+                return beginCount == 1
+                    ? .invalid
+                    : UIBackgroundTaskIdentifier(rawValue: 73)
+            },
+            endTask: { endedTasks.append($0) }
+        )
+
+        controller.setTurnActive(true)
+        controller.setTurnActive(true)
+
+        XCTAssertEqual(beginCount, 2, "an invalid acquisition must not block a retry")
+        controller.setTurnActive(false)
+        XCTAssertEqual(
+            endedTasks.map(\.rawValue),
+            [73],
+            "only a valid task identifier may be ended")
+    }
+
+    func testBackgroundExecutionCoversOutOfBandAndStructuredRunningWork() {
+        let model = ConversationModel()
+        model.streaming = false
+        XCTAssertFalse(model.requiresBackgroundExecution)
+
+        model.backgroundTasks = [
+            BackgroundTaskSnapshot(id: "task-1", descriptionText: "Build", status: .running),
+        ]
+        XCTAssertTrue(
+            model.requiresBackgroundExecution,
+            "a background task outlives the assistant streaming turn")
+
+        model.backgroundTasks[0].status = .completed
+        model.items = [
+            .run(ConversationExecutionRun(
+                id: "run-1",
+                sessionId: "session-a",
+                turnId: 1,
+                status: .completed,
+                tools: [ConversationToolTrace(
+                    id: "tool-1",
+                    tool: "Shell",
+                    status: .running,
+                    inputSummary: nil,
+                    outputSummary: nil,
+                    elapsedMs: nil
+                )]
+            )),
+        ]
+        XCTAssertTrue(
+            model.requiresBackgroundExecution,
+            "a still-running tool must keep the finite background assertion")
+
+        model.items = []
+        XCTAssertFalse(model.requiresBackgroundExecution)
+    }
 }

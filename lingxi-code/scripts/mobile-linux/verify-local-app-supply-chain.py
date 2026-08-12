@@ -756,10 +756,24 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "npm run build",
         "offline-fallback",
         "window.lingxi.v1",
+        "Do not call `mcp__local_apps__list` or `mcp__local_apps__get`",
+        "call `AskUserQuestion`",
+        "Never ask unresolved questions in ordinary assistant text",
+        "Every collection requires `id`, `name`, and `fields`",
+        "Never declare host-owned record metadata",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
         fail(f"create-local-app skill is missing host contract tokens: {missing}")
+    local_apps_host_path = (
+        repo / "lingxi-code" / "apps" / "engine-mobile" / "src" / "local_apps_host.rs"
+    )
+    try:
+        local_apps_host = local_apps_host_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"missing local-apps host: {exc}")
+    if "already bound to local app `{id}`" not in local_apps_host:
+        fail("app-scoped LINGXI.md does not make its current app id authoritative")
     workflow_path = repo / "lingxi-code" / "tools" / "workflow" / "src" / "local_app_build_workflow.js"
     try:
         workflow = workflow_path.read_text(encoding="utf-8")

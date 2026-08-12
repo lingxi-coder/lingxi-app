@@ -11,10 +11,19 @@ delegate specialist work to `$frontend-design`, `$accessibility`,
 
 ## Entry and confirmation
 
+When `LINGXI.md` identifies a local app and its ID, the library has already
+created that app record and its app-scoped init session. Treat that ID as
+authoritative. Do not call `mcp__local_apps__list` or `mcp__local_apps__get` to
+rediscover or confirm the current app, and do not call `create` again. Use
+`list` only from a global conversation when no app ID is already known.
+
 Inside an app's own workspace, read `LINGXI.md` and sharpen its brief. In a
 global chat, gather the product, screens, data, capabilities, and visual intent
-before creating the app. Ask focused questions in rounds, then show one
-confirmable specification containing:
+before creating the app. When a material decision is unresolved, call `AskUserQuestion`
+with one short round of one to three focused questions. Never ask unresolved questions in ordinary assistant text.
+If the brief and host device context already determine the answer, infer it,
+state the inference, and continue instead of blocking. Then show one confirmable
+specification containing:
 
 - target OS and form factor; if omitted, infer from the host device context
   (`os`, `formFactor`, `viewport`, `safeArea`, `colorScheme`, `reducedMotion`,
@@ -40,6 +49,21 @@ using `mcp__local_apps__create`. Declare collections, domains, capabilities,
 and the confirmed `device_context` with `mcp__local_apps__update_manifest`
 before generated source relies on them. Inside an existing app, do not call
 `create` again.
+
+Every collection requires `id`, `name`, and `fields`; every field requires
+`id`, `label`, and `kind`. Collection and field IDs use lower snake_case and
+must match `^[a-z][a-z0-9_]{0,63}$`. Optional field keys are `required` and
+`enumOptions`, and supported kinds are `text`, `long_text`, `integer`,
+`decimal`, `boolean`, `date_time`, `enum`, and `image_ref`:
+
+```json
+{"app_id":"<id>","collections":[{"id":"recognition_results","name":"识别结果","fields":[{"id":"source_image","label":"图片","kind":"image_ref","required":true},{"id":"recognized_text","label":"识别结果","kind":"long_text","required":true}]}]}
+```
+
+Never declare host-owned record metadata (`recordId`, `revision`,
+`createdAtMs`, or `updatedAtMs`) as collection fields. If manifest validation
+fails, repair the payload and retry before building; do not treat a failed
+manifest update as a completed generation step.
 
 ## Prefer local and host-provided capabilities
 

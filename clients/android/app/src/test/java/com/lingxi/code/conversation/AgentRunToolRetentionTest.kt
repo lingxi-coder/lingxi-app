@@ -81,6 +81,75 @@ class AgentRunToolRetentionTest {
     }
 
     @Test
+    fun `a terminal agent result follows its message and survives a fresh live run`() {
+        val completed = runOf(3).finish(AgentRunOutcome.Completed)
+        val settled = chatState(completed).settleTurn(
+            run = completed,
+            settling = Message(role = Role.Ai, text = "done"),
+        )
+        val message = settled.messages.single()
+        assertEquals(AgentRunOutcome.Completed, settled.agentRunsByMessageId[message.id]?.outcome)
+
+        val next = chatState(AgentRunState(turnId = 2L)).copy(
+            messages = settled.messages,
+            agentRun = AgentRunState(turnId = 2L),
+            agentRunsByMessageId = settled.agentRunsByMessageId,
+        )
+        val rows = buildChatRenderItems(next)
+        assertEquals(listOf("message", "agent_run"), rows.map { it.contentType })
+        assertTrue(rows.last() is ChatRenderItem.AgentRun)
+    }
+
+    @Test
+    fun `a terminal agent with async workers stays pinned and is not duplicated`() {
+        val message = Message(role = Role.Ai, text = "delegated")
+        val delegated = AgentRunState(
+            turnId = 7L,
+            active = false,
+            outcome = AgentRunOutcome.Completed,
+            activeWorkers = 1,
+        )
+        val state = chatState(delegated).copy(
+            messages = listOf(message),
+            agentRunsByMessageId = mapOf(message.id to delegated),
+        )
+
+        assertEquals(delegated, agentRunForBottomPanel(state))
+        assertEquals(listOf("message"), buildChatRenderItems(state).map { it.contentType })
+    }
+
+    @Test
+    fun `an earlier terminal agent with async workers is pinned when the latest turn is idle`() {
+        val earlierMessage = Message(role = Role.Ai, text = "delegated")
+        val earlier = AgentRunState(
+            turnId = 7L,
+            active = false,
+            outcome = AgentRunOutcome.Completed,
+            activeWorkers = 1,
+        )
+        val latest = AgentRunState(
+            turnId = 8L,
+            active = false,
+            outcome = AgentRunOutcome.Completed,
+        )
+        val state = chatState(latest).copy(
+            messages = listOf(earlierMessage),
+            agentRunsByMessageId = mapOf(earlierMessage.id to earlier),
+        )
+
+        assertEquals(earlier, agentRunForBottomPanel(state))
+        assertEquals(listOf("message"), buildChatRenderItems(state).map { it.contentType })
+    }
+
+    @Test
+    fun `every agent outcome has a distinct visual tone`() {
+        assertEquals(
+            AgentRunOutcome.entries.size,
+            AgentRunOutcome.entries.map { it.tone }.toSet().size,
+        )
+    }
+
+    @Test
     fun `a late result for a row outside the display window updates it in place`() {
         // The evicting cap made this APPEND a second, header-less row at the
         // bottom: a bare tool name, out of chronological order, that also

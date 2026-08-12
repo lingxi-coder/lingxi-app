@@ -1,4 +1,77 @@
 import SwiftUI
+import UIKit
+
+/// Holds UIKit's finite background-execution assertion while a user-started
+/// conversation turn is active. Expiration only releases the assertion: it must
+/// never manufacture a user cancellation or corrupt the engine's turn state.
+@MainActor
+final class ConversationBackgroundExecutionController {
+    typealias ExpirationHandler = @MainActor @Sendable () -> Void
+    typealias TaskIdentifier = UIBackgroundTaskIdentifier
+    typealias BeginTask = (@escaping ExpirationHandler) -> TaskIdentifier
+    typealias EndTask = (TaskIdentifier) -> Void
+
+    private let beginTask: BeginTask
+    private let endTask: EndTask
+    private var taskIdentifier: TaskIdentifier?
+    private var generation = 0
+
+    init(beginTask: @escaping BeginTask, endTask: @escaping EndTask) {
+        self.beginTask = beginTask
+        self.endTask = endTask
+    }
+
+    static func live() -> ConversationBackgroundExecutionController {
+        let application = UIApplication.shared
+        return ConversationBackgroundExecutionController(
+            beginTask: { expirationHandler in
+                application.beginBackgroundTask(
+                    withName: "ConversationTurn",
+                    expirationHandler: expirationHandler
+                )
+            },
+            endTask: { identifier in
+                application.endBackgroundTask(identifier)
+            }
+        )
+    }
+
+    func setTurnActive(_ active: Bool) {
+        if active {
+            guard taskIdentifier == nil else { return }
+            generation &+= 1
+            let currentGeneration = generation
+            let identifier = beginTask { [weak self] in
+                self?.expire(generation: currentGeneration)
+            }
+            // UIKit can refuse a finite assertion and return `.invalid`. Never
+            // latch that sentinel: keeping the slot empty lets a later state or
+            // foreground transition retry the acquisition.
+            guard identifier != .invalid else { return }
+            // Be defensive about a test adapter (or future UIKit behaviour)
+            // invoking expiration synchronously during acquisition.
+            guard generation == currentGeneration else {
+                endTask(identifier)
+                return
+            }
+            taskIdentifier = identifier
+        } else {
+            endCurrentTask()
+        }
+    }
+
+    private func expire(generation expiredGeneration: Int) {
+        guard expiredGeneration == generation else { return }
+        endCurrentTask()
+    }
+
+    private func endCurrentTask() {
+        generation &+= 1
+        guard let taskIdentifier else { return }
+        self.taskIdentifier = nil
+        endTask(taskIdentifier)
+    }
+}
 
 /// App composition root. Every workspace-sensitive dependency is created from
 /// the active project and replaced as one unit when the project or Provider
@@ -30,6 +103,8 @@ struct RootView: View {
     @State private var pendingSessionRestoreID: String?
     @State private var draft: String
     @State private var voiceInteraction = VoiceInteractionController()
+    @State private var conversationBackgroundExecution =
+        ConversationBackgroundExecutionController.live()
     @State private var projectSwitching = false
 
     private let appSandboxRoot: String
@@ -169,6 +244,9 @@ struct RootView: View {
         }
         .environment(\.locale, localization.effectiveLocale())
         .onChange(of: scenePhase, handleScenePhase)
+        .onReceive(source.model.backgroundExecutionActivity) { active in
+            conversationBackgroundExecution.setTurnActive(active)
+        }
         .onChange(of: draft) { _, value in
             scopedPreferences.setDraft(value, scope: activeScope)
         }
@@ -850,12 +928,16 @@ struct RootView: View {
             persistConversationScope()
             localAppsStore.sceneDidEnterBackground()
             voiceInteraction.handleBackground()
+            conversationBackgroundExecution.setTurnActive(
+                source.model.requiresBackgroundExecution)
             source.handleBackground()
             Task {
                 await VoicePreviewPlayback.shared.stop()
                 await VoiceAudioSessionCoordinator.shared.suspendForBackground()
             }
         case .active:
+            conversationBackgroundExecution.setTurnActive(
+                source.model.requiresBackgroundExecution)
             source.handleForeground()
             Task { await localAppsStore.sceneWillEnterForeground() }
             Task { await VoiceAudioSessionCoordinator.shared.resumeAfterForeground() }

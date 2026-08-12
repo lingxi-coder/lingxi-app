@@ -314,12 +314,65 @@ impl LocalAppsMcpTransport {
 
     fn tool_catalog() -> Vec<McpToolDto> {
         let app_id = json!({ "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" });
+        let display_name_max_bytes = local_apps::manifest::MAX_MANIFEST_DISPLAY_NAME_BYTES;
+        let enum_option_max_bytes = local_apps::manifest::MAX_ENUM_OPTION_BYTES;
+        let manifest_identifier = json!({ "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" });
+        let manifest_field = json!({
+            "type": "object",
+            "properties": {
+                "id": manifest_identifier.clone(),
+                "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": format!("Maximum {display_name_max_bytes} UTF-8 bytes; enforced by the host")
+                },
+                "kind": {"enum": [
+                    "text", "long_text", "integer", "decimal", "boolean",
+                    "date_time", "enum", "image_ref"
+                ]},
+                "required": {"type": "boolean"},
+                "enumOptions": {
+                    "type": "array",
+                    "maxItems": local_apps::manifest::MAX_ENUM_OPTIONS,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": format!("Maximum {enum_option_max_bytes} UTF-8 bytes; enforced by the host")
+                    }
+                }
+            },
+            "required": ["id", "label", "kind"],
+            "additionalProperties": false
+        });
+        let manifest_collection = json!({
+            "type": "object",
+            "properties": {
+                "id": manifest_identifier,
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": format!("Maximum {display_name_max_bytes} UTF-8 bytes; enforced by the host")
+                },
+                "fields": {
+                    "type": "array",
+                    "maxItems": local_apps::manifest::MAX_COLLECTION_FIELDS,
+                    "items": manifest_field
+                }
+            },
+            "required": ["id", "name", "fields"],
+            "additionalProperties": false
+        });
+        let mut list = Self::tool(
+            "list",
+            "List local apps only from a global conversation when no app id is known. Never use from an app-scoped workspace to rediscover or confirm the current app; its LINGXI.md id is authoritative. Read-only; this is a discovery tool, not a prerequisite for get or runtime actions. The page is bounded by `limit` (default 50, max 100); when `has_more` is true, narrow with `query`.",
+            json!({"type":"object","properties":{"query":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":100}}}),
+        );
+        // App-scoped sessions already receive their authoritative id through
+        // LINGXI.md. Keep global catalog discovery out of their eager tool set.
+        list.always_load = Some(false);
+        list.search_hint = Some("discover existing local apps".into());
         vec![
-            Self::tool(
-                "list",
-                "List local apps and their workflow state. Read-only; use before get or runtime actions. The page is bounded by `limit` (default 50, max 100); when `has_more` is true, narrow with `query`.",
-                json!({"type":"object","properties":{"query":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":100}}}),
-            ),
+            list,
             Self::tool(
                 "get",
                 "Get one local app's record, runtime and checkpoints. Read-only.",
@@ -353,10 +406,14 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "update_manifest",
-                "Declare the app's data collections, allowed network domains, capabilities and confirmed native device context in its manifest. Destructive schema migrations against existing data require the user's approval.",
+                "Declare the app's data collections, allowed network domains, capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. Destructive schema migrations against existing data require the user's approval.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
-                    "collections":{"type":"array","maxItems":8},
+                    "collections":{
+                        "type":"array",
+                        "maxItems":local_apps::manifest::MAX_MANIFEST_COLLECTIONS,
+                        "items":manifest_collection
+                    },
                     "allowed_domains":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":200}},
                     "capabilities":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":64}},
                     "device_context":{"type":"object","properties":{
@@ -1049,6 +1106,34 @@ mod tests {
             !descriptions.contains("five-step") && !descriptions.contains("five step"),
             "no tool description should promise a removed five-step flow: {descriptions}"
         );
+        let list = tools
+            .iter()
+            .find(|tool| tool.tool_name == "list")
+            .expect("list is declared");
+        assert!(
+            list.description.contains("global conversation")
+                && list.description.contains("no app id is known"),
+            "list must be reserved for global discovery: {}",
+            list.description
+        );
+        assert!(
+            list.description
+                .contains("Never use from an app-scoped workspace"),
+            "list must reject app-scoped rediscovery: {}",
+            list.description
+        );
+        assert_eq!(
+            list.always_load,
+            Some(false),
+            "global discovery must stay deferred during app-scoped work"
+        );
+        assert!(
+            !list
+                .description
+                .contains("use before get or runtime actions"),
+            "list must not be advertised as a generic prerequisite: {}",
+            list.description
+        );
         let query = tools
             .iter()
             .find(|tool| tool.tool_name == "query_data")
@@ -1061,6 +1146,104 @@ mod tests {
         assert!(
             query.input_schema["properties"].get("cursor").is_none(),
             "the broken string cursor contract must not remain in the catalog"
+        );
+    }
+
+    #[test]
+    fn update_manifest_catalog_exposes_the_complete_collection_contract() {
+        let tools = LocalAppsMcpTransport::tool_catalog();
+        let update = tools
+            .iter()
+            .find(|tool| tool.tool_name == "update_manifest")
+            .expect("update_manifest is declared");
+        let collection = &update.input_schema["properties"]["collections"]["items"];
+        assert_eq!(collection["type"], "object");
+        assert_eq!(
+            collection["properties"]["id"]["pattern"],
+            "^[a-z][a-z0-9_]{0,63}$"
+        );
+        assert_eq!(collection["properties"]["name"]["type"], "string");
+        assert_eq!(collection["required"], json!(["id", "name", "fields"]));
+        assert_eq!(collection["additionalProperties"], false);
+
+        let field = &collection["properties"]["fields"]["items"];
+        assert_eq!(
+            field["properties"]["id"]["pattern"],
+            "^[a-z][a-z0-9_]{0,63}$"
+        );
+        assert_eq!(
+            field["properties"]["kind"]["enum"],
+            json!([
+                "text",
+                "long_text",
+                "integer",
+                "decimal",
+                "boolean",
+                "date_time",
+                "enum",
+                "image_ref"
+            ])
+        );
+        assert_eq!(field["required"], json!(["id", "label", "kind"]));
+        assert_eq!(field["additionalProperties"], false);
+        assert!(
+            update.description.contains("recordId") && update.description.contains("createdAtMs"),
+            "host-owned record metadata must be called out: {}",
+            update.description
+        );
+    }
+
+    #[test]
+    fn update_manifest_catalog_accepts_authoritative_manifest_boundaries() {
+        let tools = LocalAppsMcpTransport::tool_catalog();
+        let update = tools
+            .iter()
+            .find(|tool| tool.tool_name == "update_manifest")
+            .expect("update_manifest is declared");
+        let collection = &update.input_schema["properties"]["collections"]["items"];
+        assert_eq!(
+            update.input_schema["properties"]["collections"]["maxItems"],
+            local_apps::manifest::MAX_MANIFEST_COLLECTIONS
+        );
+        let fields = &collection["properties"]["fields"];
+        let field = &fields["items"];
+
+        assert_eq!(
+            fields["maxItems"],
+            local_apps::manifest::MAX_COLLECTION_FIELDS
+        );
+        assert_eq!(
+            field["properties"]["enumOptions"]["maxItems"],
+            local_apps::manifest::MAX_ENUM_OPTIONS
+        );
+        assert_eq!(
+            field["properties"]["label"]["description"],
+            format!(
+                "Maximum {} UTF-8 bytes; enforced by the host",
+                local_apps::manifest::MAX_MANIFEST_DISPLAY_NAME_BYTES
+            )
+        );
+        assert_eq!(
+            collection["properties"]["name"]["description"],
+            format!(
+                "Maximum {} UTF-8 bytes; enforced by the host",
+                local_apps::manifest::MAX_MANIFEST_DISPLAY_NAME_BYTES
+            )
+        );
+        assert_eq!(
+            field["properties"]["enumOptions"]["items"]["description"],
+            format!(
+                "Maximum {} UTF-8 bytes; enforced by the host",
+                local_apps::manifest::MAX_ENUM_OPTION_BYTES
+            )
+        );
+        assert!(
+            field["properties"]["label"].get("maxLength").is_none()
+                && collection["properties"]["name"].get("maxLength").is_none()
+                && field["properties"]["enumOptions"]["items"]
+                    .get("maxLength")
+                    .is_none(),
+            "JSON Schema maxLength counts characters, while manifest limits count UTF-8 bytes"
         );
     }
 

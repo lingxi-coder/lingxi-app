@@ -20,6 +20,13 @@ pub struct TranscriptEntry {
     pub timestamp: SystemTime,
     /// The conversation message itself.
     pub message: ConversationMessage,
+    /// Terminal agent status for lifecycle records. Ordinary conversation
+    /// entries omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Terminal failure detail. Kept out of ordinary message entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
@@ -49,10 +56,39 @@ impl AgentTranscriptWriter {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
             message: message.clone(),
+            status: None,
+            error: None,
         };
+        self.append_entry(&entry).await
+    }
+
+    /// Append a terminal lifecycle entry while retaining a normal transcript
+    /// message shape for readers that replay only `message` values.
+    pub async fn record_terminal(
+        &self,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<(), traits::FsError> {
+        let detail = error.unwrap_or(status);
+        let entry = TranscriptEntry {
+            agent_id: self.agent_id,
+            timestamp: SystemTime::now(),
+            message: ConversationMessage::System {
+                id: protocol::MessageId::new(),
+                content: detail.to_string(),
+                subtype: Some(format!("agent_{status}")),
+                compact_metadata: None,
+            },
+            status: Some(status.to_string()),
+            error: error.map(str::to_string),
+        };
+        self.append_entry(&entry).await
+    }
+
+    async fn append_entry(&self, entry: &TranscriptEntry) -> Result<(), traits::FsError> {
         let line = format!(
             "{}\n",
-            serde_json::to_string(&entry).expect("transcript serialization")
+            serde_json::to_string(entry).expect("transcript serialization")
         );
         let path_str = self
             .transcript_path

@@ -1465,6 +1465,49 @@ async fn loop_api_error_surfaces_failed() {
 }
 
 #[tokio::test]
+async fn loop_api_error_persists_seed_and_terminal_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = MockSubagentApiClient::new(vec![Err(llm_client::LlmError::InvalidRequest {
+        message: "provider rejected tool_choice".into(),
+    })]);
+    let mut ctx = loop_ctx(api, None, 4);
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )) as Arc<dyn traits::FileSystem>);
+    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "design the local app".to_string(),
+    )];
+    let agent_id = ctx.agent_id;
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
+    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "failed run transcript at {} should exist: {e}",
+            path.display()
+        )
+    });
+    assert!(
+        body.contains("design the local app"),
+        "the seed must survive a first-request API failure: {body}"
+    );
+    assert!(
+        body.contains("provider rejected tool_choice"),
+        "the terminal provider reason must be inspectable: {body}"
+    );
+    assert!(
+        body.contains("\"status\":\"failed\""),
+        "the transcript must distinguish terminal failure: {body}"
+    );
+}
+
+#[tokio::test]
 async fn loop_tool_use_without_invoker_fails() {
     // A tool_use with tool_invoker = None surfaces Failed.
     let api = MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("tool_use")))]);
@@ -2724,6 +2767,7 @@ const EXPECTED_SERVER_ERROR_CUTOFF: &str = "Agent terminated early due to an API
 /// the salvaged partial text following it. NOT a `Failed`.
 #[tokio::test]
 async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
+    let dir = tempfile::tempdir().unwrap();
     // Turn 1: a complete tool_use turn (drives the loop into turn 2 after the
     // tool is dispatched). Turn 2: a partial text block then a mid-stream 429.
     let turn1: Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> =
@@ -2741,7 +2785,12 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
     let api = ResultStreamMockApiClient::new(vec![turn1, turn2]);
     let api2 = api.clone();
     let invoker = CountingInvoker::new();
-    let ctx = loop_ctx(api, Some(invoker), 10);
+    let mut ctx = loop_ctx(api, Some(invoker), 10);
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )) as Arc<dyn traits::FileSystem>);
+    let agent_id = ctx.agent_id;
     let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2781,6 +2830,12 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
     );
     // Both round-trips were attempted (the loop reached turn 2 before erroring).
     assert_eq!(api2.call_count(), 2);
+    let transcript = std::fs::read_to_string(dir.path().join(format!("agent-{agent_id}.jsonl")))
+        .expect("partial completion must persist its transcript before Completed");
+    assert!(
+        transcript.contains("Partial answer before the cutoff"),
+        "salvaged response must remain inspectable: {transcript}"
+    );
 }
 
 /// A qualifying error (`RateLimited`) at request-start on the FIRST turn — with

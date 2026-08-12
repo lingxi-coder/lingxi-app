@@ -174,10 +174,11 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
         return run_slash_command_with_budget(&prompt, runtime, argv.max_budget_usd, sink).await;
     }
 
-    // Structured-output branch (`--json-schema`): the model is forced through the
-    // `StructuredOutput` tool (forced tool_choice wired in `engine_desktop::build`);
-    // we validate its captured result against the schema and retry. Only active
-    // when `build()` surfaced a capture slot (i.e. `--json-schema` + `--print`).
+    // Structured-output branch (`--json-schema`): `engine_desktop::build` wires
+    // the StructuredOutput tool and requests forced tool choice. Providers that
+    // reject that request still receive an explicit prompt requirement here. We
+    // validate the captured result against the schema and retry. Only active when
+    // `build()` surfaced a capture slot (`--json-schema` + `--print`).
     if let Some(slot) = runtime.structured_output_slot.clone() {
         if let Some(schema) = argv
             .json_schema
@@ -2452,10 +2453,18 @@ pub async fn run_json_print(
 }
 
 /// `--json-schema` structured-output loop: run the turn (the model is forced to
-/// call `StructuredOutput`), then validate the captured arguments against
-/// `schema` and retry up to `MAX_STRUCTURED_OUTPUT_RETRIES` — 1:1 with
-/// claude-code. Emits the validated JSON to stdout on success; on exhausted
-/// retries surfaces `error_max_structured_output_retries`.
+/// call `StructuredOutput` when the provider supports forced tool choice, and
+/// is explicitly prompted to call it otherwise. Validate the captured arguments
+/// against `schema` and retry up to `MAX_STRUCTURED_OUTPUT_RETRIES`. Emits the
+/// validated JSON to stdout on success; on exhausted retries surfaces
+/// `error_max_structured_output_retries`.
+fn structured_output_turn_error_is_retryable(err: &orchestrator::OrchestratorError) -> bool {
+    matches!(
+        err,
+        orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 1 }
+    )
+}
+
 async fn run_structured_output(
     runtime: &Runtime,
     prompt: &str,
@@ -2465,14 +2474,15 @@ async fn run_structured_output(
     sink: &dyn OutputSink,
 ) -> i32 {
     use crate::structured_output::{
-        resolve_max_retries, structured_output_decision, StructuredDecision,
+        resolve_max_retries, structured_output_decision, structured_output_prompt,
+        StructuredDecision,
     };
     let max_retries = resolve_max_retries(
         std::env::var("MAX_STRUCTURED_OUTPUT_RETRIES")
             .ok()
             .as_deref(),
     );
-    let mut turn_prompt = prompt.to_string();
+    let mut turn_prompt = structured_output_prompt(prompt);
     for _ in 0..max_retries {
         // Clear the slot before each attempt (no await while the lock is held).
         if let Ok(mut s) = slot.lock() {
@@ -2487,13 +2497,17 @@ async fn run_structured_output(
         )
         .await;
         let captured = slot.lock().ok().and_then(|mut s| s.take());
-        // The forced StructuredOutput call trips the 1-turn cap AFTER capturing the
-        // result, so a turn error WITH a captured value is success, not failure —
-        // only surface the error when nothing was captured.
+        // Any tool call trips the structured-output path's 1-turn cap. A captured
+        // StructuredOutput value is success. Without one, MaxTurnsReached means a
+        // provider that cannot force tool_choice selected another advertised tool;
+        // feed the corrective prompt into the bounded retry loop. Other errors are
+        // genuine runtime failures and remain terminal.
         if captured.is_none() {
             if let Err(e) = turn_result {
-                sink.error("runtime", &e.to_string()).await;
-                return exit_codes::RUNTIME_ERROR;
+                if !structured_output_turn_error_is_retryable(&e) {
+                    sink.error("runtime", &e.to_string()).await;
+                    return exit_codes::RUNTIME_ERROR;
+                }
             }
         }
         match structured_output_decision(captured, schema) {
@@ -3792,6 +3806,19 @@ mod tests {
             stream_json_error_subtype(&orchestrator::OrchestratorError::Internal("boom".into())),
             "error_during_execution"
         );
+    }
+
+    #[test]
+    fn structured_output_retries_the_one_turn_cap_when_no_result_was_captured() {
+        assert!(structured_output_turn_error_is_retryable(
+            &orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 1 }
+        ));
+        assert!(!structured_output_turn_error_is_retryable(
+            &orchestrator::OrchestratorError::Internal("boom".into())
+        ));
+        assert!(!structured_output_turn_error_is_retryable(
+            &orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 3 }
+        ));
     }
 
     #[test]

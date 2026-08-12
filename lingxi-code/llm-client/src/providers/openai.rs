@@ -43,6 +43,23 @@ impl OpenAiChatCodec {
         matches!(self.profile_name.as_deref(), Some("kimi" | "kimi-code"))
     }
 
+    fn is_deepseek_profile(&self) -> bool {
+        let endpoint = self.base_url.trim_end_matches('/');
+        self.profile_name.as_deref() == Some("deepseek")
+            || matches!(
+                endpoint,
+                "https://api.deepseek.com" | "https://api.deepseek.com/v1"
+            )
+    }
+
+    fn deepseek_thinking_rejects_tool_choice(&self, model: &str) -> bool {
+        self.is_deepseek_profile()
+            && matches!(
+                model,
+                "deepseek-reasoner" | "deepseek-v4-flash" | "deepseek-v4-pro"
+            )
+    }
+
     fn kimi_reasoning_effort(&self, request: &LlmRequest) -> Option<&'static str> {
         if !self.is_kimi_profile()
             || !matches!(request.model.as_str(), "kimi-k3" | "k3" | "k3-256k")
@@ -92,13 +109,20 @@ impl WireCodec for OpenAiChatCodec {
             messages.push(serde_json::json!({"role": "system", "content": text}));
         }
 
-        let preserve_reasoning_content = self.is_kimi_profile();
-        messages.extend(
-            request
-                .messages
-                .iter()
-                .flat_map(|message| encode_message(message, preserve_reasoning_content)),
-        );
+        let require_assistant_tool_content = self.is_deepseek_profile();
+        messages.extend(request.messages.iter().flat_map(|message| {
+            let preserve_reasoning_content = self.is_kimi_profile()
+                || (self.is_deepseek_profile()
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ToolCall { .. })));
+            encode_message(
+                message,
+                preserve_reasoning_content,
+                require_assistant_tool_content,
+            )
+        }));
 
         let mut body = serde_json::Map::new();
         let legacy_deepseek = self.deepseek_legacy_model(&request.model);
@@ -152,8 +176,15 @@ impl WireCodec for OpenAiChatCodec {
             );
         }
 
-        if let Some(tool_choice) = &request.tool_choice {
-            body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
+        // DeepSeek V4 thinking mode rejects the `tool_choice` parameter. Keep
+        // the tools themselves so workflow schema agents can follow their
+        // StructuredOutput prompt and rely on the existing local validation,
+        // nudge, and bounded retry path. The retired `deepseek-chat` alias
+        // explicitly disables thinking above and can still use named choice.
+        if !self.deepseek_thinking_rejects_tool_choice(&request.model) {
+            if let Some(tool_choice) = &request.tool_choice {
+                body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
+            }
         }
 
         if !request.tools.is_empty() {
@@ -483,7 +514,11 @@ impl OpenAiStreamDecoder {
     }
 }
 
-fn encode_message(message: &crate::Message, preserve_reasoning_content: bool) -> Vec<Value> {
+fn encode_message(
+    message: &crate::Message,
+    preserve_reasoning_content: bool,
+    require_assistant_tool_content: bool,
+) -> Vec<Value> {
     let mut text = String::new();
     let mut reasoning_content = String::new();
     let mut media_parts: Vec<Value> = Vec::new();
@@ -533,7 +568,11 @@ fn encode_message(message: &crate::Message, preserve_reasoning_content: bool) ->
                     has_media = false;
                 }
                 if !tool_calls.is_empty() {
-                    messages.push(assistant_tool_call_message(&message.role, &tool_calls));
+                    messages.push(assistant_tool_call_message(
+                        &message.role,
+                        &tool_calls,
+                        require_assistant_tool_content,
+                    ));
                     tool_calls.clear();
                 }
                 messages.push(serde_json::json!({
@@ -588,12 +627,26 @@ fn encode_message(message: &crate::Message, preserve_reasoning_content: bool) ->
         ));
     }
     if !tool_calls.is_empty() {
-        messages.push(assistant_tool_call_message(&message.role, &tool_calls));
+        messages.push(assistant_tool_call_message(
+            &message.role,
+            &tool_calls,
+            require_assistant_tool_content,
+        ));
     }
     if !reasoning_content.is_empty() {
-        if let Some(Value::Object(assistant)) = messages
+        let assistant_index = messages
             .iter_mut()
-            .find(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
+            .position(|value| {
+                value.get("role").and_then(Value::as_str) == Some("assistant")
+                    && value.get("tool_calls").is_some()
+            })
+            .or_else(|| {
+                messages.iter().position(|value| {
+                    value.get("role").and_then(Value::as_str) == Some("assistant")
+                })
+            });
+        if let Some(Value::Object(assistant)) =
+            assistant_index.and_then(|index| messages.get_mut(index))
         {
             assistant.insert(
                 "reasoning_content".to_string(),
@@ -638,10 +691,17 @@ fn text_message(role: &str, text: &str) -> Value {
     })
 }
 
-fn assistant_tool_call_message(role: &str, tool_calls: &[Value]) -> Value {
+fn assistant_tool_call_message(role: &str, tool_calls: &[Value], require_content: bool) -> Value {
     let mut message_json = serde_json::Map::new();
     message_json.insert("role".to_string(), Value::String(role.to_string()));
-    message_json.insert("content".to_string(), Value::Null);
+    message_json.insert(
+        "content".to_string(),
+        if require_content {
+            Value::String(String::new())
+        } else {
+            Value::Null
+        },
+    );
     message_json.insert("tool_calls".to_string(), Value::Array(tool_calls.to_vec()));
     Value::Object(message_json)
 }
@@ -696,9 +756,10 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
             match block {
                 // Image, ImageUrl, and Document are now encoded as content parts.
                 // Reasoning / RedactedThinking are intentionally NOT rejected: the stream
-                // decoder emits Reasoning blocks into history, and chat-completions APIs
-                // reject reasoning_content as input (deepseek docs say not to send it back),
-                // so encode_message simply skips them. Erroring here would break turn 2+.
+                // decoder emits Reasoning blocks into history. Most chat-completions
+                // providers reject reasoning_content as input, so encode_message skips
+                // it unless a provider-specific tool-call replay path opts in.
+                // Erroring here would break turn 2+.
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {
@@ -881,6 +942,111 @@ mod tests {
 
     fn body_of(request: &ProviderRequest) -> &Value {
         &request.body_json
+    }
+
+    fn request_with_named_tool_choice(model: &str) -> LlmRequest {
+        let mut request = LlmRequest::new(model);
+        request.tool_choice = Some(ToolChoice::Tool {
+            name: "StructuredOutput".to_string(),
+        });
+        request.tools.push(ToolDeclaration {
+            name: "StructuredOutput".to_string(),
+            description: "Return structured output".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"]
+            }),
+            ..ToolDeclaration::default()
+        });
+        request
+    }
+
+    #[test]
+    fn deepseek_thinking_omits_named_tool_choice_but_keeps_structured_output_tool() {
+        for codec in [
+            OpenAiChatCodec::new("https://api.deepseek.com"),
+            OpenAiChatCodec::new("https://deepseek-proxy.example/v1").with_profile_name("deepseek"),
+        ] {
+            let encoded = codec
+                .encode_request(&request_with_named_tool_choice("deepseek-v4-flash"))
+                .expect("encode DeepSeek V4 structured-output request");
+            let body = body_of(&encoded);
+
+            assert!(
+                body.get("tool_choice").is_none(),
+                "DeepSeek V4 thinking mode rejects named tool_choice"
+            );
+            assert_eq!(
+                body["tools"][0]["function"]["name"], "StructuredOutput",
+                "the prompt-driven fallback still advertises StructuredOutput"
+            );
+        }
+    }
+
+    #[test]
+    fn named_tool_choice_is_kept_when_deepseek_thinking_is_disabled_or_provider_supports_it() {
+        let deepseek_chat = OpenAiChatCodec::new("https://api.deepseek.com")
+            .encode_request(&request_with_named_tool_choice("deepseek-chat"))
+            .expect("encode legacy non-thinking DeepSeek request");
+        assert_eq!(body_of(&deepseek_chat)["thinking"]["type"], "disabled");
+        assert_eq!(
+            body_of(&deepseek_chat)["tool_choice"]["function"]["name"],
+            "StructuredOutput"
+        );
+
+        let openai = OpenAiChatCodec::new("https://api.openai.com/v1")
+            .with_profile_name("openai")
+            .encode_request(&request_with_named_tool_choice("gpt-4o"))
+            .expect("encode OpenAI structured-output request");
+        assert_eq!(
+            body_of(&openai)["tool_choice"]["function"]["name"],
+            "StructuredOutput"
+        );
+    }
+
+    #[test]
+    fn deepseek_tool_history_preserves_reasoning_and_non_null_assistant_content() {
+        let mut request = LlmRequest::new("deepseek-v4-flash");
+        request.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "choose the design skill".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "I will use the design skill.".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::ToolCall {
+                    id: "call_skill".to_string(),
+                    name: "Skill".to_string(),
+                    input: serde_json::json!({"skill": "frontend-design"}),
+                },
+            ],
+        });
+
+        let encoded = OpenAiChatCodec::new("https://api.deepseek.com")
+            .encode_request(&request)
+            .expect("encode DeepSeek tool history");
+        let messages = encoded.body_json["messages"]
+            .as_array()
+            .expect("DeepSeek messages array");
+        assert_eq!(messages[0]["content"], "I will use the design skill.");
+        assert!(messages[0].get("reasoning_content").is_none());
+        assert_eq!(messages[1]["content"], "");
+        assert_eq!(messages[1]["reasoning_content"], "choose the design skill");
+
+        let openai = OpenAiChatCodec::new("https://api.openai.com/v1")
+            .encode_request(&request)
+            .expect("encode ordinary OpenAI tool history");
+        let messages = openai.body_json["messages"]
+            .as_array()
+            .expect("OpenAI messages array");
+        assert_eq!(messages[0]["content"], "I will use the design skill.");
+        assert!(messages[1]["content"].is_null());
+        assert!(messages[1].get("reasoning_content").is_none());
     }
 
     /// (a) A request carrying a reasoning budget no longer errors, and the

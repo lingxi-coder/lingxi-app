@@ -159,6 +159,11 @@ mod tests {
         }
         // Fails fast without an app id rather than spawning agents blind.
         assert!(descriptor.script.contains("requires args.app_id"));
+        assert_eq!(
+            descriptor.script.matches("await agent(").count(),
+            descriptor.script.matches("throwOnError: true").count(),
+            "every local-app agent stage must surface its terminal failure reason",
+        );
         let forbidden_model_name = ["gpt-5.6", "luna"].concat();
         assert!(!descriptor.script.contains(&forbidden_model_name));
     }

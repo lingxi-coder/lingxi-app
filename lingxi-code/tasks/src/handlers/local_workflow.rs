@@ -625,6 +625,15 @@ fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> Strin
     }
 }
 
+fn subagent_failure_reason(result: &Result<SubagentResult, SubagentSpawnError>) -> Option<String> {
+    match result {
+        Ok(SubagentResult::Completed { .. }) => None,
+        Ok(SubagentResult::Failed { reason, .. }) => Some(reason.clone()),
+        Ok(SubagentResult::Killed { .. }) => Some("subagent was cancelled".to_string()),
+        Err(error) => Some(error.to_string()),
+    }
+}
+
 /// Render a live `phase()`/`log()`/`agent` progress event as a task-output line.
 ///
 /// `Phase` and `Log` render as human-readable text lines (back-compat).
@@ -643,6 +652,7 @@ fn format_progress(p: &workflow::Progress) -> String {
             agent_id,
             model,
             state,
+            error,
             tool_use_id,
         } => {
             let mut obj = serde_json::json!({
@@ -664,6 +674,9 @@ fn format_progress(p: &workflow::Progress) -> String {
                 }
                 if let Some(m) = model {
                     obj_map.insert("model".to_string(), serde_json::json!(m));
+                }
+                if let Some(error) = error {
+                    obj_map.insert("error".to_string(), serde_json::json!(error));
                 }
             }
             format!(
@@ -1018,6 +1031,7 @@ pub async fn run_workflow_script(
                             agent_id: None,
                             model: None,
                             state: workflow::AgentState::Cached,
+                            error: None,
                             tool_use_id,
                         };
                         if let Some(ref tx) = ptx {
@@ -1096,6 +1110,7 @@ pub async fn run_workflow_script(
                         agent_id: None,
                         model: agent_model.clone(),
                         state: workflow::AgentState::Start,
+                        error: None,
                         tool_use_id: format!("workflow_agent_{call_index}_queued"),
                     };
                     if let Some(ref tx) = ptx {
@@ -1108,6 +1123,7 @@ pub async fn run_workflow_script(
                 };
                 let request = make_request(&subagent_type, &prompt, &opts_json);
                 let raw = spawner.spawn(request, inherit).await;
+                let terminal_error = subagent_failure_reason(&raw);
                 // Accumulate this fresh subagent's output tokens into the shared
                 // `spent` pool (replayed/cached agents cost nothing) — the same
                 // pool the main loop feeds when wired.
@@ -1140,10 +1156,16 @@ pub async fn run_workflow_script(
                         agent_id: agent_id_str,
                         model: agent_model,
                         state,
+                        error: terminal_error.clone(),
                         tool_use_id,
                     };
                     if let Some(ref tx) = ptx {
                         let _ = tx.send(format_progress(&lifecycle_event));
+                    }
+                }
+                if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
+                    if let Some(error) = terminal_error {
+                        return wf_throw(&format!("Workflow agent {label:?} failed: {error}"));
                     }
                 }
                 let result = result_to_string(raw);

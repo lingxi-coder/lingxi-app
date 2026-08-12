@@ -54,12 +54,13 @@ globalThis.__wf_pump = () => {
   globalThis.__wf_queue = [];
   // Dispatch the batch as two parallel arrays: the prompts and the JSON-encoded
   // opts ({agentType, model, isolation, schema, label, phase, effort}). The host
-  // runner maps the spawn-affecting opts onto each subagent request.
+  // runner maps the spawn-affecting opts onto each subagent request; host-only
+  // behavior such as `throwOnError` is consumed by the runner itself.
   const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt), q.map((x) => JSON.stringify(x.opts || {})));
   for (let i = 0; i < q.length; i++) {
     const r = results[i];
     if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
-      // agent-cap / budget-ceiling → REJECT (claude throws these).
+      // Agent-cap, budget-ceiling, or caller-requested terminal failure → reject.
       q[i].rej(new Error(r.slice(globalThis.__WF_THROW_PREFIX.length)));
     } else if (r === globalThis.__WF_NULL) {
       // skipped / dead agent → resolve with null (claude-code's contract).
@@ -216,6 +217,8 @@ pub enum Progress {
         model: Option<String>,
         /// Lifecycle state.
         state: AgentState,
+        /// Failure/cancellation detail for `Error` events.
+        error: Option<String>,
         /// `toolUseID = "workflow_agent_{index}_{agent_id_or_suffix}"`.
         tool_use_id: String,
     },

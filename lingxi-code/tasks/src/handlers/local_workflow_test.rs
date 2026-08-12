@@ -2246,8 +2246,44 @@ async fn workflow_agent_error_event_on_failure() {
             let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
             (v["state"] == "error").then_some(v)
         });
+    let error_event = error_event.unwrap_or_else(|| {
+        panic!("error event must be emitted for failed agent; lines: {lines:?}")
+    });
+    assert_eq!(
+        error_event["error"], "boom",
+        "the terminal event must preserve the subagent failure reason"
+    );
+}
+
+/// Critical workflows can opt out of the compatibility `null` result and make
+/// a failed agent reject with its original reason.
+#[tokio::test]
+async fn workflow_agent_throw_on_error_preserves_failure_reason() {
+    let err = run_workflow_script(
+        "await agent('task', { throwOnError: true });",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner {
+            fail: true,
+            ..Default::default()
+        }),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect_err("throwOnError must reject the agent promise");
+
     assert!(
-        error_event.is_some(),
-        "error event must be emitted for failed agent; lines: {lines:?}"
+        err.to_string().contains("boom"),
+        "the workflow error must retain the real subagent reason: {err}"
     );
 }

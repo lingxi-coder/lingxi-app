@@ -739,6 +739,55 @@ async fn emit_message(
         .await;
 }
 
+async fn flush_transcript(
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    history: &[protocol::ConversationMessage],
+    written: &mut usize,
+) {
+    let Some(writer) = transcript else {
+        return;
+    };
+    // The watermark is normally <= history.len(). Be defensive around a
+    // malformed restored history so transcript persistence can never panic and
+    // mask the actual agent terminal event.
+    let start = (*written).min(history.len());
+    for message in &history[start..] {
+        if writer.record(message).await.is_err() {
+            break;
+        }
+        *written += 1;
+    }
+}
+
+async fn emit_failed(
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    history: &[protocol::ConversationMessage],
+    written: &mut usize,
+    agent_id: AgentId,
+    error: String,
+) {
+    flush_transcript(transcript, history, written).await;
+    if let Some(writer) = transcript {
+        let _ = writer.record_terminal("failed", Some(&error)).await;
+    }
+    let _ = out_tx.send(SubagentEvent::Failed { agent_id, error }).await;
+}
+
+async fn emit_killed(
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    history: &[protocol::ConversationMessage],
+    written: &mut usize,
+    agent_id: AgentId,
+) {
+    flush_transcript(transcript, history, written).await;
+    if let Some(writer) = transcript {
+        let _ = writer.record_terminal("cancelled", None).await;
+    }
+    let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+}
+
 /// Returns the companion note suffix (`yyo` in the binary, `nke` set) appended
 /// to the allow-list-refusal error when a subagent tries to call a tool from
 /// the "external companion" set that has been stripped from its pool.
@@ -991,7 +1040,15 @@ async fn run_subagent_loop(
                             )
                         },
                     );
-                    let _ = out_tx.send(SubagentEvent::Failed { agent_id, error }).await;
+                    emit_failed(
+                        &out_tx,
+                        transcript.as_ref(),
+                        &history,
+                        &mut transcript_written,
+                        agent_id,
+                        error,
+                    )
+                    .await;
                     return;
                 }
                 // `Ok` and `BudgetError::Internal` fall through to the round-trip:
@@ -1080,7 +1137,14 @@ async fn run_subagent_loop(
                     ev = event_rx.recv() => {
                         match ev {
                             Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
-                                let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+                                emit_killed(
+                                    &out_tx,
+                                    transcript.as_ref(),
+                                    &history,
+                                    &mut transcript_written,
+                                    agent_id,
+                                )
+                                .await;
                                 return;
                             }
                             // (M9 cc2.1.198 wake-on-message) messaging a stuck
@@ -1131,6 +1195,25 @@ async fn run_subagent_loop(
                         {
                             let cutoff_note = build_cutoff_note(api_error_text);
                             let result = build_recovered_result(&history, &salvaged, &cutoff_note);
+                            if !salvaged.is_empty() {
+                                let partial_message = ConversationMessage::Assistant {
+                                    id: MessageId::new(),
+                                    content: salvaged,
+                                    stop_reason: Some("api_error".to_string()),
+                                };
+                                history.push(partial_message.clone());
+                                emit_message(&out_tx, agent_id, &partial_message).await;
+                                assistant_message_count = assistant_message_count.saturating_add(1);
+                            }
+                            // Make the transcript observable before publishing the
+                            // terminal event. The receiver may release the runner as
+                            // soon as it sees `Completed`.
+                            flush_transcript(
+                                transcript.as_ref(),
+                                &history,
+                                &mut transcript_written,
+                            )
+                            .await;
                             let _ = out_tx
                                 .send(SubagentEvent::Completed {
                                     agent_id,
@@ -1145,12 +1228,15 @@ async fn run_subagent_loop(
                             return;
                         }
                         _ => {
-                            let _ = out_tx
-                                .send(SubagentEvent::Failed {
-                                    agent_id,
-                                    error: format!("subagent api error: {e}"),
-                                })
-                                .await;
+                            emit_failed(
+                                &out_tx,
+                                transcript.as_ref(),
+                                &history,
+                                &mut transcript_written,
+                                agent_id,
+                                format!("subagent api error: {e}"),
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -1218,13 +1304,15 @@ async fn run_subagent_loop(
             if !tool_uses.is_empty() {
                 // Dispatch each tool_use through the inherited invoker.
                 let Some(invoker) = &ctx.tool_invoker else {
-                    let _ = out_tx
-                        .send(SubagentEvent::Failed {
-                            agent_id,
-                            error: "subagent requested a tool but no tool_invoker was inherited"
-                                .to_string(),
-                        })
-                        .await;
+                    emit_failed(
+                        &out_tx,
+                        transcript.as_ref(),
+                        &history,
+                        &mut transcript_written,
+                        agent_id,
+                        "subagent requested a tool but no tool_invoker was inherited".to_string(),
+                    )
+                    .await;
                     return;
                 };
 
@@ -1407,13 +1495,16 @@ async fn run_subagent_loop(
                 } else {
                     "calls"
                 };
-                let _ = out_tx
-                .send(SubagentEvent::Failed {
+                emit_failed(
+                    &out_tx,
+                    transcript.as_ref(),
+                    &history,
+                    &mut transcript_written,
                     agent_id,
-                    error: format!(
+                    format!(
                         "agent({{schema}}): StructuredOutput retry cap ({structured_retry_cap}) exceeded \u{2014} {structured_failed_count} failed {calls} with no valid output"
                     ),
-                })
+                )
                 .await;
                 return;
             }
@@ -1441,26 +1532,29 @@ async fn run_subagent_loop(
                     if structured_nudge_count < 2 {
                         structured_nudge_count = structured_nudge_count.saturating_add(1);
                         let nudge = ConversationMessage::user(
-                        MessageId::new(),
-                        "You did not call StructuredOutput. You MUST call StructuredOutput to return your answer \u{2014} the tool input IS your answer. Call it now.".to_string(),
-                    );
+                            MessageId::new(),
+                            "You did not call StructuredOutput. You MUST call StructuredOutput to return your answer \u{2014} the tool input IS your answer. Call it now.".to_string(),
+                        );
                         history.push(nudge.clone());
                         emit_message(&out_tx, agent_id, &nudge).await;
                         // Re-run the turn loop with the nudge appended (still bounded
                         // by `max_turns`).
                         continue;
                     }
-                    let _ = out_tx
-                    .send(SubagentEvent::Failed {
+                    emit_failed(
+                        &out_tx,
+                        transcript.as_ref(),
+                        &history,
+                        &mut transcript_written,
                         agent_id,
                         // Byte-locked to claude 2.1.195 (binary strings :331985 /
-                // :514141, the workflow `agent({schema})` runtime): the give-up
-                // wording is SINGULAR "(after in-conversation nudge)" with no
-                // count. (claude's exact in-conversation nudge body and its
-                // nudge count are not discoverable static strings in the binary,
-                // so the port's nudge text + 2× retry are left as-is.)
-                error: "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
-                    })
+                        // :514141, the workflow `agent({schema})` runtime): the give-up
+                        // wording is SINGULAR "(after in-conversation nudge)" with no
+                        // count. (claude's exact in-conversation nudge body and its
+                        // nudge count are not discoverable static strings in the binary,
+                        // so the port's nudge text + 2× retry are left as-is.)
+                        "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
+                    )
                     .await;
                     return;
                 }
@@ -1476,6 +1570,9 @@ async fn run_subagent_loop(
                         build_completed_result(&history, &assistant_blocks, stop_reason.as_deref())
                     }
                 };
+                // Persist all messages before publishing the terminal event; the
+                // consumer is allowed to tear down a one-shot runner immediately.
+                flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
                 let _ = out_tx
                     .send(SubagentEvent::Completed {
                         agent_id,
@@ -1501,6 +1598,7 @@ async fn run_subagent_loop(
             // stop. claude-code surfaces this as a completion carrying a max-turns
             // reason rather than a hard failure, so the parent can still consume
             // whatever work was produced.
+            flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
             let _ = out_tx
                 .send(SubagentEvent::Completed {
                     agent_id,
@@ -1522,14 +1620,7 @@ async fn run_subagent_loop(
         // much a record as a persistent one's, and the `SubagentStop` hook
         // reports its path either way. Best-effort: a transcript write failure
         // must never mask the agent's result.
-        if let Some(writer) = &transcript {
-            for message in &history[transcript_written..] {
-                if writer.record(message).await.is_err() {
-                    break;
-                }
-                transcript_written += 1;
-            }
-        }
+        flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
 
         // ----- Persist decision ------------------------------------------------
         // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
@@ -1556,7 +1647,14 @@ async fn run_subagent_loop(
                     break;
                 }
                 Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
-                    let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+                    emit_killed(
+                        &out_tx,
+                        transcript.as_ref(),
+                        &history,
+                        &mut transcript_written,
+                        agent_id,
+                    )
+                    .await;
                     return;
                 }
                 // Ignore any other event while idle and keep parking.

@@ -1,13 +1,14 @@
 //! `--json-schema` structured-output support.
 //!
 //! Faithful port of claude-code's structured-output path (`QueryEngine.ts`,
-//! gated on `hasStructuredOutputTool`): in print mode the model is FORCED to
-//! call a `StructuredOutput` tool whose `input_schema` is the user-supplied
-//! schema; the returned arguments are validated against that schema client-side
-//! and the turn is retried up to `MAX_STRUCTURED_OUTPUT_RETRIES` times on
-//! failure. This module owns the two pure pieces — schema validation and the
-//! retry budget — so they are unit-testable without the live turn loop. The
-//! tool itself + the print-path retry loop wire these in.
+//! gated on `hasStructuredOutputTool`): in print mode the model calls a
+//! `StructuredOutput` tool whose `input_schema` is the user-supplied schema.
+//! Supporting providers receive a forced tool choice; providers whose reasoning
+//! mode rejects `tool_choice` receive the same requirement in the prompt. The
+//! returned arguments are validated against that schema client-side and the turn
+//! is retried up to `MAX_STRUCTURED_OUTPUT_RETRIES` times on failure. This module
+//! owns the pure prompt, schema-validation, and retry-budget pieces so they are
+//! unit-testable without the live turn loop.
 //!
 //! The validator covers the common JSON-Schema subset structured-output prompts
 //! use: `type` (incl. type arrays + `integer`), `required`, `properties`,
@@ -22,6 +23,16 @@ use serde_json::Value;
 /// `MAX_STRUCTURED_OUTPUT_RETRIES` default (claude-code reads the env of the
 /// same name, defaulting to `5`).
 pub const DEFAULT_MAX_STRUCTURED_OUTPUT_RETRIES: u32 = 5;
+
+const STRUCTURED_OUTPUT_REQUIRED_PROMPT: &str =
+    "You must call the StructuredOutput tool exactly once with the final result. Do not call any other tool.";
+
+/// Add a prompt-level requirement for providers that advertise tools but do
+/// not support a forced `tool_choice` in their current reasoning mode.
+#[must_use]
+pub(crate) fn structured_output_prompt(prompt: &str) -> String {
+    format!("{prompt}\n\n{STRUCTURED_OUTPUT_REQUIRED_PROMPT}")
+}
 
 /// Resolve the structured-output retry budget from `MAX_STRUCTURED_OUTPUT_RETRIES`
 /// (1:1 with `QueryEngine.ts` `parseInt(process.env.MAX_STRUCTURED_OUTPUT_RETRIES || '5')`).
@@ -63,9 +74,7 @@ pub fn structured_output_decision(captured: Option<Value>, schema: &Value) -> St
                 ))
             }
         }
-        None => StructuredDecision::Retry(
-            "You must call the StructuredOutput tool with the final result.".to_string(),
-        ),
+        None => StructuredDecision::Retry(STRUCTURED_OUTPUT_REQUIRED_PROMPT.to_string()),
     }
 }
 
@@ -203,6 +212,15 @@ mod tests {
         assert_eq!(resolve_max_retries(Some("0")), 5); // non-positive → default
         assert_eq!(resolve_max_retries(Some("nope")), 5); // unparseable → default
         assert_eq!(resolve_max_retries(Some("  7 ")), 7); // trimmed
+    }
+
+    #[test]
+    fn initial_prompt_requires_the_structured_output_tool() {
+        let prompt = structured_output_prompt("Summarize the repository");
+        assert!(prompt.starts_with("Summarize the repository\n\n"));
+        assert!(prompt.contains("must call the StructuredOutput tool"));
+        assert!(prompt.contains("Do not call any other tool"));
+        assert!(prompt.contains("final result"));
     }
 
     #[test]

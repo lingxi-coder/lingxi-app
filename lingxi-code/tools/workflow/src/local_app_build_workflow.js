@@ -80,11 +80,10 @@ const BUILD_RESULT_SCHEMA = {
   required: ['ok', 'preview_url', 'summary'],
 };
 
-// A subagent that dies (API error, kill, retry exhaustion) does NOT throw —
-// agent() resolves to null. Every phase below feeds its result into the next
-// prompt or into the terminal verdict, so an unchecked null silently degrades
-// into `JSON.stringify(null)` in a prompt and an `ok:false` return, which the
-// task handler still reports as Completed.
+// Local-app stages opt into throwOnError so the provider/runtime reason reaches
+// the parent task immediately. Keep this null guard as a compatibility fallback
+// for older or alternate workflow hosts that implement the default agent()
+// contract (failed/killed agents resolve to null).
 const requireAgentResult = (result, stage) => {
   if (!result) {
     throw new Error(
@@ -144,7 +143,12 @@ const designResult = await agent(
     'If the confirmed brief needs an original bitmap asset (photo, illustration, texture, hero, or background), conditionally detect ImageGen; when ready, record prompt/source/use and generate under public/. If unavailable, ask once whether to configure it or skip, then continue with CSS, gradients, user assets, or a placeholder without treating ImageGen as a hard dependency. Never use ImageGen for ordinary UI icons.',
     'The CLI scaffold is the only Design-phase source initialization. Do not install packages in this phase; Dependencies owns npm install/npm uninstall/npm ci.',
   ].join('\n'),
-  { label: 'design', phase: 'Design', schema: DESIGN_RESULT_SCHEMA },
+  {
+    label: 'design',
+    phase: 'Design',
+    schema: DESIGN_RESULT_SCHEMA,
+    throwOnError: true,
+  },
 );
 const design = requireAgentResult(designResult, 'the design step');
 
@@ -162,7 +166,7 @@ const dependenciesResult = await agent(
     'Use the existing Git/Bash capability for checkpoint status, diff, and source restore operations; preserve app data and keep package-lock.json in the normal workspace history.',
     'Reject empty, newline/NUL, option-like, ambiguous, or more-than-64 specs before invoking Shell; keep every displayed spec exact and never silently add a package.',
   ].join('\n'),
-  { label: 'dependencies', phase: 'Dependencies' },
+  { label: 'dependencies', phase: 'Dependencies', throwOnError: true },
 );
 const dependencies = requireAgentResult(dependenciesResult, 'the dependency step');
 
@@ -179,7 +183,7 @@ const generated = await agent(
     '',
     'Use platform tokens and adapters instead of scattered platform conditionals. Include loading, empty, error, success, disabled, offline, permission-denied, and reduced-motion states where relevant. Build actual copy and interaction paths, not a placeholder shell. Do not build or start anything in this phase.',
   ].join('\n'),
-  { label: 'generate', phase: 'Generate' },
+  { label: 'generate', phase: 'Generate', throwOnError: true },
 );
 // Without this check the Build phase would happily build the untouched
 // scaffold, the host would stamp the app `ready`, and the workflow would
@@ -199,6 +203,7 @@ let build = requirePreviewOnSuccess(await agent(
     label: 'build',
     phase: 'Build',
     schema: BUILD_RESULT_SCHEMA,
+    throwOnError: true,
   },
 ), 'initial build');
 
@@ -223,6 +228,7 @@ for (let round = 0; round <= 2; round += 1) {
       label: `verify-${round}`,
       phase: 'Verify',
       schema: VERIFICATION_RESULT_SCHEMA,
+      throwOnError: true,
     },
   );
   if (verification && verification.ok) break;
@@ -235,7 +241,11 @@ for (let round = 0; round <= 2; round += 1) {
       CONTRACT,
       'Fix the smallest source-level cause. Do not install packages or edit workspace package files in the repair pass, and do not claim verification yet.',
     ].join('\n'),
-    { label: `repair-${repairRounds}`, phase: 'Verify' },
+    {
+      label: `repair-${repairRounds}`,
+      phase: 'Verify',
+      throwOnError: true,
+    },
   );
   build = requirePreviewOnSuccess(await agent(
     [
@@ -249,6 +259,7 @@ for (let round = 0; round <= 2; round += 1) {
       label: `rebuild-${repairRounds}`,
       phase: 'Verify',
       schema: BUILD_RESULT_SCHEMA,
+      throwOnError: true,
     },
   ), `rebuild ${repairRounds}`);
 }

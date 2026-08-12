@@ -126,14 +126,9 @@ impl OAuthHandle {
     /// caller and must remain private until [`Self::complete_mobile_browser_login`]
     /// receives the callback.
     #[must_use]
-    pub fn begin_mobile_browser_login(
-        &self,
-        redirect_uri: &str,
-    ) -> (String, String, String) {
-        self.client.build_authorize_url_with_options(
-            redirect_uri,
-            &AuthorizeOptions::default(),
-        )
+    pub fn begin_mobile_browser_login(&self, redirect_uri: &str) -> (String, String, String) {
+        self.client
+            .build_authorize_url_with_options(redirect_uri, &AuthorizeOptions::default())
     }
 
     /// Complete a native-host callback and persist the Anthropic session.

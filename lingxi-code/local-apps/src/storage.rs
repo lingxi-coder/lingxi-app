@@ -892,7 +892,10 @@ mod tests {
         let app = new_app("dddd4444");
         save_full(dir.path(), std::slice::from_ref(&app));
         // Rewrite index + mirror with a legacy mid-pipeline state.
-        for rel in ["apps/index.json", "apps/dddd4444/workspace/.lingxi/app.json"] {
+        for rel in [
+            "apps/index.json",
+            "apps/dddd4444/workspace/.lingxi/app.json",
+        ] {
             let path = dir.path().join(rel);
             let body = std::fs::read_to_string(&path).unwrap();
             std::fs::write(

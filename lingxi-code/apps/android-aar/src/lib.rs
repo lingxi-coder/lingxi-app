@@ -202,6 +202,85 @@ pub struct AndroidProviderConfigFfi {
     pub routing_json: Option<String>,
 }
 
+/// Stable Android device class supplied by the native host.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum AndroidDeviceClassFfi {
+    /// A handset-sized Android device.
+    Phone,
+    /// A tablet-sized Android device.
+    Tablet,
+    /// Native configuration did not expose a reliable classification.
+    Unknown,
+}
+
+/// Best-effort classification of the Android execution target.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum AndroidExecutionTargetFfi {
+    /// A physical Android device.
+    PhysicalDevice,
+    /// An Android emulator or another well-known virtual-device image.
+    Emulator,
+    /// Build facts were unavailable, so no target was inferred.
+    Unknown,
+}
+
+/// Whether the engine was launched for an interactive or scheduled session.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum AndroidLaunchModeFfi {
+    /// A user-visible interactive conversation engine.
+    Interactive,
+    /// A transient engine launched by scheduled background work.
+    ScheduledHeadless,
+}
+
+/// Stable host facts collected by Kotlin when an Android engine is launched.
+///
+/// Runtime capabilities are deliberately absent: Rust derives those after the
+/// mobile runtime probe and registration gates have completed.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AndroidHostEnvironmentFfi {
+    /// Android release/API label, for example `16 (API 36)`.
+    pub host_os_version: Option<String>,
+    /// Stable phone/tablet classification.
+    pub device_class: AndroidDeviceClassFfi,
+    /// Best-effort physical/emulator classification.
+    pub execution_target: AndroidExecutionTargetFfi,
+    /// Interactive foreground vs scheduled headless launch.
+    pub launch_mode: AndroidLaunchModeFfi,
+}
+
+impl From<AndroidHostEnvironmentFfi> for traits::mobile_runtime_environment::MobileHostEnvironment {
+    fn from(value: AndroidHostEnvironmentFfi) -> Self {
+        use traits::mobile_runtime_environment::{
+            MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
+            MobileLaunchMode,
+        };
+
+        MobileHostEnvironment::new(
+            MobileHostOs::Android,
+            value.host_os_version,
+            match value.device_class {
+                AndroidDeviceClassFfi::Phone => MobileDeviceClass::Phone,
+                AndroidDeviceClassFfi::Tablet => MobileDeviceClass::Tablet,
+                AndroidDeviceClassFfi::Unknown => MobileDeviceClass::Unknown,
+            },
+            match value.execution_target {
+                AndroidExecutionTargetFfi::PhysicalDevice => MobileExecutionTarget::PhysicalDevice,
+                AndroidExecutionTargetFfi::Emulator => MobileExecutionTarget::Emulator,
+                AndroidExecutionTargetFfi::Unknown => MobileExecutionTarget::Unknown,
+            },
+            match value.launch_mode {
+                AndroidLaunchModeFfi::Interactive => MobileLaunchMode::Interactive,
+                AndroidLaunchModeFfi::ScheduledHeadless => MobileLaunchMode::ScheduledHeadless,
+            },
+        )
+    }
+}
+
 /// Compact launch configuration for the extended Android engine constructor.
 ///
 /// Keeping the scalar and record inputs behind one FFI record is intentional:
@@ -227,6 +306,8 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub local_apps_runtime_root: Option<String>,
     /// Device physical memory reported by the Android host.
     pub physical_memory_bytes: u64,
+    /// Stable native-host facts. Absent for legacy launch entry points.
+    pub host_environment: Option<AndroidHostEnvironmentFfi>,
 }
 
 #[cfg(feature = "uniffi")]
@@ -615,6 +696,13 @@ pub fn build_mobile_engine(
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_files_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_files_root).join(branding::DOT_DIR),
+            host_environment: Some(traits::MobileHostEnvironment::new(
+                traits::MobileHostOs::Android,
+                None,
+                traits::MobileDeviceClass::Unknown,
+                traits::MobileExecutionTarget::Unknown,
+                traits::MobileLaunchMode::Unknown,
+            )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -3516,6 +3604,7 @@ pub fn build_android_engine(
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
             physical_memory_bytes: 0,
+            host_environment: None,
         },
         listener,
         stt,
@@ -3568,6 +3657,7 @@ pub fn build_android_engine_with_mobile_linux(
         local_apps_full_runtime,
         local_apps_runtime_root,
         physical_memory_bytes,
+        host_environment,
     } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -3589,6 +3679,18 @@ pub fn build_android_engine_with_mobile_linux(
             local_apps_full_runtime,
             local_apps_runtime_root: local_apps_runtime_root.map(std::path::PathBuf::from),
             physical_memory_bytes,
+            host_environment: Some(host_environment.map_or_else(
+                || {
+                    traits::MobileHostEnvironment::new(
+                        traits::MobileHostOs::Android,
+                        None,
+                        traits::MobileDeviceClass::Unknown,
+                        traits::MobileExecutionTarget::Unknown,
+                        traits::MobileLaunchMode::Unknown,
+                    )
+                },
+                Into::into,
+            )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -3902,6 +4004,7 @@ pub fn build_android_engine_with_mobile_linux(
             git,
             provider_config,
             mobile_linux,
+            host_environment,
             git_credential_provider,
             secure_storage,
         );
@@ -4692,6 +4795,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn android_host_environment_maps_to_shared_stable_facts() {
+        let environment: traits::mobile_runtime_environment::MobileHostEnvironment =
+            super::AndroidHostEnvironmentFfi {
+                host_os_version: Some("16 (API 36)".to_string()),
+                device_class: super::AndroidDeviceClassFfi::Tablet,
+                execution_target: super::AndroidExecutionTargetFfi::Emulator,
+                launch_mode: super::AndroidLaunchModeFfi::ScheduledHeadless,
+            }
+            .into();
+
+        assert_eq!(
+            environment.host_os,
+            traits::mobile_runtime_environment::MobileHostOs::Android
+        );
+        assert_eq!(environment.host_os_version.as_deref(), Some("16 (API 36)"));
+        assert_eq!(
+            environment.device_class,
+            traits::mobile_runtime_environment::MobileDeviceClass::Tablet
+        );
+        assert_eq!(
+            environment.execution_target,
+            traits::mobile_runtime_environment::MobileExecutionTarget::Emulator
+        );
+        assert_eq!(
+            environment.launch_mode,
+            traits::mobile_runtime_environment::MobileLaunchMode::ScheduledHeadless
+        );
+    }
+
     /// Off-device fake [`Platform`] shim (portable `platform-posix-minimal`
     /// handles over a temp root). Lets the SHARED `build_mobile_engine` build a
     /// real handle on CI without an Android device — exactly the spec §8 "prove
@@ -4947,7 +5080,9 @@ mod tests {
         .expect("local app workspace is accepted");
         assert_eq!(
             resolved_app,
-            app_workspace.canonicalize().expect("canonical app workspace")
+            app_workspace
+                .canonicalize()
+                .expect("canonical app workspace")
         );
 
         let illegal_app = root.join("apps").join("Bad_ID").join("workspace");

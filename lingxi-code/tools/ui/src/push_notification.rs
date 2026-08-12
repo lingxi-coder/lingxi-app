@@ -51,12 +51,12 @@ const PUSH_NOTIFICATION_FLAG: &str = "tengu_kairos_push_notifications";
 const IDLE_THRESHOLD_MS: u64 = 60_000;
 
 /// Binary `zVi` — the tool description.
-const DESCRIPTION: &str = "Send a notification to the user via their terminal and, when Remote Control is connected, also push to their mobile device";
+const DESCRIPTION: &str = "Send a host notification to the user and, when Remote Control is connected, also send a remote push";
 
 /// Binary `KVi` — the tool prompt (`YVi()` returns `KVi` outside a remote-trigger
 /// routine; the `q4d` routine addendum is appended only when
 /// `CLAUDE_CODE_ENTRYPOINT=="remote_trigger"`). Byte-exact incl. em-dashes (U+2014).
-const PROMPT: &str = "This tool sends a desktop notification in the user's terminal. If Remote Control is connected, it also pushes to their phone. Either way, it pulls their attention from whatever they're doing — a meeting, another task, dinner — to this session. That's the cost. The benefit is they learn something now that they'd want to know now: a long task finished while they were away, a build is ready, you've hit something that needs their decision before you can continue.
+const PROMPT: &str = "This tool sends a host notification. If Remote Control is connected, it also sends a remote push. Either way, it pulls their attention from whatever they're doing — a meeting, another task, dinner — to this session. That's the cost. The benefit is they learn something now that they'd want to know now: a long task finished while they were away, a build is ready, you've hit something that needs their decision before you can continue.
 Because a notification they didn't need is annoying in a way that accumulates, err toward not sending one. Don't notify for routine progress, or to announce you've answered something they asked seconds ago and are clearly still watching, or when a quick task completes. Notify when there's a real chance they've walked away and there's something worth coming back for — or when they've explicitly asked you to notify them.
 Keep the message under 200 characters, one line, no markdown. Lead with what they'd act on — \"build failed: 2 auth tests\" tells them more than \"task done\" and more than a status dump.
 If the result says the push wasn't sent, that's expected — no action needed.";
@@ -134,7 +134,7 @@ fn agent_push_notif_enabled() -> bool {
     traits::session_flags::agent_push_notif_enabled()
 }
 
-/// `xur()` — is the user present (focus `H1e()` known, else last keystroke `N0()`
+/// `xur()` — is the user present (focus `H1e()` known, else last interaction `N0()`
 /// within `hZt`)? The port has no focus / interaction-time tracking → not present.
 fn user_present() -> bool {
     false
@@ -157,7 +157,8 @@ fn render(
         Some("config_off") => "Push not sent — mobile push is disabled in /config.".to_string(),
         Some("user_present") => {
             if has_focus == Some(true) {
-                "Not sent — terminal has focus. Terminal + mobile suppressed.".to_string()
+                "Not sent — the host app has focus. Local + remote notification suppressed."
+                    .to_string()
             } else {
                 let threshold = IDLE_THRESHOLD_MS / 1000;
                 let idle = match idle_sec {
@@ -165,23 +166,23 @@ fn render(
                     None => format!("<{threshold}s"),
                 };
                 format!(
-                    "Not sent — user active (last keystroke {idle} ago, threshold {threshold}s). Terminal + mobile suppressed."
+                    "Not sent — user active (last interaction {idle} ago, threshold {threshold}s). Local + remote notification suppressed."
                 )
             }
         }
         Some("no_transport") => {
             if local_sent {
-                "Terminal notification sent. Mobile push not sent (Remote Control inactive)."
+                "Host notification sent. Remote push not sent (Remote Control inactive)."
                     .to_string()
             } else {
-                "Mobile push not sent (Remote Control inactive).".to_string()
+                "Remote push not sent (Remote Control inactive).".to_string()
             }
         }
         _ => {
             if local_sent {
-                "Terminal notification sent. Mobile push requested.".to_string()
+                "Host notification sent. Remote push requested.".to_string()
             } else {
-                "Mobile push requested.".to_string()
+                "Remote push requested.".to_string()
             }
         }
     }
@@ -194,7 +195,7 @@ impl Tool for PushNotificationTool {
     }
 
     fn search_hint(&self) -> Option<&str> {
-        Some("send a notification to the user via terminal and optionally mobile")
+        Some("send a host notification to the user and optionally a remote push")
     }
 
     fn user_facing_name(&self) -> Option<&str> {
@@ -450,7 +451,7 @@ mod tests {
         assert_eq!(t.name(), "PushNotification");
         assert_eq!(
             t.search_hint(),
-            Some("send a notification to the user via terminal and optionally mobile")
+            Some("send a host notification to the user and optionally a remote push")
         );
         assert!(t.should_defer());
         assert_eq!(t.max_result_size_chars(), 1000);
@@ -490,7 +491,7 @@ mod tests {
         assert!(out.data["sentAt"].as_str().unwrap().ends_with('Z'));
         assert_eq!(
             out.model_content.as_deref(),
-            Some("Terminal notification sent. Mobile push not sent (Remote Control inactive).")
+            Some("Host notification sent. Remote push not sent (Remote Control inactive).")
         );
     }
 
@@ -522,29 +523,29 @@ mod tests {
         );
         assert_eq!(
             render(Some("user_present"), false, Some(true), None),
-            "Not sent — terminal has focus. Terminal + mobile suppressed."
+            "Not sent — the host app has focus. Local + remote notification suppressed."
         );
         assert_eq!(
             render(Some("user_present"), false, None, Some(12)),
-            "Not sent — user active (last keystroke 12s ago, threshold 60s). Terminal + mobile suppressed."
+            "Not sent — user active (last interaction 12s ago, threshold 60s). Local + remote notification suppressed."
         );
         assert_eq!(
             render(Some("user_present"), false, None, None),
-            "Not sent — user active (last keystroke <60s ago, threshold 60s). Terminal + mobile suppressed."
+            "Not sent — user active (last interaction <60s ago, threshold 60s). Local + remote notification suppressed."
         );
         assert_eq!(
             render(Some("no_transport"), true, None, None),
-            "Terminal notification sent. Mobile push not sent (Remote Control inactive)."
+            "Host notification sent. Remote push not sent (Remote Control inactive)."
         );
         assert_eq!(
             render(Some("no_transport"), false, None, None),
-            "Mobile push not sent (Remote Control inactive)."
+            "Remote push not sent (Remote Control inactive)."
         );
         assert_eq!(
             render(None, true, None, None),
-            "Terminal notification sent. Mobile push requested."
+            "Host notification sent. Remote push requested."
         );
-        assert_eq!(render(None, false, None, None), "Mobile push requested.");
+        assert_eq!(render(None, false, None, None), "Remote push requested.");
     }
 
     #[test]
@@ -562,7 +563,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let opts = PromptOptions::default();
         let base = rt.block_on(t.prompt(&opts));
-        assert!(base.starts_with("This tool sends a desktop notification"));
+        assert!(base.starts_with("This tool sends a host notification"));
+        assert!(!base.contains("terminal"));
         assert!(!base.contains("scheduled routine"));
         std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "remote_trigger");
         let routine = rt.block_on(t.prompt(&opts));

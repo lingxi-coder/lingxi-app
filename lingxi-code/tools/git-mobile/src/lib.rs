@@ -165,7 +165,7 @@ impl Tool for GitTool {
 
         let mut prompt = String::new();
         prompt.push_str(
-            "Run a STRUCTURED git operation on this Android device. This is NOT a \
+            "Run a STRUCTURED git operation on this mobile device. This is NOT a \
              shell: pick one `operation` from a fixed set (it is an enum, not a \
              free-form command line) and supply the relevant typed parameters \
              (repo_url, remote, branch, refspec, paths, message, rev, rev_range, \
@@ -550,6 +550,8 @@ mod tests {
             prompt.contains("git"),
             "prompt should mention git: {prompt}"
         );
+        assert!(prompt.contains("mobile device"));
+        assert!(!prompt.contains("Android device"));
         assert!(prompt.contains("push"), "push now listed: {prompt}");
         assert!(
             !prompt.to_lowercase().contains("no push"),

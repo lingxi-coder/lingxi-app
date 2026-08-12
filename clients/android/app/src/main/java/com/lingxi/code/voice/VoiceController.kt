@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,6 +19,10 @@ import com.lingxi.code.BuildConfig
 import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidEventListener
 import com.lingxi.code.bindings.AndroidEngineLaunchConfigFfi
+import com.lingxi.code.bindings.AndroidDeviceClassFfi
+import com.lingxi.code.bindings.AndroidExecutionTargetFfi
+import com.lingxi.code.bindings.AndroidHostEnvironmentFfi
+import com.lingxi.code.bindings.AndroidLaunchModeFfi
 import com.lingxi.code.bindings.AndroidPermissionSink
 import com.lingxi.code.bindings.AndroidProviderConfigFfi
 import com.lingxi.code.bindings.AndroidShellConfigFfi
@@ -48,6 +54,73 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 private const val TAG = "VoiceController"
+
+internal fun androidDeviceClass(smallestScreenWidthDp: Int): AndroidDeviceClassFfi = when {
+    smallestScreenWidthDp <= Configuration.SMALLEST_SCREEN_WIDTH_DP_UNDEFINED ->
+        AndroidDeviceClassFfi.UNKNOWN
+    smallestScreenWidthDp >= 600 -> AndroidDeviceClassFfi.TABLET
+    else -> AndroidDeviceClassFfi.PHONE
+}
+
+internal fun androidExecutionTarget(
+    fingerprint: String,
+    model: String,
+    manufacturer: String,
+    brand: String,
+    device: String,
+    product: String,
+    hardware: String,
+): AndroidExecutionTargetFfi {
+    val values = listOf(fingerprint, model, manufacturer, brand, device, product, hardware)
+    if (values.all { it.isBlank() || it.equals("unknown", ignoreCase = true) }) {
+        return AndroidExecutionTargetFfi.UNKNOWN
+    }
+
+    val emulator = fingerprint.startsWith("generic", ignoreCase = true) ||
+        model.contains("google_sdk", ignoreCase = true) ||
+        model.contains("emulator", ignoreCase = true) ||
+        model.contains("android sdk built for", ignoreCase = true) ||
+        manufacturer.contains("genymotion", ignoreCase = true) ||
+        hardware.equals("goldfish", ignoreCase = true) ||
+        hardware.equals("ranchu", ignoreCase = true) ||
+        product.contains("sdk_gphone", ignoreCase = true) ||
+        product.contains("google_sdk", ignoreCase = true) ||
+        product.contains("emulator", ignoreCase = true) ||
+        product.contains("simulator", ignoreCase = true) ||
+        (brand.startsWith("generic", ignoreCase = true) &&
+            device.startsWith("generic", ignoreCase = true))
+
+    return if (emulator) AndroidExecutionTargetFfi.EMULATOR
+    else AndroidExecutionTargetFfi.PHYSICAL_DEVICE
+}
+
+internal fun androidHostOsVersion(release: String, apiLevel: Int): String? {
+    val normalizedRelease = release.trim()
+    return when {
+        normalizedRelease.isNotEmpty() && apiLevel > 0 -> "$normalizedRelease (API $apiLevel)"
+        normalizedRelease.isNotEmpty() -> normalizedRelease
+        apiLevel > 0 -> "API $apiLevel"
+        else -> null
+    }
+}
+
+private fun androidHostEnvironment(
+    context: Context,
+    launchMode: AndroidLaunchModeFfi,
+): AndroidHostEnvironmentFfi = AndroidHostEnvironmentFfi(
+    hostOsVersion = androidHostOsVersion(Build.VERSION.RELEASE, Build.VERSION.SDK_INT),
+    deviceClass = androidDeviceClass(context.resources.configuration.smallestScreenWidthDp),
+    executionTarget = androidExecutionTarget(
+        fingerprint = Build.FINGERPRINT,
+        model = Build.MODEL,
+        manufacturer = Build.MANUFACTURER,
+        brand = Build.BRAND,
+        device = Build.DEVICE,
+        product = Build.PRODUCT,
+        hardware = Build.HARDWARE,
+    ),
+    launchMode = launchMode,
+)
 
 /**
  * Resolves a localized string for voice-package code that runs OUTSIDE a
@@ -125,6 +198,7 @@ fun buildVoiceEngine(
     routingJson: String? = null,
     projectWorkspace: ProjectWorkspace? = null,
     linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
+    launchMode: AndroidLaunchModeFfi = AndroidLaunchModeFfi.INTERACTIVE,
     onEvent: suspend (ClientEvent) -> Unit = { event ->
         Log.d(TAG, "engine event: ${event::class.simpleName}")
     },
@@ -221,6 +295,7 @@ fun buildVoiceEngine(
                     activityManager.getMemoryInfo(memoryInfo)
                     memoryInfo.totalMem.takeIf { it > 0L }?.toULong() ?: 0uL
                 }.getOrDefault(0uL),
+                hostEnvironment = androidHostEnvironment(appContext, launchMode),
             ),
             listener = listener,
             stt = stt,

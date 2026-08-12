@@ -159,7 +159,8 @@ import XCTest
                 mobileLinux: nil,
                 localAppsFullRuntime: false,
                 localAppsRuntimeRoot: nil,
-                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+                hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )
 
             XCTAssertNoThrow(

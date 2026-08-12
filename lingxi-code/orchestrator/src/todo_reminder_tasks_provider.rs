@@ -26,7 +26,9 @@ use crate::prompt::todo_reminder::{TaskReminderItem, TodoReminderTaskProvider};
 
 /// [`TodoReminderTaskProvider`] that reads the file-backed V2 task store for the
 /// active list each turn.
-pub struct TodoStoreReminderTasks;
+pub struct TodoStoreReminderTasks {
+    config_home: Option<std::path::PathBuf>,
+}
 
 impl TodoStoreReminderTasks {
     /// Construct the store-backed provider. Stateless — it resolves the active
@@ -34,7 +36,15 @@ impl TodoStoreReminderTasks {
     /// honored.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self { config_home: None }
+    }
+
+    /// Pin reminder reads to a host-resolved config home.
+    #[must_use]
+    pub fn with_config_home(config_home: std::path::PathBuf) -> Self {
+        Self {
+            config_home: Some(config_home),
+        }
     }
 
     /// Resolve the active task-list id via the `KF()` precedence, using the
@@ -71,7 +81,10 @@ impl Default for TodoStoreReminderTasks {
 impl TodoReminderTaskProvider for TodoStoreReminderTasks {
     async fn task_items(&self, session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
         let list_id = Self::resolve_list_id(session_id);
-        let store = tool_task::todo_store::TodoStore::for_list(&list_id);
+        let store = self.config_home.as_ref().map_or_else(
+            || tool_task::todo_store::TodoStore::for_list(&list_id),
+            |home| tool_task::todo_store::TodoStore::for_list_at(home, &list_id),
+        );
         store
             .list()
             .await

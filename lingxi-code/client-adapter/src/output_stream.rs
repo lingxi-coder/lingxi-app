@@ -124,7 +124,9 @@ impl AdapterOutputStream {
     fn take_call(&self, id: &protocol::ToolUseId) -> Option<(String, serde_json::Value)> {
         let mut pending = self.pending.lock().ok()?;
         let key = id.to_string();
-        let at = pending.iter().position(|(pending_id, _)| pending_id == &key)?;
+        let at = pending
+            .iter()
+            .position(|(pending_id, _)| pending_id == &key)?;
         pending.remove(at).map(|(_, call)| call)
     }
 

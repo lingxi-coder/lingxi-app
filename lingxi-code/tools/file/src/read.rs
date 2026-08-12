@@ -331,7 +331,7 @@ struct StreamedTextRange {
 
 fn format_line_too_long(path: &Path, line: u64) -> String {
     format!(
-        "File {} contains a line longer than {} at or after requested line {line}. Use Grep to find a smaller section, or use Bash tools that can stream the file.",
+        "File {} contains a line longer than {} at or after requested line {line}. Use Grep to find a smaller section, or use a registered shell tool that can stream the file.",
         path.display(),
         format_file_size(MAX_FILE_READ_SIZE),
     )
@@ -2192,7 +2192,7 @@ impl Tool for FileReadTool {
             if cells_json_bytes > MAX_FILE_READ_SIZE {
                 self.emit_failed(&invocation_id, "notebook_too_large").await;
                 return Err(ToolError::Io(format!(
-                    "Notebook content ({}) exceeds maximum allowed size ({}). Use Bash with jq to read specific portions:\n  cat \"{file_path}\" | jq '.cells[:20]' # First 20 cells\n  cat \"{file_path}\" | jq '.cells[100:120]' # Cells 100-120\n  cat \"{file_path}\" | jq '.cells | length' # Count total cells\n  cat \"{file_path}\" | jq '.cells[] | select(.cell_type==\"code\") | .source' # All code sources",
+                    "Notebook content ({}) exceeds maximum allowed size ({}). Use a registered shell tool with jq to read specific portions:\n  cat \"{file_path}\" | jq '.cells[:20]' # First 20 cells\n  cat \"{file_path}\" | jq '.cells[100:120]' # Cells 100-120\n  cat \"{file_path}\" | jq '.cells | length' # Count total cells\n  cat \"{file_path}\" | jq '.cells[] | select(.cell_type==\"code\") | .source' # All code sources",
                     format_file_size(cells_json_bytes),
                     format_file_size(MAX_FILE_READ_SIZE),
                 )));
@@ -3036,6 +3036,7 @@ mod tests {
         // R-T3: directory line uses the registered-shell-tool wording.
         assert!(prompt
             .contains("This tool can only read files, not directories. To list files in a directory, use the registered shell tool."));
+        assert!(!prompt.contains("Bash"));
         // R-T3: the qhi final bullet is present (em-dash U+2014).
         assert!(prompt.ends_with(
             "- Do NOT re-read a file you just edited to verify \u{2014} Edit/Write would have errored if the change failed, and the harness tracks file state for you."

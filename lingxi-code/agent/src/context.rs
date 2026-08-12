@@ -88,6 +88,9 @@ pub struct SubagentContext {
     pub persistent: bool,
     /// Whether the agent may surface permission prompts to the user.
     pub can_show_permission_prompts: bool,
+    /// Owning session mode for prompt/provider gates inside this independently
+    /// spawned runner. `None` preserves the legacy process-global fallback.
+    pub session_interactive: Option<bool>,
     /// MCP connections the agent should attach to.
     pub mcp_clients: Vec<McpConnectionId>,
     /// Directory under which this agent writes its transcript.
@@ -119,6 +122,15 @@ pub struct SubagentContext {
     pub resumed_history: Option<Vec<ConversationMessage>>,
     /// Pre-rendered system prompt (post template + frontmatter expansion).
     pub rendered_system_prompt: Option<Arc<str>>,
+    /// Fixed engine-owned mobile runtime reminder for a fresh child. Rendered
+    /// after this spawn's tool policy is resolved, so shell details are exposed
+    /// only when `Shell` is in the child's actual advertised tool set. The
+    /// runner persists it with the initial history; resumed agents therefore
+    /// recover it from `resumed_history` and do not inject it again.
+    pub mobile_runtime_environment_reminder: Option<Arc<str>>,
+    /// Per-spawn guest workspace reminder, kept separate from the stable mobile
+    /// runtime prefix because explicit cwd/worktree isolation can vary.
+    pub mobile_runtime_workspace_reminder: Option<Arc<str>>,
     /// Shared content-replacement state (e.g. file mention expansion). Wrapped
     /// in a `Mutex` so the tool layer can mutate it across awaits.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,

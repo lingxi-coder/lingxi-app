@@ -303,6 +303,13 @@ async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
     }
 }
 
+fn todo_store(config_home: Option<&std::path::Path>, list_id: &str) -> TodoStore {
+    config_home.map_or_else(
+        || TodoStore::for_list(list_id),
+        |home| TodoStore::for_list_at(home, list_id),
+    )
+}
+
 /// Borrowed view of a [`TodoTask`] used to render `TaskList` lines.
 struct TaskListRow {
     id: String,
@@ -701,13 +708,24 @@ static TASK_CREATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// Product-A V2 `TaskCreate` — appends a task to the todo store.
 pub struct TaskCreateTool {
     ctx: BuiltinToolContext,
+    config_home: Option<std::path::PathBuf>,
 }
 
 impl TaskCreateTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            config_home: None,
+        }
+    }
+
+    /// Pin task persistence to a host-resolved config home.
+    #[must_use]
+    pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
+        self.config_home = Some(config_home);
+        self
     }
 }
 
@@ -826,7 +844,7 @@ impl Tool for TaskCreateTool {
         emit_started(&bus, TASK_CREATE_STARTED, &invocation_id, &[]).await;
 
         let list_id = resolve_task_list_id(&ctx).await;
-        let store = TodoStore::for_list(&list_id);
+        let store = todo_store(self.config_home.as_deref(), &list_id);
         let task = TodoTask::new(subject.clone(), description.clone(), active_form, metadata);
         let task_id = match store.create(task).await {
             Ok(id) => id,
@@ -934,13 +952,24 @@ static TASK_GET_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// Product-A V2 `TaskGet` — read one task from the todo store.
 pub struct TaskGetTool {
     ctx: BuiltinToolContext,
+    config_home: Option<std::path::PathBuf>,
 }
 
 impl TaskGetTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            config_home: None,
+        }
+    }
+
+    /// Pin task persistence to a host-resolved config home.
+    #[must_use]
+    pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
+        self.config_home = Some(config_home);
+        self
     }
 }
 
@@ -1023,7 +1052,7 @@ impl Tool for TaskGetTool {
         emit_started(&bus, TASK_GET_STARTED, &invocation_id, &[]).await;
 
         let list_id = resolve_task_list_id(&ctx).await;
-        let store = TodoStore::for_list(&list_id);
+        let store = todo_store(self.config_home.as_deref(), &list_id);
         let task = store.get(&task_id).await;
 
         emit_completed(
@@ -1071,13 +1100,24 @@ static TASK_LIST_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// Product-A V2 `TaskList` — enumerate the todo store.
 pub struct TaskListTool {
     ctx: BuiltinToolContext,
+    config_home: Option<std::path::PathBuf>,
 }
 
 impl TaskListTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            config_home: None,
+        }
+    }
+
+    /// Pin task persistence to a host-resolved config home.
+    #[must_use]
+    pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
+        self.config_home = Some(config_home);
+        self
     }
 }
 
@@ -1152,7 +1192,7 @@ impl Tool for TaskListTool {
         emit_started(&bus, TASK_LIST_STARTED, &invocation_id, &[]).await;
 
         let list_id = resolve_task_list_id(&ctx).await;
-        let store = TodoStore::for_list(&list_id);
+        let store = todo_store(self.config_home.as_deref(), &list_id);
         // Filter out tasks flagged metadata._internal (TaskListTool.ts:435-437).
         let all: Vec<TodoTask> = store
             .list()
@@ -1262,13 +1302,24 @@ fn render_task_update_fail(task_id: &str, error: Option<&str>) -> String {
 /// Product-A V2 `TaskUpdate` — mutate a task in the todo store.
 pub struct TaskUpdateTool {
     ctx: BuiltinToolContext,
+    config_home: Option<std::path::PathBuf>,
 }
 
 impl TaskUpdateTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            config_home: None,
+        }
+    }
+
+    /// Pin task persistence to a host-resolved config home.
+    #[must_use]
+    pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
+        self.config_home = Some(config_home);
+        self
     }
 }
 
@@ -1354,7 +1405,7 @@ impl Tool for TaskUpdateTool {
         let duration = || started.elapsed().as_millis() as u64;
 
         let list_id = resolve_task_list_id(&ctx).await;
-        let store = TodoStore::for_list(&list_id);
+        let store = todo_store(self.config_home.as_deref(), &list_id);
 
         let existing = match store.get(&task_id).await {
             Some(t) => t,

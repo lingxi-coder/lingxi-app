@@ -95,7 +95,7 @@ fn read_only_disallowed() -> Vec<String> {
 /// binary) — an unconditional bullet, separated from the previous one by a
 /// single `\n` (no blank line), with a literal em dash (U+2014) between
 /// "directly" and "do not".
-const GENERAL_PURPOSE_PROMPT: &str = r"You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.
+const GENERAL_PURPOSE_PROMPT: &str = r"You are an agent for LingXi. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.
 
 Your strengths:
 - Searching for code, configurations, and patterns across large codebases
@@ -113,7 +113,7 @@ Guidelines:
 
 /// `src/tools/AgentTool/built-in/exploreAgent.ts` (non-embedded branch:
 /// `Glob`/`Grep`/`Read`/`Bash`).
-const EXPLORE_PROMPT: &str = r"You are a file search specialist for Claude Code, Anthropic's official CLI for Claude. You excel at thoroughly navigating and exploring codebases.
+const EXPLORE_PROMPT: &str = r"You are a file search specialist for LingXi. You excel at thoroughly navigating and exploring codebases.
 
 === CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
 This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:
@@ -136,8 +136,8 @@ Guidelines:
 - Use Glob for broad file pattern matching
 - Use Grep for searching file contents with regex
 - Use Read when you know the specific file path you need to read
-- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
-- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
+- Use the registered shell tool ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
+- NEVER use the registered shell tool for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
 - Adapt your search approach based on the thoroughness level specified by the caller
 - Communicate your final report directly as a regular message - do NOT attempt to create files
 
@@ -149,7 +149,7 @@ Complete the user's search request efficiently and report your findings clearly.
 
 /// `src/tools/AgentTool/built-in/planAgent.ts` (non-embedded branch:
 /// search hint `Glob, Grep, and Read`).
-const PLAN_PROMPT: &str = r"You are a software architect and planning specialist for Claude Code. Your role is to explore the codebase and design implementation plans.
+const PLAN_PROMPT: &str = r"You are a software architect and planning specialist for LingXi. Your role is to explore the codebase and design implementation plans.
 
 === CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
 This is a READ-ONLY planning task. You are STRICTLY PROHIBITED from:
@@ -175,8 +175,8 @@ You will be provided with a set of requirements and optionally a perspective on 
    - Understand the current architecture
    - Identify similar features as reference
    - Trace through relevant code paths
-   - Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
-   - NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
+   - Use the registered shell tool ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
+   - NEVER use the registered shell tool for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
 
 3. **Design Solution**:
    - Create implementation approach based on your assigned perspective
@@ -699,6 +699,27 @@ mod tests {
                 p.contains("Host context:"),
                 "{ty} should include host context"
             );
+        }
+    }
+
+    #[test]
+    fn task_builtins_are_lingxi_branded_and_shell_neutral() {
+        let defs = builtin_agent_definitions();
+        for ty in ["general-purpose", "Explore", "Plan"] {
+            let prompt = find(&defs, ty).system_prompt.as_deref().unwrap();
+            assert!(prompt.contains("LingXi"), "{ty} must identify LingXi");
+            assert!(
+                !prompt.contains("Claude Code"),
+                "{ty} must not claim Claude Code identity"
+            );
+            assert!(
+                !prompt.contains("Bash"),
+                "{ty} must not require an unavailable shell tool"
+            );
+        }
+        for ty in ["Explore", "Plan"] {
+            let prompt = find(&defs, ty).system_prompt.as_deref().unwrap();
+            assert!(prompt.contains("registered shell tool"));
         }
     }
 

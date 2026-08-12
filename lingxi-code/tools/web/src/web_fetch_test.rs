@@ -417,6 +417,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             "LONG must lead with the auth-warning prefix; got {long:?}"
         );
         assert!(long.contains("authenticated access.\n\n- Fetches content from a specified URL"));
+        assert!(!long.contains("via Bash"));
+        assert!(long.contains("authenticated GitHub tool"));
 
         // Current-gen model ⇒ SHORT (no auth-prefix).
         let short = tool

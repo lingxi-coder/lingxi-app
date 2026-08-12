@@ -151,7 +151,10 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             },
             localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
             localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
-            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+            hostEnvironment: await MainActor.run {
+                makeIosHostEnvironment(launchMode: .scheduledHeadless)
+            }
         )
         let handle = try buildIosEngineWithConfig(
             config: config,

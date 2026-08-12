@@ -31,9 +31,9 @@ use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
     AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
     AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto,
-    AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, DeviceContextDto,
+    AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto, DeviceContextDto,
     DeviceInsetsDto, DeviceViewportDto,
-    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto,
 };
 use local_apps::{
     load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppError, AppErrorCode,
@@ -626,8 +626,13 @@ mod tests {
             kind: AppCheckpointKind::ScaffoldCreated,
             created_at_ms: 33,
         };
-        let details = lower_details(root.path(), &record, &runtime, std::slice::from_ref(&checkpoint))
-            .expect("lowers");
+        let details = lower_details(
+            root.path(),
+            &record,
+            &runtime,
+            std::slice::from_ref(&checkpoint),
+        )
+        .expect("lowers");
         assert_eq!(details.app, lower_record(&record));
         assert_eq!(
             details.manifest, None,

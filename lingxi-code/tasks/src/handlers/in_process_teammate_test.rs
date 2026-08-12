@@ -316,6 +316,22 @@ fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
 }
 
 #[tokio::test]
+async fn build_context_carries_owning_session_interactivity() {
+    let handler = model_test_handler(None).with_session_interactive(false);
+    let def = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "lead")
+        .unwrap();
+    let ctx = handler
+        .build_context(protocol::AgentId::new(), "lead", "alpha", "task", def)
+        .await
+        .unwrap();
+
+    assert_eq!(ctx.session_interactive, Some(false));
+    assert!(ctx.persistent);
+    assert!(!ctx.is_async);
+}
+
+#[tokio::test]
 async fn build_context_resolves_inherit_to_default_model() {
     // DefaultTeammateDefinition yields AgentModel::Inherit; with a default
     // model wired the teammate ctx carries a concrete wire id (folded via
@@ -1070,6 +1086,55 @@ async fn spawn_auto_claims_next_available_task() {
     let t = store.get(&tid).await.unwrap();
     assert_eq!(t.owner.as_deref(), Some("buddy"), "claimed at startup");
     assert_eq!(t.status, engine::TodoState::InProgress);
+
+    handler.kill(&h.task_id, c).await.unwrap();
+}
+
+/// Embedded hosts inject an app-private config home for the Task* tools and
+/// reminders; teammate auto-claim must read that SAME task-list root instead of
+/// the process-global `HOME` / `LINGXI_CONFIG_DIR`.
+#[tokio::test]
+async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
+    let guard = ClaimEnvGuard::new();
+    let team = "claim-team-explicit-home";
+    let config_home = guard.dir.join("host-owned-config");
+    let store = task_store::TodoStore::for_list_at(&config_home, team);
+    let tid = store
+        .create(todo("Host-owned work", engine::TodoState::Pending, None))
+        .await
+        .unwrap();
+
+    let api = ScriptedApiClient::new(vec!["answer one"]);
+    let (_d, fs, rt, handler) = make_handler(api);
+    let handler = handler.with_config_home(config_home.clone());
+    let c = ctx(fs, rt);
+    let h = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: team.into(),
+                description: "seeded description".into(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+
+    let t = store.get(&tid).await.unwrap();
+    assert_eq!(
+        t.owner.as_deref(),
+        Some("buddy"),
+        "startup claim must read the injected config home"
+    );
+    assert_eq!(t.status, engine::TodoState::InProgress);
+    assert!(
+        task_store::TodoStore::for_list(team)
+            .list()
+            .await
+            .is_empty(),
+        "legacy env-root store must stay untouched"
+    );
 
     handler.kill(&h.task_id, c).await.unwrap();
 }

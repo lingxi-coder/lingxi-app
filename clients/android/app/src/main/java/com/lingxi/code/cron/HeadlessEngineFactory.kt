@@ -2,6 +2,7 @@ package com.lingxi.code.cron
 
 import android.content.Context
 import android.util.Log
+import com.lingxi.code.bindings.AndroidLaunchModeFfi
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.secure.SecureKeyStore
@@ -56,6 +57,7 @@ object HeadlessEngineFactory {
                     guestPath = scope.guestPath,
                 )
             },
+            launchMode = AndroidLaunchModeFfi.SCHEDULED_HEADLESS,
             // Discard streamed turn events — the cron result is returned by the
             // single-task cron FFI, not by the event stream.
             onEvent = { },

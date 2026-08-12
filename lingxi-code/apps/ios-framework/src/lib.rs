@@ -71,8 +71,7 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink,
-    ProviderConnectionTestDto,
+    MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink, ProviderConnectionTestDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -182,6 +181,61 @@ pub struct IosEngineLaunchConfigFfi {
     pub local_apps_runtime_root: Option<String>,
     /// Device physical memory reported by the iOS host.
     pub physical_memory_bytes: u64,
+    /// Stable native host facts used to describe the device execution surface.
+    /// Dynamic UI state and model/provider selection deliberately stay out.
+    pub host_environment: Option<IosHostEnvironmentFfi>,
+}
+
+/// Stable iOS form factor reported once when the engine is constructed.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IosDeviceClassFfi {
+    /// iPhone-sized host.
+    Phone,
+    /// iPad-sized host.
+    Tablet,
+    /// Native client could not determine the form factor.
+    Unknown,
+}
+
+/// Whether this iOS host is a physical device or Simulator process.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IosExecutionTargetFfi {
+    /// Physical iPhone or iPad.
+    PhysicalDevice,
+    /// Apple Simulator process.
+    Simulator,
+    /// Native client could not determine the target.
+    Unknown,
+}
+
+/// Stable engine launch surface; independent from UIKit foreground state.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IosLaunchModeFfi {
+    /// User-visible conversation engine.
+    Interactive,
+    /// Background scheduler engine without interactive UI.
+    ScheduledHeadless,
+}
+
+/// Native iOS facts captured once per engine so prompt context stays cacheable.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IosHostEnvironmentFfi {
+    /// iOS/iPadOS version reported by UIKit.
+    pub os_version: String,
+    /// Stable iPhone/iPad form factor.
+    pub device_class: IosDeviceClassFfi,
+    /// Physical device or Simulator.
+    pub execution_target: IosExecutionTargetFfi,
+    /// Interactive or scheduled-headless construction path.
+    pub launch_mode: IosLaunchModeFfi,
 }
 
 /// FFI rootfs lifecycle state.
@@ -433,6 +487,13 @@ pub fn build_mobile_engine(
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
+            host_environment: Some(traits::MobileHostEnvironment::new(
+                traits::MobileHostOs::Ios,
+                None,
+                traits::MobileDeviceClass::Unknown,
+                traits::MobileExecutionTarget::Unknown,
+                traits::MobileLaunchMode::Unknown,
+            )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -622,6 +683,43 @@ fn ios_mobile_config_from_launch_config(
             .as_ref()
             .map(std::path::PathBuf::from),
         physical_memory_bytes: config.physical_memory_bytes,
+        host_environment: Some(config.host_environment.as_ref().map_or_else(
+            || {
+                traits::MobileHostEnvironment::new(
+                    traits::MobileHostOs::Ios,
+                    None,
+                    traits::MobileDeviceClass::Unknown,
+                    traits::MobileExecutionTarget::Unknown,
+                    traits::MobileLaunchMode::Unknown,
+                )
+            },
+            |environment| {
+                traits::MobileHostEnvironment::new(
+                    traits::MobileHostOs::Ios,
+                    Some(environment.os_version.clone()),
+                    match environment.device_class {
+                        IosDeviceClassFfi::Phone => traits::MobileDeviceClass::Phone,
+                        IosDeviceClassFfi::Tablet => traits::MobileDeviceClass::Tablet,
+                        IosDeviceClassFfi::Unknown => traits::MobileDeviceClass::Unknown,
+                    },
+                    match environment.execution_target {
+                        IosExecutionTargetFfi::PhysicalDevice => {
+                            traits::MobileExecutionTarget::PhysicalDevice
+                        }
+                        IosExecutionTargetFfi::Simulator => {
+                            traits::MobileExecutionTarget::Simulator
+                        }
+                        IosExecutionTargetFfi::Unknown => traits::MobileExecutionTarget::Unknown,
+                    },
+                    match environment.launch_mode {
+                        IosLaunchModeFfi::Interactive => traits::MobileLaunchMode::Interactive,
+                        IosLaunchModeFfi::ScheduledHeadless => {
+                            traits::MobileLaunchMode::ScheduledHeadless
+                        }
+                    },
+                )
+            },
+        )),
         // P0.2: production injects the real LINGXI.md hierarchy provider so the
         // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
         // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -642,6 +740,18 @@ fn ios_mobile_config_from_launch_config(
         )?;
         cfg.provider_profiles = profiles;
         cfg.routing = routing;
+    }
+    let mobile_linux_selected = config.mobile_linux.as_ref().is_some_and(|runtime| {
+        matches!(runtime.mode, MobileLinuxRuntimeModeFfi::MobileLinux)
+            || config.local_apps_runtime_root.is_some()
+    });
+    if mobile_linux_selected {
+        // Local-app generation always runs in the bundled Mobile Linux runtime,
+        // even when the user-facing terminal stays in Legacy mode. Advertise
+        // the matching shell carrier so agents can invoke the bundled npm/Vite
+        // toolchain; engine-mobile's capability gate still fails closed when
+        // the runtime is unavailable.
+        cfg.enable_mobile_linux_shell();
     }
     Ok(cfg)
 }
@@ -2402,8 +2512,8 @@ pub fn build_ios_engine_with_config(
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
         // The app generator uses the bundled runtime independently of the
-        // user-facing terminal mode. The iOS tool registry has no mobile shell
-        // carrier, so selecting this internal runtime cannot expose a shell.
+        // user-facing terminal mode. Keep the platform runtime selection in
+        // sync with the Shell carrier configured above.
         let mut local_apps_mobile_linux = config.mobile_linux.clone();
         if config.local_apps_runtime_root.is_some() {
             if let Some(runtime) = local_apps_mobile_linux.as_mut() {
@@ -2497,6 +2607,7 @@ pub fn build_ios_engine(
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
             physical_memory_bytes: 0,
+            host_environment: None,
         },
         listener,
         stt,
@@ -3757,7 +3868,9 @@ mod tests {
         .expect("local app workspace is accepted");
         assert_eq!(
             resolved_app,
-            app_workspace.canonicalize().expect("canonical app workspace")
+            app_workspace
+                .canonicalize()
+                .expect("canonical app workspace")
         );
 
         let illegal_app = root.join("apps").join("Bad_ID").join("workspace");
@@ -3821,6 +3934,7 @@ mod tests {
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
             physical_memory_bytes: 7 * 1024_u64.pow(3),
+            host_environment: None,
         })
         .expect("launch config");
 
@@ -3832,16 +3946,108 @@ mod tests {
         assert_eq!(cfg.api_key, "sk-test");
         assert_eq!(cfg.default_model, "claude-test");
         assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
+        let host = cfg.host_environment.as_ref().expect("mobile host fallback");
+        assert_eq!(host.host_os, traits::MobileHostOs::Ios);
+        assert_eq!(host.device_class, traits::MobileDeviceClass::Unknown);
+        assert_eq!(
+            host.execution_target,
+            traits::MobileExecutionTarget::Unknown
+        );
+        assert_eq!(host.launch_mode, traits::MobileLaunchMode::Unknown);
         assert_eq!(
             cfg.lingxi_home,
             temp.path().join(branding::DOT_DIR),
             "global state remains rooted at the sandbox"
+        );
+        assert!(
+            cfg.mobile_shell().is_none(),
+            "iOS must not advertise Shell without a configured mobile-linux runtime"
         );
         let providers = cfg.provider_profiles.expect("provider profiles");
         assert!(providers.contains_key("openai"));
         assert_eq!(
             cfg.routing.expect("routing"),
             serde_json::json!({ "default": "openai" })
+        );
+    }
+
+    #[test]
+    fn ios_local_app_runtime_exposes_mobile_linux_shell_carrier() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_root = temp.path().join("local-app-runtime");
+        std::fs::create_dir_all(&runtime_root).expect("runtime root");
+
+        let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+            api_base: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            app_sandbox_root: temp.path().to_string_lossy().into_owned(),
+            project_cwd: None,
+            provider_config: None,
+            mobile_linux: Some(super::IosMobileLinuxConfigFfi {
+                mode: super::MobileLinuxRuntimeModeFfi::Legacy,
+                managed_root: temp
+                    .path()
+                    .join("mobile-linux")
+                    .to_string_lossy()
+                    .into_owned(),
+                workspace_host_path: temp.path().join("workspace").to_string_lossy().into_owned(),
+                stable_workspace_id: "local-app-test".to_string(),
+                abi: "arm64".to_string(),
+                rootfs_version: "test".to_string(),
+                archive_sha256: None,
+                authorization_file: None,
+                app_sandbox_root: temp.path().to_string_lossy().into_owned(),
+            }),
+            local_apps_full_runtime: false,
+            local_apps_runtime_root: Some(runtime_root.to_string_lossy().into_owned()),
+            physical_memory_bytes: 0,
+            host_environment: None,
+        })
+        .expect("launch config");
+
+        let shell = cfg
+            .mobile_shell()
+            .expect("local-app runtime should expose the mobile-linux shell carrier");
+        assert!(shell.enabled);
+        assert_eq!(shell.shell_path, "/bin/sh");
+        assert!(shell.force_platform_sandbox);
+    }
+
+    #[test]
+    fn ios_host_environment_maps_stable_native_facts_without_model_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+            api_base: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            app_sandbox_root: temp.path().to_string_lossy().into_owned(),
+            project_cwd: None,
+            provider_config: None,
+            mobile_linux: None,
+            local_apps_full_runtime: false,
+            local_apps_runtime_root: None,
+            physical_memory_bytes: 0,
+            host_environment: Some(super::IosHostEnvironmentFfi {
+                os_version: "19.0".to_string(),
+                device_class: super::IosDeviceClassFfi::Tablet,
+                execution_target: super::IosExecutionTargetFfi::Simulator,
+                launch_mode: super::IosLaunchModeFfi::ScheduledHeadless,
+            }),
+        })
+        .expect("launch config");
+
+        let environment = cfg.host_environment.expect("host environment");
+        assert_eq!(environment.host_os, traits::MobileHostOs::Ios);
+        assert_eq!(environment.host_os_version.as_deref(), Some("19.0"));
+        assert_eq!(environment.device_class, traits::MobileDeviceClass::Tablet);
+        assert_eq!(
+            environment.execution_target,
+            traits::MobileExecutionTarget::Simulator
+        );
+        assert_eq!(
+            environment.launch_mode,
+            traits::MobileLaunchMode::ScheduledHeadless
         );
     }
 

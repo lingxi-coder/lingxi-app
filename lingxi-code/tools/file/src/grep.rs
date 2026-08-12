@@ -87,7 +87,7 @@ const MAX_COLUMNS: usize = 500;
 const GREP_DESCRIPTION: &str = r#"A powerful search tool built on ripgrep
 
   Usage:
-  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.
+  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` through a registered shell tool. The Grep tool has been optimized for correct permissions and access.
   - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
   - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
   - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
@@ -101,7 +101,7 @@ const GREP_DESCRIPTION: &str = r#"A powerful search tool built on ripgrep
 /// default models. `${ns}`=Bash; the two em-dashes are U+2014. The regex
 /// snippets render with single backslashes (`function\s+\w+`, `interface\{\}`)
 /// — the JS template literal's `\\` collapse to one `\` in the final string.
-const GREP_PROMPT_SHORT: &str = r#"Content search built on ripgrep. Prefer this over `grep`/`rg` via Bash — results integrate with the permission UI and file links.
+const GREP_PROMPT_SHORT: &str = r#"Content search built on ripgrep. Prefer this over `grep`/`rg` via a registered shell tool — results integrate with the permission UI and file links.
 
 - Full regex syntax (e.g. "log.*Error", "function\s+\w+"). Ripgrep, not grep — escape literal braces (`interface\{\}`).
 - Filter with `glob` (e.g. "**/*.tsx") or `type` (e.g. "js", "py", "rust").
@@ -1096,7 +1096,7 @@ mod tests {
             .await;
         assert_eq!(short, GREP_PROMPT_SHORT);
         assert!(short.starts_with(
-            "Content search built on ripgrep. Prefer this over `grep`/`rg` via Bash \u{2014} results integrate with the permission UI and file links."
+            "Content search built on ripgrep. Prefer this over `grep`/`rg` via a registered shell tool \u{2014} results integrate with the permission UI and file links."
         ));
         // Regex snippets render with single backslashes.
         assert!(short.contains("\"function\\s+\\w+\""));
@@ -1812,6 +1812,7 @@ mod tests {
         assert!(d.starts_with("A powerful search tool built on ripgrep\n"));
         assert!(d.contains("\"files_with_matches\" shows only file paths (default)"));
         assert!(d.contains("use `multiline: true`"));
+        assert!(!d.contains("Bash"));
     }
 
     #[tokio::test]

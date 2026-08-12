@@ -934,8 +934,8 @@ mod tests {
     fn a_resumed_bash_or_read_result_keeps_its_output() {
         use protocol::{ContentBlock, MessageId, ToolUseId};
 
-        let call = |tu: &ToolUseId, tool: &str, input: serde_json::Value| {
-            ConversationMessage::Assistant {
+        let call =
+            |tu: &ToolUseId, tool: &str, input: serde_json::Value| ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
                     id: tu.clone(),
@@ -944,8 +944,7 @@ mod tests {
                     provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
-            }
-        };
+            };
         let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
@@ -969,7 +968,11 @@ mod tests {
 
         let bash_id = ToolUseId::new();
         let bash = display_of(&[
-            call(&bash_id, "Bash", serde_json::json!({"command": "cargo test"})),
+            call(
+                &bash_id,
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+            ),
             persisted(&bash_id, "compiling…\nwarning: unused\ndone"),
         ]);
         assert_eq!(bash.headline.as_deref(), Some("compiling…"));

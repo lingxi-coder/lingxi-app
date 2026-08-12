@@ -66,6 +66,57 @@ pub fn is_non_interactive_session() -> bool {
     NON_INTERACTIVE_SESSION.load(Ordering::Relaxed)
 }
 
+tokio::task_local! {
+    /// Per-turn override for embedded runtimes that coexist in one process.
+    /// Desktop/CLI callers without a scope retain the process-global behavior.
+    static NON_INTERACTIVE_SESSION_OVERRIDE: bool;
+}
+
+/// Run `future` with a task-local session mode, so prompt builders and provider
+/// beta assembly see the owning orchestrator instead of a concurrently
+/// constructed runtime's process-global compatibility value. Independently
+/// spawned Tokio tasks do not inherit task locals and must establish their own
+/// scope explicitly.
+pub async fn scope_non_interactive_session<F: std::future::Future>(
+    non_interactive: bool,
+    future: F,
+) -> F::Output {
+    NON_INTERACTIVE_SESSION_OVERRIDE
+        .scope(non_interactive, future)
+        .await
+}
+
+/// Read the task-local session mode when present, falling back to the legacy
+/// process-global flag for callers outside an orchestrator turn.
+#[must_use]
+pub fn effective_non_interactive_session() -> bool {
+    NON_INTERACTIVE_SESSION_OVERRIDE
+        .try_with(|value| *value)
+        .unwrap_or_else(|_| is_non_interactive_session())
+}
+
+#[cfg(test)]
+mod interactivity_tests {
+    #[tokio::test]
+    async fn task_local_interactivity_isolated_from_process_global_flag() {
+        let prior = super::is_non_interactive_session();
+        super::set_non_interactive_session(false);
+
+        let headless = super::scope_non_interactive_session(true, async {
+            super::effective_non_interactive_session()
+        });
+        let interactive = super::scope_non_interactive_session(false, async {
+            super::effective_non_interactive_session()
+        });
+        let (headless, interactive) = tokio::join!(headless, interactive);
+
+        assert!(headless);
+        assert!(!interactive);
+        assert!(!super::effective_non_interactive_session());
+        super::set_non_interactive_session(prior);
+    }
+}
+
 /// Publish the merged `showThinkingSummaries` setting for request assembly.
 pub fn set_show_thinking_summaries(show: bool) {
     SHOW_THINKING_SUMMARIES.store(show, Ordering::Relaxed);

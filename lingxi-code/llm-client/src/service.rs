@@ -301,6 +301,11 @@ pub struct ApiService {
     /// environment variable so concurrent embedded runtimes cannot leak flags
     /// into one another.
     custom_cli_betas: Vec<String>,
+    /// Session-local interactivity for request beta assembly. Keeping this on
+    /// the service prevents concurrently embedded mobile runtimes (foreground
+    /// chat plus scheduled headless work) from overwriting one process-global
+    /// flag. Defaults to the legacy global when no host supplies a value.
+    interactive_session: Option<bool>,
     /// Per-model fallback chains from `routing.fallback`.
     ///
     /// Key is the request's resolved display model; value is the ordered chain
@@ -653,6 +658,7 @@ impl ApiService {
             analytics,
             fallback_models,
             custom_cli_betas: Vec::new(),
+            interactive_session: None,
             fallback_overrides,
             alias_to_display,
             settings_max_retries,
@@ -702,6 +708,13 @@ impl ApiService {
     #[must_use]
     pub fn with_custom_cli_betas(mut self, betas: Vec<String>) -> Self {
         self.custom_cli_betas = betas;
+        self
+    }
+
+    /// Attach the session's interaction mode for beta-header decisions.
+    #[must_use]
+    pub fn with_interactive_session(mut self, interactive: bool) -> Self {
+        self.interactive_session = Some(interactive);
         self
     }
 
@@ -1166,7 +1179,7 @@ impl ApiService {
     /// Interactivity and `showThinkingSummaries` come from the process session
     /// flags published by the composition root, matching Claude's module-level
     /// `getIsNonInteractiveSession()` / initial-settings reads.
-    fn beta_context(prepared: &crate::PreparedLlmCall) -> BetaContext {
+    fn beta_context(&self, prepared: &crate::PreparedLlmCall) -> BetaContext {
         let model = prepared
             .provider_request
             .body_json
@@ -1203,8 +1216,11 @@ impl ApiService {
                             == Some(true)
                 })
             });
+        let interactive = self
+            .interactive_session
+            .unwrap_or_else(|| !traits::session_flags::effective_non_interactive_session());
         BetaContext::for_model(model)
-            .with_interactive(!traits::session_flags::is_non_interactive_session())
+            .with_interactive(interactive)
             .with_show_thinking_summaries(traits::session_flags::show_thinking_summaries())
             .with_fast_mode(fast_mode)
             .with_effort(has_effort)
@@ -1216,6 +1232,12 @@ impl ApiService {
                     .get("context_hint")
                     .is_some(),
             )
+    }
+
+    #[cfg(test)]
+    fn interactive_session_for_test(&self) -> bool {
+        self.interactive_session
+            .unwrap_or_else(|| !traits::session_flags::effective_non_interactive_session())
     }
 
     /// Return host-validated CLI betas only for the first-party Anthropic
@@ -1401,7 +1423,7 @@ impl ApiService {
     /// `speed`/`output_config` in the extra body never leaks into the computed
     /// `anthropic-beta` header ([`ApiService::beta_context`] reads the pre-merge
     /// body).
-    fn merge_extra_body(prepared: &mut crate::PreparedLlmCall) {
+    fn merge_extra_body(&self, prepared: &mut crate::PreparedLlmCall) {
         if !Self::is_anthropic_family_protocol(&prepared.route.protocol) {
             return;
         }
@@ -1411,7 +1433,7 @@ impl ApiService {
             prepared.route.protocol,
             crate::ProtocolFamily::BedrockClaude
         ) {
-            bedrock_extra_body_betas(&Self::beta_context(prepared))
+            bedrock_extra_body_betas(&self.beta_context(prepared))
         } else {
             Vec::new()
         };
@@ -1629,7 +1651,7 @@ impl ApiService {
             _ => None,
         };
         if let Some(provider) = beta_provider {
-            let ctx = Self::beta_context(prepared);
+            let ctx = self.beta_context(prepared);
             let custom_betas = self.custom_cli_betas(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
@@ -1651,7 +1673,7 @@ impl ApiService {
         Self::apply_dispatch_header(prepared, dispatch);
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
-        Self::merge_extra_body(prepared);
+        self.merge_extra_body(prepared);
         // Final resolved-route guard. `CLAUDE_CODE_EXTRA_BODY` is merged above,
         // so this must run last to prevent it from reintroducing first-party
         // speed/beta fields on custom or unsupported routes.
@@ -1676,7 +1698,7 @@ impl ApiService {
             _ => None,
         };
         if let Some(provider) = beta_provider {
-            let ctx = Self::beta_context(prepared);
+            let ctx = self.beta_context(prepared);
             let custom_betas = self.custom_cli_betas(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
@@ -1696,7 +1718,7 @@ impl ApiService {
         Self::apply_dispatch_header(prepared, dispatch);
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
-        Self::merge_extra_body(prepared);
+        self.merge_extra_body(prepared);
         Self::enforce_fast_route(prepared);
     }
 

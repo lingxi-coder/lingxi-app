@@ -254,6 +254,10 @@ struct ChatView: View {
         TranscriptScroll(
             follow: FollowSignal(
                 itemCount: renderItems.count,
+                lastMessageText: renderItems.reversed().compactMap { item in
+                    guard case let .message(message) = item else { return nil }
+                    return message.text
+                }.first,
                 streaming: convo.streaming,
                 error: convo.error,
                 notice: convo.notice
@@ -319,6 +323,11 @@ struct ChatView: View {
     /// signal.
     private struct FollowSignal: Equatable {
         let itemCount: Int
+        /// A streamed assistant message keeps one stable row and replaces its
+        /// value for every delta, so the item count alone does not change while
+        /// the row's height and bottom position do. Keep the text itself so a
+        /// same-length replacement still invalidates the follow signal.
+        let lastMessageText: String?
         let streaming: Bool
         let error: ConversationError?
         let notice: TurnNotice?

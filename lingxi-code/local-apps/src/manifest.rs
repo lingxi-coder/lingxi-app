@@ -152,7 +152,10 @@ impl DeviceContext {
             "iphone" | "ipad" | "phone" | "tablet" | "desktop" | "unknown"
         );
         let valid_color_scheme = matches!(self.color_scheme.as_str(), "light" | "dark" | "unknown");
-        let valid_input_mode = matches!(self.input_mode.as_str(), "touch" | "pointer" | "hybrid" | "unknown");
+        let valid_input_mode = matches!(
+            self.input_mode.as_str(),
+            "touch" | "pointer" | "hybrid" | "unknown"
+        );
         if !valid_os || !valid_form_factor || !valid_color_scheme || !valid_input_mode {
             return Err(AppError::InvalidRequest(
                 "manifest deviceContext contains an unsupported platform value".into(),

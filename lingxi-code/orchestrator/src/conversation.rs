@@ -699,13 +699,13 @@ pub(crate) const MAX_REQUEST_BYTES: u64 = 33_554_432;
 /// stripped). The tail differs by interactivity (`un()===!Ht.isInteractive`):
 /// a non-interactive (print) session gets the generic advice; an interactive
 /// (TUI) session gets the `/compact` + double-esc actions.
-pub(crate) fn request_too_large_notice() -> String {
+pub(crate) fn request_too_large_notice(interactive: bool) -> String {
     debug_assert_eq!(MAX_REQUEST_BYTES, 32 * 1024 * 1024);
     let head = "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit.";
-    if traits::session_flags::is_non_interactive_session() {
-        format!("{head} Remove older images or compact the conversation.")
-    } else {
+    if interactive {
         format!("{head} Run /compact, or double press esc to go back and remove attachments.")
+    } else {
+        format!("{head} Remove older images or compact the conversation.")
     }
 }
 
@@ -1041,6 +1041,21 @@ pub struct ConversationOrchestrator {
     /// `None` everywhere but the mobile host.
     pub(crate) prompt_probe_cwd_resolver:
         Option<Arc<dyn Fn(&std::path::Path) -> std::path::PathBuf + Send + Sync>>,
+    /// Fixed, engine-owned mobile runtime reminder prepended to real main-loop
+    /// model requests. The message is rendered once when the mobile composition
+    /// root wires it, then cloned with the same id and bytes for every retry and
+    /// turn. It stays outside the system prompt so an explicit system-prompt
+    /// override remains byte-exact, and outside session history so it is never
+    /// persisted or duplicated by resume/compaction.
+    pub(crate) mobile_runtime_environment_message: Option<ConversationMessage>,
+    /// Typed mobile environment retained so the mutable guest cwd can be
+    /// rendered per request as a separate second message. Stable host/tool
+    /// facts remain frozen in `mobile_runtime_environment_message`.
+    pub(crate) mobile_runtime_environment:
+        Option<traits::mobile_runtime_environment::MobileRuntimeEnvironment>,
+    /// Optional mobile host-path to guest-path mapping for live cwd updates.
+    pub(crate) mobile_workspace_cwd_resolver:
+        Option<Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>>,
     /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
     /// Used by [`Self::computed_transcript_path`] to deterministically derive the
     /// session's transcript path (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`,
@@ -1795,6 +1810,9 @@ impl ConversationOrchestrator {
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
             prompt_probe_cwd_resolver: None,
+            mobile_runtime_environment_message: None,
+            mobile_runtime_environment: None,
+            mobile_workspace_cwd_resolver: None,
             cwd,
             config_home: None,
             workspace_trusted: true,
@@ -2464,6 +2482,36 @@ impl ConversationOrchestrator {
         resolver: Arc<dyn Fn(&std::path::Path) -> std::path::PathBuf + Send + Sync>,
     ) -> Self {
         self.prompt_probe_cwd_resolver = Some(resolver);
+        self
+    }
+
+    /// Attach the stable mobile host/tool-runtime snapshot for this engine.
+    ///
+    /// Rendering happens exactly once here. The snapshot describes the stable
+    /// configured runtime; registered tool schemas remain authoritative for
+    /// each agent's effective `Shell` availability.
+    #[must_use]
+    pub fn with_mobile_runtime_environment(
+        mut self,
+        environment: traits::mobile_runtime_environment::MobileRuntimeEnvironment,
+    ) -> Self {
+        self.mobile_runtime_environment_message = Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            environment.render_system_reminder(),
+        ));
+        self.mobile_runtime_environment = Some(environment);
+        self
+    }
+
+    /// Attach the model-visible mobile cwd mapper. Host-native backing paths
+    /// that are not covered by a guest mount are omitted by the environment's
+    /// sanitizer rather than exposed to the model.
+    #[must_use]
+    pub fn with_mobile_workspace_cwd_resolver(
+        mut self,
+        resolver: Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>,
+    ) -> Self {
+        self.mobile_workspace_cwd_resolver = Some(resolver);
         self
     }
 
@@ -6462,7 +6510,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
             // 413 request-too-large (accumulated images/attachments): render the
             // byte-exact `$Vi()` notice instead of the opaque "request too large".
-            LlmError::RequestTooLarge => request_too_large_notice(),
+            LlmError::RequestTooLarge => request_too_large_notice(self.prompt_is_interactive()),
             // Billing (`Flp`: `yu({content:LYr,error:"billing_error"})`) and
             // prompt-too-long (`content:Jq`) both render BARE — no `API Error:`
             // prefix. Both used to fall through to `Display`, i.e. the words
@@ -6473,7 +6521,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // sign-in will. Keyed on the variant, mirroring the oracle's
             // instanceof check rather than sniffing message text.
             LlmError::OAuthRefreshDead => {
-                crate::api_error_copy::oauth_refresh_dead_text(self.config.interactive_session)
+                crate::api_error_copy::oauth_refresh_dead_text(self.prompt_is_interactive())
                     .to_string()
             }
             // Revoked OAuth token (`Uke`): a 403 whose message names it. Checked
@@ -6493,7 +6541,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             {
                 let profile = self.session.lock().await.model_profile.clone();
                 crate::api_error_copy::oauth_revoked_text(
-                    self.config.interactive_session,
+                    self.prompt_is_interactive(),
                     profile.as_deref(),
                 )
             }
@@ -6579,7 +6627,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // "permission denied"), which is what this port used to show.
             LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => {
                 crate::api_error_copy::auth_failed_fallback(
-                    self.config.interactive_session,
+                    self.prompt_is_interactive(),
                     // Oracle: `let i = sir(e)` — the SAME normalizer the retry
                     // banner uses, so both surfaces agree.
                     &llm_client::error_display_text(err),
@@ -6689,7 +6737,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn(prompt).await;
+        let result = traits::session_flags::scope_non_interactive_session(
+            !self.prompt_is_interactive(),
+            self.try_run_turn(prompt),
+        )
+        .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         // ConversationOutcome is #[non_exhaustive] so future variants will
@@ -8236,9 +8288,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         );
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
-        let result = self
-            .try_run_turn_streaming(prompt, Vec::new(), None, None, false)
-            .await;
+        let result = traits::session_flags::scope_non_interactive_session(
+            !self.prompt_is_interactive(),
+            self.try_run_turn_streaming(prompt, Vec::new(), None, None, false),
+        )
+        .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
@@ -8270,9 +8324,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     pub async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
         self.output.emit_turn_started().await;
-        let result = self
-            .try_run_turn_streaming("", Vec::new(), None, None, true)
-            .await;
+        let result = traits::session_flags::scope_non_interactive_session(
+            !self.prompt_is_interactive(),
+            self.try_run_turn_streaming("", Vec::new(), None, None, true),
+        )
+        .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         match result {
             Ok(
@@ -8508,9 +8564,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // message at every `callModel`. Recomputed each turn, never accumulates.
             // `currentDate` is always present, so this is `Some(_)` whenever a
             // LINGXI.md / email / date is sourceable (i.e. always for the date).
-            if let Some(ctx_msg) = self.additional_context_message().await {
-                snapshot.insert(0, ctx_msg);
-            }
+            self.prepend_leading_context(&mut snapshot).await;
 
             // Per-turn TRANSIENT reminders are collected here rather than
             // pushed straight onto `snapshot`, because `snapshot` is MOVED into
@@ -8681,7 +8735,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let wire_tools = self.build_wire_tools().await;
             let deferred_reminder = self.deferred_tools_reminder_message();
             if let Some(reminder) = deferred_reminder.clone() {
-                snapshot.insert(0, reminder);
+                self.prepend_transient_leading_context(&mut snapshot, reminder);
             }
 
             // `date_change` (streaming twin): sessions crossing local midnight
@@ -8698,7 +8752,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let date_change_reminder =
                 self.date_change_reminder_message(self.session.lock().await.session_id);
             if let Some(reminder) = date_change_reminder.clone() {
-                snapshot.insert(0, reminder);
+                self.prepend_transient_leading_context(&mut snapshot, reminder);
             }
 
             // RECOV.1: blocking-limit preempt — the streaming twin of the batched
@@ -8862,21 +8916,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         let s = self.session.lock().await;
                         (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
-                    // Re-append THIS step's reminders (computed once above).
-                    recov_snapshot.extend(turn_reminders.iter().cloned());
-                    if let Some(ctx_msg) = self.additional_context_message().await {
-                        recov_snapshot.insert(0, ctx_msg);
-                    }
-                    // Reuse THIS step's delta (already computed above); do not
-                    // re-invoke, which would advance the announced-set tracking.
-                    if let Some(reminder) = deferred_reminder.clone() {
-                        recov_snapshot.insert(0, reminder);
-                    }
-                    // Same for the step's `date_change` (already committed when
-                    // the stream opened).
-                    if let Some(reminder) = date_change_reminder.clone() {
-                        recov_snapshot.insert(0, reminder);
-                    }
+                    self.reattach_outgoing_context(
+                        &mut recov_snapshot,
+                        deferred_reminder.as_ref(),
+                        date_change_reminder.as_ref(),
+                        &turn_reminders,
+                    )
+                    .await;
                     match call_api_with_ptl_recovery(
                         self,
                         system_prompt.as_deref(),
@@ -8885,6 +8931,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         recov_snapshot,
                         wire_tools.clone(),
                         None,
+                        deferred_reminder.clone(),
                         date_change_reminder.clone(),
                         &turn_reminders,
                     )
@@ -9103,21 +9150,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                     let s = self.session.lock().await;
                                     (s.history.clone(), s.model.clone(), s.model_profile.clone())
                                 };
-                                // Re-append THIS step's reminders (computed once above).
-                                re_snapshot.extend(turn_reminders.iter().cloned());
-                                if let Some(ctx_msg) = self.additional_context_message().await {
-                                    re_snapshot.insert(0, ctx_msg);
-                                }
-                                // Reuse THIS step's delta (computed above); do not
-                                // re-invoke and re-advance the announced set.
-                                if let Some(reminder) = deferred_reminder.clone() {
-                                    re_snapshot.insert(0, reminder);
-                                }
-                                // Same for the step's `date_change` (dedupe
-                                // already advanced).
-                                if let Some(reminder) = date_change_reminder.clone() {
-                                    re_snapshot.insert(0, reminder);
-                                }
+                                self.reattach_outgoing_context(
+                                    &mut re_snapshot,
+                                    deferred_reminder.as_ref(),
+                                    date_change_reminder.as_ref(),
+                                    &turn_reminders,
+                                )
+                                .await;
                                 match self
                                     .streaming_api
                                     .stream(
@@ -9256,21 +9295,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
                             // context meta message on EVERY `callModel`, including this
                             // non-streaming fallback. Prepend it to the re-snapshot too.
-                            // Re-append THIS step's reminders (computed once above).
-                            non_stream_snapshot.extend(turn_reminders.iter().cloned());
-                            if let Some(ctx_msg) = self.additional_context_message().await {
-                                non_stream_snapshot.insert(0, ctx_msg);
-                            }
-                            // Reuse THIS step's delta (computed above); do not
-                            // re-invoke and re-advance the announced set.
-                            if let Some(reminder) = deferred_reminder.clone() {
-                                non_stream_snapshot.insert(0, reminder);
-                            }
-                            // Same for the step's `date_change` (dedupe already
-                            // advanced).
-                            if let Some(reminder) = date_change_reminder.clone() {
-                                non_stream_snapshot.insert(0, reminder);
-                            }
+                            self.reattach_outgoing_context(
+                                &mut non_stream_snapshot,
+                                deferred_reminder.as_ref(),
+                                date_change_reminder.as_ref(),
+                                &turn_reminders,
+                            )
+                            .await;
                             let tools_for_fallback = wire_tools.clone();
 
                             let resp = self
@@ -9438,9 +9469,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 message_count: api_success_message_count,
                                 message_tokens: api_success_message_tokens,
                                 did_fall_back_to_non_streaming,
-                                is_non_interactive_session:
-                                    traits::session_flags::is_non_interactive_session(),
-                                print: traits::session_flags::is_non_interactive_session(),
+                                is_non_interactive_session: !self.prompt_is_interactive(),
+                                print: !self.prompt_is_interactive(),
                                 is_tty: false,
                                 query_source: "user".into(),
                                 permission_mode: if self.session.lock().await.plan_mode {
@@ -10073,7 +10103,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         let request_id = self.api.last_request_id();
                         crate::turn_loop::terminal_api_error_text(
                             &model,
-                            self.config.interactive_session,
+                            self.prompt_is_interactive(),
                             other,
                             request_id.as_deref(),
                             pumped.stop_details.as_ref(),
@@ -10215,7 +10245,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn_cancelable(prompt, cancel).await;
+        let result = traits::session_flags::scope_non_interactive_session(
+            !self.prompt_is_interactive(),
+            self.try_run_turn_cancelable(prompt, cancel),
+        )
+        .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         result.map_err(|e| self.enrich_api_error(e))
     }
@@ -10524,9 +10558,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // running only Block-behavior tools (or no tools) runs to its natural end
         // and is still reported `Cancelled` here — faithful: claude-code only
         // aborts Cancel-behavior tools; Block tools / the stream finish.
-        let r = self
-            .try_run_turn_streaming(prompt, images, Some(cancel.clone()), message_id, false)
-            .await;
+        let r = traits::session_flags::scope_non_interactive_session(
+            !self.prompt_is_interactive(),
+            self.try_run_turn_streaming(prompt, images, Some(cancel.clone()), message_id, false),
+        )
+        .await;
         match r {
             Ok(
                 ConversationOutcome::EndTurn { turn_count, .. }
@@ -10789,10 +10825,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.build_system_prompt().await
     }
 
-    /// Read-only introspection seam for the leading additional-context
-    /// `<system-reminder>` meta (R-P1): `claudeMd` / `userEmail` / `currentDate`
-    /// live HERE now, not in the system prompt. Returns the meta's text, or
-    /// `None` when nothing is sourceable. Companion to
+    /// Read-only introspection seam for the ordinary per-turn additional
+    /// context (`claudeMd` / `userEmail` / `currentDate`). Companion to
     /// [`Self::assemble_system_prompt_preview`] — lets a host/composition-root
     /// test prove an injected memory provider reaches the additional-context
     /// message without a live model round-trip.
@@ -10808,6 +10842,99 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
                 _ => None,
             })
+    }
+
+    /// Prepend the fixed runtime context followed by the ordinary per-turn
+    /// additional context. Keeping this in one helper prevents retry paths from
+    /// drifting in ordering or accidentally dropping the mobile snapshot.
+    pub(crate) async fn prepend_leading_context(&self, messages: &mut Vec<ConversationMessage>) {
+        if let Some(ctx_msg) = self.additional_context_message().await {
+            messages.insert(0, ctx_msg);
+        }
+        if let Some(workspace) = self.mobile_workspace_environment_message() {
+            messages.insert(0, workspace);
+        }
+        if let Some(runtime) = self.mobile_runtime_environment_message().await {
+            messages.insert(0, runtime);
+        }
+    }
+
+    fn mobile_workspace_environment_message(&self) -> Option<ConversationMessage> {
+        let environment = self.mobile_runtime_environment.as_ref()?;
+        let cwd = self.session_cwd.cwd();
+        let model_cwd = match &self.mobile_workspace_cwd_resolver {
+            Some(resolver) => resolver(&cwd),
+            None => Some(cwd.to_string_lossy().into_owned()),
+        };
+        let reminder = environment.render_workspace_system_reminder(model_cwd.as_deref())?;
+        Some(ConversationMessage::user_meta(MessageId::new(), reminder))
+    }
+
+    pub(crate) fn prompt_is_interactive(&self) -> bool {
+        self.mobile_runtime_environment.as_ref().map_or(
+            self.config.interactive_session,
+            |environment| {
+                !matches!(
+                    environment.host.launch_mode,
+                    traits::MobileLaunchMode::ScheduledHeadless
+                )
+            },
+        )
+    }
+
+    /// Prepend a transient call-scoped reminder without displacing the fixed
+    /// mobile runtime snapshot from index zero.
+    ///
+    /// Desktop callers retain the historical index-zero behavior. Mobile
+    /// callers place date/deferred-tool deltas immediately after the fixed
+    /// runtime reminder, keeping that cache-stable prefix in one position on
+    /// initial, retry, and fallback requests.
+    pub(crate) fn prepend_transient_leading_context(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+        reminder: ConversationMessage,
+    ) {
+        let mut index = usize::from(
+            messages
+                .first()
+                .is_some_and(Self::is_mobile_runtime_environment_message),
+        );
+        if self.mobile_runtime_environment.is_some()
+            && messages.get(index).is_some_and(|message| {
+                matches!(message, ConversationMessage::User { content, .. } if content.iter().any(
+                    |block| matches!(block, protocol::ContentBlock::Text { text } if text.starts_with("<system-reminder>\nMobile workspace context"))
+                ))
+            })
+        {
+            index += 1;
+        }
+        messages.insert(index, reminder);
+    }
+
+    /// Reattach all call-scoped context after rebuilding a request from raw
+    /// session history (for example after a context-overflow retry).
+    pub(crate) async fn reattach_outgoing_context(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+        deferred_tools_reminder: Option<&ConversationMessage>,
+        date_change_reminder: Option<&ConversationMessage>,
+        turn_reminders: &[ConversationMessage],
+    ) {
+        self.prepend_leading_context(messages).await;
+        if let Some(reminder) = deferred_tools_reminder {
+            self.prepend_transient_leading_context(messages, reminder.clone());
+        }
+        if let Some(reminder) = date_change_reminder {
+            self.prepend_transient_leading_context(messages, reminder.clone());
+        }
+        messages.extend(turn_reminders.iter().cloned());
+    }
+
+    /// Read-only test/host preview of the fixed runtime reminder.
+    pub async fn mobile_runtime_environment_preview(&self) -> Option<String> {
+        self.mobile_runtime_environment_message()
+            .await
+            .and_then(|message| Self::text_content(&message))
     }
 
     /// Build the per-turn system prompt by gathering cwd / git / file
@@ -10921,7 +11048,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Some(provider) => !provider.skill_entries().await.is_empty(),
                 None => false,
             },
-            is_interactive: self.config.interactive_session,
+            // A scheduled mobile runtime shares a process with the foreground
+            // conversation, so `interactive_session` intentionally remains
+            // process-interactive. The typed per-orchestrator launch mode is
+            // authoritative for prompt guidance and avoids advertising `!`
+            // commands or other live-UI actions to a headless Cron run.
+            is_interactive: self.prompt_is_interactive(),
             // `# Memory` section gate (claude-code `tengu_moth_copse`, default
             // OFF): the memory feature is active iff a memory prefetch is wired
             // (`memory_prefetch.is_some()`), and the section points the model at
@@ -12342,60 +12474,8 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     ///
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
     pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {
-        use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
-        let mut tools = self.tools.available_tools(&ToolStaticContext::default());
-        // Tool-wide deny filter (claude-code `filterToolsByDenyRules`,
-        // `tools.ts:307-310`): strip every tool a TOOL-WIDE deny rule blankets,
-        // BEFORE the model sees it, using the SAME matcher the runtime check uses
-        // (`tool_wide_name_matches` — exact name OR an `mcp__server` prefix that
-        // covers all `mcp__server__tool` of that server). The names come from the
-        // permission gate; the default gate (no rule layer) returns an EMPTY list,
-        // so with zero deny rules `tools` is untouched and the wire bytes are
-        // byte-identical to before (regression-safe). Content deny rules
-        // (`Bash(rm:*)`, `WebFetch(domain:x)`) are NOT in this list — they deny
-        // specific calls, not the tool, so the tool stays advertised.
-        let denied = self.perms.tool_wide_deny_names().await;
-        if !denied.is_empty() {
-            tools.retain(|t| {
-                !denied
-                    .iter()
-                    .any(|d| permission::tool_wide_name_matches(d, t.name()))
-            });
-        }
-        // (P2-02 cc2.1.207) Main-thread `--agent` tool restriction. When `--agent`
-        // adopted an agent, the binary filters the advertised tool pool through
-        // its frontmatter: `_o=MB();…let us=yn.find(a=>a.agentType===_o);if(us){to=
-        // HJ(us,to,!1,!0).resolvedTools}`. `HJ`'s 4th arg (`n=true`) makes it
-        // SKIP the subagent always-disallowed strip (`_Ty`) — the main thread
-        // keeps ExitPlanMode / AskUserQuestion / … — so only two drops apply:
-        //   (1) the per-definition `disallowedTools` filter, then
-        //   (2) the `tools:` policy projection (`s===undefined` ⇒ keep all;
-        //       an explicit list ⇒ allow-list).
-        // Runs AFTER the tool-wide deny (claude `PNt` precedes `HJ`) and BEFORE
-        // wire serialization, on the SAME assembled pool. A strict no-op unless
-        // `--agent` was applied (guard `main_thread_agent.is_some()`).
-        {
-            let guard = self.main_thread_agent.read().await;
-            if let Some(a) = guard.as_ref() {
-                if !a.disallowed_tools.is_empty() {
-                    let def_denied: std::collections::HashSet<&str> = a
-                        .disallowed_tools
-                        .iter()
-                        .map(|spec| spec.split('(').next().unwrap_or(spec).trim())
-                        .collect();
-                    tools.retain(|t| !def_denied.contains(t.name()));
-                }
-                match &a.tool_policy {
-                    agent::AgentToolPolicy::All { .. } => {}
-                    agent::AgentToolPolicy::Explicit(names) => {
-                        tools.retain(|t| names.iter().any(|n| n == t.name()));
-                    }
-                    agent::AgentToolPolicy::Except(names) => {
-                        tools.retain(|t| !names.iter().any(|n| n == t.name()));
-                    }
-                }
-            }
-        }
+        use tool_api::tool_trait::PromptOptions;
+        let tools = self.filtered_available_tools().await;
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
@@ -12609,6 +12689,75 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         let delta = self.tools.deferral().compute_deferred_delta(&current);
         let body = delta.render_reminder()?;
         Some(ConversationMessage::user_meta(MessageId::new(), body))
+    }
+
+    async fn filtered_available_tools(
+        &self,
+    ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        use tool_api::tool_trait::ToolStaticContext;
+
+        let mut tools = self.tools.available_tools(&ToolStaticContext::default());
+        let denied = self.perms.tool_wide_deny_names().await;
+        if !denied.is_empty() {
+            tools.retain(|t| {
+                !denied
+                    .iter()
+                    .any(|d| permission::tool_wide_name_matches(d, t.name()))
+            });
+        }
+        {
+            let guard = self.main_thread_agent.read().await;
+            if let Some(agent) = guard.as_ref() {
+                if !agent.disallowed_tools.is_empty() {
+                    let def_denied: std::collections::HashSet<&str> = agent
+                        .disallowed_tools
+                        .iter()
+                        .map(|spec| spec.split('(').next().unwrap_or(spec).trim())
+                        .collect();
+                    tools.retain(|t| !def_denied.contains(t.name()));
+                }
+                match &agent.tool_policy {
+                    agent::AgentToolPolicy::All { .. } => {}
+                    agent::AgentToolPolicy::Explicit(names) => {
+                        tools.retain(|t| names.iter().any(|n| n == t.name()));
+                    }
+                    agent::AgentToolPolicy::Except(names) => {
+                        tools.retain(|t| !names.iter().any(|n| n == t.name()));
+                    }
+                }
+            }
+        }
+        tools
+    }
+
+    async fn mobile_runtime_environment_message(&self) -> Option<ConversationMessage> {
+        if let Some(message) = &self.mobile_runtime_environment_message {
+            return Some(message.clone());
+        }
+        let environment = self.mobile_runtime_environment.as_ref()?;
+        Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            environment.render_system_reminder(),
+        ))
+    }
+
+    fn text_content(message: &ConversationMessage) -> Option<String> {
+        match message {
+            ConversationMessage::User { content, .. } => content.iter().find_map(|block| {
+                if let protocol::ContentBlock::Text { text } = block {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        }
+    }
+
+    fn is_mobile_runtime_environment_message(message: &ConversationMessage) -> bool {
+        Self::text_content(message).is_some_and(|text| {
+            text.starts_with("<system-reminder>\nMobile runtime environment (version ")
+        })
     }
 
     /// Return the live, policy-filtered tool catalog in MCP's 2025-06-18

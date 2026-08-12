@@ -143,11 +143,10 @@ impl ToolInvoker for RegistryToolInvoker {
                 model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
-                // claude-code `runAgent` (runAgent.ts:668-672): an ASYNC
-                // (backgrounded) subagent runs its tools with
-                // isNonInteractiveSession=true; a sync subagent inherits the
-                // parent (default false). `is_async` is the available signal.
-                is_non_interactive_session: ctx.is_async,
+                // Use the effective owner mode captured by the runner. It is
+                // deliberately separate from `is_async`: scheduled work can
+                // launch a synchronous child that must remain non-interactive.
+                is_non_interactive_session: ctx.is_non_interactive_session,
                 custom_system_prompt: None,
                 append_system_prompt: None,
             },
@@ -547,6 +546,7 @@ mod tests {
                     agent_name: Some("researcher".to_string()),
                     team_name: Some("alpha".to_string()),
                     is_async: false,
+                    is_non_interactive_session: false,
                     can_show_permission_prompts: true,
                     cwd: None,
                     tool_use_id: None,
@@ -699,6 +699,7 @@ mod tests {
             agent_name: None,
             team_name: None,
             is_async: false,
+            is_non_interactive_session: traits::session_flags::effective_non_interactive_session(),
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
@@ -707,6 +708,95 @@ mod tests {
             parent_model: None,
             mode_override: None,
         }
+    }
+
+    struct SessionModeRecordingTool {
+        captured: Arc<StdMutex<Option<bool>>>,
+    }
+
+    #[async_trait]
+    impl Tool for SessionModeRecordingTool {
+        fn name(&self) -> &str {
+            "SessionModeRecordingTool"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &RECORDING_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
+            allow_for_tests()
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "record session mode".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            "record session mode".into()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            ctx: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            *self.captured.lock().unwrap() = Some(ctx.options.is_non_interactive_session);
+            Ok(ToolCallResult {
+                data: json!({}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+        fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
+            InterruptBehavior::Cancel
+        }
+    }
+
+    #[tokio::test]
+    async fn synchronous_subagent_tools_inherit_scheduled_headless_session_mode() {
+        let captured = Arc::new(StdMutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SessionModeRecordingTool {
+            captured: captured.clone(),
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+
+        traits::session_flags::scope_non_interactive_session(true, async {
+            invoker
+                .invoke("SessionModeRecordingTool", json!({}), no_ctx())
+                .await
+                .expect("dispatch ok");
+        })
+        .await;
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(true),
+            "a synchronous child must inherit its scheduled-headless owner's mode"
+        );
     }
 
     #[tokio::test]
@@ -789,6 +879,7 @@ mod tests {
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,
+            is_non_interactive_session: true,
             can_show_permission_prompts: can_show,
             cwd: None,
             tool_use_id: None,
@@ -874,6 +965,7 @@ mod tests {
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,
+            is_non_interactive_session: true,
             can_show_permission_prompts: true,
             cwd: None,
             tool_use_id: Some(id.to_string()),

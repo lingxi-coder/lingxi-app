@@ -35,6 +35,9 @@ fn mobile_tool_list_snapshot() {
         "computer",
         "android_use",
         "ios_use",
+        // Monitor's Bash/process-substitution contract is not portable to the
+        // restricted mobile Shell runtime.
+        "Monitor",
     ] {
         assert!(
             !names.iter().any(|n| n == forbidden),

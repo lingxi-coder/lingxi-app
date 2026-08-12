@@ -297,6 +297,22 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertThrowsError(try LocalAppWorkspacePath.validatedRoot(relativePath: "apps/tracker/elsewhere"))
     }
 
+    func testLocalAppWorkspaceBuildsDedicatedMobileLinuxRuntimeConfig() throws {
+        let config = try XCTUnwrap(
+            LocalAppWorkspacePath.mobileLinuxRuntimeConfig(appID: "tracker")
+        )
+
+        XCTAssertEqual(config.mode, .mobileLinux)
+        XCTAssertEqual(
+            config.workspaceHostPath,
+            ConversationSourceFactory.appSandboxRoot()
+                + "/" + LocalAppWorkspacePath.relativePath(appID: "tracker")
+        )
+        XCTAssertEqual(config.stableWorkspaceId, "local-app-tracker")
+        XCTAssertFalse(config.managedRoot.isEmpty)
+        XCTAssertFalse(config.rootfsVersion.isEmpty)
+    }
+
     private func makeBridgeCaptureWebView() async throws -> WKWebView {
         let webView = WKWebView()
         webView.loadHTMLString(#"<div id="ready">ready</div>"#, baseURL: nil)

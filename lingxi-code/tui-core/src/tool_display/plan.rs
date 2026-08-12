@@ -217,10 +217,7 @@ mod tests {
             ]
         }));
         assert_eq!(
-            tasks
-                .iter()
-                .map(|t| t.state)
-                .collect::<Vec<_>>(),
+            tasks.iter().map(|t| t.state).collect::<Vec<_>>(),
             vec![
                 PlanTaskState::InProgress,
                 PlanTaskState::InProgress,

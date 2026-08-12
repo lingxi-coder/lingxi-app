@@ -796,7 +796,10 @@ mod tests {
     /// actual `node` invocation.
     fn staged_runtime_root(root: &Path) -> std::path::PathBuf {
         let runtime_root = root.join("runtime");
-        for relative in ["node_modules/next/dist/bin/next", "node_modules/vite/bin/vite.js"] {
+        for relative in [
+            "node_modules/next/dist/bin/next",
+            "node_modules/vite/bin/vite.js",
+        ] {
             let path = runtime_root.join(relative);
             fs::create_dir_all(path.parent().expect("bin parent")).expect("runtime bin dir");
             fs::write(&path, "#!/usr/bin/env node\n").expect("runtime bin");
@@ -832,8 +835,11 @@ mod tests {
         // Whatever the official CLI + `npm install` produced.
         let app_package_json = br#"{"name":"scaffolded","dependencies":{"lucide-react":"^0.1.0"}}"#;
         fs::write(workspace.join("package.json"), app_package_json).expect("app package.json");
-        fs::write(workspace.join("index.html"), b"<!doctype html><div id=root>")
-            .expect("app index.html");
+        fs::write(
+            workspace.join("index.html"),
+            b"<!doctype html><div id=root>",
+        )
+        .expect("app index.html");
 
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),

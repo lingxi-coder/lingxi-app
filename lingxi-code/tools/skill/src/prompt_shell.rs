@@ -89,6 +89,16 @@ pub struct PromptShellRunner {
     /// instead of `bypass_with_audit`, so mobile-linux guest shells route
     /// through the injected runtime bridge.
     force_platform_sandbox: bool,
+    /// Executable selected by the actual registered shell carrier. Desktop
+    /// keeps the existing zsh/bash resolver; mobile uses its `/bin/sh` or
+    /// `/system/bin/sh` carrier and never assumes Bash exists.
+    shell_path: String,
+    /// Mobile shells run one-shot `-c` commands and do not load desktop login
+    /// profiles/snapshots.
+    mobile_shell: bool,
+    /// Whether the mobile carrier is actually registered for this engine. A
+    /// disabled carrier must fail closed instead of falling back to host Bash.
+    shell_enabled: bool,
     /// One lazily-created shell snapshot shared by every command expansion in
     /// this session/provider.
     snapshot: Arc<ShellSnapshot>,
@@ -260,8 +270,20 @@ impl ShellRunner for PromptShellRunner {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
         use traits::sandbox::ProcessCommand;
 
-        let shell_path = resolve_shell_path();
-        let snapshot = if self.force_platform_sandbox {
+        if self.mobile_shell && !self.shell_enabled {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: false,
+                generic_message: Some(
+                    "Mobile Shell is unavailable; prompt commands cannot run on the host shell"
+                        .into(),
+                ),
+            });
+        }
+
+        let shell_path = self.shell_path.as_str();
+        let snapshot = if self.mobile_shell {
             None
         } else {
             self.snapshot
@@ -340,7 +362,7 @@ impl ShellRunner for PromptShellRunner {
             command: shell_path.to_string(),
             // A valid snapshot replaces per-command login-shell startup. If the
             // snapshot vanished or failed to build, preserve the `-c -l` fallback.
-            args: if snapshot.is_some() {
+            args: if self.mobile_shell || snapshot.is_some() {
                 vec!["-c".into(), inner]
             } else {
                 vec!["-c".into(), "-l".into(), inner]
@@ -431,17 +453,33 @@ struct PolicyShellPermissionGate {
     live_gate: Option<Arc<dyn traits::permission_gate::PermissionGate>>,
     /// Frontmatter allow rules injected only for this prompt command.
     transient_allow_rules: Vec<String>,
+    /// Actual registered command tool name (`Shell` on mobile, otherwise the
+    /// frontmatter-selected desktop shell tool).
+    mobile_shell: bool,
+    shell_enabled: bool,
 }
 
 impl ShellPermissionGate for PolicyShellPermissionGate {
     fn check(&self, command: &str, shell: Option<FrontmatterShell>) -> ShellPermissionDecision {
+        if self.mobile_shell && !self.shell_enabled {
+            return ShellPermissionDecision::Deny {
+                message: Some(
+                    "Mobile Shell is unavailable; prompt commands cannot run on the host shell"
+                        .into(),
+                ),
+            };
+        }
         // Shell selection is frontmatter-only (never settings.defaultShell):
         // `powershell` selects the PowerShell tool ONLY when it is enabled (the
         // Windows host), else fall back to Bash (promptShellExecution.ts:80-83).
         // Builtins pass `None` → Bash.
-        let tool_name = match shell {
-            Some(FrontmatterShell::PowerShell) if cfg!(target_os = "windows") => "PowerShell",
-            _ => "Bash",
+        let tool_name = if self.mobile_shell {
+            "Shell"
+        } else {
+            match shell {
+                Some(FrontmatterShell::PowerShell) if cfg!(target_os = "windows") => "PowerShell",
+                _ => "Bash",
+            }
         };
         let input = serde_json::json!({ "command": command });
         if let Some(decision) = self.live_gate.as_ref().and_then(|gate| {
@@ -554,6 +592,8 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
         // `ShellPermissionGate::check` and `ShellRunner::run` (the SAME
         // frontmatter value), so the gate reads it there per call.
         let sandbox_runtime = self.ctx.effective_sandbox_runtime();
+        let mobile_shell = self.ctx.mobile_shell();
+        let shell_enabled = mobile_shell.is_some_and(|carrier| carrier.enabled);
         let runner = Arc::new(PromptShellRunner {
             process: self.ctx.process.clone(),
             sandbox: self.ctx.sandbox.clone(),
@@ -566,6 +606,12 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
                 .ctx
                 .mobile_shell()
                 .is_some_and(|carrier| carrier.force_platform_sandbox),
+            shell_path: mobile_shell.map_or_else(
+                || resolve_shell_path().to_string(),
+                |carrier| carrier.shell_path.clone(),
+            ),
+            mobile_shell: mobile_shell.is_some(),
+            shell_enabled,
             snapshot: self.snapshot.clone(),
         });
         let mut effective = build_effective_policy(
@@ -585,6 +631,8 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
             mode: self.ctx.permission_mode,
             live_gate: self.ctx.permission_gate.clone(),
             transient_allow_rules: allowed_tools.to_vec(),
+            mobile_shell: mobile_shell.is_some(),
+            shell_enabled,
         });
         ShellExpansionCtx {
             runner,
@@ -865,5 +913,75 @@ mod tests {
             *sandbox.last_network.lock().unwrap(),
             Some(traits::sandbox::NetworkPolicy::Disabled)
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_mobile_carrier_never_falls_back_to_desktop_shell() {
+        let mut ctx = test_ctx();
+        ctx.process = Arc::new(RecordingProcessRunner);
+        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+            false,
+            vec!["sh".into()],
+            None,
+        ));
+
+        let provider = build_prompt_shell_provider(&ctx);
+        let expansion = provider.build(&["Shell(*)".into()], None);
+
+        assert!(matches!(
+            expansion.permission_gate.check("printf ok", None),
+            ShellPermissionDecision::Deny { .. }
+        ));
+        let error = expansion
+            .runner
+            .run("printf ok", None)
+            .await
+            .expect_err("disabled mobile shell must fail closed");
+        assert_eq!(
+            error.generic_message.as_deref(),
+            Some("Mobile Shell is unavailable; prompt commands cannot run on the host shell")
+        );
+    }
+
+    #[test]
+    fn mobile_prompt_commands_authorize_as_shell_not_bash() {
+        struct RecordingGate(Mutex<Vec<String>>);
+        #[async_trait]
+        impl traits::permission_gate::PermissionGate for RecordingGate {
+            async fn check(
+                &self,
+                _tool_name: &str,
+                _input: &serde_json::Value,
+            ) -> traits::permission_gate::PermissionDecision {
+                traits::permission_gate::PermissionDecision::Allow
+            }
+
+            fn check_noninteractive_with_allow_rules(
+                &self,
+                tool_name: &str,
+                _input: &serde_json::Value,
+                _allow_rules: &[String],
+            ) -> Option<traits::permission_gate::NonInteractivePermissionDecision> {
+                self.0.lock().unwrap().push(tool_name.to_string());
+                Some(traits::permission_gate::NonInteractivePermissionDecision::Allow)
+            }
+        }
+
+        let mut ctx = test_ctx();
+        let gate = Arc::new(RecordingGate(Mutex::new(Vec::new())));
+        ctx.permission_gate = Some(gate.clone());
+        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+            true,
+            vec!["sh".into()],
+            None,
+        ));
+
+        let provider = build_prompt_shell_provider(&ctx);
+        let expansion = provider.build(&[], None);
+        assert_eq!(
+            expansion.permission_gate.check("printf ok", None),
+            ShellPermissionDecision::Allow
+        );
+        assert_eq!(*gate.0.lock().unwrap(), vec!["Shell"]);
     }
 }

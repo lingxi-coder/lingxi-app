@@ -292,7 +292,11 @@ pub fn result_headline_parts(
                     english,
                 ));
             }
-            Some(counted(HeadlineKind::LinesRead, vec![as_u32(read)], english))
+            Some(counted(
+                HeadlineKind::LinesRead,
+                vec![as_u32(read)],
+                english,
+            ))
         }
         "Grep" => {
             let mode = result.get("mode").and_then(Value::as_str).unwrap_or("");
@@ -462,7 +466,9 @@ fn generic_body(result: &Value) -> Option<String> {
     if let Some(text) = result.as_str() {
         return Some(text.to_string());
     }
-    for key in ["content", "output", "result", "message", "summary", "stdout"] {
+    for key in [
+        "content", "output", "result", "message", "summary", "stdout",
+    ] {
         if let Some(text) = result.get(key).and_then(Value::as_str) {
             return Some(text.to_string());
         }
@@ -541,7 +547,10 @@ mod tests {
         assert_eq!(added_removed_header(1, 0).as_deref(), Some("Added 1 line"));
         assert_eq!(added_removed_header(2, 0).as_deref(), Some("Added 2 lines"));
         // Sole clause capitalizes; paired clause does not.
-        assert_eq!(added_removed_header(0, 1).as_deref(), Some("Removed 1 line"));
+        assert_eq!(
+            added_removed_header(0, 1).as_deref(),
+            Some("Removed 1 line")
+        );
         assert_eq!(
             added_removed_header(3, 2).as_deref(),
             Some("Added 3 lines, removed 2 lines")
@@ -646,13 +655,23 @@ mod tests {
     #[test]
     fn glob_headline_flags_truncation() {
         assert_eq!(
-            result_headline("Glob", None, &json!({"numFiles": 4, "truncated": false}), false)
-                .as_deref(),
+            result_headline(
+                "Glob",
+                None,
+                &json!({"numFiles": 4, "truncated": false}),
+                false
+            )
+            .as_deref(),
             Some("Found 4 files")
         );
         assert_eq!(
-            result_headline("Glob", None, &json!({"numFiles": 100, "truncated": true}), false)
-                .as_deref(),
+            result_headline(
+                "Glob",
+                None,
+                &json!({"numFiles": 100, "truncated": true}),
+                false
+            )
+            .as_deref(),
             Some("Found 100 files (truncated)")
         );
     }
@@ -757,7 +776,10 @@ mod tests {
         });
         for tool in ["Edit", "MultiEdit", "Write", "NotebookEdit"] {
             let body = result_body(tool, &result);
-            assert!(body.is_none(), "{tool} body should be the diff, got {body:?}");
+            assert!(
+                body.is_none(),
+                "{tool} body should be the diff, got {body:?}"
+            );
         }
         // An error still surfaces — the diff cannot say what went wrong.
         let failed = json!({"error": "String not found in file"});
@@ -808,8 +830,13 @@ mod tests {
             "new_string": "a\nB\nc\n",
         });
         assert_eq!(
-            result_headline("Edit", Some(&input), &json!("The file has been updated."), false)
-                .as_deref(),
+            result_headline(
+                "Edit",
+                Some(&input),
+                &json!("The file has been updated."),
+                false
+            )
+            .as_deref(),
             Some("Added 2 lines, removed 1 line")
         );
     }

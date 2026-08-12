@@ -165,11 +165,14 @@ fn parked_teammate_ctx() -> SubagentContext {
         // Marked persistent for fidelity; the stub runner parks regardless.
         persistent: true,
         can_show_permission_prompts: false,
+        session_interactive: None,
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,
         resumed_history: None,
         rendered_system_prompt: None,
+        mobile_runtime_environment_reminder: None,
+        mobile_runtime_workspace_reminder: None,
         content_replacement_state: None,
         agent_memory: None,
         display: AgentDisplay {

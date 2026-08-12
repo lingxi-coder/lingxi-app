@@ -46,6 +46,7 @@ pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
 pub mod mobile_linux;
+pub mod mobile_runtime_environment;
 pub mod model_capabilities;
 pub mod notification;
 pub mod orchestrator;
@@ -121,6 +122,11 @@ pub use mobile_linux::{
     MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskSnapshot,
     MobileLinuxTaskStatus, MountPurpose, MountSpec, PtyOpenRequest, PtySessionHandle, PtySize,
     RootfsState, RootfsStatus, UnavailableMobileLinuxRuntime,
+};
+pub use mobile_runtime_environment::{
+    MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
+    MobileLaunchMode, MobileLifecyclePolicy, MobileNetworkPolicy, MobileRuntimeEnvironment,
+    MobileToolRuntime, MOBILE_RUNTIME_ENVIRONMENT_VERSION,
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{

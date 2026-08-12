@@ -28,6 +28,31 @@ import SwiftUI
     import AuthenticationServices
     import UIKit
     import engine_mobileFFI
+
+    /// Capture only stable native host facts once per engine construction.
+    /// Viewport, safe-area, theme, and model/provider choices are intentionally
+    /// excluded so the model-facing runtime context remains cacheable.
+    @MainActor
+    func makeIosHostEnvironment(
+        launchMode: IosLaunchModeFfi
+    ) -> IosHostEnvironmentFfi {
+        let deviceClass: IosDeviceClassFfi = switch UIDevice.current.userInterfaceIdiom {
+        case .phone: .phone
+        case .pad: .tablet
+        default: .unknown
+        }
+        #if targetEnvironment(simulator)
+            let executionTarget = IosExecutionTargetFfi.simulator
+        #else
+            let executionTarget = IosExecutionTargetFfi.physicalDevice
+        #endif
+        return IosHostEnvironmentFfi(
+            osVersion: UIDevice.current.systemVersion,
+            deviceClass: deviceClass,
+            executionTarget: executionTarget,
+            launchMode: launchMode
+        )
+    }
 #endif
 
 // MARK: - Published conversation state
@@ -1902,7 +1927,8 @@ final class MockConversationSource: ConversationSource {
                 },
                 localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
                 localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
-                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+                hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )
             let handleBuilder = self.handleBuilder
             handleBuildAttemptID &+= 1

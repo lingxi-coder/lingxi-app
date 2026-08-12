@@ -771,7 +771,7 @@ Usage notes:\n\
   - Results may be summarized if the content is very large\n\
   - Includes a self-cleaning 15-minute cache for faster responses when repeatedly accessing the same URL\n\
   - When a URL redirects to a different host, the tool will inform you and provide the redirect URL in a special format. You should then make a new WebFetch request with the redirect URL to fetch the content.\n\
-  - For GitHub URLs, prefer using the gh CLI via Bash instead (e.g., gh pr view, gh issue view, gh api).\n"
+  - For GitHub URLs, prefer an authenticated GitHub tool; when available, this can be an MCP integration or the gh CLI through a registered shell tool.\n"
             .into()
     }
     async fn prompt(&self, opts: &PromptOptions) -> String {

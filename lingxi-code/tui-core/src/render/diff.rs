@@ -1186,11 +1186,7 @@ mod tests {
     fn structured_falls_back_to_whole_line_when_too_dissimilar() {
         let diff = structured("aaaaaaaa\n", "zzzzzzzz\n", Some("x.txt"));
         assert!(diff.rows.iter().all(|r| !r.word_diffed));
-        assert!(diff
-            .rows
-            .iter()
-            .flat_map(|r| &r.segments)
-            .all(|s| !s.emph));
+        assert!(diff.rows.iter().flat_map(|r| &r.segments).all(|s| !s.emph));
     }
 
     #[test]
@@ -1238,7 +1234,11 @@ mod tests {
         let diff = structured(&old, &new, Some("x.txt"));
         let hunks: Vec<usize> = diff.rows.iter().map(|r| r.hunk).collect();
         assert_eq!(hunks.first(), Some(&0));
-        assert_eq!(hunks.last(), Some(&1), "two separated clusters -> two hunks");
+        assert_eq!(
+            hunks.last(),
+            Some(&1),
+            "two separated clusters -> two hunks"
+        );
         // Hunk indices are non-decreasing.
         assert!(hunks.windows(2).all(|w| w[0] <= w[1]));
     }

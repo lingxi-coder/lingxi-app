@@ -2048,7 +2048,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // env ON + interactive + non-coordinator, the description switches to the fork
     // variants (subagent_type sentence, addendum, SendMessage qualifier). Default
     // (env OFF) keeps the non-fork text. Serialized on the build-prompt env lock
-    // (`LINGXI_FORK_SUBAGENT` + the non-interactive global are process-wide).
+    // because `LINGXI_FORK_SUBAGENT` is process-wide.
     #[test]
     fn build_prompt_fork_gate() {
         let _g = AGENT_LIST_ENV_LOCK
@@ -2121,6 +2121,38 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "non-interactive disables fork text"
         );
         assert!(p.contains("specify a subagent_type parameter to select which agent type to use"));
+    }
+
+    #[tokio::test]
+    async fn build_prompt_fork_gate_uses_task_local_session_mode() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        let prior_global = traits::session_flags::is_non_interactive_session();
+        let prior_env = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+        traits::session_flags::set_non_interactive_session(true);
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
+
+        let interactive = traits::session_flags::scope_non_interactive_session(false, async {
+            AgentTool::build_prompt(&agents, &[], false)
+        });
+        let headless = traits::session_flags::scope_non_interactive_session(true, async {
+            AgentTool::build_prompt(&agents, &[], false)
+        });
+        let (interactive, headless) = tokio::join!(interactive, headless);
+
+        assert!(interactive.contains("forks yourself"));
+        assert!(!headless.contains("forks yourself"));
+        match prior_env {
+            Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
+            None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
+        }
+        traits::session_flags::set_non_interactive_session(prior_global);
     }
 
     // The fabricated "# MCP Servers" note is NOT present in v2.1.193 — the agent

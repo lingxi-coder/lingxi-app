@@ -680,7 +680,7 @@ impl AgentTool {
         // non-fork text below, byte-identical to the pre-F4 prompt.
         let is_fork = traits::fork_subagent::is_fork_subagent_enabled(
             is_coordinator,
-            traits::session_flags::is_non_interactive_session(),
+            traits::session_flags::effective_non_interactive_session(),
         );
 
         // Subagent_type sentence — fork variant (binary `${o?…:…}`).

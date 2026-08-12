@@ -38,7 +38,11 @@ fn parse_builtin(entry: &BundledSkill) -> Skill {
         LoadedFrom::Bundled,
     )
     .unwrap_or_else(|e| panic!("bundled skill `{}` failed to parse: {e}", entry.name));
-    skill.frontmatter.triggers = entry.triggers.iter().map(|trigger| (*trigger).into()).collect();
+    skill.frontmatter.triggers = entry
+        .triggers
+        .iter()
+        .map(|trigger| (*trigger).into())
+        .collect();
     skill
 }
 
@@ -84,7 +88,10 @@ mod tests {
         let mut r = SkillRegistry::new();
         register_mobile(&mut r);
         for (query, expected) in [
-            ("make a distinctive native frontend design", "frontend-design"),
+            (
+                "make a distinctive native frontend design",
+                "frontend-design",
+            ),
             ("run browser and webview frontend QA", "frontend-qa"),
             ("audit accessibility semantics", "accessibility"),
             ("improve React state and effects", "react-best-practices"),

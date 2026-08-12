@@ -222,11 +222,6 @@ fn lingxi_config_home_dir() -> PathBuf {
     }
 }
 
-/// `{configHome}/tasks` (parent of every per-list tasks dir).
-fn tasks_root() -> PathBuf {
-    lingxi_config_home_dir().join("tasks")
-}
-
 /// Port of `sanitizePathComponent()` (`utils/tasks.ts`): replace every char
 /// outside `[a-zA-Z0-9_-]` with `-`.
 #[must_use]
@@ -269,7 +264,24 @@ impl TodoStore {
     /// (`<configHome>/tasks/<sanitize(list_id)>/`).
     #[must_use]
     pub fn for_list(list_id: &str) -> Self {
-        Self::in_dir(tasks_root().join(sanitize_path_component(list_id)))
+        Self::for_list_at(lingxi_config_home_dir(), list_id)
+    }
+
+    /// Open the store for `list_id` under an explicitly resolved config home.
+    ///
+    /// Embedded hosts must use this constructor instead of relying on the
+    /// process-wide `HOME` / `LINGXI_CONFIG_DIR` environment. On iOS in
+    /// particular, `HOME` identifies `/var/mobile`, which is outside the app
+    /// container and rejects task creation with `EPERM`; the native host
+    /// already owns the correct app-private config-home path.
+    #[must_use]
+    pub fn for_list_at(config_home: impl AsRef<Path>, list_id: &str) -> Self {
+        Self::in_dir(
+            config_home
+                .as_ref()
+                .join("tasks")
+                .join(sanitize_path_component(list_id)),
+        )
     }
 
     /// Open a store rooted at an explicit tasks directory (used by tests).

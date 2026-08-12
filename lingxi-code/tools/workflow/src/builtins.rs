@@ -133,7 +133,7 @@ mod tests {
             "lib/lingxi-bridge.js",
             "window.lingxi.v1",
             "existing Shell tool",
-            "existing Git/Bash capability",
+            "existing Git capability",
             "npm install",
             "npm uninstall",
             "npm ci",

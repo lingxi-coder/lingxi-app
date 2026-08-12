@@ -127,6 +127,21 @@ pub async fn run_subagent(
     event_rx: mpsc::Receiver<engine::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
+    let non_interactive = ctx
+        .session_interactive
+        .map_or(ctx.is_async, |interactive| !interactive || ctx.is_async);
+    traits::session_flags::scope_non_interactive_session(
+        non_interactive,
+        run_subagent_inner(ctx, event_rx, out_tx),
+    )
+    .await;
+}
+
+async fn run_subagent_inner(
+    ctx: SubagentContext,
+    event_rx: mpsc::Receiver<engine::Event>,
+    out_tx: mpsc::Sender<SubagentEvent>,
+) {
     // G4 (frontmatter hooks): register the agent definition's frontmatter hooks
     // scoped to this child `agent_id` BEFORE the run and clear them AFTER —
     // claude `registerFrontmatterHooks(…, isAgent=true)` (runAgent.ts:557-575)
@@ -887,6 +902,12 @@ async fn run_subagent_loop(
     let force_structured_tool: Option<&'static str> = if let Some(schema_str) = &ctx.schema {
         let input_schema: serde_json::Value = serde_json::from_str(schema_str)
             .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+        // The normal registry exposes a permissive StructuredOutput tool. A
+        // workflow schema run must replace it with this invocation's schema,
+        // not append a second declaration with the same provider-facing name.
+        tool_schemas.retain(|tool| {
+            tool.get("name").and_then(serde_json::Value::as_str) != Some("StructuredOutput")
+        });
         tool_schemas.push(serde_json::json!({
             "name": "StructuredOutput",
             "description":
@@ -923,6 +944,23 @@ async fn run_subagent_loop(
     if let Some(resumed) = &ctx.resumed_history {
         history.extend(resumed.iter().cloned());
     } else {
+        // Keep the engine-owned mobile snapshot at the fixed first-message
+        // position, before the variable task/fork prompt. That preserves the
+        // provider-cacheable prefix while leaving custom/fork SYSTEM bytes
+        // untouched. A resumed transcript already contains this message.
+        if let Some(reminder) = &ctx.mobile_runtime_environment_reminder {
+            history.push(ConversationMessage::user_meta(
+                MessageId::new(),
+                reminder.to_string(),
+            ));
+        }
+        if let Some(reminder) = &ctx.mobile_runtime_workspace_reminder {
+            history.push(ConversationMessage::user_meta(
+                MessageId::new(),
+                reminder.to_string(),
+            ));
+        }
+
         // Fork-context prefix (if any) followed by the prompt.
         if let Some(fork) = &ctx.fork_context_messages {
             history.extend(fork.iter().cloned());
@@ -1395,6 +1433,8 @@ async fn run_subagent_loop(
                         // R1: an async (backgrounded) subagent runs its tools with
                         // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
                         is_async: ctx.is_async,
+                        is_non_interactive_session: ctx.is_async
+                            || traits::session_flags::effective_non_interactive_session(),
                         // Whether this worker may surface a permission prompt to the
                         // user — drives the worker attribution on the prompt dialog
                         // (claude-code's worker permission badge).

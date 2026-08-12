@@ -1212,9 +1212,8 @@ impl ChatWidget {
                 // side-table, mirroring the resume path's correlation, then
                 // render the `⎿ {summary}` result cell (or an Edit/Write diff).
                 let call_input = self.tool_inputs.remove(&id);
-                let (old_string, new_string, file_path) = call_input
-                    .as_ref()
-                    .map_or((None, None, None), |input| {
+                let (old_string, new_string, file_path) =
+                    call_input.as_ref().map_or((None, None, None), |input| {
                         tui_core::active_turn::diff_inputs_for(&tool, input)
                     });
                 self.transcript

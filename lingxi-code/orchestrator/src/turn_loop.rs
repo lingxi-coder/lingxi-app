@@ -393,9 +393,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // snapshot only (never `session.history` / JSONL). 1:1 with claude-code
     // `A6n(re, userContext)`, which prepends the meta message at every
     // `callModel`. Recomputed each turn, never accumulates.
-    if let Some(ctx_msg) = orch.additional_context_message().await {
-        history_snapshot.insert(0, ctx_msg);
-    }
+    orch.prepend_leading_context(&mut history_snapshot).await;
 
     // Collected, not pushed: `call_api_with_ptl_recovery` rebuilds the request
     // from raw `session.history` on every retry, and each of these advances
@@ -553,8 +551,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let tools = orch.build_wire_tools().await;
     history_snapshot.extend(turn_reminders.iter().cloned());
 
-    if let Some(reminder) = orch.deferred_tools_reminder_message() {
-        history_snapshot.insert(0, reminder);
+    let deferred_tools_reminder = orch.deferred_tools_reminder_message();
+    if let Some(reminder) = deferred_tools_reminder.clone() {
+        orch.prepend_transient_leading_context(&mut history_snapshot, reminder);
     }
     // `date_change` (batched twin): sessions crossing local midnight tell the
     // model the new date once per changed date. Prepended AFTER the deferred
@@ -569,7 +568,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let date_change_reminder =
         orch.date_change_reminder_message(orch.session.lock().await.session_id);
     if let Some(reminder) = date_change_reminder.clone() {
-        history_snapshot.insert(0, reminder);
+        orch.prepend_transient_leading_context(&mut history_snapshot, reminder);
     }
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
     // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
@@ -594,6 +593,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot,
         tools,
         max_tokens_override,
+        deferred_tools_reminder,
         date_change_reminder,
         &turn_reminders,
     )
@@ -667,7 +667,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             let content = match &e {
                 OrchestratorError::ApiCall(LlmError::RequestTooLarge)
                 | OrchestratorError::Streaming(LlmError::RequestTooLarge) => {
-                    crate::conversation::request_too_large_notice()
+                    crate::conversation::request_too_large_notice(orch.prompt_is_interactive())
                 }
                 _ => e.to_string(),
             };
@@ -762,8 +762,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     message_count: api_success_message_count,
                     message_tokens: api_success_message_tokens,
                     did_fall_back_to_non_streaming: false,
-                    is_non_interactive_session: traits::session_flags::is_non_interactive_session(),
-                    print: traits::session_flags::is_non_interactive_session(),
+                    is_non_interactive_session: !orch.prompt_is_interactive(),
+                    print: !orch.prompt_is_interactive(),
                     is_tty: false,
                     query_source: "user".into(),
                     permission_mode: if orch.session.lock().await.plan_mode {
@@ -1169,10 +1169,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
     history_snapshot: Vec<ConversationMessage>,
     tools: Vec<serde_json::Value>,
     max_tokens_override: Option<u32>,
-    // This step's transient `date_change` reminder (already at index 0 of
-    // `history_snapshot`). The retry/fallback paths below rebuild the request
-    // from raw `session.history`, where the transient does not live, so it is
-    // re-prepended there — the streaming twin threads it the same way.
+    // This step's transient deferred-tool delta. Like the date-change reminder,
+    // it must be reattached when a retry rebuilds from raw session history.
+    deferred_tools_reminder: Option<ConversationMessage>,
+    // This step's transient `date_change` reminder (first on desktop, directly
+    // after the fixed runtime snapshot on mobile). Retry/fallback paths rebuild
+    // from raw `session.history`, so it is reattached there too.
     date_change_reminder: Option<ConversationMessage>,
     // This step's per-turn transient reminders (skill listing, conditional
     // rules, nested memory, diagnostics, …), already appended to
@@ -1358,7 +1360,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         let mut s = orch.session.lock().await;
                         s.history.clone_from(&edits.messages);
                     }
-                    retry.extend(turn_reminders.iter().cloned());
+                    orch.reattach_outgoing_context(
+                        &mut retry,
+                        deferred_tools_reminder.as_ref(),
+                        date_change_reminder.as_ref(),
+                        turn_reminders,
+                    )
+                    .await;
                     return match orch
                         .api
                         .messages_create(model, profile, system, retry, tools.clone())
@@ -1391,13 +1399,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
             let mut s = orch.session.lock().await;
             s.history.clone_from(&truncated);
         }
-        // The re-snapshot came from raw `session.history`, so re-prepend this
-        // step's transient `date_change` reminder — the retried request is the
-        // SAME step's request and must still carry it.
-        if let Some(reminder) = date_change_reminder.clone() {
-            truncated.insert(0, reminder);
-        }
-        truncated.extend(turn_reminders.iter().cloned());
+        orch.reattach_outgoing_context(
+            &mut truncated,
+            deferred_tools_reminder.as_ref(),
+            date_change_reminder.as_ref(),
+            turn_reminders,
+        )
+        .await;
         match orch
             .api
             .messages_create(model, profile, system, truncated, tools.clone())
@@ -1500,7 +1508,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     let s = orch.session.lock().await;
                     s.history.clone()
                 };
-                history.extend(turn_reminders.iter().cloned());
+                orch.reattach_outgoing_context(
+                    &mut history,
+                    deferred_tools_reminder.as_ref(),
+                    date_change_reminder.as_ref(),
+                    turn_reminders,
+                )
+                .await;
                 match orch
                     .api
                     .messages_create(model, profile, system, history, tools)
@@ -1827,7 +1841,7 @@ pub(crate) async fn surface_terminal_api_error(
 ) -> Option<MessageId> {
     let (model, interactive) = {
         let s = orch.session.lock().await;
-        (s.model.clone(), orch.config.interactive_permissions)
+        (s.model.clone(), orch.prompt_is_interactive())
     };
     // The just-completed call's Anthropic `request-id` — for the refusal
     // message's `\nRequest ID: …` suffix (recorded by the adapter from the

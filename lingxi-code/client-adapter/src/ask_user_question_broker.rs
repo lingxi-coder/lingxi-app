@@ -168,7 +168,10 @@ impl BridgeAskUserQuestionBroker {
     pub async fn replay_pending(&self) -> usize {
         let requests: Vec<AskUserQuestionRequestDto> = {
             let pending = self.pending.lock().await;
-            pending.values().map(|entry| entry.request.clone()).collect()
+            pending
+                .values()
+                .map(|entry| entry.request.clone())
+                .collect()
         };
         let count = requests.len();
         for request in requests {
@@ -212,9 +215,7 @@ mod tests {
     use crate::MockSink;
     use tui_core::ask_user_question_bridge::{AskOption, AskQuestion};
 
-    fn an_exchange(
-        resp_tx: oneshot::Sender<HashMap<String, String>>,
-    ) -> AskUserQuestionExchange {
+    fn an_exchange(resp_tx: oneshot::Sender<HashMap<String, String>>) -> AskUserQuestionExchange {
         AskUserQuestionExchange {
             questions: vec![AskQuestion {
                 question: "Choose?".into(),

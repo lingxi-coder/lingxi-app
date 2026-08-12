@@ -230,6 +230,35 @@ impl traits::ToolInvoker for CountingInvoker {
     }
 }
 
+struct SessionModeRecordingInvoker {
+    captured: Mutex<Option<bool>>,
+}
+
+impl SessionModeRecordingInvoker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            captured: Mutex::new(None),
+        })
+    }
+}
+
+#[async_trait]
+impl traits::ToolInvoker for SessionModeRecordingInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        *self.captured.lock().unwrap() = Some(ctx.is_non_interactive_session);
+        Ok(serde_json::json!("tool-output"))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// `BudgetEnforcerHandle` that reports the budget already exhausted when
 /// `exceeded` is set. `check_and_charge` returns
 /// `Err(BudgetError::Exceeded { current_nano_usd: 1_500_000_000 })`
@@ -393,11 +422,14 @@ fn fresh_subagent_ctx() -> SubagentContext {
         is_async: false,
         persistent: false,
         can_show_permission_prompts: true,
+        session_interactive: None,
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,
         resumed_history: None,
         rendered_system_prompt: Some(Arc::from("")),
+        mobile_runtime_environment_reminder: None,
+        mobile_runtime_workspace_reminder: None,
         content_replacement_state: None,
         agent_memory: None,
         display: AgentDisplay {
@@ -1023,6 +1055,29 @@ async fn loop_consumes_streaming_seam_end_to_end() {
 }
 
 #[tokio::test]
+async fn synchronous_child_dispatch_preserves_scheduled_headless_session_mode() {
+    let api = StreamingMockApiClient::new(vec![
+        streamed_tool_use_turn("Read", "tool_use"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let invoker = SessionModeRecordingInvoker::new();
+    let mut ctx = loop_ctx(api, Some(invoker.clone()), 4);
+    ctx.is_async = false;
+    ctx.session_interactive = Some(false);
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert_eq!(
+        *invoker.captured.lock().unwrap(),
+        Some(true),
+        "scheduled work must not become interactive at the child tool boundary"
+    );
+}
+
+#[tokio::test]
 async fn loop_advertises_context_tool_schemas_to_the_seam() {
     // `ctx.tool_schemas` must reach `messages_create_stream`'s `tools` arg
     // on every round-trip (this is what lets the model emit `tool_use`).
@@ -1044,6 +1099,54 @@ async fn loop_advertises_context_tool_schemas_to_the_seam() {
         api.last_tools(),
         schemas,
         "ctx.tool_schemas must be forwarded verbatim to the streaming seam"
+    );
+}
+
+#[tokio::test]
+async fn schema_replaces_inherited_structured_output_tool() {
+    let api =
+        StreamingMockApiClient::new(vec![streamed_tool_use_turn("StructuredOutput", "tool_use")]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
+    ctx.tool_schemas = vec![
+        serde_json::json!({
+            "name": "Read",
+            "description": "Reads a file.",
+            "input_schema": {"type": "object"}
+        }),
+        serde_json::json!({
+            "name": "StructuredOutput",
+            "description": "Generic structured output inherited from the registry.",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": true
+            }
+        }),
+    ];
+    let stage_schema = serde_json::json!({
+        "type": "object",
+        "required": ["ok"],
+        "properties": {"ok": {"type": "boolean"}}
+    });
+    ctx.schema = Some(stage_schema.to_string());
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let tools = api.last_tools();
+    let structured: Vec<&serde_json::Value> = tools
+        .iter()
+        .filter(|tool| tool["name"] == "StructuredOutput")
+        .collect();
+    assert_eq!(
+        structured.len(),
+        1,
+        "the provider request must not contain duplicate tool names: {tools:?}"
+    );
+    assert_eq!(
+        structured[0]["input_schema"], stage_schema,
+        "the workflow stage schema must replace the inherited generic schema"
     );
 }
 
@@ -2519,6 +2622,38 @@ async fn subagent_start_additional_context_injected_as_system_reminder() {
 }
 
 #[tokio::test]
+async fn mobile_runtime_reminder_is_the_fixed_prefix_before_task_and_hooks() {
+    let api = CapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 2);
+    ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
+    ctx.mobile_runtime_environment_reminder = Some(Arc::from(
+        "<system-reminder>\nMOBILE RUNTIME\n</system-reminder>",
+    ));
+    ctx.mobile_runtime_workspace_reminder = Some(Arc::from(
+        "<system-reminder>\nMOBILE WORKSPACE\n</system-reminder>",
+    ));
+    ctx.hook_executor = Some(exec_with_start_context("extra from hook").await);
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    drop(event_tx);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let texts: Vec<String> = api.captured().iter().filter_map(user_text).collect();
+    assert_eq!(
+        texts[0],
+        "<system-reminder>\nMOBILE RUNTIME\n</system-reminder>"
+    );
+    assert_eq!(
+        texts[1],
+        "<system-reminder>\nMOBILE WORKSPACE\n</system-reminder>"
+    );
+    assert_eq!(texts[2], "do it");
+    assert!(texts[3].contains("SubagentStart hook additional context"));
+}
+
+#[tokio::test]
 async fn subagent_start_multiple_contexts_join_into_one_reminder() {
     // G4 byte-parity (runAgent.ts:530-555 + messages.ts:4117-4128): when
     // multiple SubagentStart hooks each return additionalContext, claude
@@ -2983,6 +3118,12 @@ async fn a_resumed_history_replaces_the_seed_rather_than_prefixing_it() {
         MessageId::new(),
         "RECOVERED".to_string(),
     )]);
+    ctx.mobile_runtime_environment_reminder = Some(Arc::from(
+        "<system-reminder>\nMOBILE RUNTIME MUST NOT DUPLICATE\n</system-reminder>",
+    ));
+    ctx.mobile_runtime_workspace_reminder = Some(Arc::from(
+        "<system-reminder>\nMOBILE WORKSPACE MUST NOT DUPLICATE\n</system-reminder>",
+    ));
 
     let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -3002,6 +3143,14 @@ async fn a_resumed_history_replaces_the_seed_rather_than_prefixing_it() {
     assert!(
         !rendered.contains("FORK CONTEXT"),
         "the fork-context prefix is NOT re-added: {rendered}"
+    );
+    assert!(
+        !rendered.contains("MOBILE RUNTIME MUST NOT DUPLICATE"),
+        "the runtime reminder is already persisted in recovered history and is NOT re-added: {rendered}"
+    );
+    assert!(
+        !rendered.contains("MOBILE WORKSPACE MUST NOT DUPLICATE"),
+        "the workspace reminder is already persisted in recovered history and is NOT re-added: {rendered}"
     );
 }
 

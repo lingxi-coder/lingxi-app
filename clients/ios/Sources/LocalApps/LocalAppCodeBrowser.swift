@@ -53,6 +53,28 @@ enum LocalAppWorkspacePath {
         try validatedRoot(relativePath: relativePath(appID: appID))
     }
 
+    /// Build the Mobile Linux mount used by an app-scoped conversation. The
+    /// app workspace remains the host/session catalog cwd, while tools see the
+    /// same directory through a dedicated `/workspace/local-app-<id>` mount.
+    static func mobileLinuxRuntimeConfig(appID: String) -> TerminalRuntimeConfig? {
+        guard (try? validatedRoot(appID: appID)) != nil else { return nil }
+        let appSandboxRoot = ConversationSourceFactory.appSandboxRoot()
+        let workspaceHostPath = appSandboxRoot + "/" + relativePath(appID: appID)
+        let managedRoot = LXISHDefaultWorkspace.managedRootPath()
+        guard !managedRoot.isEmpty else { return nil }
+        let manifest = LXISHRuntimeBundleMetadata.current()
+        return TerminalRuntimeConfig(
+            mode: .mobileLinux,
+            managedRoot: managedRoot,
+            workspaceHostPath: workspaceHostPath,
+            stableWorkspaceId: "local-app-\(appID)",
+            abi: "arm64",
+            rootfsVersion: manifest.rootfsVersion,
+            archiveSha256: manifest.archiveSha256,
+            authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path
+        )
+    }
+
     static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
         candidate.path == root.path || candidate.path.hasPrefix(root.path + "/")
     }

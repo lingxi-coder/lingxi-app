@@ -225,6 +225,25 @@ mod tests {
         )
     }
 
+    #[test]
+    fn api_service_interactivity_is_session_local() {
+        let prior = traits::session_flags::is_non_interactive_session();
+        traits::session_flags::set_non_interactive_session(false);
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+
+        let headless = make_adapter(transport.clone()).with_interactive_session(false);
+        let interactive = make_adapter(transport).with_interactive_session(true);
+
+        assert!(!headless.interactive_session_for_test());
+        assert!(interactive.interactive_session_for_test());
+        traits::session_flags::set_non_interactive_session(prior);
+    }
+
     fn make_adapter_for_protocol(
         protocol: ProtocolFamily,
         provider_id: ProviderId,
@@ -573,7 +592,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// `None` must mean "whatever this model can emit", not a codec default.
     ///
     /// This is what makes `messages_create_side_query`'s `Option<u32>` worth
@@ -1480,7 +1498,7 @@ mod tests {
             .insert("speed".to_string(), serde_json::json!("fast"));
 
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"speed":"slow"}"#);
-        ApiService::merge_extra_body(&mut prepared);
+        adapter.merge_extra_body(&mut prepared);
         let body = prepared.provider_request.body_json;
         assert_eq!(
             body["speed"],

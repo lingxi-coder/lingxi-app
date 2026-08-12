@@ -25,7 +25,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -328,12 +328,54 @@ impl From<&str> for BridgeFailure {
     }
 }
 
+/// ONE canonical spelling for a session-catalog cwd key. `canonicalize`
+/// collapses the platform's symlink split (`/var` vs `/private/var` on
+/// iOS/macOS), so mint, listing, resume and the cwd gates all derive the SAME
+/// sanitized `projects/` directory. Falls back to the raw string when the path
+/// does not exist.
+pub(crate) fn canonical_cwd_string(path: &std::path::Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Delete a session file this host minted into an app's workspace catalog.
+/// Used by both create paths when `set_init_session` refuses their id — the
+/// set-once pin is the arbiter, and the loser's file would otherwise linger as
+/// a phantom conversation row in the app's session list.
+pub(crate) fn remove_app_session_file(
+    lingxi_home: &std::path::Path,
+    data_root: &std::path::Path,
+    record: &local_apps::AppRecord,
+    session_id: &str,
+) -> bool {
+    let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    let path = lingxi_home
+        .join("projects")
+        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
+        .join(format!("{session_id}.jsonl"));
+    std::fs::remove_file(path).is_ok()
+}
+
+pub(crate) fn create_next_step_guidance(shell_available: Option<bool>) -> String {
+    match shell_available {
+        Some(true) => "Run local-app-build: Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript). Dependencies use the existing Shell for npm. Generate edits src/ and injects the bridge/platform adapter, then call build and preview via manage_runtime.".into(),
+        Some(false) => "Run local-app-build: Shell is unavailable, so reuse existing source if present or the repository-verified .lingxi/vite-fallback when the source root is still empty, report the Shell-unavailable reason, avoid npm dependency operations, then call build and preview via manage_runtime.".into(),
+        None => "Run local-app-build: If Shell is available, Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript); if Shell is unavailable, reuse existing source or the repository-verified .lingxi/vite-fallback and report that reason. Use npm dependency commands only when Shell is available, then call build and preview via manage_runtime.".into(),
+    }
+}
+
 /// Profile-scoped broker.  The service is attached after its durable load has
 /// completed, while command/capability resolution can be wired immediately.
 pub(crate) struct LocalAppsHostBroker {
     root: PathBuf,
     event_sink: Arc<dyn ClientEventSink>,
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    /// Whether the current connection actually exposes the model-facing Shell
+    /// tool. Kept separate from `mobile_linux`: an unavailable runtime object
+    /// may still be present (for example an iOS simulator stub).
+    shell_available: AtomicBool,
     physical_memory_bytes: u64,
     full_runtime: bool,
     runtime_root: Option<PathBuf>,
@@ -450,6 +492,7 @@ impl LocalAppsHostBroker {
         let broker = Arc::new(Self {
             root,
             event_sink,
+            shell_available: AtomicBool::new(mobile_linux.is_some()),
             mobile_linux,
             physical_memory_bytes,
             full_runtime,
@@ -484,6 +527,17 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
         self.service.set(service)
+    }
+
+    /// Refresh the connection-scoped Shell capability used by generated app
+    /// guidance. A cached profile host survives reconnects, while the selected
+    /// runtime and its authorization may not.
+    pub(crate) fn set_shell_available(&self, available: bool) {
+        self.shell_available.store(available, Ordering::Release);
+    }
+
+    fn shell_available(&self) -> bool {
+        self.shell_available.load(Ordering::Acquire)
     }
 
     pub(crate) fn attach_llm(
@@ -1405,15 +1459,15 @@ impl LocalAppsHostBroker {
                 ("LINGXI_APP_OUTPUT".into(), "server".into()),
                 (
                     "NODE_PATH".into(),
-                    app_node_modules_projection.as_ref().map(|mount| {
-                        format!(
-                            "{}:/opt/lingxi/local-app-runtime/node_modules",
-                            mount.guest_path
-                        )
-                    })
-                        .unwrap_or_else(|| {
-                            "/opt/lingxi/local-app-runtime/node_modules".into()
-                        }),
+                    app_node_modules_projection
+                        .as_ref()
+                        .map(|mount| {
+                            format!(
+                                "{}:/opt/lingxi/local-app-runtime/node_modules",
+                                mount.guest_path
+                            )
+                        })
+                        .unwrap_or_else(|| "/opt/lingxi/local-app-runtime/node_modules".into()),
                 ),
                 ("NODE_ENV".into(), "production".into()),
             ]
@@ -1432,10 +1486,8 @@ impl LocalAppsHostBroker {
                 cwd: Some(workspace_guest.clone()),
                 env: {
                     if let Some(mount) = &app_node_modules_projection {
-                        environment.insert(
-                            "LINGXI_APP_NODE_MODULES".into(),
-                            mount.guest_path.clone(),
-                        );
+                        environment
+                            .insert("LINGXI_APP_NODE_MODULES".into(), mount.guest_path.clone());
                     }
                     environment
                 },
@@ -1448,12 +1500,12 @@ impl LocalAppsHostBroker {
                 },
                 mounts: {
                     let mut mounts = vec![
-                    MountSpec {
-                        host_path: workspace,
-                        guest_path: workspace_guest,
-                        read_only: false,
-                        purpose: MountPurpose::LocalAppBuild,
-                    },
+                        MountSpec {
+                            host_path: workspace,
+                            guest_path: workspace_guest,
+                            read_only: false,
+                            purpose: MountPurpose::LocalAppBuild,
+                        },
                         runtime_mount.expect("full runtime mount was preflighted"),
                     ];
                     if let Some(mount) = app_node_modules_projection {
@@ -1836,10 +1888,7 @@ impl LocalAppsHostBroker {
         let app_id = required_string(&input, "app_id")?.to_string();
         let checkpoint_id = required_string(&input, "checkpoint_id")?.to_string();
         let service = self.service()?;
-        service
-            .record(&app_id)
-            .await
-            .map_err(|e| e.to_string())?;
+        service.record(&app_id).await.map_err(|e| e.to_string())?;
         // Pre-flight the one precondition the restore cannot recover from,
         // BEFORE reading any digest, BEFORE prompting the user and BEFORE
         // stopping the runtime: an app created with `git_enabled: false` has
@@ -1989,19 +2038,40 @@ impl LocalAppsHostBroker {
         // agent starts with the brief + the workspace contract without any
         // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
         // cannot edit its own contract.
-        let record = self.service()?.record(app_id).await.map_err(|e| e.to_string())?;
+        let record = self
+            .service()?
+            .record(app_id)
+            .await
+            .map_err(|e| e.to_string())?;
         let workspace = layout.root().join(layout.workspace_rel());
+        let shell_available = self.shell_available();
+        let setup_path = if shell_available {
+            "- The normal new-app path is the official Vite CLI through the existing Mobile Linux `Shell`: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
+             - If registry/network access is unavailable, use only `.lingxi/vite-fallback/` as the explicit offline fallback and report that mode/reason. Do not add a Vite wrapper or scaffold API.\n\
+             - Generated source must not edit `package.json` or `package-lock.json`; use the existing `Shell` tool for npm in this workspace. Preserve `index.html` and `vite.config.*`; `src/` is the official Vite source root and may receive the host bridge/deviceContext/platform adapter integration.\n\
+             - Show exact package specs in the confirmed design, then use the existing `Shell` tool from this workspace for `npm install`, `npm uninstall`, or `npm ci`. The existing shell network/command approval and logs apply; the subsequent build is offline.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history plus the package-lock digest, not a second package/version store.\n"
+        } else {
+            "- Shell is unavailable in this session. Do not claim or rely on the official Vite CLI or npm dependency commands.\n\
+             - If source already exists under `src/` or `app/`, extend it in place. If the source root is still empty, reuse only the repository-verified `.lingxi/vite-fallback/` files and report that Shell was unavailable.\n\
+             - Generated source must not edit `package.json` or `package-lock.json`; without Shell, leave dependency changes as explicit follow-up requirements instead of attempting npm operations. Preserve `index.html` and `vite.config.*`; `src/` remains the preferred source root when it already exists.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints remain workspace Git history plus the package-lock digest, not a second package/version store.\n"
+        };
+        let build_preview = if shell_available {
+            "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
+             (30-minute budget); an ordinary project may also use `npm run build` \
+             or `npx vite` for preview only through the existing Shell.\n"
+        } else {
+            "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
+             (30-minute budget).\n"
+        };
         let context = format!(
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
              ## Workspace contract\n\
              - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `mcp__local_apps__list` or `mcp__local_apps__get` to rediscover or confirm it, and do not call `mcp__local_apps__create` again.\n\
              - Edit ONLY files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
-             - The normal new-app path is the official Vite CLI through the existing Mobile Linux `Shell`: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
-             - If registry/network access is unavailable, use only `.lingxi/vite-fallback/` as the explicit offline fallback and report that mode/reason. Do not add a Vite wrapper or scaffold API.\n\
-             - Generated source must not edit `package.json` or `package-lock.json`; use the existing `Shell` tool for npm in this workspace. Preserve `index.html` and `vite.config.*`; `src/` is the official Vite source root and may receive the host bridge/deviceContext/platform adapter integration.\n\
-             - Show exact package specs in the confirmed design, then use the existing `Shell` tool from this workspace for `npm install`, `npm uninstall`, or `npm ci`. The existing shell network/command approval and logs apply; the subsequent build is offline.\n\
-             - Use the existing Git/Bash capability for source status, diff, and checkpoint versioning; checkpoints are workspace Git history plus the package-lock digest, not a second package/version store.\n\
+             {setup_path}\
              - The page reaches host data/network/device ONLY through `window.lingxi.v1` \
              (see `lib/lingxi-bridge.js`).\n\
              - Declare data collections / network domains / capabilities through \
@@ -2009,9 +2079,7 @@ impl LocalAppsHostBroker {
              authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
              - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
              ## Build & preview\n\
-             - `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
-             (30-minute budget); an ordinary project may also use `npm run build` \
-             or `npx vite` for preview only through the existing Shell.\n\
+             {build_preview}\
              - `mcp__local_apps__manage_runtime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
              — serve the built output and return the preview url.\n\
              - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
@@ -2020,6 +2088,8 @@ impl LocalAppsHostBroker {
             name = record.name,
             id = record.id,
             brief = record.brief,
+            setup_path = setup_path,
+            build_preview = build_preview,
         );
         std::fs::write(workspace.join("LINGXI.md"), context)
             .map_err(|error| format!("write workspace LINGXI.md: {error}"))
@@ -2028,6 +2098,10 @@ impl LocalAppsHostBroker {
 
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
+    fn create_next_step(&self) -> String {
+        create_next_step_guidance(Some(self.shell_available()))
+    }
+
     async fn manage_runtime(&self, input: Value) -> Result<Value, String> {
         self.manage_runtime_value(input).await
     }
@@ -2045,8 +2119,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             mobile_linux: self.mobile_linux.clone(),
             host: self,
         };
-        let target = crate::local_apps_build::detect_build_target(&layout)
-            .map_err(|e| e.to_string())?;
+        let target =
+            crate::local_apps_build::detect_build_target(&layout).map_err(|e| e.to_string())?;
         builder
             .build_workspace(&layout)
             .await
@@ -2702,7 +2776,10 @@ fn app_node_modules_projection(
     layout: &AppLayout,
     app_id: &str,
 ) -> Result<Option<MountSpec>, String> {
-    let app_node_modules = layout.root().join(layout.workspace_rel()).join("node_modules");
+    let app_node_modules = layout
+        .root()
+        .join(layout.workspace_rel())
+        .join("node_modules");
     match std::fs::symlink_metadata(&app_node_modules) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             Err("workspace node_modules must not be a symlink".into())
@@ -3594,6 +3671,92 @@ mod tests {
         record.id
     }
 
+    async fn scaffolded_lingxi(
+        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    ) -> (String, String) {
+        let (root, service, broker) = create_broker(false, mobile_linux).await;
+        let record = service
+            .create_app(Some("Tracker"), "a test app", None)
+            .await
+            .expect("create app");
+        broker
+            .scaffold_app_value(&record.id)
+            .await
+            .expect("scaffold app");
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
+        let lingxi =
+            std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
+                .expect("read LINGXI.md");
+        (record.id, lingxi)
+    }
+
+    #[tokio::test]
+    async fn scaffold_writes_shell_specific_lingxi_when_shell_is_available() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_app_id, lingxi) = scaffolded_lingxi(Some(runtime)).await;
+        assert!(
+            lingxi.contains("official Vite CLI through the existing Mobile Linux `Shell`"),
+            "{lingxi}"
+        );
+        assert!(
+            lingxi.contains("use the existing `Shell` tool from this workspace for `npm install`, `npm uninstall`, or `npm ci`"),
+            "{lingxi}"
+        );
+        assert!(lingxi.contains("`npm run build`"), "{lingxi}");
+        assert!(
+            !lingxi.contains("Git/Bash capability"),
+            "the workspace contract must not promise Git/Bash unconditionally: {lingxi}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scaffold_writes_shell_unavailable_lingxi_when_shell_is_missing() {
+        let (_app_id, lingxi) = scaffolded_lingxi(None).await;
+        assert!(
+            lingxi.contains("Shell is unavailable in this session"),
+            "{lingxi}"
+        );
+        assert!(
+            lingxi.contains("reuse only the repository-verified `.lingxi/vite-fallback/` files"),
+            "{lingxi}"
+        );
+        assert!(
+            lingxi.contains("leave dependency changes as explicit follow-up requirements"),
+            "{lingxi}"
+        );
+        assert!(
+            !lingxi.contains("`npm run build`") && !lingxi.contains("`npx vite`"),
+            "shell-free guidance must not promise shell-only preview commands: {lingxi}"
+        );
+        assert!(
+            !lingxi.contains("Git/Bash capability"),
+            "the workspace contract must not promise Git/Bash unconditionally: {lingxi}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_runtime_object_does_not_make_shell_guidance_available() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        broker.set_shell_available(false);
+        let record = service
+            .create_app(Some("Tracker"), "a test app", None)
+            .await
+            .expect("create app");
+
+        broker
+            .scaffold_app_value(&record.id)
+            .await
+            .expect("scaffold app");
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
+        let lingxi =
+            std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
+                .expect("read LINGXI.md");
+
+        assert!(lingxi.contains("Shell is unavailable in this session"));
+        assert!(broker.create_next_step().contains("Shell is unavailable"));
+    }
+
     fn mark_fixture_as_vite(root: &TempDir, app_id: &str) {
         let layout = AppLayout::new(root.path().to_path_buf(), app_id).expect("layout");
         let workspace = root.path().join(layout.workspace_rel());
@@ -3875,7 +4038,10 @@ mod tests {
         let (root, service, _broker) = create_broker(false, None).await;
         let app_id = create_app_fixture(&root, &service, "App modules").await;
         let layout = AppLayout::new(root.path(), app_id.clone()).expect("layout");
-        let app_node_modules = root.path().join(layout.workspace_rel()).join("node_modules");
+        let app_node_modules = root
+            .path()
+            .join(layout.workspace_rel())
+            .join("node_modules");
         fs::create_dir_all(app_node_modules.join("app-only")).expect("app node_modules");
         fs::write(app_node_modules.join("app-only/package.json"), "{}").expect("app package");
 
@@ -3892,7 +4058,10 @@ mod tests {
                 + &app_id
                 + "/full-node_modules:/opt/lingxi/local-app-runtime/node_modules"
         );
-        assert!(mount.read_only, "app dependencies must be read-only at runtime");
+        assert!(
+            mount.read_only,
+            "app dependencies must be read-only at runtime"
+        );
         assert_eq!(mount.purpose, MountPurpose::External);
     }
 

@@ -128,8 +128,8 @@ impl AppCheckpointStore {
     /// trailer existed carry no trailer but do carry the blob.
     pub fn package_lock_digest(&self, checkpoint_id: &str) -> Result<Option<String>, AppError> {
         let target = parse_oid(checkpoint_id)?;
-        let repo = Repository::open(&self.workspace)
-            .map_err(git_error("open checkpoint repository"))?;
+        let repo =
+            Repository::open(&self.workspace).map_err(git_error("open checkpoint repository"))?;
         let commit = repo
             .find_commit(target)
             .map_err(git_error("read checkpoint commit"))?;
@@ -141,13 +141,15 @@ impl AppCheckpointStore {
         {
             return Ok(Some(digest.to_string()));
         }
-        let tree = commit
-            .tree()
-            .map_err(git_error("read checkpoint tree"))?;
+        let tree = commit.tree().map_err(git_error("read checkpoint tree"))?;
         let entry = match tree.get_path(Path::new(PACKAGE_LOCK_FILE)) {
             Ok(entry) => entry,
             Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
-            Err(error) => return Err(AppError::Io(format!("read checkpoint package lock: {error}"))),
+            Err(error) => {
+                return Err(AppError::Io(format!(
+                    "read checkpoint package lock: {error}"
+                )))
+            }
         };
         let blob = repo
             .find_blob(entry.id())
@@ -730,15 +732,26 @@ mod tests {
         fs::write(&lockfile, br#"{"lockfileVersion":3,"packages":{}}"#).unwrap();
         let store = AppCheckpointStore::new(&layout);
         let checkpoint = store
-            .create(AppCheckpointKind::GenerationValidated, "with package lock", 4_000)
+            .create(
+                AppCheckpointKind::GenerationValidated,
+                "with package lock",
+                4_000,
+            )
             .unwrap();
         let expected = package_lock_digest(&lockfile).unwrap().unwrap();
-        assert_eq!(store.package_lock_digest(&checkpoint.id).unwrap(), Some(expected));
+        assert_eq!(
+            store.package_lock_digest(&checkpoint.id).unwrap(),
+            Some(expected)
+        );
         assert_eq!(
             store.current_package_lock_digest().unwrap(),
             store.package_lock_digest(&checkpoint.id).unwrap()
         );
-        fs::write(&lockfile, br#"{"lockfileVersion":3,"packages":{"demo":{}}}"#).unwrap();
+        fs::write(
+            &lockfile,
+            br#"{"lockfileVersion":3,"packages":{"demo":{}}}"#,
+        )
+        .unwrap();
         assert_ne!(
             store.current_package_lock_digest().unwrap(),
             store.package_lock_digest(&checkpoint.id).unwrap()
@@ -759,7 +772,11 @@ mod tests {
         let layout = layout(root.path());
         let workspace = root.path().join(layout.workspace_rel());
         fs::create_dir_all(&workspace).unwrap();
-        fs::write(workspace.join(".gitignore"), "node_modules/\npackage-lock.json\n").unwrap();
+        fs::write(
+            workspace.join(".gitignore"),
+            "node_modules/\npackage-lock.json\n",
+        )
+        .unwrap();
         fs::write(
             workspace.join("package.json"),
             br#"{"name":"demo","dependencies":{}}"#,
@@ -770,7 +787,11 @@ mod tests {
 
         let store = AppCheckpointStore::new(&layout);
         let checkpoint = store
-            .create(AppCheckpointKind::GenerationValidated, "ignored lock", 5_000)
+            .create(
+                AppCheckpointKind::GenerationValidated,
+                "ignored lock",
+                5_000,
+            )
             .unwrap();
 
         // Precondition: the blob really is absent from the commit tree, so this
@@ -792,7 +813,11 @@ mod tests {
             store.package_lock_digest(&checkpoint.id).unwrap()
         );
         // …and a real lockfile edit is still detected.
-        fs::write(&lockfile, br#"{"lockfileVersion":3,"packages":{"demo":{}}}"#).unwrap();
+        fs::write(
+            &lockfile,
+            br#"{"lockfileVersion":3,"packages":{"demo":{}}}"#,
+        )
+        .unwrap();
         assert_ne!(
             store.current_package_lock_digest().unwrap(),
             store.package_lock_digest(&checkpoint.id).unwrap()
@@ -816,7 +841,9 @@ mod tests {
 
         // Rewrite the commit message to the PRE-TRAILER shape, keeping the tree.
         let repo = Repository::open(&workspace).unwrap();
-        let commit = repo.find_commit(parse_oid(&checkpoint.id).unwrap()).unwrap();
+        let commit = repo
+            .find_commit(parse_oid(&checkpoint.id).unwrap())
+            .unwrap();
         let legacy_message = commit
             .message()
             .unwrap()
@@ -825,7 +852,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!legacy_message.contains(PACKAGE_LOCK_TRAILER));
-        let legacy = commit.amend(None, None, None, None, Some(&legacy_message), None).unwrap();
+        let legacy = commit
+            .amend(None, None, None, None, Some(&legacy_message), None)
+            .unwrap();
 
         assert_eq!(
             store.package_lock_digest(&legacy.to_string()).unwrap(),

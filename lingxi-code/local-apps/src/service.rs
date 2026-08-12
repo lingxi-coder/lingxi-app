@@ -32,8 +32,8 @@ use crate::permissions::{save_permissions, AppPermissions};
 use crate::state::AppState;
 use crate::storage;
 use crate::types::{
-    AppCheckpoint, AppCheckpointKind, AppRecord, AppRuntimeMode, AppRuntimeRecord,
-    AppRuntimeState, AppWorkflowState,
+    AppCheckpoint, AppCheckpointKind, AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState,
+    AppWorkflowState,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -532,27 +532,21 @@ impl AppService {
     /// calls this right after minting the session (create) or backfilling a
     /// missing anchor at boot. Announces `AppsChanged` so clients learn the
     /// pin without a details round-trip.
-    pub async fn set_init_session(
-        &self,
-        app_id: &str,
-        session_id: &str,
-    ) -> Result<(), AppError> {
+    pub async fn set_init_session(&self, app_id: &str, session_id: &str) -> Result<(), AppError> {
         let session_id = session_id.to_string();
-        self.with_app(app_id, move |app, now| {
-            match &app.record.init_session_id {
-                Some(existing) if *existing == session_id => (Ok(()), Vec::new()),
-                Some(existing) => (
-                    Err(AppError::InvalidRequest(format!(
-                        "app {} already has init session {existing}",
-                        app.record.id
-                    ))),
-                    Vec::new(),
-                ),
-                None => {
-                    app.record.init_session_id = Some(session_id.clone());
-                    app.record.updated_at_ms = now;
-                    (Ok(()), Vec::new())
-                }
+        self.with_app(app_id, move |app, now| match &app.record.init_session_id {
+            Some(existing) if *existing == session_id => (Ok(()), Vec::new()),
+            Some(existing) => (
+                Err(AppError::InvalidRequest(format!(
+                    "app {} already has init session {existing}",
+                    app.record.id
+                ))),
+                Vec::new(),
+            ),
+            None => {
+                app.record.init_session_id = Some(session_id.clone());
+                app.record.updated_at_ms = now;
+                (Ok(()), Vec::new())
             }
         })
         .await?;

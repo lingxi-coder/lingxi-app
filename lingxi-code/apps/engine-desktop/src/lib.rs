@@ -6027,6 +6027,7 @@ pub async fn build(
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
     // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
     // agent seams. The `with_*` builders live on `ApiService`.
+    let interactive_session = cfg.session_composition().is_interactive_session();
     let service_built = llm_client::ApiService::new_with_routing(
         llm_client,
         llm_transport,
@@ -6041,6 +6042,7 @@ pub async fn build(
         settings_backoff_ms,
     )
     .with_subscription(subscription.clone())
+    .with_interactive_session(interactive_session)
     .with_custom_cli_betas(cfg.custom_betas.clone())
     .with_request_metadata(request_metadata)
     // Boot SESSION thinking config, resolved host-side from MAX_THINKING_TOKENS
@@ -6115,7 +6117,6 @@ pub async fn build(
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
-    let interactive_session = cfg.session_composition().is_interactive_session();
     orch_cfg.interactive_session = interactive_session;
     // Keep the legacy main-loop interactive bit aligned for CLI TUI / stdio
     // REPL sessions until every remaining consumer reads `interactive_session`.
@@ -6277,6 +6278,7 @@ pub async fn build(
     // collection keys on agent_id/agent_type, set by the runner per spawn).
     let subagent_hook_session_id = protocol::SessionId::new();
     let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_session_interactive(interactive_session)
         .with_api_client(subagent_api)
         // #15: the parent model handed to the spawner must be the RESOLVED
         // main-loop wire id (claude `getMainLoopModel()`), NOT the raw alias —
@@ -7496,6 +7498,9 @@ pub async fn build(
         task_registry_inner.output_manager.clone(),
         teammate_api,
     )
+    // Keep teammate auto-claim on the same host-owned task-store root as the
+    // Task* tools and orchestrator reminders.
+    .with_config_home(cfg.lingxi_home.clone())
     .with_tool_invoker(teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>)
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
     // model — the same seam the `PoolSubagentSpawner` gets above. #15: resolve
@@ -7513,6 +7518,7 @@ pub async fn build(
     // spawner seam).
     .with_permission_mode(cfg.permission_mode)
     .with_model_setting(model_setting_for_spawns.clone())
+    .with_session_interactive(interactive_session)
     .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
     // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
     // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks

@@ -65,7 +65,9 @@ use llm_client::oauth::anthropic::handle::OAuthHandle;
 use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::LlmTransportBridge;
-use llm_client::{Credential, CredentialProvider, CredentialScope, DefaultLlmClient, ProviderId, Transport};
+use llm_client::{
+    Credential, CredentialProvider, CredentialScope, DefaultLlmClient, ProviderId, Transport,
+};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::StaticMemoryProvider;
@@ -93,7 +95,7 @@ use traits::{
 };
 
 use crate::{
-    local_apps_host::LocalAppsHostBroker,
+    local_apps_host::{canonical_cwd_string, remove_app_session_file, LocalAppsHostBroker},
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::{profile_apps, ProfileApps},
@@ -246,6 +248,10 @@ pub struct MobileConfig {
     /// Physical memory reported by the native host. Local-app runtime quotas
     /// are derived from this value; zero is the conservative fallback.
     pub physical_memory_bytes: u64,
+    /// Stable native host facts used to render the fixed mobile runtime
+    /// reminder. `None` keeps desktop-style prompt assembly semantics for host
+    /// tests and non-mobile embedder scenarios.
+    pub host_environment: Option<traits::MobileHostEnvironment>,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -278,6 +284,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("local_apps_full_runtime", &self.local_apps_full_runtime)
             .field("local_apps_runtime_root", &self.local_apps_runtime_root)
             .field("physical_memory_bytes", &self.physical_memory_bytes)
+            .field("host_environment", &self.host_environment)
             .finish()
     }
 }
@@ -302,11 +309,26 @@ impl Default for MobileConfig {
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
             physical_memory_bytes: 0,
+            host_environment: None,
         }
     }
 }
 
 impl MobileConfig {
+    /// Expose the sandboxed Mobile Linux shell to the tool registry.
+    ///
+    /// Platform composition roots call this only when they also install a
+    /// Mobile Linux runtime. The capability probe in [`build_mobile_engine`]
+    /// remains authoritative and disables the carrier if that runtime cannot
+    /// actually execute.
+    pub fn enable_mobile_linux_shell(&mut self) {
+        self.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+            true,
+            Vec::new(),
+            None,
+        ));
+    }
+
     #[must_use]
     pub fn mobile_shell(&self) -> Option<&tool_api::MobileShellToolCtx> {
         self.android_shell.as_ref()
@@ -425,6 +447,10 @@ pub struct MobileRuntime {
     /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
     /// when the platform wires one. `None` preserves the pre-migration state.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    /// Whether the final capability gate exposes the model-facing mobile
+    /// Shell. This may be false even when `mobile_linux` holds an unavailable
+    /// runtime stub.
+    pub mobile_shell_available: bool,
     /// The mobile MCP registry. It always contains the built-in `local_apps`
     /// provider and also loads the app-private `settings.json` plus project
     /// `.mcp.json` entries using the shared MCP parser.
@@ -635,10 +661,9 @@ mod mobile_oauth_callback_tests {
 
     #[test]
     fn callback_requires_the_registered_destination_and_both_parameters() {
-        let (code, state) = parse_mobile_oauth_callback(
-            "lingxi://oauth/callback?code=auth-code&state=csrf-state",
-        )
-        .expect("valid callback");
+        let (code, state) =
+            parse_mobile_oauth_callback("lingxi://oauth/callback?code=auth-code&state=csrf-state")
+                .expect("valid callback");
         assert_eq!(code, "auth-code");
         assert_eq!(state, "csrf-state");
 
@@ -649,7 +674,10 @@ mod mobile_oauth_callback_tests {
             "lingxi://oauth/callback?code=auth-code",
             "lingxi://oauth/callback?state=csrf-state",
         ] {
-            assert!(parse_mobile_oauth_callback(callback).is_err(), "accepted {callback}");
+            assert!(
+                parse_mobile_oauth_callback(callback).is_err(),
+                "accepted {callback}"
+            );
         }
     }
 
@@ -711,9 +739,18 @@ mod mobile_oauth_callback_tests {
 
     #[test]
     fn provider_aliases_lower_to_the_stable_credential_ids() {
-        assert_eq!(MobileOAuthProvider::parse("anthropic").unwrap().id(), "anthropic");
-        assert_eq!(MobileOAuthProvider::parse("openai").unwrap().id(), "openai-chatgpt");
-        assert_eq!(MobileOAuthProvider::parse("openai-chatgpt").unwrap().id(), "openai-chatgpt");
+        assert_eq!(
+            MobileOAuthProvider::parse("anthropic").unwrap().id(),
+            "anthropic"
+        );
+        assert_eq!(
+            MobileOAuthProvider::parse("openai").unwrap().id(),
+            "openai-chatgpt"
+        );
+        assert_eq!(
+            MobileOAuthProvider::parse("openai-chatgpt").unwrap().id(),
+            "openai-chatgpt"
+        );
         assert!(MobileOAuthProvider::parse("openai-api-key").is_err());
     }
 }
@@ -824,7 +861,9 @@ impl MobileOAuthManager {
                     organization_id: Some(info.org_id),
                     fedramp: false,
                 })
-                .map_err(|error| MobileEngineError::Internal(format!("OAuth login failed: {error}"))),
+                .map_err(|error| {
+                    MobileEngineError::Internal(format!("OAuth login failed: {error}"))
+                }),
             MobileOAuthProvider::OpenAi => self
                 .openai
                 .complete_mobile_browser_login(&code, &session.verifier, &session.redirect_uri)
@@ -837,13 +876,18 @@ impl MobileOAuthManager {
                     organization_id: None,
                     fedramp: info.fedramp,
                 })
-                .map_err(|error| MobileEngineError::Internal(format!("OAuth login failed: {error}"))),
+                .map_err(|error| {
+                    MobileEngineError::Internal(format!("OAuth login failed: {error}"))
+                }),
         }
     }
 
     async fn cancel(&self, flow_id: String) {
         let mut pending = self.pending.lock().await;
-        if pending.as_ref().is_some_and(|value| value.flow_id == flow_id) {
+        if pending
+            .as_ref()
+            .is_some_and(|value| value.flow_id == flow_id)
+        {
             *pending = None;
         }
     }
@@ -852,33 +896,32 @@ impl MobileOAuthManager {
         let provider = MobileOAuthProvider::parse(&provider)?;
         {
             let mut pending = self.pending.lock().await;
-            if pending.as_ref().is_some_and(|value| value.provider == provider) {
+            if pending
+                .as_ref()
+                .is_some_and(|value| value.provider == provider)
+            {
                 *pending = None;
             }
         }
         match provider {
             MobileOAuthProvider::Anthropic => {
-                self.anthropic
-                    .logout()
-                    .await
-                    .map_err(|error| MobileEngineError::Internal(format!("OAuth logout failed: {error}")))?;
-                if let (Some(driver), Some(spawner)) = (
-                    &self.anthropic_refresh,
-                    &self.anthropic_refresh_spawner,
-                ) {
+                self.anthropic.logout().await.map_err(|error| {
+                    MobileEngineError::Internal(format!("OAuth logout failed: {error}"))
+                })?;
+                if let (Some(driver), Some(spawner)) =
+                    (&self.anthropic_refresh, &self.anthropic_refresh_spawner)
+                {
                     driver.invalidate(spawner.as_ref()).await;
                 }
                 Ok(())
             }
             MobileOAuthProvider::OpenAi => {
-                self.openai
-                    .logout()
-                    .await
-                    .map_err(|error| MobileEngineError::Internal(format!("OAuth logout failed: {error}")))?;
-                if let (Some(driver), Some(spawner)) = (
-                    &self.openai_refresh,
-                    &self.openai_refresh_spawner,
-                ) {
+                self.openai.logout().await.map_err(|error| {
+                    MobileEngineError::Internal(format!("OAuth logout failed: {error}"))
+                })?;
+                if let (Some(driver), Some(spawner)) =
+                    (&self.openai_refresh, &self.openai_refresh_spawner)
+                {
                     driver.invalidate(spawner.as_ref()).await;
                 }
                 Ok(())
@@ -936,24 +979,59 @@ impl MobileOAuthManager {
     ) -> ProviderConnectionTestDto {
         let provider = match MobileOAuthProvider::parse(&provider) {
             Ok(provider) => provider,
-            Err(_) => return provider_connection_failure("OAuth Provider 标识无效", false, false, None, 0, true),
+            Err(_) => {
+                return provider_connection_failure(
+                    "OAuth Provider 标识无效",
+                    false,
+                    false,
+                    None,
+                    0,
+                    true,
+                )
+            }
         };
         let (token, account_id, fedramp) = match provider {
             MobileOAuthProvider::Anthropic => {
                 let Some(driver) = &self.anthropic_refresh else {
-                    return provider_connection_failure("请先登录 Anthropic OAuth", false, false, None, 0, true);
+                    return provider_connection_failure(
+                        "请先登录 Anthropic OAuth",
+                        false,
+                        false,
+                        None,
+                        0,
+                        true,
+                    );
                 };
                 let credential = OAuthCredentialProvider::new(driver.clone())
-                    .load(&CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic"))
+                    .load(&CredentialScope::new(
+                        ProviderId::AnthropicFirstParty,
+                        "anthropic",
+                    ))
                     .await;
                 match credential {
                     Ok(Credential::BearerToken(token)) => (token, None, false),
-                    _ => return provider_connection_failure("Anthropic OAuth 会话已失效，请重新登录", false, false, None, 0, true),
+                    _ => {
+                        return provider_connection_failure(
+                            "Anthropic OAuth 会话已失效，请重新登录",
+                            false,
+                            false,
+                            None,
+                            0,
+                            true,
+                        )
+                    }
                 }
             }
             MobileOAuthProvider::OpenAi => {
                 let Some(driver) = &self.openai_refresh else {
-                    return provider_connection_failure("请先登录 ChatGPT OAuth", false, false, None, 0, true);
+                    return provider_connection_failure(
+                        "请先登录 ChatGPT OAuth",
+                        false,
+                        false,
+                        None,
+                        0,
+                        true,
+                    );
                 };
                 let credential = openai_oauth::OpenAiOAuthCredentialProvider::new(driver.clone())
                     .load(&CredentialScope::new(
@@ -964,10 +1042,21 @@ impl MobileOAuthManager {
                     ))
                     .await;
                 match credential {
-                    Ok(Credential::ChatGptOAuth { access_token, account_id, fedramp }) => {
-                        (access_token, account_id, fedramp)
+                    Ok(Credential::ChatGptOAuth {
+                        access_token,
+                        account_id,
+                        fedramp,
+                    }) => (access_token, account_id, fedramp),
+                    _ => {
+                        return provider_connection_failure(
+                            "ChatGPT OAuth 会话已失效，请重新登录",
+                            false,
+                            false,
+                            None,
+                            0,
+                            true,
+                        )
                     }
-                    _ => return provider_connection_failure("ChatGPT OAuth 会话已失效，请重新登录", false, false, None, 0, true),
                 }
             }
         };
@@ -990,7 +1079,9 @@ impl MobileOAuthManager {
         };
         let endpoint = match endpoint {
             Ok(endpoint) => endpoint,
-            Err(message) => return provider_connection_failure(message, false, false, None, 0, true),
+            Err(message) => {
+                return provider_connection_failure(message, false, false, None, 0, true)
+            }
         };
         let mut headers = vec![
             ("accept".to_string(), "application/json".to_string()),
@@ -1156,6 +1247,140 @@ fn gate_mobile_git_ctx(
     Some(carrier)
 }
 
+fn build_mobile_runtime_environment(
+    host_environment: Option<&traits::MobileHostEnvironment>,
+    shell_ctx: Option<&tool_api::MobileShellToolCtx>,
+    capability: Option<&MobileLinuxCapability>,
+    session_cwd: &SessionCwd,
+) -> Option<traits::MobileRuntimeEnvironment> {
+    let host_environment = host_environment?.clone();
+    let enabled_shell = shell_ctx.filter(|ctx| ctx.enabled);
+    let tool_runtime = if capability
+        .is_some_and(|cap| matches!(cap.mode, MobileLinuxRuntimeMode::MobileLinux) && cap.available)
+        || enabled_shell.is_some_and(|ctx| ctx.force_platform_sandbox)
+    {
+        traits::MobileToolRuntime::MobileLinuxGuest
+    } else if enabled_shell.is_some() {
+        traits::MobileToolRuntime::AndroidLegacy
+    } else {
+        traits::MobileToolRuntime::Unavailable
+    };
+    let network_policy = match tool_runtime {
+        traits::MobileToolRuntime::MobileLinuxGuest => {
+            traits::MobileNetworkPolicy::PermissionMediated
+        }
+        traits::MobileToolRuntime::AndroidLegacy => traits::MobileNetworkPolicy::DeniedByHost,
+        traits::MobileToolRuntime::Unavailable => traits::MobileNetworkPolicy::DeniedByHost,
+    };
+    let lifecycle_policy = match host_environment.launch_mode {
+        traits::MobileLaunchMode::ScheduledHeadless => {
+            traits::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
+        }
+        traits::MobileLaunchMode::Interactive => match host_environment.host_os {
+            traits::MobileHostOs::Ios => {
+                traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
+            }
+            traits::MobileHostOs::Android => {
+                traits::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
+            }
+        },
+        traits::MobileLaunchMode::Unknown => traits::MobileLifecyclePolicy::UnknownBestEffort,
+    };
+
+    let guest_cwd = matches!(tool_runtime, traits::MobileToolRuntime::MobileLinuxGuest)
+        .then(|| session_cwd.cwd().to_string_lossy().to_string());
+    Some(traits::MobileRuntimeEnvironment::new(
+        host_environment,
+        tool_runtime,
+        guest_cwd,
+        enabled_shell.map(|ctx| ctx.shell_path.clone()),
+        enabled_shell.map(|ctx| ctx.runtime_label.clone()),
+        network_policy,
+        lifecycle_policy,
+    ))
+}
+
+fn mobile_launch_is_interactive(host_environment: Option<&traits::MobileHostEnvironment>) -> bool {
+    !host_environment.is_some_and(|environment| {
+        matches!(
+            environment.launch_mode,
+            traits::MobileLaunchMode::ScheduledHeadless
+        )
+    })
+}
+
+fn model_visible_mobile_cwd(
+    path: &std::path::Path,
+    mounts: &[traits::MountSpec],
+    has_mobile_linux_guest: bool,
+) -> Option<String> {
+    if !has_mobile_linux_guest {
+        return None;
+    }
+    traits::mobile_linux::map_host_path_to_guest(path, mounts).or_else(|| {
+        path.to_str()
+            .and_then(traits::mobile_runtime_environment::normalize_mobile_guest_cwd)
+    })
+}
+
+fn subagent_env_platform_name(rust_os: &str) -> &str {
+    match rust_os {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+fn build_mobile_subagent_env_renderer(
+    probe_cwd: std::path::PathBuf,
+    mobile_runtime_environment: Option<&traits::MobileRuntimeEnvironment>,
+    mobile_workspace_cwd_provider: agent::handle::MobileWorkspaceCwdProvider,
+) -> agent::handle::SubagentEnvRenderer {
+    if mobile_runtime_environment.is_none() {
+        return Arc::new(orchestrator::prompt::subagent_env::boot_renderer(probe_cwd));
+    }
+
+    let is_git_repo = orchestrator::prompt::git_status::probe(&probe_cwd).is_some();
+    let platform = subagent_env_platform_name(std::env::consts::OS).to_string();
+    let shell = orchestrator::prompt::env_meta::detect_shell();
+    let os_version = orchestrator::prompt::env_meta::os_version_string();
+    let default_visible_cwd = mobile_workspace_cwd_provider(None)
+        .or_else(|| {
+            mobile_runtime_environment
+                .and_then(|environment| environment.guest_cwd().map(ToOwned::to_owned))
+        })
+        .or_else(|| {
+            probe_cwd
+                .to_str()
+                .and_then(traits::mobile_runtime_environment::normalize_mobile_guest_cwd)
+        })
+        .unwrap_or_else(|| traits::mobile_linux::guest_paths::WORKSPACE_ROOT.to_string());
+
+    Arc::new(
+        move |model_id: &str, cwd_override: Option<&std::path::Path>| {
+            let visible_cwd = mobile_workspace_cwd_provider(cwd_override)
+                .or_else(|| {
+                    cwd_override.and_then(|path| {
+                        path.to_str().and_then(
+                            traits::mobile_runtime_environment::normalize_mobile_guest_cwd,
+                        )
+                    })
+                })
+                .unwrap_or_else(|| default_visible_cwd.clone());
+            orchestrator::prompt::subagent_env::subagent_env_block(
+                model_id,
+                std::path::Path::new(&visible_cwd),
+                is_git_repo,
+                &platform,
+                &shell,
+                &os_version,
+                &[],
+                cwd_override.is_some(),
+            )
+        },
+    )
+}
+
 #[cfg(test)]
 mod mobile_tool_gate_tests {
     use super::*;
@@ -1200,6 +1425,147 @@ mod mobile_tool_gate_tests {
         )
         .expect("carrier present");
         assert!(!gated.enabled);
+    }
+
+    fn ios_host() -> traits::MobileHostEnvironment {
+        traits::MobileHostEnvironment::new(
+            traits::MobileHostOs::Ios,
+            Some("19.0".into()),
+            traits::MobileDeviceClass::Phone,
+            traits::MobileExecutionTarget::PhysicalDevice,
+            traits::MobileLaunchMode::Interactive,
+        )
+    }
+
+    #[test]
+    fn unavailable_gated_shell_is_not_described_as_mobile_linux() {
+        let gated = gate_mobile_shell_ctx(
+            Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+                true,
+                vec!["sh".into()],
+                None,
+            )),
+            Some(&unavailable_mobile_linux_capability()),
+        )
+        .expect("carrier retained for registration gate");
+        let session_cwd = SessionCwd::new(
+            std::path::PathBuf::from("/workspace/app"),
+            vec![std::path::PathBuf::from("/workspace/app")],
+        );
+
+        let environment = build_mobile_runtime_environment(
+            Some(&ios_host()),
+            Some(&gated),
+            Some(&unavailable_mobile_linux_capability()),
+            &session_cwd,
+        )
+        .expect("host context");
+
+        assert_eq!(
+            environment.tool_runtime,
+            traits::MobileToolRuntime::Unavailable
+        );
+        assert_eq!(environment.guest_cwd(), None);
+        let reminder = environment.render_body();
+        assert!(reminder.contains("Shell runtime: unavailable"));
+        assert!(!reminder.contains("/bin/sh"));
+    }
+
+    #[test]
+    fn workspace_prompt_paths_are_guest_only() {
+        let mounts = [traits::MountSpec {
+            host_path: std::path::PathBuf::from("/native/workspace"),
+            guest_path: "/workspace/app".into(),
+            read_only: false,
+            purpose: traits::MountPurpose::Workspace,
+        }];
+
+        assert_eq!(
+            model_visible_mobile_cwd(std::path::Path::new("/native/workspace/src"), &mounts, true,)
+                .as_deref(),
+            Some("/workspace/app/src")
+        );
+        assert_eq!(
+            model_visible_mobile_cwd(std::path::Path::new("/workspace/app/src"), &mounts, true)
+                .as_deref(),
+            Some("/workspace/app/src")
+        );
+        assert_eq!(
+            model_visible_mobile_cwd(
+                std::path::Path::new("/private/var/mobile/worktree"),
+                &mounts,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            model_visible_mobile_cwd(
+                std::path::Path::new("/native/workspace/src"),
+                &mounts,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mobile_subagent_env_renderer_uses_guest_paths_only() {
+        let mounts = vec![traits::MountSpec {
+            host_path: std::path::PathBuf::from("/native/workspace"),
+            guest_path: "/workspace/app".into(),
+            read_only: false,
+            purpose: traits::MountPurpose::Workspace,
+        }];
+        let provider_mounts = mounts.clone();
+        let provider = Arc::new(move |override_cwd: Option<&std::path::Path>| {
+            let cwd = override_cwd.unwrap_or_else(|| std::path::Path::new("/native/workspace"));
+            model_visible_mobile_cwd(cwd, &provider_mounts, true)
+        });
+        let environment = traits::MobileRuntimeEnvironment::new(
+            ios_host(),
+            traits::MobileToolRuntime::MobileLinuxGuest,
+            Some("/workspace/app".into()),
+            Some("/bin/sh".into()),
+            Some("mobile-linux".into()),
+            traits::MobileNetworkPolicy::PermissionMediated,
+            traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        );
+        let renderer = build_mobile_subagent_env_renderer(
+            std::path::PathBuf::from(
+                "/private/var/mobile/Containers/Data/Application/secret/workspace",
+            ),
+            Some(&environment),
+            provider,
+        );
+
+        let base = renderer("claude-opus-4-8[1m]", None);
+        assert!(base.contains("Working directory: /workspace/app\n"));
+        assert!(!base.contains("/private/var/mobile/Containers/Data/Application/secret"));
+
+        let mapped = renderer(
+            "claude-opus-4-8[1m]",
+            Some(std::path::Path::new("/native/workspace/src")),
+        );
+        assert!(mapped.contains("Working directory: /workspace/app/src\n"));
+        assert!(!mapped.contains("/native/workspace/src"));
+
+        let unmapped = renderer(
+            "claude-opus-4-8[1m]",
+            Some(std::path::Path::new("/private/var/mobile/worktree")),
+        );
+        assert!(unmapped.contains("Working directory: /workspace/app\n"));
+        assert!(!unmapped.contains("/private/var/mobile/worktree"));
+    }
+
+    #[test]
+    fn only_explicit_scheduled_launches_use_headless_prompt_semantics() {
+        let mut host = ios_host();
+        assert!(mobile_launch_is_interactive(Some(&host)));
+        host.launch_mode = traits::MobileLaunchMode::Unknown;
+        assert!(mobile_launch_is_interactive(Some(&host)));
+        assert!(mobile_launch_is_interactive(None));
+        host.launch_mode = traits::MobileLaunchMode::ScheduledHeadless;
+        assert!(!mobile_launch_is_interactive(Some(&host)));
     }
 }
 
@@ -1576,6 +1942,7 @@ async fn build_mobile_inner_with_ask(
 ) -> Result<MobileRuntime, MobileBuildError> {
     let cwd = cfg.cwd.clone();
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
+    let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
     let mcp_registry = Arc::new(McpRegistry::new(
         local_apps_mcp.clone() as Arc<dyn traits::McpTransport>
     ));
@@ -1712,7 +2079,8 @@ async fn build_mobile_inner_with_ask(
             Some(credentials.clone()),
             anthropic_refresh_spawner.clone(),
         )
-        .await {
+        .await
+        {
             Ok(state) => Some(state),
             Err(error) => {
                 tracing::warn!(%error, "failed to restore Anthropic OAuth session");
@@ -1739,7 +2107,8 @@ async fn build_mobile_inner_with_ask(
             Some(credentials.clone()),
             openai_refresh_spawner.clone(),
         )
-        .await {
+        .await
+        {
             Ok(state) => Some(state),
             Err(error) => {
                 tracing::warn!(%error, "failed to restore OpenAI ChatGPT OAuth session");
@@ -1772,11 +2141,7 @@ async fn build_mobile_inner_with_ask(
     //      shared assembler gives API Key precedence over OAuth.
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let stored_anthropic_key = credentials
-        .get_anthropic_api_key()
-        .await
-        .ok()
-        .flatten();
+    let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
     let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
     let has_anthropic_oauth = anthropic_oauth_state.is_some();
     let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
@@ -1840,10 +2205,8 @@ async fn build_mobile_inner_with_ask(
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
     // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
     // Swift; API-key profiles retain the existing keychain → env fallback.
-    let mut oauth_delegates: std::collections::BTreeMap<
-        String,
-        Arc<dyn CredentialProvider>,
-    > = std::collections::BTreeMap::new();
+    let mut oauth_delegates: std::collections::BTreeMap<String, Arc<dyn CredentialProvider>> =
+        std::collections::BTreeMap::new();
     let anthropic_refresh = anthropic_oauth_state
         .clone()
         .map(|state| Arc::new(RefreshDriver::new(state)));
@@ -1961,19 +2324,23 @@ async fn build_mobile_inner_with_ask(
     // subscriber (`SubscriberState::default()` — api-key-only inference), and
     // binds no live subscription slot / availability map / CostTracker (out of
     // scope; mobile parity did not).
-    let api_service = Arc::new(llm_client::ApiService::new_with_routing(
-        llm_client,
-        llm_transport,
-        subscriber_state,
-        UserAgentEnv::from_process_env(),
-        env!("CARGO_PKG_VERSION"),
-        Some(analytics_bus.clone()), // audit fix: API events share the one bus
-        None,
-        Some(cost_estimator),
-        fallback_overrides,
-        settings_max_retries,
-        settings_backoff_ms,
-    ));
+    let interactive_launch = mobile_launch_is_interactive(cfg.host_environment.as_ref());
+    let api_service = Arc::new(
+        llm_client::ApiService::new_with_routing(
+            llm_client,
+            llm_transport,
+            subscriber_state,
+            UserAgentEnv::from_process_env(),
+            env!("CARGO_PKG_VERSION"),
+            Some(analytics_bus.clone()), // audit fix: API events share the one bus
+            None,
+            Some(cost_estimator),
+            fallback_overrides,
+            settings_max_retries,
+            settings_backoff_ms,
+        )
+        .with_interactive_session(interactive_launch),
+    );
     // Task 9: the local-app generator's three LLM calls (author/plan/write
     // source) ride the SAME `api_service` — routing, auth, retry — as the
     // main conversation, via `ApiService::messages_create_side_query`
@@ -2007,8 +2374,8 @@ async fn build_mobile_inner_with_ask(
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/
     // prefix when present, passes through unchanged for bare ids).
     orch_cfg.model.clone_from(&default_model_id);
-    // Mobile hosts a live chat UI, so the session follows interactive
-    // semantics on BOTH axes the orchestrator distinguishes:
+    // Foreground mobile hosts have a live chat UI, so interactive launches
+    // follow interactive semantics on BOTH axes the orchestrator distinguishes:
     // - `interactive_permissions` feeds the main loop's per-tool-call
     //   `is_non_interactive_session` (turn_loop's ToolUseContext options) —
     //   the gate `AskUserQuestion` checks before forwarding to the mounted
@@ -2018,15 +2385,16 @@ async fn build_mobile_inner_with_ask(
     //   what this flag asserts a host can do.
     // - `interactive_session` is published by `ConversationOrchestrator::new`
     //   to the PROCESS-global session flag prompt builders read. This one
-    //   constructor also serves the cron-fired throwaway runtime, and a
-    //   headless fire flipping the global would poison the live chat's next
-    //   AskUserQuestion.
+    //   constructor also serves the cron-fired throwaway runtime, so it must
+    //   retain the mobile process's interactive value. The typed runtime
+    //   environment independently suppresses interactive prompt guidance for
+    //   scheduled-headless sessions without poisoning the live conversation.
     // A session without a prompt transport stays safe regardless of both
     // flags: its registry has no ask resolver (`ask_user_question_tx: None`
     // ⇒ `DefaultTimeoutResolver` refuses) and cron's permission sink
     // auto-denies.
     orch_cfg.interactive_session = true;
-    orch_cfg.interactive_permissions = true;
+    orch_cfg.interactive_permissions = interactive_launch;
 
     // (5) Connection-scoped sinks — the mobile transport's analog of the
     //     bridge-server's WS writer:
@@ -2407,16 +2775,52 @@ async fn build_mobile_inner_with_ask(
         .map(|m| std::path::PathBuf::from(&m.guest_path))
         .unwrap_or_else(|| cwd.clone());
     let session_cwd = SessionCwd::new(model_cwd, trusted_dirs);
+    let gated_shell_ctx = gate_mobile_shell_ctx(
+        cfg.mobile_shell().cloned(),
+        mobile_linux_capability.as_ref(),
+    );
+    let gated_git_ctx =
+        gate_mobile_git_ctx(cfg.mobile_git().cloned(), mobile_linux_capability.as_ref());
+    let mobile_runtime_environment = build_mobile_runtime_environment(
+        cfg.host_environment.as_ref(),
+        gated_shell_ctx.as_ref(),
+        mobile_linux_capability.as_ref(),
+        &session_cwd,
+    );
+    orch_cfg.exclude_dynamic_system_prompt_sections = cfg.host_environment.is_some();
+    let mobile_workspace_cwd_provider = {
+        let session_cwd = session_cwd.clone();
+        let mobile_linux = mobile_linux.clone();
+        let has_mobile_linux_guest =
+            mobile_runtime_environment
+                .as_ref()
+                .is_some_and(|environment| {
+                    matches!(
+                        environment.tool_runtime,
+                        traits::MobileToolRuntime::MobileLinuxGuest
+                    )
+                });
+        Arc::new(move |override_cwd: Option<&std::path::Path>| {
+            if !has_mobile_linux_guest {
+                return None;
+            }
+            let cwd = override_cwd
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| session_cwd.cwd());
+            let mounts = mobile_linux
+                .as_ref()
+                .map(|runtime| runtime.current_mounts())
+                .unwrap_or_default();
+            model_visible_mobile_cwd(&cwd, &mounts, has_mobile_linux_guest)
+        }) as Arc<dyn Fn(Option<&std::path::Path>) -> Option<String> + Send + Sync>
+    };
 
     // ── v3 Phase 1: workflow-on-mobile stack ─────────────────────────────
     // (a) Task output spool + registry (mirror of the desktop composition,
     // engine-desktop lib.rs (5.46)). The spool lives under the app-private
     // lingxi home, keyed by the boot session so concurrent processes never
     // share a spool dir.
-    let task_output_dir = cfg
-        .lingxi_home
-        .join("task-output")
-        .join(&main_session_uuid);
+    let task_output_dir = cfg.lingxi_home.join("task-output").join(&main_session_uuid);
     if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
         tracing::warn!(
             dir = %task_output_dir.display(),
@@ -2465,8 +2869,14 @@ async fn build_mobile_inner_with_ask(
         &cwd.to_string_lossy(),
         &main_session_uuid,
     );
-    let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+    let subagent_env_renderer = build_mobile_subagent_env_renderer(
+        cwd.clone(),
+        mobile_runtime_environment.as_ref(),
+        mobile_workspace_cwd_provider.clone(),
+    );
+    let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
+        .with_session_interactive(interactive_launch)
         .with_default_model(agent::model_resolution::resolve_user_specified_model(
             &orch_cfg.model,
         ))
@@ -2478,9 +2888,12 @@ async fn build_mobile_inner_with_ask(
             Some(main_subagents_dir.clone()),
         )
         .with_transcript_fs(fs.clone())
-        .with_subagent_env_renderer(Arc::new(
-            orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
-        ));
+        .with_subagent_env_renderer(subagent_env_renderer);
+    if let Some(environment) = mobile_runtime_environment.clone() {
+        subagent_spawner_concrete = subagent_spawner_concrete
+            .with_mobile_runtime_environment(environment)
+            .with_mobile_workspace_cwd_provider(mobile_workspace_cwd_provider);
+    }
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
@@ -2512,12 +2925,10 @@ async fn build_mobile_inner_with_ask(
     let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
     let local_workflow_status_sink =
         Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
-    let local_workflow_output_pool: Arc<
-        std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>,
-    > = Arc::new(std::sync::OnceLock::new());
-    let local_workflow_turn_baseline: Arc<
-        std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>,
-    > = Arc::new(std::sync::OnceLock::new());
+    let local_workflow_output_pool: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let local_workflow_turn_baseline: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
+        Arc::new(std::sync::OnceLock::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(
@@ -2632,21 +3043,13 @@ async fn build_mobile_inner_with_ask(
         // mobile-linux but the runtime is blocked or unlinked. In that state the
         // tools stay ABSENT rather than silently falling back to the Android
         // legacy path.
-        android_shell: gate_mobile_shell_ctx(
-            cfg.mobile_shell().cloned(),
-            mobile_linux_capability.as_ref(),
-        ),
-        android_git: gate_mobile_git_ctx(
-            cfg.mobile_git().cloned(),
-            mobile_linux_capability.as_ref(),
-        ),
+        android_shell: gated_shell_ctx.clone(),
+        android_git: gated_git_ctx.clone(),
         // Secret carrier follows the same public-gate decision: if the public
         // git tool is gated off, keep the secret seam absent too.
-        android_git_secret: gate_mobile_git_ctx(
-            cfg.mobile_git().cloned(),
-            mobile_linux_capability.as_ref(),
-        )
-        .and_then(|_| cfg.mobile_git_secret().cloned()),
+        android_git_secret: gated_git_ctx
+            .as_ref()
+            .and_then(|_| cfg.mobile_git_secret().cloned()),
         // Mobile uses the same blocking TaskCreated/TaskCompleted hook contract
         // as desktop. The transcript path is unavailable before the session is
         // mounted, so it remains empty; cwd and policy are still enforced.
@@ -2699,13 +3102,18 @@ async fn build_mobile_inner_with_ask(
         );
         mobile_tool_registry_with_skill_loader_and_ask_resolver(
             tool_ctx.clone(),
+            cfg.lingxi_home.clone(),
             skill_loader,
             Arc::new(tool_ui::ask_user_question::TuiBridgeResolver::new(
                 timeout, tx,
             )),
         )
     } else {
-        mobile_tool_registry_with_skill_loader(tool_ctx.clone(), skill_loader)
+        mobile_tool_registry_with_skill_loader(
+            tool_ctx.clone(),
+            cfg.lingxi_home.clone(),
+            skill_loader,
+        )
     };
     register_android_ui_automation(&mut tools, platform.android_ui_automation());
     // v3 Phase 1: register the Workflow tool (mirror of the desktop
@@ -2925,7 +3333,9 @@ async fn build_mobile_inner_with_ask(
     .with_cache_safe_slot(cache_safe_slot)
     // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
     // TodoStore (tool_task IS registered on mobile) — mirror of desktop.
-    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    .with_todo_reminder_tasks(Arc::new(
+        orchestrator::TodoStoreReminderTasks::with_config_home(cfg.lingxi_home.clone()),
+    ))
     // v3 Phase 1: drain terminal-not-notified background tasks (workflows)
     // into the per-turn `<task-notification>` reminder — the model learns a
     // launched workflow finished on the next turn (desktop mirror).
@@ -2958,6 +3368,23 @@ async fn build_mobile_inner_with_ask(
     } else {
         orch_inner
     };
+    if let Some(environment) = mobile_runtime_environment.clone() {
+        let runtime = mobile_linux.clone();
+        let has_mobile_linux_guest = matches!(
+            environment.tool_runtime,
+            traits::MobileToolRuntime::MobileLinuxGuest
+        );
+        let resolver = Arc::new(move |path: &std::path::Path| {
+            let mounts = runtime
+                .as_ref()
+                .map(|runtime| runtime.current_mounts())
+                .unwrap_or_default();
+            model_visible_mobile_cwd(path, &mounts, has_mobile_linux_guest)
+        });
+        orch_inner = orch_inner
+            .with_mobile_runtime_environment(environment)
+            .with_mobile_workspace_cwd_resolver(resolver);
+    }
     orch_inner = orch_inner.with_mcp_registry(mcp_registry.clone());
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
@@ -3107,6 +3534,7 @@ async fn build_mobile_inner_with_ask(
         oauth_supported,
         credentials,
         mobile_linux,
+        mobile_shell_available: gated_shell_ctx.as_ref().is_some_and(|ctx| ctx.enabled),
         mcp_registry,
         routable_listings: default_listings.clone(),
         local_apps_mcp,
@@ -4044,12 +4472,7 @@ impl MobileEngineHandle {
     /// The catalog IS the ordinary per-cwd JSONL listing — an app's sessions
     /// live under `projects/<sanitize(workspace)>/` exactly like a
     /// project's; only the init pin is app-specific.
-    async fn handle_list_app_sessions(
-        &self,
-        app_id: String,
-        offset: u64,
-        limit: Option<u32>,
-    ) {
+    async fn handle_list_app_sessions(&self, app_id: String, offset: u64, limit: Option<u32>) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
@@ -4709,8 +5132,7 @@ impl MobileEngineHandle {
                     // Compare CANONICAL spellings: a client may say `/var/…`
                     // where this source was rooted at `/private/var/…` (the
                     // same directory through the platform symlink).
-                    let requested_canon =
-                        canonical_cwd_string(std::path::Path::new(requested));
+                    let requested_canon = canonical_cwd_string(std::path::Path::new(requested));
                     let source_canon =
                         canonical_cwd_string(std::path::Path::new(&self.session_cwd));
                     if requested_canon != source_canon {
@@ -4794,8 +5216,7 @@ impl MobileEngineHandle {
                     // Compare CANONICAL spellings: a client may say `/var/…`
                     // where this source was rooted at `/private/var/…` (the
                     // same directory through the platform symlink).
-                    let requested_canon =
-                        canonical_cwd_string(std::path::Path::new(requested));
+                    let requested_canon = canonical_cwd_string(std::path::Path::new(requested));
                     let source_canon =
                         canonical_cwd_string(std::path::Path::new(&self.session_cwd));
                     if requested_canon != source_canon {
@@ -4963,12 +5384,11 @@ impl MobileEngineHandle {
             ClientCommand::TaskOutput { task_id, offset } => {
                 let registry: &dyn traits::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
-                let chunk = registry
-                    .output(&task_id, Some(offset))
-                    .await
-                    .map_err(|e| ClientError::Internal {
+                let chunk = registry.output(&task_id, Some(offset)).await.map_err(|e| {
+                    ClientError::Internal {
                         message: format!("task output failed: {e}"),
-                    })?;
+                    }
+                })?;
                 let (task_id, content, total_lines, truncated) =
                     client_adapter::lowering::lower_task_output_chunk(&chunk);
                 self.event_sink
@@ -5466,8 +5886,10 @@ impl MobileEngineHandle {
             &self.lingxi_home.join("settings.json"),
             &cwd,
         );
-        let desired: std::collections::HashSet<&str> =
-            configured.iter().map(|config| config.name.as_str()).collect();
+        let desired: std::collections::HashSet<&str> = configured
+            .iter()
+            .map(|config| config.name.as_str())
+            .collect();
         for name in self
             .inner
             .mcp_registry
@@ -6580,39 +7002,6 @@ pub fn build_mobile_engine(
 /// workspace — history follows the user, the source session stays put; a
 /// library create (or a fork that fails, e.g. an empty source) anchors an
 /// empty mobile session instead. Returns the minted uuid; the caller pins it
-/// via `AppService::set_init_session`.
-/// ONE canonical spelling for a session-catalog cwd key. `canonicalize`
-/// collapses the platform's symlink split (`/var` vs `/private/var` on
-/// iOS/macOS), so mint, listing, resume and the cwd gates all derive the
-/// SAME sanitized `projects/` directory — the on-device forensics showed the
-/// two spellings landing in TWO different catalog dirs, which made a freshly
-/// minted init session unresumable. Falls back to the raw string when the
-/// path does not exist (nothing to resume there anyway).
-fn canonical_cwd_string(path: &std::path::Path) -> String {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
-}
-
-/// Delete a session file this host minted into an app's workspace catalog.
-/// Used by both mint sites when `set_init_session` refuses their id — the
-/// set-once pin is the arbiter, and the loser's file would otherwise linger
-/// as a phantom conversation row in the app's session list.
-fn remove_app_session_file(
-    lingxi_home: &std::path::Path,
-    data_root: &std::path::Path,
-    record: &local_apps::AppRecord,
-    session_id: &str,
-) -> bool {
-    let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
-    let path = lingxi_home
-        .join("projects")
-        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
-        .join(format!("{session_id}.jsonl"));
-    std::fs::remove_file(path).is_ok()
-}
-
 async fn mint_app_init_session(
     lingxi_home: &std::path::Path,
     source_cwd: &str,
@@ -6647,11 +7036,8 @@ async fn mint_app_init_session(
         }
     }
     let init_id = uuid::Uuid::new_v4().to_string();
-    let path = orchestrator::transcript_paths::main_transcript_path(
-        lingxi_home,
-        &workspace_cwd,
-        &init_id,
-    );
+    let path =
+        orchestrator::transcript_paths::main_transcript_path(lingxi_home, &workspace_cwd, &init_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create app session catalog dir: {error}"))?;
@@ -6799,6 +7185,7 @@ pub fn build_mobile_engine_inner(
             (Err(error), host, None, None, None, None)
         }
     };
+    local_apps_host.set_shell_available(inner.mobile_shell_available);
     if inner
         .local_apps_mcp
         .attach_host(local_apps_host.clone())
@@ -6839,16 +7226,12 @@ pub fn build_mobile_engine_inner(
                         // spelling; any older dir whose name ends with this
                         // app's workspace suffix is renamed onto it.
                         {
-                            let workspace_cwd = canonical_cwd_string(
-                                &backfill_root.join(&record.workspace_rel),
-                            );
+                            let workspace_cwd =
+                                canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
                             let projects = backfill_home.join("projects");
                             let expected = projects
                                 .join(session::jsonl::path::project_dir_name(&workspace_cwd));
-                            let suffix = format!(
-                                "-apps-{}-workspace",
-                                record.id
-                            );
+                            let suffix = format!("-apps-{}-workspace", record.id);
                             // There can be MORE than one drifted directory —
                             // the two documented drifts compound (an old
                             // container UUID AND the pre-canonical `/var`
@@ -6948,9 +7331,7 @@ pub fn build_mobile_engine_inner(
                             if let Some(init_id) = record.init_session_id.as_deref() {
                                 let expected_file = expected.join(format!("{init_id}.jsonl"));
                                 if !expected_file.exists() {
-                                    if let Err(error) =
-                                        std::fs::create_dir_all(&expected)
-                                    {
+                                    if let Err(error) = std::fs::create_dir_all(&expected) {
                                         tracing::warn!(
                                             app_id = %record.id,
                                             error = %error,
@@ -7199,17 +7580,14 @@ mod tests {
                 "频率",
             ),
             (
-                Err(traits::HttpError::Timeout(std::time::Duration::from_secs(1))),
+                Err(traits::HttpError::Timeout(std::time::Duration::from_secs(
+                    1,
+                ))),
                 None,
                 "超时",
             ),
         ] {
-            let result = classify_provider_connection_response(
-                response,
-                "model",
-                20,
-                true,
-            );
+            let result = classify_provider_connection_response(response, "model", 20, true);
             assert!(!result.connected);
             assert_eq!(result.http_status, status);
             assert!(result.message.contains(expected_fragment));
@@ -7652,7 +8030,10 @@ mod tests {
             .await
             .expect("launch succeeds");
         assert!(
-            launched.run_id.as_deref().is_some_and(|r| r.starts_with("wf_")),
+            launched
+                .run_id
+                .as_deref()
+                .is_some_and(|r| r.starts_with("wf_")),
             "{launched:?}"
         );
 
@@ -9507,13 +9888,13 @@ mod tests {
             1,
         )
         .record;
-        let fs: Arc<dyn traits::FileSystem> =
-            Arc::new(platform_posix_minimal::PosixFileSystem::new(
-                tmp.path().to_path_buf(),
-            ));
-        let init_id = super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
-            .await
-            .expect("mint forks");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
+        );
+        let init_id =
+            super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
+                .await
+                .expect("mint forks");
 
         let workspace_cwd = data_root
             .join(&record.workspace_rel)

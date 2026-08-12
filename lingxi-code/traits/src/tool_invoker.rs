@@ -41,6 +41,10 @@ pub struct SubagentInvocationContext {
     /// async agent (else it inherits the parent's flag, default `false`) —
     /// `runAgent.ts:668-672`. Mapped into `ToolUseContext.is_non_interactive_session`.
     pub is_async: bool,
+    /// Effective owning-session mode for this dispatch. This is distinct from
+    /// `is_async`: a synchronous child of scheduled/headless work must still
+    /// keep every invoked tool non-interactive.
+    pub is_non_interactive_session: bool,
     /// Whether the dispatching subagent may SURFACE permission prompts to the
     /// user (claude-code's permission-prompt eligibility). Threaded from
     /// `SubagentContext.can_show_permission_prompts`. When `true` (a named

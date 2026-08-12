@@ -26,8 +26,12 @@ state the inference, and continue instead of blocking. Then show one confirmable
 specification containing:
 
 - target OS and form factor; if omitted, infer from the host device context
-  (`os`, `formFactor`, `viewport`, `safeArea`, `colorScheme`, `reducedMotion`,
-  and `inputMode`) and show that inference for confirmation;
+  described by the fixed Mobile Runtime Environment reminder (`Host OS`,
+  `Device class`, `Execution target`, and `Launch mode`) and show that
+  inference for confirmation;
+- dynamic viewport, safe area, color scheme, reduced motion, and input mode
+  are runtime inputs only; do not treat them as prompt facts. The generated app
+  must read them from `window.lingxi.v1.deviceContext`;
 - pages, navigation/back semantics, complete states, data/permissions;
 - design direction, platform tokens, responsive/adaptive behavior, and the
   exact packages proposed for installation (including versions/specs);
@@ -114,8 +118,8 @@ The workflow is deterministic and owns these phases in order:
 
 1. **Design** — invoke `$frontend-design`, produce/confirm platform and form
    factor, page structure, tokens, adapters, interactions, and asset decision.
-   For a new app with no `package.json`, use the existing Mobile Linux
-   `Shell`/Bash tool to run the official CLI in a newly created empty staging
+   For a new app with no `package.json`, use the existing `Shell` tool to run
+   the official CLI in a newly created empty staging
    source root: `npm create vite@latest . -- --template react --no-interactive`.
    Use `--template react-ts` only when the confirmed specification explicitly
    requires TypeScript; the exact TypeScript command is
@@ -124,11 +128,14 @@ The workflow is deterministic and owns these phases in order:
    workspace already contains host `.lingxi/` metadata, so never target that
    non-empty directory directly. Copy the completed staging contents into the
    still-empty source root only after checking that no user source exists.
-   If registry/network access is unavailable, copy the repository-verified
-   `.lingxi/vite-fallback/` into the source root as an explicit
-   `offline-fallback`, record the reason, and report that the official CLI did
-   not run. Do not use that fallback for unrelated CLI failures or add a Vite
-   wrapper/scaffold API.
+   If `Shell` is unavailable, do not invent a replacement installer or scaffold
+   tool. Reuse an existing source tree when one already exists; otherwise copy
+   the repository-verified `.lingxi/vite-fallback/` into the source root as an
+   explicit `offline-fallback`, record that `Shell` was unavailable, and report
+   that the official CLI did not run. If `Shell` is available but
+   registry/network access is unavailable, use that same offline fallback and
+   record the reason. Do not use the fallback for unrelated CLI failures or add
+   a Vite wrapper/scaffold API.
 2. **Dependencies** — compare the confirmed package list with the app's
    package manifest using the existing `Shell` tool in the app workspace. Show
    the exact displayed specs, then run `npm install -- <specs>` or
@@ -138,7 +145,9 @@ The workflow is deterministic and owns these phases in order:
    when `node_modules` is absent or incomplete. After restore, run `npm ci`
    through the same Shell when the lockfile and installed tree differ. Optional
    `tailwindcss`/`@tailwindcss/vite`, `motion`, and `lucide-react` packages are
-   valid proposals, but only install the exact specs shown and confirmed.
+   valid proposals, but only install the exact specs shown and confirmed. If
+   `Shell` is unavailable, do not mutate dependencies; report the exact pending
+   package operations instead.
 3. **Generate** — invoke `$accessibility` and `$react-best-practices`; inject
    the LingXi bridge, `deviceContext`, source policy/manifest integration,
    platform adapter, complete React source, and all required states under the
@@ -172,10 +181,10 @@ Use only `window.lingxi.v1` for host data, network, device, and agent events.
 The build is offline and the bridge/device context is untrusted input: validate
 it at the adapter boundary.
 
-Source versioning uses the existing Git/Bash capability and its normal
-workspace approval and command logs. Checkpoints are ordinary workspace Git
-history plus the package-lock digest; do not introduce a second version store
-or a checkpoint-specific command surface.
+Source versioning uses ordinary workspace Git history plus the package-lock
+digest. Use the existing Git capability when available; otherwise use standard
+git commands through `Shell`. Do not introduce a second version store or a
+checkpoint-specific command surface.
 
 ## Existing app operations
 

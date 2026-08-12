@@ -220,7 +220,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseStarted.id", "String");
     put("ClientEvent::ToolUseStarted.tool", "String");
     put("ClientEvent::ToolUseStarted.input_json", "String");
-    put("ClientEvent::ToolUseStarted.header", "Option<ToolHeaderDto>");
+    put(
+        "ClientEvent::ToolUseStarted.header",
+        "Option<ToolHeaderDto>",
+    );
 
     put("ClientEvent::ToolHeartbeat", "tool_heartbeat");
     put("ClientEvent::ToolHeartbeat.id", "String");
@@ -231,7 +234,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseResult.id", "String");
     put("ClientEvent::ToolUseResult.tool", "String");
     put("ClientEvent::ToolUseResult.result_json", "String");
-    put("ClientEvent::ToolUseResult.display", "Option<ToolResultDisplayDto>");
+    put(
+        "ClientEvent::ToolUseResult.display",
+        "Option<ToolResultDisplayDto>",
+    );
     put("ClientEvent::ToolUseResult.is_error", "bool");
 
     put("ClientEvent::MessageComplete", "message_complete");
@@ -704,7 +710,10 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::ToolResult.old_string", "Option<String>");
     put("MessageBlockDto::ToolResult.new_string", "Option<String>");
     put("MessageBlockDto::ToolResult.file_path", "Option<String>");
-    put("MessageBlockDto::ToolResult.display", "Option<ToolResultDisplayDto>");
+    put(
+        "MessageBlockDto::ToolResult.display",
+        "Option<ToolResultDisplayDto>",
+    );
 
     put("ClientEvent::PlanUpdated", "plan_updated");
     put("ClientEvent::PlanUpdated.tasks", "Vec<PlanTaskDto>");
@@ -779,7 +788,10 @@ fn current_contract_index() -> ContractIndex {
     put("HeadlineKindDto::LinesRead", "lines_read");
     put("HeadlineKindDto::LinesReadPartial", "lines_read_partial");
     put("HeadlineKindDto::FilesFound", "files_found");
-    put("HeadlineKindDto::FilesFoundTruncated", "files_found_truncated");
+    put(
+        "HeadlineKindDto::FilesFoundTruncated",
+        "files_found_truncated",
+    );
     put("HeadlineKindDto::LinesFound", "lines_found");
     put("HeadlineKindDto::MatchesFound", "matches_found");
     put("HeadlineKindDto::Interrupted", "interrupted");
@@ -788,7 +800,10 @@ fn current_contract_index() -> ContractIndex {
     put("HeadlineKindDto::Plain", "plain");
 
     put("ToolResultDisplayDto.headline", "Option<String>");
-    put("ToolResultDisplayDto.headline_kind", "Option<HeadlineKindDto>");
+    put(
+        "ToolResultDisplayDto.headline_kind",
+        "Option<HeadlineKindDto>",
+    );
     put("ToolResultDisplayDto.headline_args", "Vec<u32>");
     put("ToolResultDisplayDto.diff", "Option<StructuredDiffDto>");
     put("ToolResultDisplayDto.body", "Option<String>");
@@ -1493,11 +1508,6 @@ fn contract_index_covers_every_dto() {
     };
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
-    use client_protocol::tool_display::{
-        CodeSegmentDto, DiffLineKindDto, DiffRowDto, PlanTaskDto, PlanTaskStateDto,
-        HeadlineKindDto, StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto,
-        ToolSubLineDto, ToolVerbDto,
-    };
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
@@ -1517,6 +1527,11 @@ fn contract_index_covers_every_dto() {
     use client_protocol::permission::{
         PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto,
         WorkerInfoDto,
+    };
+    use client_protocol::tool_display::{
+        CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto,
+        PlanTaskStateDto, StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto,
+        ToolSubLineDto, ToolVerbDto,
     };
 
     // Touch every type so removing a type breaks this compile. The values are

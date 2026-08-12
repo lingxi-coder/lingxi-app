@@ -29,6 +29,7 @@ const MAX_INPUT_BYTES: usize = 256 * 1024;
 /// WebView or process handles itself.
 #[async_trait]
 pub trait LocalAppsMcpHost: Send + Sync {
+    fn create_next_step(&self) -> String;
     async fn manage_runtime(&self, input: Value) -> Result<Value, String>;
     async fn query_data(&self, input: Value) -> Result<Value, String>;
     async fn mutate_data(&self, input: Value) -> Result<Value, String>;
@@ -70,14 +71,14 @@ pub type SessionIdProvider = dyn Fn() -> Option<String> + Send + Sync;
 /// layer because ONLY it knows the source conversation's cwd.
 pub type InitSessionMinter = dyn Fn(
         local_apps::AppRecord,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
-    > + Send
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+    + Send
     + Sync;
 
 /// Mobile-local implementation of the MCP transport boundary.
 pub struct LocalAppsMcpTransport {
     root: PathBuf,
+    lingxi_home: OnceLock<PathBuf>,
     service: OnceLock<Arc<AppService>>,
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
     session_id: OnceLock<Arc<SessionIdProvider>>,
@@ -90,12 +91,17 @@ impl LocalAppsMcpTransport {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
+            lingxi_home: OnceLock::new(),
             service: OnceLock::new(),
             host: OnceLock::new(),
             session_id: OnceLock::new(),
             init_session_minter: OnceLock::new(),
             connections: StdMutex::new(HashSet::new()),
         }
+    }
+
+    pub fn attach_lingxi_home(&self, lingxi_home: PathBuf) -> Result<(), PathBuf> {
+        self.lingxi_home.set(lingxi_home)
     }
 
     /// Attach the connection-scoped init-session minter (engine host boot).
@@ -380,7 +386,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record and host metadata. The local-app-build workflow then uses the existing Mobile Linux Shell to run the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript), copies it into the app workspace without overwriting source, and uses the repository-verified .lingxi/vite-fallback only when registry/network access is unavailable. Generate under src/ (or app/ for the explicit fallback), call build, and preview via manage_runtime.",
+                "Create a local app record and host metadata. The local-app-build workflow uses the official Vite CLI in an empty staging source root when the Shell tool is available (react by default, react-ts only for confirmed TypeScript), copies it into the app workspace without overwriting source, and otherwise reuses existing source or the repository-verified .lingxi/vite-fallback while reporting the Shell-unavailable reason. Generate under src/ (or app/ for the explicit fallback), use npm dependency operations only when Shell is available, then call build and preview via manage_runtime.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -636,16 +642,25 @@ impl LocalAppsMcpTransport {
                 let mut init_session_id: Option<String> = None;
                 if let Some(minter) = self.init_session_minter.get() {
                     match minter(record.clone()).await {
-                        Ok(init_id) => {
-                            match service.set_init_session(&record.id, &init_id).await {
-                                Ok(()) => init_session_id = Some(init_id),
-                                Err(error) => tracing::warn!(
+                        Ok(init_id) => match service.set_init_session(&record.id, &init_id).await {
+                            Ok(()) => init_session_id = Some(init_id),
+                            Err(error) => {
+                                let removed = self.lingxi_home.get().is_some_and(|lingxi_home| {
+                                    crate::local_apps_host::remove_app_session_file(
+                                        lingxi_home,
+                                        &self.root,
+                                        &record,
+                                        &init_id,
+                                    )
+                                });
+                                tracing::warn!(
                                     app_id = %record.id,
                                     error = %error,
+                                    orphan_removed = removed,
                                     "local-apps MCP create: init-session pin failed"
-                                ),
+                                );
                             }
-                        }
+                        },
                         Err(error) => tracing::warn!(
                             app_id = %record.id,
                             error = %error,
@@ -656,7 +671,10 @@ impl LocalAppsMcpTransport {
                 let mut result = json!({
                     "app": record,
                     "scaffolded": scaffolded,
-                    "next_step": "Run local-app-build: Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript), Dependencies uses the existing Shell for npm, Generate edits src/ and injects the bridge/platform adapter, then call build and preview via manage_runtime."
+                    "next_step": self.host.get().map_or_else(
+                        || crate::local_apps_host::create_next_step_guidance(None),
+                        |host| host.create_next_step(),
+                    )
                 });
                 if let (Some(object), Some(warning)) = (result.as_object_mut(), warning) {
                     object.insert("warning".into(), Value::String(warning));
@@ -679,11 +697,7 @@ impl LocalAppsMcpTransport {
                 let label = Self::required_string(&input, "label")?;
                 match self
                     .service()?
-                    .create_checkpoint(
-                        app_id,
-                        local_apps::AppCheckpointKind::UserApproved,
-                        label,
-                    )
+                    .create_checkpoint(app_id, local_apps::AppCheckpointKind::UserApproved, label)
                     .await
                 {
                     Ok(checkpoint) => Self::result(serde_json::json!({
@@ -1092,6 +1106,18 @@ mod tests {
             create_schema.contains("brief"),
             "create takes a brief: {create_schema}"
         );
+        assert!(
+            create
+                .description
+                .contains("when the Shell tool is available"),
+            "create must only require the Vite CLI when Shell is available: {}",
+            create.description
+        );
+        assert!(
+            create.description.contains("Shell-unavailable reason"),
+            "create must describe the Shell-unavailable fallback path: {}",
+            create.description
+        );
         let descriptions = tools
             .iter()
             .map(|tool| tool.description.as_str())
@@ -1388,6 +1414,10 @@ mod tests {
 
     #[async_trait]
     impl LocalAppsMcpHost for RecordingScaffoldHost {
+        fn create_next_step(&self) -> String {
+            "host-specific next step".into()
+        }
+
         async fn manage_runtime(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
@@ -1443,6 +1473,7 @@ mod tests {
         let structured = result.structured_content.expect("structured");
         let app_id = structured["app"]["id"].as_str().expect("id").to_string();
         assert_eq!(structured["scaffolded"], true);
+        assert_eq!(structured["next_step"], "host-specific next step");
 
         assert_eq!(
             host.calls.lock().expect("lock").as_slice(),
@@ -1470,6 +1501,9 @@ mod tests {
             structured["warning"].as_str().is_some(),
             "a missed scaffold must be reported, not silent: {structured}"
         );
+        let next_step = structured["next_step"].as_str().expect("next_step");
+        assert!(next_step.contains("If Shell is available"), "{next_step}");
+        assert!(next_step.contains("if Shell is unavailable"), "{next_step}");
         assert_eq!(
             service
                 .record(&app_id)
@@ -1477,6 +1511,74 @@ mod tests {
                 .expect("record")
                 .workflow_state,
             local_apps::AppWorkflowState::Draft
+        );
+    }
+
+    #[tokio::test]
+    async fn create_removes_the_losing_minted_session_when_init_pin_races() {
+        const PINNED_INIT_ID: &str = "pinned-init";
+        const ORPHAN_INIT_ID: &str = "orphan-init";
+
+        let root = tempfile::tempdir().unwrap();
+        let lingxi_home = root.path().join(".lingxi-home");
+        let (transport, service) = attached_transport(root.path()).await;
+        assert!(transport.attach_lingxi_home(lingxi_home.clone()).is_ok());
+
+        let orphan_path = Arc::new(StdMutex::new(None::<std::path::PathBuf>));
+        let orphan_path_for_minter = Arc::clone(&orphan_path);
+        let service_for_minter = Arc::clone(&service);
+        let data_root = root.path().to_path_buf();
+        assert!(transport
+            .attach_init_session_minter(Arc::new(move |record| {
+                let orphan_path = Arc::clone(&orphan_path_for_minter);
+                let service = Arc::clone(&service_for_minter);
+                let lingxi_home = lingxi_home.clone();
+                let data_root = data_root.clone();
+                Box::pin(async move {
+                    service
+                        .set_init_session(&record.id, PINNED_INIT_ID)
+                        .await
+                        .expect("pre-pin the winner");
+                    let workspace_cwd = crate::local_apps_host::canonical_cwd_string(
+                        &data_root.join(&record.workspace_rel),
+                    );
+                    let orphan = lingxi_home
+                        .join("projects")
+                        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
+                        .join(format!("{ORPHAN_INIT_ID}.jsonl"));
+                    std::fs::create_dir_all(orphan.parent().expect("orphan parent")).unwrap();
+                    std::fs::write(&orphan, "").unwrap();
+                    *orphan_path.lock().expect("lock") = Some(orphan);
+                    Ok(ORPHAN_INIT_ID.to_string())
+                })
+            }))
+            .is_ok());
+
+        let created = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("create");
+        let structured = created.structured_content.expect("structured");
+        let app_id = structured["app"]["id"].as_str().expect("id");
+        assert_eq!(structured["init_session_id"], Value::Null);
+        assert_eq!(
+            service
+                .record(app_id)
+                .await
+                .expect("record")
+                .init_session_id
+                .as_deref(),
+            Some(PINNED_INIT_ID)
+        );
+        let orphan = orphan_path
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("orphan path");
+        assert!(
+            !orphan.exists(),
+            "the losing minted session must be deleted: {}",
+            orphan.display()
         );
     }
 

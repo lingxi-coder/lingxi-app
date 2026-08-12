@@ -227,6 +227,51 @@ mod tests {
         assert_eq!(render_task_update_fail("9", Some("")), "Task #9 not found");
     }
 
+    #[tokio::test]
+    async fn task_tools_use_the_host_config_home_when_injected() {
+        use std::sync::Arc;
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+
+        let unique = format!(
+            "lingxi-host-task-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0),
+        );
+        let temp = std::env::temp_dir().join(unique);
+        let config_home = temp.join("app-container").join(branding::DOT_DIR);
+        let tool = TaskCreateTool::new(ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![temp.clone()],
+        ))
+        .with_config_home(config_home.clone());
+
+        let result = tool
+            .call(
+                json!({
+                    "subject": "Build local app",
+                    "description": "Use the host-owned task directory"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("injected config home is writable");
+
+        let id = result.data["task"]["id"].as_str().expect("created task id");
+        let stored = TodoStore::for_list_at(&config_home, "default")
+            .get(id)
+            .await
+            .expect("task persisted under the host config home");
+        assert_eq!(stored.subject, "Build local app");
+        assert!(config_home.join("tasks/default").is_dir());
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     // ── TaskUpdate statusChange gates on the COMPUTED transition — a no-op
     //    `completed` re-send must NOT report a transition (oracle 2.1.223
     //    `g.status!==void 0` is set only when `status !== existingTask.status`).

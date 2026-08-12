@@ -167,8 +167,15 @@ pub(crate) fn resolve_teammate_list_id(team_name: &str) -> Option<String> {
 /// [`claimed_task_prompt`] text. `None` when there is nothing claimable, the
 /// claim loses a race, or any store error occurs (all logged with the
 /// oracle's `[inProcessRunner]` message bodies).
-pub(crate) async fn check_and_claim_next_task(list_id: &str, agent_name: &str) -> Option<String> {
-    let store = task_store::TodoStore::for_list(list_id);
+pub(crate) async fn check_and_claim_next_task(
+    config_home: Option<&std::path::Path>,
+    list_id: &str,
+    agent_name: &str,
+) -> Option<String> {
+    let store = config_home.map_or_else(
+        || task_store::TodoStore::for_list(list_id),
+        |home| task_store::TodoStore::for_list_at(home, list_id),
+    );
     let tasks = store.list().await;
     let next = pick_next_task(&tasks)?.clone();
     let res = store
@@ -268,6 +275,10 @@ pub struct InProcessTeammateHandler {
     pool: Arc<StateMachinePool>,
     /// Spool-file owner (same role as in `LocalBash` / `MonitorMcp`).
     output: Arc<TaskOutputManager>,
+    /// Optional host-resolved config-home root for V2 task-list reads. When
+    /// absent, teammate auto-claim preserves the legacy process-global
+    /// `HOME`/`LINGXI_CONFIG_DIR` resolution.
+    config_home: Option<std::path::PathBuf>,
     /// Model API seam handed to every spawned teammate's runner.
     api_client: Arc<dyn SubagentApiClient>,
     /// Tool dispatch seam inherited by the teammate. `None` means the teammate
@@ -292,6 +303,9 @@ pub struct InProcessTeammateHandler {
     /// runtime resolution; without it (the default) the Inherit branch returns the
     /// parent model unchanged (mirrors `PoolSubagentSpawner::model_setting`).
     model_setting: Option<String>,
+    /// Owning session mode for prompt/provider gates inside the independently
+    /// spawned persistent runner. `None` preserves the legacy fallback.
+    session_interactive: Option<bool>,
     /// Live tool registry used to resolve the teammate's advertised tool
     /// SCHEMAS + dispatch allow-list per spawn (claude-code `assembleToolPool`),
     /// mirroring [`agent::PoolSubagentSpawner`]. A SET-ONCE cell (same
@@ -351,12 +365,14 @@ impl InProcessTeammateHandler {
         Self {
             pool,
             output,
+            config_home: None,
             api_client,
             tool_invoker: None,
             definitions: Arc::new(DefaultTeammateDefinition),
             default_model: None,
             permission_mode: PermissionMode::Default,
             model_setting: None,
+            session_interactive: None,
             tool_registry: Arc::new(OnceLock::new()),
             tool_wide_deny_names: Arc::new(OnceLock::new()),
             budget_enforcer: None,
@@ -446,10 +462,24 @@ impl InProcessTeammateHandler {
         self
     }
 
+    /// Pin teammate auto-claim reads to a host-resolved config home.
+    #[must_use]
+    pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
+        self.config_home = Some(config_home);
+        self
+    }
+
     /// Attach the tool dispatch seam inherited by spawned teammates.
     #[must_use]
     pub fn with_tool_invoker(mut self, invoker: Arc<dyn traits::ToolInvoker>) -> Self {
         self.tool_invoker = Some(invoker);
+        self
+    }
+
+    /// Set the owning session mode for this handler's independent runners.
+    #[must_use]
+    pub fn with_session_interactive(mut self, interactive: bool) -> Self {
+        self.session_interactive = Some(interactive);
         self
     }
 
@@ -601,11 +631,14 @@ impl InProcessTeammateHandler {
             // resume on the next injected UserMessage.
             persistent: true,
             can_show_permission_prompts: true,
+            session_interactive: self.session_interactive,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
             resumed_history: None,
             rendered_system_prompt: None,
+            mobile_runtime_environment_reminder: None,
+            mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,
             display: AgentDisplay {
@@ -755,8 +788,9 @@ impl Task for InProcessTeammateHandler {
         //     seeded the first message. A teamless spawn (`None` list id) is
         //     the standalone analogue and skips.
         let claim_list_id = resolve_teammate_list_id(&team_name);
+        let claim_config_home = self.config_home.clone();
         if let Some(list_id) = &claim_list_id {
-            let _ = check_and_claim_next_task(list_id, &name).await;
+            let _ = check_and_claim_next_task(self.config_home.as_deref(), list_id, &name).await;
         }
 
         // 5. Spawn the streaming worker through the runtime (never tokio::spawn
@@ -814,7 +848,12 @@ impl Task for InProcessTeammateHandler {
                         }
                         if let Some(list_id) = &claim_list_id {
                             if let Some(prompt) =
-                                check_and_claim_next_task(list_id, &claim_name).await
+                                check_and_claim_next_task(
+                                    claim_config_home.as_deref(),
+                                    list_id,
+                                    &claim_name,
+                                )
+                                .await
                             {
                                 let content =
                                     teammate_message_envelope("task-list", &prompt);

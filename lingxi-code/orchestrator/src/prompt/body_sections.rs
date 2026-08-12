@@ -202,7 +202,7 @@ fn session_guidance(
     fork_mode_enabled: bool,
     skills_present: bool,
     lean: bool,
-    has_bash: bool,
+    has_posix_shell: bool,
 ) -> Option<String> {
     let mut bullets: Vec<String> = Vec::with_capacity(4);
 
@@ -236,8 +236,8 @@ fn session_guidance(
         }
     }
     if has_agent_tool && !fork_mode_enabled && !lean {
-        let direct_search = if has_bash {
-            "`find` or `grep` via the Bash tool"
+        let direct_search = if has_posix_shell {
+            "`find` or `grep` via the registered shell tool"
         } else {
             "the Glob or Grep"
         };
@@ -431,7 +431,7 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
 /// Build the `# Using your tools` section — claude-code `Nym(d)`, default
 /// (shell-capable, non-`ox()`) path. Reproduced from the available tool names:
 ///
-/// * `o` = the shell tool — `Bash` when present, else `PowerShell`.
+/// * `o` = the shell tool — `Bash`, then mobile `Shell`, then `PowerShell`.
 /// * `s` = the dedicated-tool list. claude-code logic (binary offset 206660705):
 ///   ```js
 ///   let n = rv();        // rv() = true for posix non-Windows-shell-mode (always true)
@@ -452,14 +452,17 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
 fn using_your_tools(tool_names: &[String]) -> Option<String> {
     let has = |n: &str| tool_names.iter().any(|t| t == n);
 
-    // Shell tool: Bash preferred, else PowerShell (claude-code `o=r?ns:Js`).
-    let shell = if has("Bash") { "Bash" } else { "PowerShell" };
+    // LingXi supports three canonical shell tools. Do not invent a PowerShell
+    // surface for read-only/tool-only agents that have no shell at all.
+    let shell = ["Bash", "Shell", "PowerShell"]
+        .into_iter()
+        .find(|name| has(name));
 
     // Dedicated-tool list (claude-code `s`).
     // rv()=true for posix (always in LingXi); r=has("Bash").
     // Binary: `n&&r?[]:[ou,Ac]` — when posix AND Bash present → Glob/Grep EXCLUDED.
-    let dedicated = if has("Bash") {
-        // posix + Bash: standard interactive CLI case — Glob/Grep excluded.
+    let dedicated = if has("Bash") || has("Shell") {
+        // POSIX Bash/mobile Shell: Glob/Grep excluded.
         "Read, Edit, Write"
     } else {
         // No Bash (e.g. PowerShell, or shell-less): Glob/Grep included.
@@ -476,9 +479,15 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
     };
 
     let mut bullets: Vec<String> = Vec::with_capacity(3);
-    bullets.push(format!(
-        " - Prefer dedicated tools over {shell} when one fits ({dedicated}) \u{2014} reserve {shell} for shell-only operations."
-    ));
+    if let Some(shell) = shell {
+        bullets.push(format!(
+            " - Prefer dedicated tools over {shell} when one fits ({dedicated}) \u{2014} reserve {shell} for shell-only operations."
+        ));
+    } else {
+        bullets.push(format!(
+            " - Prefer dedicated tools when one fits ({dedicated})."
+        ));
+    }
     if let Some(t) = task_tool {
         bullets.push(format!(
             " - Use {t} to plan and track work. Mark each task completed as soon as it's done; don't batch."
@@ -578,7 +587,7 @@ pub fn format(
         fork_mode_enabled,
         skills_available && has_skill_tool,
         lean,
-        tool_names.iter().any(|t| t == "Bash"),
+        tool_names.iter().any(|t| t == "Bash" || t == "Shell"),
     ) {
         sections.push(sg);
     }
@@ -992,6 +1001,17 @@ mod tests {
     }
 
     #[test]
+    fn using_your_tools_mobile_shell_is_posix() {
+        let tools = vec!["Read".to_string(), "Shell".to_string()];
+        let s = using_your_tools(&tools).expect("present");
+        assert!(s.contains("reserve Shell for shell-only operations."));
+        assert!(!s.contains("PowerShell"));
+        assert!(!s.contains("Bash"));
+        assert!(!s.contains("Glob"));
+        assert!(!s.contains("Grep"));
+    }
+
+    #[test]
     fn using_your_tools_taskcreate_preferred_over_todowrite() {
         let tools = vec![
             "Bash".to_string(),
@@ -1005,11 +1025,21 @@ mod tests {
 
     #[test]
     fn using_your_tools_powershell_when_no_bash() {
-        let tools = vec!["Read".to_string()];
+        let tools = vec!["Read".to_string(), "PowerShell".to_string()];
         let s = using_your_tools(&tools).expect("present");
         assert!(s.contains("reserve PowerShell for shell-only operations."));
         // No task tool ⇒ no task bullet.
         assert!(!s.contains("plan and track work"));
+    }
+
+    #[test]
+    fn using_your_tools_without_shell_does_not_invent_one() {
+        let tools = vec!["Read".to_string(), "TodoWrite".to_string()];
+        let s = using_your_tools(&tools).expect("present");
+        assert!(!s.contains("PowerShell"));
+        assert!(!s.contains("Bash"));
+        assert!(!s.contains("reserve "));
+        assert!(s.contains("Use TodoWrite to plan and track work."));
     }
 
     #[test]

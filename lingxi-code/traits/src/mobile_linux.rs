@@ -425,6 +425,27 @@ mod map_guest_path_tests {
         assert_eq!(map_guest_path_to_host("relative", &m), None);
         assert_eq!(map_guest_path_to_host("/tmp/x", &m), None);
     }
+
+    #[test]
+    fn maps_host_paths_back_to_the_longest_guest_mount() {
+        let m = mounts();
+        assert_eq!(
+            map_host_path_to_guest(std::path::Path::new("/host/ws/src/a.rs"), &m).as_deref(),
+            Some("/workspace/abc/src/a.rs")
+        );
+        assert_eq!(
+            map_host_path_to_guest(std::path::Path::new("/host/ext/d.txt"), &m).as_deref(),
+            Some("/workspace/abc/ext/d.txt")
+        );
+        assert_eq!(
+            map_host_path_to_guest(std::path::Path::new("/host/other"), &m),
+            None
+        );
+        assert_eq!(
+            map_host_path_to_guest(std::path::Path::new("/host/ws/../escape"), &m),
+            None
+        );
+    }
 }
 
 /// Map a guest path onto its host twin via the longest-prefix matching
@@ -439,6 +460,41 @@ mod map_guest_path_tests {
 #[must_use]
 pub fn map_guest_path_to_host(path: &str, mounts: &[MountSpec]) -> Option<std::path::PathBuf> {
     find_guest_mount(path, mounts).map(|(_, host)| host)
+}
+
+/// Map a native host path back to its model-visible guest coordinate via the
+/// longest matching mount. Pure and lexical; dirty or relative paths fail
+/// closed so prompt context never exposes a native backing path.
+#[must_use]
+pub fn map_host_path_to_guest(path: &std::path::Path, mounts: &[MountSpec]) -> Option<String> {
+    use std::path::Component;
+
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return None;
+    }
+    let mount = mounts
+        .iter()
+        .filter(|mount| {
+            mount.host_path.is_absolute()
+                && (path == mount.host_path || path.starts_with(&mount.host_path))
+        })
+        .max_by_key(|mount| mount.host_path.components().count())?;
+    let relative = path.strip_prefix(&mount.host_path).ok()?;
+    let mut guest = std::path::PathBuf::from(&mount.guest_path);
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => guest.push(segment),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    let guest = guest.to_str()?;
+    find_guest_mount(guest, mounts)?;
+    Some(guest.to_owned())
 }
 
 /// Like [`map_guest_path_to_host`], but also returns WHICH mount matched —

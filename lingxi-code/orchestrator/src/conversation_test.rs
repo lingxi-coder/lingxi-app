@@ -2103,8 +2103,8 @@ mod additional_context_tests {
     use super::*;
     use crate::prompt::MemoryFile;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
     use protocol::ContentBlock;
@@ -2141,6 +2141,35 @@ mod additional_context_tests {
                 .collect(),
             _ => String::new(),
         }
+    }
+
+    fn runtime_message(body: &str) -> ConversationMessage {
+        ConversationMessage::user_meta(MessageId::new(), body.to_string())
+    }
+
+    fn mobile_environment_with_runtime(
+        tool_runtime: traits::MobileToolRuntime,
+        cwd: Option<&str>,
+    ) -> traits::MobileRuntimeEnvironment {
+        traits::MobileRuntimeEnvironment::new(
+            traits::MobileHostEnvironment::new(
+                traits::MobileHostOs::Ios,
+                Some("19.0".into()),
+                traits::MobileDeviceClass::Phone,
+                traits::MobileExecutionTarget::PhysicalDevice,
+                traits::MobileLaunchMode::Interactive,
+            ),
+            tool_runtime,
+            cwd.map(str::to_string),
+            Some("/bin/sh".into()),
+            Some("Mobile Linux sh".into()),
+            traits::MobileNetworkPolicy::PermissionMediated,
+            traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        )
+    }
+
+    fn mobile_environment(cwd: &str) -> traits::MobileRuntimeEnvironment {
+        mobile_environment_with_runtime(traits::MobileToolRuntime::MobileLinuxGuest, Some(cwd))
     }
 
     #[tokio::test]
@@ -2225,6 +2254,175 @@ You should not respond to this context unless it is highly relevant to your task
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), Some("   "));
         let body = text(&orch.additional_context_message().await.expect("date"));
         assert!(!body.contains("# userEmail"));
+    }
+
+    #[tokio::test]
+    async fn runtime_message_is_prepended_before_additional_context() {
+        let mut orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        let runtime =
+            "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>";
+        orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
+        orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+        let original = ConversationMessage::user(MessageId::new(), "hello".into());
+        let mut messages = vec![original.clone()];
+
+        orch.prepend_leading_context(&mut messages).await;
+
+        assert_eq!(text(&messages[0]), runtime);
+        assert!(text(&messages[1]).contains("Guest workspace: /workspace/a"));
+        assert!(text(&messages[2]).contains("# currentDate\nToday's date is "));
+        assert_eq!(messages[3], original);
+        assert_eq!(
+            orch.mobile_runtime_environment_preview().await.as_deref(),
+            Some(runtime)
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_native_workspace_path_falls_back_to_guest_coordinate() {
+        let host_cwd = std::path::PathBuf::from("/tmp/native-host-worktree");
+        let session_cwd = tool_api::SessionCwd::new(host_cwd.clone(), vec![host_cwd]);
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
+            .with_session_cwd(session_cwd)
+            .with_mobile_runtime_environment(mobile_environment("/workspace/a"))
+            .with_mobile_workspace_cwd_resolver(Arc::new(|_| None));
+        let mut messages = Vec::new();
+
+        orch.prepend_leading_context(&mut messages).await;
+
+        assert!(text(&messages[1]).contains("Guest workspace: /workspace/a"));
+        assert!(!text(&messages[1]).contains("native-host-worktree"));
+    }
+
+    #[test]
+    fn scheduled_mobile_runtime_uses_headless_prompt_guidance() {
+        let mut orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        orch.config.interactive_session = true;
+        assert!(orch.prompt_is_interactive());
+
+        let mut environment = mobile_environment("/workspace/a");
+        environment.host.launch_mode = traits::MobileLaunchMode::ScheduledHeadless;
+        orch.mobile_runtime_environment = Some(environment);
+
+        assert!(!orch.prompt_is_interactive());
+    }
+
+    #[tokio::test]
+    async fn runtime_message_stays_first_when_transient_context_is_reattached() {
+        let mut orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        let runtime = "<system-reminder>runtime</system-reminder>";
+        let deferred = runtime_message("<system-reminder>deferred</system-reminder>");
+        let date = runtime_message("<system-reminder>date</system-reminder>");
+        let tail = runtime_message("<system-reminder>tail</system-reminder>");
+        orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
+        orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+        let original = ConversationMessage::user(MessageId::new(), "hello".into());
+        let mut messages = vec![original.clone()];
+
+        orch.reattach_outgoing_context(
+            &mut messages,
+            Some(&deferred),
+            Some(&date),
+            std::slice::from_ref(&tail),
+        )
+        .await;
+
+        assert_eq!(text(&messages[0]), runtime);
+        assert!(text(&messages[1]).contains("Guest workspace: /workspace/a"));
+        assert_eq!(text(&messages[2]), text(&date));
+        assert_eq!(text(&messages[3]), text(&deferred));
+        assert!(text(&messages[4]).contains("# currentDate\nToday's date is "));
+        assert_eq!(messages[5], original);
+        assert_eq!(messages[6], tail);
+    }
+
+    #[tokio::test]
+    async fn runtime_message_keeps_dynamic_environment_separate() {
+        let mut orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                exclude_dynamic_system_prompt_sections: true,
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.mobile_runtime_environment_message = Some(runtime_message(
+            "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>",
+        ));
+        orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+
+        let body = text(&orch.additional_context_message().await.expect("date"));
+        assert!(body.contains("# Environment\n"));
+        assert!(body.contains("# currentDate\nToday's date is "));
+    }
+
+    #[tokio::test]
+    async fn non_guest_mobile_runtime_keeps_environment_re_emission_when_excluded() {
+        let mut orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                exclude_dynamic_system_prompt_sections: true,
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.mobile_runtime_environment = Some(mobile_environment_with_runtime(
+            traits::MobileToolRuntime::AndroidLegacy,
+            None,
+        ));
+
+        let body = text(&orch.additional_context_message().await.expect("date"));
+        assert!(body.contains("# Environment\n"));
+        assert!(body.contains("# currentDate\nToday's date is "));
+    }
+
+    #[tokio::test]
+    async fn system_prompt_override_stays_verbatim_while_runtime_message_is_sent() {
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "ok".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        )]));
+        let mut orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                system_prompt_override: Some("CUSTOM PROMPT — no assembler".into()),
+                ..OrchestratorConfig::default()
+            },
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let runtime =
+            "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>";
+        orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
+        orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+
+        orch.run_turn("hi").await.expect("turn");
+
+        assert_eq!(
+            api.captured_systems().await,
+            vec![Some("CUSTOM PROMPT — no assembler".into())]
+        );
+        let sent = api.captured_msgs().await;
+        assert_eq!(text(&sent[0][0]), runtime);
+        assert!(text(&sent[0][1]).contains("Guest workspace: /workspace/a"));
+        assert!(text(&sent[0][2]).contains("# currentDate\nToday's date is "));
     }
 
     // ------------------------------------------------------------------------
@@ -6681,23 +6879,17 @@ mod persist_with_parent_tests {
     /// switches on interactivity (`un()===!Ht.isInteractive`).
     #[test]
     fn request_too_large_notice_is_byte_exact() {
-        let prior = traits::session_flags::is_non_interactive_session();
-
         // Non-interactive (print) session: generic advice.
-        traits::session_flags::set_non_interactive_session(true);
         assert_eq!(
-            super::request_too_large_notice(),
+            super::request_too_large_notice(false),
             "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit. Remove older images or compact the conversation."
         );
 
         // Interactive (TUI) session: `/compact` + double-esc actions.
-        traits::session_flags::set_non_interactive_session(false);
         assert_eq!(
-            super::request_too_large_notice(),
+            super::request_too_large_notice(true),
             "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit. Run /compact, or double press esc to go back and remove attachments."
         );
-
-        traits::session_flags::set_non_interactive_session(prior);
     }
 
     /// Orchestrator-internal / generic-Error variants fall through to `unknown`
@@ -8624,6 +8816,47 @@ mod main_thread_agent_tests {
         .await;
         let after = wire_tool_names(&orch).await;
         assert_eq!(after, vec!["Read"]);
+    }
+
+    #[tokio::test]
+    async fn mobile_runtime_reminder_is_stable_across_agent_tool_filters() {
+        let orch = orch_with_tools(&["Read", "Shell"]);
+        let orch = orch.with_mobile_runtime_environment(traits::MobileRuntimeEnvironment::new(
+            traits::MobileHostEnvironment::new(
+                traits::MobileHostOs::Ios,
+                Some("19.0".into()),
+                traits::MobileDeviceClass::Phone,
+                traits::MobileExecutionTarget::PhysicalDevice,
+                traits::MobileLaunchMode::Interactive,
+            ),
+            traits::MobileToolRuntime::MobileLinuxGuest,
+            Some("/workspace/a".into()),
+            Some("/bin/sh".into()),
+            Some("Mobile Linux sh".into()),
+            traits::MobileNetworkPolicy::PermissionMediated,
+            traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        ));
+
+        let before = orch
+            .mobile_runtime_environment_preview()
+            .await
+            .expect("runtime reminder");
+        orch.set_main_thread_agent(
+            "reviewer".to_string(),
+            None,
+            agent::AgentToolPolicy::Explicit(vec!["Read".to_string()]),
+            Vec::new(),
+            None,
+        )
+        .await;
+
+        let after = orch
+            .mobile_runtime_environment_preview()
+            .await
+            .expect("runtime reminder");
+        assert_eq!(after, before);
+        assert!(after.contains("per-agent availability is defined by registered tool schemas"));
+        assert!(!after.contains("available to this agent"));
     }
 
     /// A resolved `--agent` model (`Some(resolved_id)`) replaces the session

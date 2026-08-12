@@ -251,8 +251,7 @@ mod tests {
             // The canonical v3 spelling parses too, of course.
             "draft",
         ] {
-            let parsed: AppWorkflowState =
-                serde_json::from_str(&format!("\"{legacy}\"")).unwrap();
+            let parsed: AppWorkflowState = serde_json::from_str(&format!("\"{legacy}\"")).unwrap();
             assert_eq!(parsed, AppWorkflowState::Draft, "{legacy}");
         }
         let parsed: AppWorkflowState = serde_json::from_str("\"ready\"").unwrap();

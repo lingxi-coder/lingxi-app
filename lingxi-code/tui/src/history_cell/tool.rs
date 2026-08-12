@@ -109,8 +109,8 @@ pub(crate) fn tool_result_lines(
     // a command's output) — the same string the clients render. Falls back to
     // the raw payload for a tool with no headline rule.
     let is_error = tool_display::result_is_error(result);
-    let summary = tool_display::result_headline(tool, input, result, is_error).unwrap_or_else(
-        || {
+    let summary =
+        tool_display::result_headline(tool, input, result, is_error).unwrap_or_else(|| {
             if let Some(s) = result.as_str() {
                 s.to_string()
             } else if let Some(s) = result.get("content").and_then(serde_json::Value::as_str) {
@@ -118,8 +118,7 @@ pub(crate) fn tool_result_lines(
             } else {
                 result.to_string()
             }
-        },
-    );
+        });
     vec![StyledLine {
         spans: vec![dim_span(format!("  ⎿  {}", truncate(&summary, 100)), theme)],
     }]

@@ -83,8 +83,8 @@ pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileRuntime, ProviderConnectionTestDto,
-    MobileOAuthSessionDto, MobileOAuthStateDto,
+    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime,
+    ProviderConnectionTestDto,
 };
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`
@@ -155,7 +155,7 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 /// build. The FFI host instead calls [`register_mobile_tools_with_skill_loader`]
 /// to wire a disk-backed loader (audit fix #14).
 pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
-    register_mobile_non_skill_tools_with_ask_resolver(reg, ctx.clone(), None);
+    register_mobile_non_skill_tools_with_ask_resolver(reg, ctx.clone(), None, None);
     // Skill tool with the hermetic `EmptySkillLoader` (no on-disk discovery).
     tool_skill::register_all(reg, ctx);
 }
@@ -170,9 +170,10 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
 pub fn register_mobile_tools_with_skill_loader(
     reg: &mut ToolRegistry,
     ctx: BuiltinToolContext,
+    config_home: std::path::PathBuf,
     skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
 ) {
-    register_mobile_non_skill_tools_with_ask_resolver(reg, ctx.clone(), None);
+    register_mobile_non_skill_tools_with_ask_resolver(reg, ctx.clone(), Some(config_home), None);
     reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
         ctx,
         skill_loader,
@@ -187,11 +188,16 @@ pub fn register_mobile_tools_with_skill_loader(
 fn register_mobile_non_skill_tools_with_ask_resolver(
     reg: &mut ToolRegistry,
     ctx: BuiltinToolContext,
+    config_home: Option<std::path::PathBuf>,
     ask_resolver: Option<Arc<dyn AskUserQuestionResolver>>,
 ) {
     // ----- cross-platform subset (also linked by engine-desktop) -----------
     tool_file::register_all(reg, ctx.clone());
-    tool_task::register_all(reg, ctx.clone());
+    if let Some(config_home) = config_home {
+        tool_task::register_mobile_with_config_home(reg, ctx.clone(), config_home);
+    } else {
+        tool_task::register_mobile(reg, ctx.clone());
+    }
     tool_web::register_all(reg, ctx.clone(), None);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
@@ -225,10 +231,11 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
 #[must_use]
 pub fn mobile_tool_registry_with_skill_loader(
     ctx: BuiltinToolContext,
+    config_home: std::path::PathBuf,
     skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
 ) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    register_mobile_tools_with_skill_loader(&mut reg, ctx, skill_loader);
+    register_mobile_tools_with_skill_loader(&mut reg, ctx, config_home, skill_loader);
     reg
 }
 
@@ -239,11 +246,17 @@ pub fn mobile_tool_registry_with_skill_loader(
 /// order while keeping the disk-backed `Skill` loader.
 pub fn mobile_tool_registry_with_skill_loader_and_ask_resolver(
     ctx: BuiltinToolContext,
+    config_home: std::path::PathBuf,
     skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
     ask_resolver: Arc<dyn AskUserQuestionResolver>,
 ) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    register_mobile_non_skill_tools_with_ask_resolver(&mut reg, ctx.clone(), Some(ask_resolver));
+    register_mobile_non_skill_tools_with_ask_resolver(
+        &mut reg,
+        ctx.clone(),
+        Some(config_home),
+        Some(ask_resolver),
+    );
     reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
         ctx,
         skill_loader,
@@ -502,6 +515,7 @@ mod tests {
     async fn custom_mobile_ask_resolver_does_not_duplicate_builtin() {
         let registry = mobile_tool_registry_with_skill_loader_and_ask_resolver(
             shell_test_ctx(dummy_out()),
+            std::env::temp_dir(),
             Arc::new(NoopSkillLoader),
             Arc::new(FirstAnswerResolver),
         );
@@ -532,5 +546,46 @@ mod tests {
             .await
             .expect("custom resolver should answer");
         assert_eq!(result.data["answers"]["Pick one?"].as_str(), Some("Alpha"));
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[tokio::test]
+    async fn mobile_task_create_persists_under_the_app_config_home() {
+        let temp = tempfile::tempdir().expect("app container");
+        let config_home = temp.path().join(branding::DOT_DIR);
+        let registry = mobile_tool_registry_with_skill_loader(
+            shell_test_ctx(dummy_out()),
+            config_home.clone(),
+            Arc::new(NoopSkillLoader),
+        );
+        let task_create = registry
+            .find_by_name(tool_task::task::TASK_CREATE_TOOL_NAME)
+            .expect("TaskCreate registered");
+
+        task_create
+            .call(
+                serde_json::json!({
+                    "subject": "Generate local app",
+                    "description": "Exercise the iOS app-private task store"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("TaskCreate writes inside the app container");
+
+        let task_files = std::fs::read_dir(config_home.join("tasks"))
+            .expect("tasks root created")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .flat_map(|entry| {
+                std::fs::read_dir(entry.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count();
+        assert_eq!(task_files, 1, "one task persisted in the injected home");
     }
 }

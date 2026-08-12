@@ -384,7 +384,10 @@ mod tests {
     #[test]
     fn read_qualifies_a_partial_range() {
         assert_eq!(
-            title("Read", &json!({"file_path": "a.rs", "offset": 40, "limit": 41})),
+            title(
+                "Read",
+                &json!({"file_path": "a.rs", "offset": 40, "limit": 41})
+            ),
             "Read(a.rs) (lines 40-80)"
         );
         assert_eq!(
@@ -408,7 +411,10 @@ mod tests {
             format!("Read(a.rs) (lines {}-{saturated})", u64::MAX)
         );
         assert_eq!(
-            title("Read", &json!({"file_path": "a.rs", "offset": 0, "limit": u64::MAX})),
+            title(
+                "Read",
+                &json!({"file_path": "a.rs", "offset": 0, "limit": u64::MAX})
+            ),
             format!("Read(a.rs) (lines 1-{saturated})")
         );
         assert_eq!(
@@ -420,7 +426,10 @@ mod tests {
     #[test]
     fn multi_edit_counts_only_when_plural() {
         assert_eq!(
-            title("MultiEdit", &json!({"file_path": "a.rs", "edits": [1, 2, 3]})),
+            title(
+                "MultiEdit",
+                &json!({"file_path": "a.rs", "edits": [1, 2, 3]})
+            ),
             "Update(a.rs) (3 edits)"
         );
         assert_eq!(
@@ -452,7 +461,10 @@ mod tests {
             title("Grep", &json!({"pattern": "TODO", "glob": "*.rs"})),
             "Search(TODO) (*.rs)"
         );
-        assert_eq!(title("Glob", &json!({"pattern": "**/*.rs"})), "Search(**/*.rs)");
+        assert_eq!(
+            title("Glob", &json!({"pattern": "**/*.rs"})),
+            "Search(**/*.rs)"
+        );
     }
 
     #[test]

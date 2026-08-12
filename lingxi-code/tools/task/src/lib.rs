@@ -51,3 +51,44 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
     reg.register_builtin(Arc::new(MonitorTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(TodoWriteTool::new(ctx)));
 }
+
+/// Register the task/todo tools that have portable mobile execution semantics.
+///
+/// `Monitor` intentionally stays desktop-only: its command contract is Bash,
+/// including process substitution and background-shell behavior that the
+/// restricted mobile `Shell` carrier does not implement.
+pub fn register_mobile(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    use std::sync::Arc;
+    reg.register_builtin(Arc::new(TaskCreateTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TaskGetTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TaskListTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TaskUpdateTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TaskStopTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TaskOutputTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TodoWriteTool::new(ctx)));
+}
+
+/// Register the portable mobile task surface against the host's app-private
+/// config home instead of process-global `HOME`.
+pub fn register_mobile_with_config_home(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    config_home: std::path::PathBuf,
+) {
+    use std::sync::Arc;
+    reg.register_builtin(Arc::new(
+        TaskCreateTool::new(ctx.clone()).with_config_home(config_home.clone()),
+    ));
+    reg.register_builtin(Arc::new(
+        TaskGetTool::new(ctx.clone()).with_config_home(config_home.clone()),
+    ));
+    reg.register_builtin(Arc::new(
+        TaskListTool::new(ctx.clone()).with_config_home(config_home.clone()),
+    ));
+    reg.register_builtin(Arc::new(
+        TaskUpdateTool::new(ctx.clone()).with_config_home(config_home),
+    ));
+    reg.register_builtin(Arc::new(TaskStopTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TaskOutputTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(TodoWriteTool::new(ctx)));
+}

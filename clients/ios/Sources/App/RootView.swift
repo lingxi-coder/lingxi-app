@@ -545,18 +545,16 @@ struct RootView: View {
     private var currentWorkspaceGuestPath: String {
         if case let .localApp(appID) = activeScope,
            (try? LocalAppWorkspacePath.validatedRoot(appID: appID)) != nil {
-            return ConversationSourceFactory.appSandboxRoot()
-                + "/" + LocalAppWorkspacePath.relativePath(appID: appID)
+            return LXISHGuestPaths.workspace("local-app-\(appID)")
         }
         return projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
     }
 
     private func openCurrentWorkspaceTerminal() {
-        // A local app's workspace is a NATIVE sandbox directory with no guest
-        // mount (app scope runs without the mobile-linux runtime), so its
-        // host path is not a guest path and asking the terminal to start
-        // there fails the containment check every time. Open the default
-        // shell instead of a guaranteed error banner.
+        // The app-scoped conversation owns a dedicated Mobile Linux mount, but
+        // the terminal route constructs a separate runtime descriptor. Keep
+        // opening the default shell until that route accepts app scope/mount
+        // metadata instead of forwarding a guest path into another workspace.
         if activeScope.isLocalApp {
             navigation.openTerminal(projectID: nil, requestedCwd: nil)
             return
@@ -643,15 +641,12 @@ struct RootView: View {
                 projectCwd = nil
             }
         }
-        // App scope runs WITHOUT the mobile-linux runtime: the app workspace
-        // is a native sandbox directory, and mounting the default guest
-        // workspace would override the engine's model-visible cwd (PathAtlas
-        // workspace-mount rule) — pointing the session catalog and every
-        // file tool at the WRONG root. Builds/previews go through the
-        // local-apps MCP runtime, which manages its own mounts.
         let runtime: TerminalRuntimeConfig?
-        if scope.isLocalApp {
-            runtime = nil
+        if let appID = scope.appID {
+            // Mount this app's own workspace, never the terminal's default
+            // workspace. The host cwd remains the session-catalog authority;
+            // file and Shell tools receive its guest twin from PathAtlas.
+            runtime = LocalAppWorkspacePath.mobileLinuxRuntimeConfig(appID: appID)
         } else {
             runtime = TerminalRuntimeDescriptor.make(
                 appSandboxRoot: appSandboxRoot,

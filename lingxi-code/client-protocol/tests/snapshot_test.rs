@@ -59,16 +59,16 @@ use client_protocol::local_apps::{
     AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto,
     AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto,
     AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
-    AppSessionKindDto, AppSessionRowDto,
+    AppRuntimeSuspensionReasonDto, AppSessionKindDto, AppSessionRowDto, AppUiActionKindDto,
+    AppUiRequestDto, AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
+use client_protocol::permission::{
+    PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
+};
 use client_protocol::tool_display::{
     CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
     StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto, ToolVerbDto,
-};
-use client_protocol::permission::{
-    PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
 };
 use serde::Serialize;
 use serde_json::Value;

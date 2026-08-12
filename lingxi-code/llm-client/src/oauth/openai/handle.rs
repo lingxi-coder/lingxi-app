@@ -110,10 +110,7 @@ impl OpenAiOAuthHandle {
     /// iOS supplies a custom-scheme redirect to `ASWebAuthenticationSession`,
     /// so this path deliberately does not bind the desktop loopback listener.
     #[must_use]
-    pub fn begin_mobile_browser_login(
-        &self,
-        redirect_uri: &str,
-    ) -> (String, String, String) {
+    pub fn begin_mobile_browser_login(&self, redirect_uri: &str) -> (String, String, String) {
         self.client.build_authorize_url_with_redirect(redirect_uri)
     }
 

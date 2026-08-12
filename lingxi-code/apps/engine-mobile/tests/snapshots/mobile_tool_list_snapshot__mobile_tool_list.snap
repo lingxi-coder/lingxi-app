@@ -13,7 +13,6 @@ expression: names
 - ExitPlanMode
 - Glob
 - Grep
-- Monitor
 - MultiEdit
 - NotebookEdit
 - PushNotification

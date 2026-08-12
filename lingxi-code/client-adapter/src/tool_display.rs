@@ -270,7 +270,8 @@ mod tests {
             "old_string": "fn a() {}\n",
             "new_string": "fn b() {}\n",
         });
-        let display = lower_tool_result_display("Edit", Some(&input), &json!({"content": "ok"}), false);
+        let display =
+            lower_tool_result_display("Edit", Some(&input), &json!({"content": "ok"}), false);
         assert_eq!(
             display.headline.as_deref(),
             Some("Added 1 line, removed 1 line")
@@ -388,9 +389,7 @@ mod tests {
         let diff = display.diff.expect("a diff");
         let segments = &diff.rows[0].segments;
         assert!(
-            segments
-                .iter()
-                .any(|s| s.class == SyntaxClassDto::Keyword),
+            segments.iter().any(|s| s.class == SyntaxClassDto::Keyword),
             "`fn` should classify as a keyword: {segments:?}"
         );
         assert!(

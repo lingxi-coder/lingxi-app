@@ -10,7 +10,7 @@ enum LXIconName: String {
     case menu, edit, search, sparkle, book, workflow, cog, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
     case chevronR, play, pause, x, skill, plug, dream, link, copy, share
-    case warning, stop, arrowRight, audioWave
+    case warning, stop, arrowRight, audioWave, terminal, globe
 }
 
 struct LXIcon: View {
@@ -93,6 +93,19 @@ extension LXIcon {
                 PathSpec { line([(10,7),(10,17)]) },
                 PathSpec { line([(14,4),(14,20)]) },
                 PathSpec { line([(18,8),(18,16)]) },
+            ]
+        case .terminal:
+            return [
+                PathSpec { roundedRect(3,4,18,16,2) },
+                PathSpec { line([(7,9),(10,12),(7,15)]) },
+                PathSpec { line([(13,16),(18,16)]) },
+            ]
+        case .globe:
+            return [
+                PathSpec { circle(12,12,9) },
+                PathSpec { line([(3,12),(21,12)]) },
+                PathSpec { var p = Path(); p.move(to: .init(x:12,y:3)); p.addCurve(to: .init(x:12,y:21), control1: .init(x:7.5,y:7), control2: .init(x:7.5,y:17)); return p },
+                PathSpec { var p = Path(); p.move(to: .init(x:12,y:3)); p.addCurve(to: .init(x:12,y:21), control1: .init(x:16.5,y:7), control2: .init(x:16.5,y:17)); return p },
             ]
         case .paperclip:
             return [PathSpec { var p = Path(); p.move(to: .init(x:21.44,y:11.05)); p.addLine(to: .init(x:12.25,y:20.24)); p.addCurve(to: .init(x:3.76,y:11.75), control1: .init(x:9.9,y:22.59), control2: .init(x:6.11,y:22.59)); p.addLine(to: .init(x:12.33,y:3.18)); p.addCurve(to: .init(x:17.93,y:8.83), control1: .init(x:13.9,y:1.61), control2: .init(x:19.5,y:7.26)); p.addLine(to: .init(x:9.34,y:17.4)); p.addCurve(to: .init(x:6.51,y:14.57), control1: .init(x:8.56,y:18.18), control2: .init(x:5.73,y:15.35)); p.addLine(to: .init(x:15,y:6.09)); return p }]

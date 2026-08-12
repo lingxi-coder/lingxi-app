@@ -1,11 +1,13 @@
 import SwiftUI
 
-// MARK: - Message bubble (user right-aligned, AI left with avatar)
+// MARK: - Message bubble (user right-aligned, AI left)
 struct MessageBubble: View, Equatable {
     @Environment(\.theme) private var t
     @State private var assistantExpanded = false
     let message: Message
     var detail: ConversationMessageDetail? = nil
+    var expandedToolBlocks: Set<String> = []
+    var onToggleToolBlock: (String) -> Void = { _ in }
     /// When the most-recent AI reply is dimmed during voice flow ("上下文已记入").
     var dimmed: Bool = false
     /// Tapping the assistant bubble's share affordance surfaces the native share
@@ -15,6 +17,7 @@ struct MessageBubble: View, Equatable {
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
         lhs.message == rhs.message &&
             lhs.detail == rhs.detail &&
+            lhs.expandedToolBlocks == rhs.expandedToolBlocks &&
             lhs.dimmed == rhs.dimmed
     }
 
@@ -41,8 +44,7 @@ struct MessageBubble: View, Equatable {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.message.user")
         } else {
-            HStack(alignment: .top, spacing: 11) {
-                AssistantAvatar()
+            HStack(alignment: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let tag = message.tag { Pill(text: tag, color: t.accent) }
                     assistantContent
@@ -101,7 +103,12 @@ struct MessageBubble: View, Equatable {
     @ViewBuilder
     private var assistantContent: some View {
         if let detail, !detail.blocks.isEmpty {
-            StructuredAIBlocks(detail: detail, fallback: message.text)
+            StructuredAIBlocks(
+                detail: detail,
+                fallback: message.text,
+                expandedToolBlocks: expandedToolBlocks,
+                onToggleToolBlock: onToggleToolBlock
+            )
         } else {
             AIText(markdown: message.text)
                 .equatable()
@@ -134,6 +141,8 @@ private struct StructuredAIBlocks: View {
     @Environment(\.theme) private var t
     let detail: ConversationMessageDetail
     let fallback: String
+    let expandedToolBlocks: Set<String>
+    let onToggleToolBlock: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -148,30 +157,41 @@ private struct StructuredAIBlocks: View {
                     panel(title: String(localized: "chat_thinking"), body: String(localized: "chat_redacted_thinking"), icon: .brain)
                 case let .compactBoundary(messagesBefore, messagesAfter, _):
                     compactBoundary(before: messagesBefore, after: messagesAfter)
-                case let .toolUse(_, tool, inputSummary, _, header):
+                case let .toolUse(id, tool, inputSummary, inputJson, header):
                     // The engine's derived header, localized. `inputSummary` is
                     // the older-engine fallback, never a re-derivation.
-                    panel(
+                    StructuredToolBlock(
+                        id: id,
                         title: header.map(ToolDisplayText.title)
                             ?? String(localized: "chat_tool_call_title \(tool)"),
-                        body: header?.subLine?.text ?? inputSummary,
-                        icon: .workflow
+                        summary: header?.subLine?.text ?? inputSummary,
+                        detail: inputJson,
+                        icon: ToolDisplayText.icon(header: header, tool: tool),
+                        iconColor: ToolDisplayText.iconColor(
+                            header: header,
+                            tool: tool,
+                            palette: t
+                        ),
+                        isExpanded: expandedToolBlocks.contains(id),
+                        onToggle: { onToggleToolBlock(id) }
                     )
-                case let .toolResult(_, tool, isError, summary, _, _, _, _, display):
-                    VStack(alignment: .leading, spacing: 6) {
-                        panel(
-                            title: isError ? String(localized: "chat_tool_failed \(tool)") : String(localized: "chat_tool_returned \(tool)"),
-                            body: display.flatMap(ToolDisplayText.headline) ?? summary,
-                            icon: isError ? .warning : .check
-                        )
-                        // BUG FIX: the old flat `- old / + new` preview never
-                        // rendered a pixel (the engine hard-coded its inputs to
-                        // nil) and is obsolete now that a real structured diff
-                        // arrives on `display`. Render THAT.
-                        if let diff = display?.diff {
-                            DiffView(diff: diff, showsFilePath: true)
-                        }
-                    }
+                case let .toolResult(id, tool, isError, summary, _, _, _, _, display):
+                    StructuredToolBlock(
+                        id: id,
+                        title: isError
+                            ? String(localized: "chat_tool_failed \(tool)")
+                            : String(localized: "chat_tool_returned \(tool)"),
+                        summary: display.flatMap(ToolDisplayText.headline) ?? summary,
+                        detail: display?.body,
+                        diff: display?.diff,
+                        detailWasTruncated: display?.bodyTruncated ?? false,
+                        icon: isError ? .warning : ToolDisplayText.icon(header: nil, tool: tool),
+                        iconColor: isError
+                            ? t.danger
+                            : ToolDisplayText.iconColor(header: nil, tool: tool, palette: t),
+                        isExpanded: expandedToolBlocks.contains(id),
+                        onToggle: { onToggleToolBlock(id) }
+                    )
                 }
             }
         }
@@ -219,6 +239,129 @@ private struct StructuredAIBlocks: View {
 
 }
 
+private struct StructuredToolBlock: View {
+    @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let id: String
+    let title: String
+    let summary: String
+    let detail: String?
+    let diff: ConversationStructuredDiff?
+    let detailWasTruncated: Bool
+    let icon: LXIconName
+    let iconColor: Color
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    init(
+        id: String,
+        title: String,
+        summary: String,
+        detail: String? = nil,
+        diff: ConversationStructuredDiff? = nil,
+        detailWasTruncated: Bool = false,
+        icon: LXIconName,
+        iconColor: Color,
+        isExpanded: Bool,
+        onToggle: @escaping () -> Void
+    ) {
+        self.id = id
+        self.title = title
+        self.summary = summary
+        self.detail = detail
+        self.diff = diff
+        self.detailWasTruncated = detailWasTruncated
+        self.icon = icon
+        self.iconColor = iconColor
+        self.isExpanded = isExpanded
+        self.onToggle = onToggle
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if hasDetail {
+                Button {
+                    if reduceMotion {
+                        onToggle()
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            onToggle()
+                        }
+                    }
+                } label: {
+                    summaryRow(showsDisclosure: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("conversation.structured-tool.\(id).toggle")
+                .accessibilityLabel(accessibilityTitle)
+                .accessibilityValue(isExpanded
+                    ? String(localized: "chat_tool_show_less")
+                    : String(localized: "chat_tool_show_more_label"))
+            } else {
+                summaryRow(showsDisclosure: false)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("conversation.structured-tool.\(id)")
+            }
+
+            if isExpanded {
+                if let detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(t.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.leading, 26)
+                }
+                if let diff {
+                    DiffView(diff: diff, showsFilePath: true)
+                        .padding(.leading, 26)
+                }
+                if detailWasTruncated {
+                    Text("chat_tool_body_truncated")
+                        .font(.system(size: 11))
+                        .foregroundStyle(t.text4)
+                        .padding(.leading, 26)
+                }
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var hasDetail: Bool {
+        (detail?.isEmpty == false) || diff != nil || detailWasTruncated
+    }
+
+    private var accessibilityTitle: String {
+        summary.isEmpty ? title : "\(title), \(summary)"
+    }
+
+    private func summaryRow(showsDisclosure: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            LXIcon(name: icon, size: 18, color: iconColor, stroke: 1.65)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(t.text)
+                    .multilineTextAlignment(.leading)
+                if !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(t.text3)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+            Spacer(minLength: 4)
+            if showsDisclosure {
+                LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 1.8)
+                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    .padding(.top, 3)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
 // AI bubble shape: rounded 18 with one corner sharpened to 6.
 struct BubbleShape: Shape {
     var topRightSharp: Bool
@@ -229,21 +372,6 @@ struct BubbleShape: Shape {
             bottomLeading: big,
             bottomTrailing: big,
             topTrailing: topRightSharp ? small : big))
-    }
-}
-
-struct AssistantAvatar: View {
-    @Environment(\.theme) private var t
-    var size: CGFloat = 30
-    var corner: CGFloat = 9
-    var glyph: CGFloat = 15
-    var body: some View {
-        RoundedRectangle(cornerRadius: corner)
-            .fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
-            .frame(width: size, height: size)
-            .overlay(LXIcon(name: .sparkle, size: glyph, color: .white, stroke: 2))
-            .shadow(color: t.accent.tint(0.30), radius: 6, y: 4)
-            .accessibilityHidden(true)
     }
 }
 

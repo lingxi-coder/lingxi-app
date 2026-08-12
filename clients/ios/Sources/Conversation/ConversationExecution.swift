@@ -286,6 +286,40 @@ struct ConversationMessageDetail: Equatable {
     let blocks: [ConversationMessageBlock]
 }
 
+enum ConversationToolExpansionKey {
+    private static let structuredPrefix = "structured:"
+
+    static func structured(messageID: UUID, toolID: String) -> String {
+        "\(structuredPrefix)\(messageID.uuidString):\(toolID)"
+    }
+
+    static func structuredToolIDs(in keys: Set<String>, messageID: UUID) -> Set<String> {
+        let prefix = "\(structuredPrefix)\(messageID.uuidString):"
+        return Set(keys.compactMap { key in
+            guard key.hasPrefix(prefix) else { return nil }
+            return String(key.dropFirst(prefix.count))
+        })
+    }
+}
+
+enum ConversationLLMActivityState: Equatable {
+    case hidden
+    case running
+    case stopping
+    case paused
+
+    static func resolve(
+        hasConversation: Bool,
+        streaming: Bool,
+        isCancelling: Bool
+    ) -> Self {
+        if isCancelling { return .stopping }
+        if streaming { return .running }
+        guard hasConversation else { return .hidden }
+        return .paused
+    }
+}
+
 enum ConversationMessageBlock: Equatable {
     case text(String)
     case thinking(text: String, signature: String?)

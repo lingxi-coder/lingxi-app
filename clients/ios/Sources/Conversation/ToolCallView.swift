@@ -41,6 +41,7 @@ struct ToolCallView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
         .accessibilityElement(children: .contain)
+        .accessibilityValue(trace.status.label)
         .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
     }
 
@@ -48,11 +49,22 @@ struct ToolCallView: View {
 
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 7) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 6, height: 6)
+            LXIcon(
+                name: ToolDisplayText.icon(header: trace.header, tool: trace.tool),
+                size: 18,
+                color: ToolDisplayText.iconColor(header: trace.header, tool: trace.tool, palette: t),
+                stroke: 1.65
+            )
             titleText
             Spacer(minLength: 4)
+            Text(trace.status.label)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(statusColor.opacity(0.12))
+                .clipShape(Capsule())
+                .accessibilityIdentifier("conversation.tool-call.\(trace.id).status")
             if let elapsed = ConversationExecutionParsing.formatDuration(trace.elapsedMs) {
                 Text(elapsed)
                     .font(.system(size: 11))
@@ -175,14 +187,26 @@ struct ToolCallView: View {
         .accessibilityIdentifier("conversation.tool-call.\(trace.id).toggle")
     }
 
-    /// `collapsed` is the engine's verdict that the body exceeds the inline
-    /// budget. Nothing to hide ⇒ no affordance, whatever the flag says.
+    /// Tool details stay out of the transcript until the user asks for them.
+    /// The engine's `collapsed` hint is still useful metadata, but the client
+    /// keeps the interaction consistent for short and long outputs alike.
     private var isCollapsible: Bool {
-        guard let display = trace.display, display.collapsed else { return false }
-        return display.diff != nil || !(display.body ?? "").isEmpty
+        guard let display = trace.display else { return false }
+        return display.diff != nil
+            || !(display.body ?? "").isEmpty
+            || display.bodyTruncated
     }
 
-    private var showsDetail: Bool { isExpanded || !isCollapsible }
+    private var showsDetail: Bool { isExpanded }
+
+    private var statusColor: Color {
+        switch trace.status {
+        case .running: return t.accent
+        case .completed: return t.ok
+        case .failed: return t.danger
+        case .cancelled: return t.text3
+        }
+    }
 
     // MARK: legacy fallback (older engine — no header / no display)
 
@@ -202,14 +226,6 @@ struct ToolCallView: View {
         }
     }
 
-    private var statusColor: Color {
-        switch trace.status {
-        case .running: return t.accent
-        case .completed: return t.ok
-        case .failed: return t.danger
-        case .cancelled: return t.text3
-        }
-    }
 }
 
 // MARK: - Localized presentation of the engine's derivation
@@ -222,6 +238,66 @@ struct ToolCallView: View {
 /// express — a subagent type, `REPL`, `Web Search`, an MCP tool name — or where
 /// the headline kind IS free text (`failed` / `plain`).
 enum ToolDisplayText {
+
+    /// Maps the engine's stable tool verb to a compact action glyph. For older
+    /// engines without a header, the raw tool name is used as a best-effort
+    /// compatibility fallback.
+    static func icon(header: ConversationToolHeader?, tool: String) -> LXIconName {
+        if let header {
+            switch header.verb {
+            case .update: return .edit
+            case .create: return .plus
+            case .read: return .search
+            case .search: return .book
+            case .shell: return .terminal
+            case .output: return .message
+            case .kill: return .stop
+            case .fetch: return .globe
+            case .task, .skill: return .skill
+            case .todo: return .check
+            case .generic: break
+            }
+        }
+
+        let normalized = tool.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.contains("shell") || normalized.contains("bash") || normalized.contains("terminal") {
+            return .terminal
+        }
+        if normalized.contains("fetch") || normalized.contains("web") || normalized.contains("url") || normalized.contains("browser") {
+            return .globe
+        }
+        if normalized.contains("read") || normalized.contains("file") || normalized.contains("grep") {
+            return .search
+        }
+        if normalized.contains("search") || normalized.contains("documentation") || normalized.contains("docs") {
+            return .book
+        }
+        if normalized.contains("write") || normalized.contains("create") || normalized.contains("edit") || normalized.contains("update") {
+            return .edit
+        }
+        if normalized.contains("task") || normalized.contains("agent") || normalized.contains("skill") {
+            return .skill
+        }
+        if normalized.contains("todo") || normalized.contains("plan") {
+            return .check
+        }
+        if normalized.contains("kill") || normalized.contains("stop") || normalized.contains("cancel") {
+            return .stop
+        }
+        return .workflow
+    }
+
+    static func iconColor(header: ConversationToolHeader?, tool: String, palette: Palette) -> Color {
+        switch icon(header: header, tool: tool) {
+        case .edit, .plus: return palette.accent2
+        case .search, .book: return palette.accent
+        case .terminal: return palette.text3
+        case .globe: return palette.accent3
+        case .skill, .check: return palette.ok
+        case .stop, .warning: return palette.danger
+        default: return palette.text3
+        }
+    }
 
     /// The localized verb, or the engine's override when it set one.
     static func verbLabel(_ header: ConversationToolHeader) -> String {

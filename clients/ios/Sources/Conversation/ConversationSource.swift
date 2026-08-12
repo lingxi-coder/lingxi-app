@@ -278,7 +278,8 @@ final class ConversationModel: ObservableObject {
     /// list and an empty list clears it. Drives `PlanTasksPanel`, pinned closest
     /// to the composer. Distinct from `backgroundTasks`, which are engine jobs.
     @Published var planTasks: [ConversationPlanTask] = []
-    /// Tool-use ids whose result body/diff the user expanded.
+    /// Stable keys whose tool body/diff the user expanded. Standalone rows use
+    /// their tool-use id; structured message blocks use message id + tool id.
     ///
     /// This lives HERE and not in the row: every transcript list recycles its
     /// rows, so row-local `@State` is dropped on scroll and then reappears on
@@ -694,6 +695,7 @@ final class MockConversationSource: ConversationSource {
         model.messages = []
         model.items = []
         model.messageDetails = [:]
+        model.expandedToolCalls = []
         model.streaming = false
         model.turnCompletion = nil
         model.isNew = true

@@ -14,6 +14,9 @@ final class LingxiCodeUITests: XCTestCase {
 
     func testStructuredShellCardOpensProjectTerminal() {
         XCTAssertFalse(app.staticTexts["理解需求"].exists)
+        let llmStatus = app.descendants(matching: .any)["conversation.llm-status"]
+        XCTAssertTrue(llmStatus.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["已暂停"].exists, app.debugDescription)
         let userMessage = app.descendants(matching: .any)["conversation.message.user"]
         let agentRun = app.descendants(matching: .any)["conversation.agent-run"]
         let assistantMessage = app.descendants(matching: .any)["conversation.message.assistant"]
@@ -24,7 +27,17 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertLessThanOrEqual(userMessage.frame.maxY, agentRun.frame.minY + 0.5)
         XCTAssertLessThanOrEqual(agentRun.frame.maxY, assistantMessage.frame.minY + 0.5)
         XCTAssertEqual(agentRun.frame.minX, assistantMessage.frame.minX, accuracy: 1)
-        XCTAssertTrue(app.staticTexts["/workspace/ui-test"].exists)
+
+        let runToggle = app.buttons["conversation.agent-run.toggle"]
+        XCTAssertTrue(runToggle.waitForExistence(timeout: 5), app.debugDescription)
+        runToggle.tap()
+        XCTAssertTrue(
+            app.staticTexts["/workspace/ui-test"].waitForExistence(timeout: 5),
+            app.debugDescription
+        )
+        let toolStatus = app.staticTexts["conversation.tool-call.ui-shell.status"]
+        XCTAssertTrue(toolStatus.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(toolStatus.label, "已完成")
 
         let openTerminal = app.buttons["在终端打开"]
         XCTAssertTrue(openTerminal.waitForExistence(timeout: 5))
@@ -110,7 +123,13 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_CANCELLED_RUN"] = "1"
         app.launch()
 
+        let runToggle = app.buttons["conversation.agent-run.toggle"]
+        XCTAssertTrue(runToggle.waitForExistence(timeout: 8), app.debugDescription)
+        runToggle.tap()
         XCTAssertTrue(app.staticTexts["WebSearch"].waitForExistence(timeout: 8), app.debugDescription)
+        let webSearchStatus = app.staticTexts["conversation.tool-call.ui-web-search.status"]
+        XCTAssertTrue(webSearchStatus.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(webSearchStatus.label, "已取消")
         let cancelledLabels = app.staticTexts.matching(
             NSPredicate(format: "label == %@", "已取消")
         )

@@ -15,7 +15,6 @@ struct ChatView: View {
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
 
-    @State private var dotPulse = false
     @State private var followsLatestMessage = true
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
@@ -171,7 +170,6 @@ struct ChatView: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {
             followsLatestMessage = true
-            withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true }
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
@@ -271,6 +269,18 @@ struct ChatView: View {
                     MessageBubble(
                         message: message,
                         detail: convo.messageDetails[message.id],
+                        expandedToolBlocks: ConversationToolExpansionKey.structuredToolIDs(
+                            in: convo.expandedToolCalls,
+                            messageID: message.id
+                        ),
+                        onToggleToolBlock: { toolID in
+                            toggleToolCall(
+                                ConversationToolExpansionKey.structured(
+                                    messageID: message.id,
+                                    toolID: toolID
+                                )
+                            )
+                        },
                         onShare: shareMessage
                     )
                     .equatable()
@@ -292,11 +302,11 @@ struct ChatView: View {
                     transcriptNoticeRow(notice)
                 }
             }
-            if convo.streaming { streamingRow }
+            if llmActivityState != .hidden { llmStatusRow }
             // PR-4 item 3: a non-clean turn outcome (MaxTurns / Cancelled),
             // surfaced distinctly from a normal end.
             if let notice = convo.notice { noticeRow(notice) }
-            if let status = convo.statusLine { statusRow(status) }
+            if !convo.streaming, !convo.isCancelling, let status = convo.statusLine { statusRow(status) }
             if let cap = captureStatus { statusRow(cap) }
             // PR-4 item 4: a persistent, dismissible, kind-aware error
             // banner (not the old transient dim line).
@@ -400,19 +410,52 @@ struct ChatView: View {
         .padding(.horizontal, 24)
     }
 
-    private var streamingRow: some View {
-        HStack(spacing: 11) {
-            AssistantAvatar()
-            HStack(spacing: 4) {
-                ForEach(0..<3) { i in
-                    Circle().fill(t.accent).frame(width: 5, height: 5)
-                        .opacity(dotPulse ? 0.8 : 0.35)
-                        .animation(.easeInOut(duration: 1.2).repeatForever().delay(Double(i) * 0.15), value: dotPulse)
+    private var llmStatusRow: some View {
+        let isActive = llmActivityState == .running
+        let color = isActive ? t.accent : t.text3
+        return HStack(spacing: 10) {
+            LLMActivityIndicator(
+                isActive: isActive,
+                color: color
+            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(llmActivityLabel)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(color)
+                if isActive, let status = convo.statusLine, !status.isEmpty {
+                    Text(status)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(t.text4)
+                        .lineLimit(1)
                 }
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.bottom, 26)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(t.surface.opacity(0.72))
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(t.border, lineWidth: 0.5))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conversation.llm-status")
+        .padding(.bottom, 18)
+    }
+
+    private var llmActivityState: ConversationLLMActivityState {
+        ConversationLLMActivityState.resolve(
+            hasConversation: !convo.messages.isEmpty || !convo.items.isEmpty,
+            streaming: convo.streaming,
+            isCancelling: convo.isCancelling
+        )
+    }
+
+    private var llmActivityLabel: String {
+        switch llmActivityState {
+        case .hidden: return ""
+        case .running: return String(localized: "chat_status_running")
+        case .stopping: return String(localized: "chat_stopping")
+        case .paused: return String(localized: "settings_status_paused")
+        }
     }
 
     // A dim, single-line status row (tool activity / capture affordances).
@@ -549,6 +592,42 @@ struct ChatView: View {
     /// user an explicit nudge instead of waiting for the next send to fail.
     private func retryConnection() { source.warmUp() }
 
+}
+
+private struct LLMActivityIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let isActive: Bool
+    let color: Color
+    @State private var phase = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 3) {
+            ForEach(0..<3) { index in
+                Capsule()
+                    .fill(color)
+                    .frame(width: 3, height: 14)
+                    .scaleEffect(y: isActive && !reduceMotion && phase ? 1 : 0.52)
+                    .animation(
+                        reduceMotion
+                            ? nil
+                            : isActive
+                                ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true).delay(Double(index) * 0.12)
+                                : .easeOut(duration: 0.16),
+                        value: phase
+                    )
+            }
+        }
+        .frame(width: 18, height: 18)
+        .onAppear {
+            if isActive && !reduceMotion { phase = true }
+        }
+        .onChange(of: isActive) { _, active in
+            phase = active && !reduceMotion
+        }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            phase = isActive && !shouldReduceMotion
+        }
+    }
 }
 
 // MARK: - Error banner (PR-4 item 4)

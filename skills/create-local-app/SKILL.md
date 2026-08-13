@@ -69,6 +69,43 @@ Never declare host-owned record metadata (`recordId`, `revision`,
 fails, repair the payload and retry before building; do not treat a failed
 manifest update as a completed generation step.
 
+Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
+`camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`,
+or `agent_notify`; there is no `data` capability. `data_mutation` authorizes
+the conversation agent to call `mcp__local_apps__mutate_data`. Do not declare
+it solely because the page writes its own collection through
+`window.lingxi.v1.data.mutate`; that foreground page path is already scoped to
+its app.
+
+The host data wire contract is tagged and camel-cased. Generated source should
+import the locked helpers instead of constructing mutation payloads:
+
+```js
+import {
+  deleteRecord,
+  queryCollection,
+  upsertRecord,
+} from "../lib/lingxi-bridge";
+
+await upsertRecord("high_scores", "best", { score: 42 });
+const page = await queryCollection({
+  collection: "high_scores",
+  filters: [{ fieldId: "score", operator: "greater_than", value: 10 }],
+});
+const scores = page.records.map((record) => record.document.score);
+await deleteRecord("high_scores", "best", page.records[0].revision);
+```
+
+For direct MCP mutations, each operation must be exactly
+`{"kind":"upsert","recordId":"...","document":{...},"expectedRevision":1}`
+or `{"kind":"delete","recordId":"...","expectedRevision":1}`; omit
+`expectedRevision` when optimistic concurrency is not needed. Never use
+`action`, `create`, `record`, or top-level field values as substitutes.
+Collection query results expose app fields only under `records[].document`.
+`localStorage`, IndexedDB, or React state may be a cache, but must never be the
+authority for a declared collection. Surface native bridge failures as a
+retryable error; never swallow them and report a successful save.
+
 ## Prefer local and host-provided capabilities
 
 Resolve every requirement against the capabilities already supplied by the
@@ -155,7 +192,9 @@ The workflow is deterministic and owns these phases in order:
    the LingXi bridge, `deviceContext`, source policy/manifest integration,
    platform adapter, complete React source, and all required states under the
    editable roots (`src/` is the normal Vite source root; `app/` remains the
-   explicit offline fallback root).
+   explicit offline fallback root). Use `queryCollection`, `upsertRecord`, and
+   `deleteRecord` from the locked bridge for declared collection data; read
+   fields from `records[].document` and do not swallow rejected native writes.
 4. **Build** — call `mcp__local_apps__build`; the host runs the production
    `vite build`/`npm run build` equivalent offline with the fixed runtime and
    the app's projected, read-only dependencies. `npx vite` is for a Shell
@@ -164,7 +203,11 @@ The workflow is deterministic and owns these phases in order:
 5. **Verify** — invoke `$frontend-qa`. Use Browser when available for preview,
    screenshots, console, navigation, and core interactions, then use native
    WebView inspect/act/log tools for bridge, data, system back, and device
-   context. Cover the phone/tablet matrix and desktop when supported.
+   context. For every declared collection written by a core UI path, perform
+   the real UI write and then call `mcp__local_apps__query_data`; the returned
+   `records[].document` must contain the value. A local-only value or swallowed
+   bridge failure is not persistence. Cover the phone/tablet matrix and
+   desktop when supported.
 
 On a verification finding, repair, rebuild, and re-verify at most twice. If
 issues remain, return them with evidence and the reduced verification level;

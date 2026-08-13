@@ -378,26 +378,41 @@ struct BubbleShape: Shape {
 // MARK: - Assistant markdown rendering (PR-4 item 5)
 //
 // Renders the markdown subset assistant replies actually emit: fenced code
-// blocks (```), inline code (`…`), **bold**, and bullet / numbered lists — in
-// addition to paragraph breaks. Anything else falls through as plain text.
+// blocks (```), inline code (`…`), **bold**, bullet / numbered lists, and GFM
+// pipe tables — in addition to paragraph breaks. Anything else falls through
+// as plain text.
 //
-// The text is first split into BLOCKS (fenced code vs. everything else); each
-// non-code block is then rendered line-by-line as a paragraph or a list item,
-// with `**bold**` + `` `inline code` `` parsed inline.
+// The text is first split into blocks (fenced code, tables, and everything
+// else); ordinary text is then rendered line-by-line as a paragraph or list
+// item, with `**bold**` + `` `inline code` `` parsed inline.
 
 /// One parsed block of assistant markdown.
-private enum MDBlock: Equatable {
+enum MDBlock: Equatable {
     /// A fenced code block (``` … ```), `lang` is the optional info string.
     case code(String, lang: String?)
     /// A run of ordinary text lines (paragraphs + list items).
     case text([MDLine])
+    /// A GitHub-Flavored Markdown pipe table.
+    case table(MDTable)
 }
 
 /// One line within a text block.
-private enum MDLine: Equatable {
+enum MDLine: Equatable {
     case paragraph(String)
     case bullet(String)
     case numbered(marker: String, String)
+}
+
+struct MDTable: Equatable {
+    let headers: [String]
+    let alignments: [MDTableAlignment]
+    let rows: [[String]]
+}
+
+enum MDTableAlignment: Equatable {
+    case leading
+    case center
+    case trailing
 }
 
 /// One top-level markdown block, rendered independently.
@@ -420,6 +435,9 @@ private struct MDBlockView: View, Equatable {
             codeBlock(code)
         case let .text(lines):
             textBlock(lines)
+        case let .table(table):
+            MDTableView(table: table)
+                .equatable()
         }
     }
 
@@ -452,6 +470,149 @@ private struct MDBlockView: View, Equatable {
         }
     }
 
+}
+
+/// A compact, horizontally scrollable table for narrow phone transcripts.
+/// Fixed column widths keep every row aligned while still allowing long tables
+/// to scroll instead of compressing their content into unreadable slivers.
+private struct MDTableView: View, Equatable {
+    @Environment(\.theme) private var t
+    let table: MDTable
+
+    private static let fontSize: CGFloat = 13.5
+    private static let minimumColumnWidth: CGFloat = 96
+    private static let maximumColumnWidth: CGFloat = 220
+    private static let cellHorizontalPadding: CGFloat = 10
+
+    static func == (lhs: MDTableView, rhs: MDTableView) -> Bool {
+        lhs.table == rhs.table
+    }
+
+    var body: some View {
+        let widths = columnWidths
+        let separators = separatorOffsets(for: widths)
+        ScrollView(.horizontal) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRow(
+                    table.headers,
+                    isHeader: true,
+                    columnWidths: widths,
+                    separatorOffsets: separators
+                )
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+                    tableRow(
+                        row,
+                        isHeader: false,
+                        columnWidths: widths,
+                        separatorOffsets: separators
+                    )
+                }
+            }
+            .clipShape(.rect(cornerRadius: 9))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(t.border, lineWidth: 0.5)
+            )
+        }
+        .scrollIndicators(.hidden)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var columnWidths: [CGFloat] {
+        table.headers.indices.map { column in
+            let cells = [table.headers[column]] + table.rows.map { row in
+                column < row.count ? row[column] : ""
+            }
+            let widest = cells.map(Self.visualCharacterCount).max() ?? 0
+            return min(
+                Self.maximumColumnWidth,
+                max(Self.minimumColumnWidth, CGFloat(widest) * 7.2 + 24)
+            )
+        }
+    }
+
+    private func separatorOffsets(for widths: [CGFloat]) -> [CGFloat] {
+        var offset: CGFloat = 0
+        return widths.dropLast().map { width in
+            offset += width + Self.cellHorizontalPadding * 2
+            return offset
+        }
+    }
+
+    private func tableRow(
+        _ cells: [String],
+        isHeader: Bool,
+        columnWidths: [CGFloat],
+        separatorOffsets: [CGFloat]
+    ) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(table.headers.indices, id: \.self) { column in
+                let text = column < cells.count ? cells[column] : ""
+                Text(AIText.parseInline(text, size: Self.fontSize))
+                    .font(.scaledSystem(
+                        Self.fontSize,
+                        weight: isHeader ? .semibold : .regular,
+                        relativeTo: .body
+                    ))
+                    .foregroundStyle(isHeader ? t.text : t.text2)
+                    .multilineTextAlignment(textAlignment(for: column))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(
+                        width: columnWidths[column],
+                        alignment: frameAlignment(for: column)
+                    )
+                    .padding(.horizontal, Self.cellHorizontalPadding)
+                    .padding(.vertical, 8)
+            }
+        }
+        .background(isHeader ? t.surface : t.windowBg.opacity(0.35))
+        .overlay(alignment: .topLeading) {
+            GeometryReader { proxy in
+                ZStack(alignment: .topLeading) {
+                    ForEach(separatorOffsets.indices, id: \.self) { index in
+                        Rectangle()
+                            .fill(t.border)
+                            .frame(width: 0.5, height: proxy.size.height)
+                            .offset(x: separatorOffsets[index])
+                    }
+                }
+                .frame(
+                    width: proxy.size.width,
+                    height: proxy.size.height,
+                    alignment: .topLeading
+                )
+            }
+            .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(t.border)
+                .frame(height: 0.5)
+        }
+    }
+
+    private func frameAlignment(for column: Int) -> Alignment {
+        switch table.alignments[column] {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private func textAlignment(for column: Int) -> TextAlignment {
+        switch table.alignments[column] {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private static func visualCharacterCount(_ text: String) -> Int {
+        text.reduce(into: 0) { width, character in
+            width += character.unicodeScalars.allSatisfy(\.isASCII) ? 1 : 2
+        }
+    }
 }
 
 /// One rendered markdown line. `Equatable` on the line so a streaming message
@@ -539,8 +700,8 @@ struct AIText: View, Equatable {
 
     // MARK: block parsing
 
-    /// Split the source into fenced-code vs. text blocks.
-    fileprivate static func parseBlocks(_ md: String) -> [MDBlock] {
+    /// Split the source into fenced-code, GFM table, and text blocks.
+    static func parseBlocks(_ md: String) -> [MDBlock] {
         var blocks: [MDBlock] = []
         let lines = md.components(separatedBy: "\n")
         var i = 0
@@ -569,6 +730,22 @@ struct AIText: View, Equatable {
                 // Skip the closing fence (if present).
                 if i < lines.count { i += 1 }
                 blocks.append(.code(code.joined(separator: "\n"), lang: lang.isEmpty ? nil : lang))
+            } else if i + 1 < lines.count,
+                      let tableHeader = parseTableHeader(line, delimiter: lines[i + 1]) {
+                flushText()
+                i += 2
+                var rows: [[String]] = []
+                while i < lines.count,
+                      !isTableBodyBoundary(lines[i]),
+                      let cells = tableCells(in: lines[i], requiresSeparator: false) {
+                    rows.append(normalize(cells, to: tableHeader.headers.count))
+                    i += 1
+                }
+                blocks.append(.table(MDTable(
+                    headers: tableHeader.headers,
+                    alignments: tableHeader.alignments,
+                    rows: rows
+                )))
             } else {
                 pendingText.append(line)
                 i += 1
@@ -576,6 +753,133 @@ struct AIText: View, Equatable {
         }
         flushText()
         return blocks
+    }
+
+    private static func parseTableHeader(
+        _ header: String,
+        delimiter: String
+    ) -> (headers: [String], alignments: [MDTableAlignment])? {
+        guard let headers = tableCells(in: header),
+              let delimiterCells = tableCells(in: delimiter),
+              !headers.isEmpty,
+              headers.count == delimiterCells.count else {
+            return nil
+        }
+
+        var alignments: [MDTableAlignment] = []
+        alignments.reserveCapacity(delimiterCells.count)
+        for cell in delimiterCells {
+            let marker = cell.trimmingCharacters(in: .whitespaces)
+            let hasLeadingColon = marker.first == ":"
+            let hasTrailingColon = marker.last == ":"
+            let dashes = marker.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard dashes.count >= 3, dashes.allSatisfy({ $0 == "-" }) else {
+                return nil
+            }
+            if hasLeadingColon && hasTrailingColon {
+                alignments.append(.center)
+            } else if hasTrailingColon {
+                alignments.append(.trailing)
+            } else {
+                alignments.append(.leading)
+            }
+        }
+        return (headers, alignments)
+    }
+
+    /// Split one pipe row while preserving escaped `\|` characters inside a
+    /// cell. Leading and trailing pipes are optional in GFM table syntax.
+    private static func tableCells(
+        in line: String,
+        requiresSeparator: Bool = true
+    ) -> [String]? {
+        let source = line.trimmingCharacters(in: .whitespaces)
+        let characters = Array(source)
+        var cells: [String] = []
+        var cell = ""
+        var foundSeparator = false
+        var pendingBackslashes = 0
+        var index = 0
+
+        while index < characters.count {
+            let character = characters[index]
+            if character == "\\" {
+                pendingBackslashes += 1
+            } else if character == "|" {
+                cell.append(String(repeating: "\\", count: pendingBackslashes / 2))
+                if pendingBackslashes.isMultiple(of: 2) {
+                    cells.append(cell.trimmingCharacters(in: .whitespaces))
+                    cell = ""
+                    foundSeparator = true
+                } else {
+                    cell.append("|")
+                }
+                pendingBackslashes = 0
+            } else {
+                cell.append(String(repeating: "\\", count: pendingBackslashes))
+                pendingBackslashes = 0
+                cell.append(character)
+            }
+            index += 1
+        }
+        cell.append(String(repeating: "\\", count: pendingBackslashes))
+        cells.append(cell.trimmingCharacters(in: .whitespaces))
+
+        guard foundSeparator || !requiresSeparator else { return nil }
+        if source.first == "|", cells.first?.isEmpty == true {
+            cells.removeFirst()
+        }
+        if source.last == "|", cells.last?.isEmpty == true {
+            cells.removeLast()
+        }
+        return cells
+    }
+
+    /// GFM tables continue through ordinary non-empty lines (a one-cell row is
+    /// valid) and stop when another block-level construct begins.
+    private static func isTableBodyBoundary(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return true }
+        if line.hasPrefix("    ") || line.hasPrefix("\t") { return true }
+        if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") || trimmed.hasPrefix(">") {
+            return true
+        }
+
+        let hashCount = trimmed.prefix(while: { $0 == "#" }).count
+        if (1 ... 6).contains(hashCount) {
+            let suffix = trimmed.dropFirst(hashCount)
+            if suffix.isEmpty || suffix.first?.isWhitespace == true { return true }
+        }
+
+        if let marker = trimmed.first, "-+*".contains(marker) {
+            let suffix = trimmed.dropFirst()
+            if suffix.isEmpty || suffix.first?.isWhitespace == true { return true }
+        }
+
+        let digits = trimmed.prefix(while: \.isNumber)
+        if !digits.isEmpty, digits.count <= 9 {
+            let suffix = trimmed.dropFirst(digits.count)
+            if let marker = suffix.first, marker == "." || marker == ")" {
+                let afterMarker = suffix.dropFirst()
+                if afterMarker.isEmpty || afterMarker.first?.isWhitespace == true { return true }
+            }
+        }
+
+        let thematicMarker = trimmed.filter { !$0.isWhitespace }
+        if thematicMarker.count >= 3,
+           let marker = thematicMarker.first,
+           "-_*".contains(marker),
+           thematicMarker.allSatisfy({ $0 == marker }) {
+            return true
+        }
+        return false
+    }
+
+    private static func normalize(_ cells: [String], to columnCount: Int) -> [String] {
+        if cells.count >= columnCount {
+            return Array(cells.prefix(columnCount))
+        }
+        return cells + Array(repeating: "", count: columnCount - cells.count)
     }
 
     /// Classify one text line as a paragraph, bullet, or numbered item.

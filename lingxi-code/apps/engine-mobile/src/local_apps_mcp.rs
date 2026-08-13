@@ -353,7 +353,7 @@ impl LocalAppsMcpTransport {
         let manifest_collection = json!({
             "type": "object",
             "properties": {
-                "id": manifest_identifier,
+                "id": manifest_identifier.clone(),
                 "name": {
                     "type": "string",
                     "minLength": 1,
@@ -367,6 +367,82 @@ impl LocalAppsMcpTransport {
             },
             "required": ["id", "name", "fields"],
             "additionalProperties": false
+        });
+        let app_capabilities = json!(local_apps::AppCapability::ALL);
+        let data_filter_operators = json!(local_apps::DataFilterOperator::ALL);
+        let scalar_filter_value = json!({"type": ["boolean", "number", "string"]});
+        let record_id_max_bytes = local_apps::MAX_RECORD_ID_BYTES;
+        let data_filter = json!({
+            "type": "object",
+            "properties": {
+                "fieldId": manifest_identifier.clone(),
+                "operator": {"enum": data_filter_operators},
+                "value": {}
+            },
+            "required": ["fieldId", "operator", "value"],
+            "additionalProperties": false,
+            "oneOf": [
+                {
+                    "properties": {
+                        "operator": {"enum": [
+                            "equal", "not_equal", "less_than", "less_than_or_equal",
+                            "greater_than", "greater_than_or_equal"
+                        ]},
+                        "value": scalar_filter_value.clone()
+                    }
+                },
+                {
+                    "properties": {
+                        "operator": {"enum": ["contains"]},
+                        "value": {"type": "string"}
+                    }
+                },
+                {
+                    "properties": {
+                        "operator": {"enum": ["in"]},
+                        "value": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": local_apps::MAX_FILTER_IN_VALUES,
+                            "items": scalar_filter_value.clone()
+                        }
+                    }
+                }
+            ]
+        });
+        let record_id = json!({
+            "type": "string",
+            "minLength": 1,
+            "description": format!("Stable caller-owned id: 1..={record_id_max_bytes} UTF-8 bytes, trimmed, with no control characters; enforced by the host")
+        });
+        let expected_revision = json!({"type": "integer", "minimum": 1});
+        let data_mutation = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"enum": ["upsert"]},
+                        "recordId": record_id.clone(),
+                        "document": {
+                            "type": "object",
+                            "description": "Complete record fields matching the declared collection schema"
+                        },
+                        "expectedRevision": expected_revision.clone()
+                    },
+                    "required": ["kind", "recordId", "document"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"enum": ["delete"]},
+                        "recordId": record_id,
+                        "expectedRevision": expected_revision
+                    },
+                    "required": ["kind", "recordId"],
+                    "additionalProperties": false
+                }
+            ]
         });
         let mut list = Self::tool(
             "list",
@@ -412,7 +488,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "update_manifest",
-                "Declare the app's data collections, allowed network domains, capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. Destructive schema migrations against existing data require the user's approval.",
+                "Declare the app's data collections, allowed network domains, exact capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to mutate_data; a page writing its own collection through window.lingxi.v1.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "collections":{
@@ -421,7 +497,7 @@ impl LocalAppsMcpTransport {
                         "items":manifest_collection
                     },
                     "allowed_domains":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":200}},
-                    "capabilities":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":64}},
+                    "capabilities":{"type":"array","maxItems":local_apps::AppCapability::ALL.len(),"uniqueItems":true,"items":{"enum":app_capabilities}},
                     "device_context":{"type":"object","properties":{
                         "os":{"enum":["ios","android","desktop","unknown"]},
                         "formFactor":{"enum":["iphone","ipad","phone","tablet","desktop","unknown"]},
@@ -435,7 +511,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "query_data",
-                "Query one declared app collection with bounded pagination, sorting and structured filters. Pass a returned numeric `nextOffset` as the next request's `offset`. Raw SQL and string cursors are never accepted.",
+                "Query one declared app collection with bounded pagination, sorting and structured filters `{fieldId,operator,value}`. App fields are returned under `records[].document`; recordId/revision/timestamps are sibling host metadata. Pass a returned numeric `nextOffset` as the next request's `offset`. Raw SQL and string cursors are never accepted.",
                 json!({
                     "type":"object",
                     "properties":{
@@ -443,8 +519,8 @@ impl LocalAppsMcpTransport {
                         "collection":{"type":"string","minLength":1,"maxLength":100},
                         "limit":{"type":"integer","minimum":1,"maximum":100},
                         "offset":{"type":"integer","minimum":0},
-                        "filter":{"type":"object"},
-                        "filters":{"type":"array","maxItems":16},
+                        "filter":data_filter.clone(),
+                        "filters":{"type":"array","maxItems":local_apps::MAX_QUERY_FILTERS,"items":data_filter},
                         "sort":{
                             "oneOf":[
                                 {"type":"string","minLength":1,"maxLength":100},
@@ -481,8 +557,8 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "mutate_data",
-                "Create, update or delete up to 50 records in one declared collection. First use requires a user capability grant.",
-                json!({"type":"object","properties":{"app_id":app_id.clone(),"collection":{"type":"string","minLength":1,"maxLength":100},"operations":{"type":"array","minItems":1,"maxItems":50}},"required":["app_id","collection","operations"],"additionalProperties":false}),
+                "Atomically upsert or delete records in one declared collection. Each operation is exactly `{kind:\"upsert\",recordId,document,expectedRevision?}` or `{kind:\"delete\",recordId,expectedRevision?}`; guessed `action`/`record` shapes are invalid. First conversation-agent mutation requires a user `data_mutation` capability grant.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"collection":{"type":"string","minLength":1,"maxLength":100},"operations":{"type":"array","minItems":1,"maxItems":local_apps::MAX_MUTATION_BATCH_SIZE,"items":data_mutation}},"required":["app_id","collection","operations"],"additionalProperties":false}),
             ),
             Self::tool(
                 "inspect_ui",
@@ -1216,6 +1292,86 @@ mod tests {
             update.description.contains("recordId") && update.description.contains("createdAtMs"),
             "host-owned record metadata must be called out: {}",
             update.description
+        );
+    }
+
+    #[test]
+    fn local_app_data_catalog_exposes_the_native_wire_contract() {
+        let tools = LocalAppsMcpTransport::tool_catalog();
+        let update = tools
+            .iter()
+            .find(|tool| tool.tool_name == "update_manifest")
+            .expect("update_manifest is declared");
+        assert_eq!(
+            update.input_schema["properties"]["capabilities"]["items"]["enum"],
+            json!([
+                "data_mutation",
+                "ui_control",
+                "camera",
+                "photo_library",
+                "microphone",
+                "location",
+                "notifications",
+                "llm",
+                "agent_notify"
+            ]),
+            "the catalog must never invite the invalid guessed capability `data`"
+        );
+
+        let query = tools
+            .iter()
+            .find(|tool| tool.tool_name == "query_data")
+            .expect("query_data is declared");
+        for filter_name in ["filter", "filters"] {
+            let filter = if filter_name == "filter" {
+                &query.input_schema["properties"][filter_name]
+            } else {
+                &query.input_schema["properties"][filter_name]["items"]
+            };
+            assert_eq!(filter["type"], "object");
+            assert_eq!(filter["required"], json!(["fieldId", "operator", "value"]));
+            assert_eq!(filter["additionalProperties"], false);
+            assert_eq!(
+                filter["oneOf"][2]["properties"]["value"]["maxItems"],
+                local_apps::MAX_FILTER_IN_VALUES
+            );
+            assert_eq!(
+                filter["properties"]["operator"]["enum"],
+                json!([
+                    "equal",
+                    "not_equal",
+                    "less_than",
+                    "less_than_or_equal",
+                    "greater_than",
+                    "greater_than_or_equal",
+                    "contains",
+                    "in"
+                ])
+            );
+        }
+
+        let mutate = tools
+            .iter()
+            .find(|tool| tool.tool_name == "mutate_data")
+            .expect("mutate_data is declared");
+        let operations = &mutate.input_schema["properties"]["operations"];
+        assert_eq!(operations["maxItems"], local_apps::MAX_MUTATION_BATCH_SIZE);
+        let variants = operations["items"]["oneOf"]
+            .as_array()
+            .expect("mutation operations use tagged variants");
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0]["properties"]["kind"]["enum"], json!(["upsert"]));
+        assert_eq!(
+            variants[0]["required"],
+            json!(["kind", "recordId", "document"])
+        );
+        assert_eq!(variants[1]["properties"]["kind"]["enum"], json!(["delete"]));
+        assert_eq!(variants[1]["required"], json!(["kind", "recordId"]));
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant["additionalProperties"] == false),
+            "guessed operation shapes such as action=create must be rejected by the schema"
         );
     }
 

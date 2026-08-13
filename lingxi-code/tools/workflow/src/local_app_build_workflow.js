@@ -43,6 +43,9 @@ const CONTRACT = [
   '- Do not overwrite an existing source root. If Shell is unavailable, reuse an existing source tree or use only the repository-verified .lingxi/vite-fallback/ copy as an explicit offline-fallback and report that direct Vite/npm commands did not run. If the official CLI cannot reach the registry, use that same offline-fallback and report the mode and reason; other CLI failures remain failures.',
   '- Generate only editable source. Do not edit package.json/package-lock.json in the Generate phase; use the existing Shell tool in the Dependencies phase. Preserve the official Vite index.html and vite.config.* unless a confirmed host integration requires a minimal compatible edit. Keep lib/lingxi-bridge.js host-controlled.',
   '- The page reaches host data/network/device ONLY through window.lingxi.v1 and the checked-in bridge adapter.',
+  '- Manifest capabilities are exact enums: data_mutation, ui_control, camera, photo_library, microphone, location, notifications, llm, agent_notify. data_mutation is for conversation-agent mutate_data calls; page-owned window.lingxi.v1.data writes do not request it solely for storage.',
+  '- For page storage, import queryCollection, upsertRecord, and deleteRecord from the locked bridge. Read app fields from records[].document. Never invent action/create/record mutation shapes.',
+  '- localStorage must never be authoritative for a declared collection and must not hide a failed native write. Do not swallow bridge errors; surface a recoverable UI error and keep failed state retryable.',
   '- Build is offline. Dependencies are changed only by the existing Shell tool in this app workspace, using the exact confirmed specs for npm install/uninstall/ci; Shell keeps its existing network and command approval.',
   '- Source versioning uses ordinary workspace Git history plus the package-lock digest. Use the existing Git capability when available, otherwise standard git commands through Shell; do not add a second version store or command surface.',
   '- A checkpoint restore compares the current and target package-lock digest, reports the difference, and uses existing Shell npm ci only when the installed tree needs reconciliation.',
@@ -114,6 +117,15 @@ const VERIFICATION_RESULT_SCHEMA = {
     browser_available: { type: 'boolean' },
     webview_checked: { type: 'boolean' },
     degraded_verification: { type: 'boolean' },
+    data_roundtrip: {
+      type: 'object',
+      properties: {
+        status: { enum: ['passed', 'not_applicable', 'failed'] },
+        collections: { type: 'array', items: { type: 'string' } },
+        evidence: { type: 'string' },
+      },
+      required: ['status', 'collections', 'evidence'],
+    },
     summary: { type: 'string' },
   },
   required: [
@@ -123,6 +135,7 @@ const VERIFICATION_RESULT_SCHEMA = {
     'browser_available',
     'webview_checked',
     'degraded_verification',
+    'data_roundtrip',
     'summary',
   ],
 };
@@ -182,6 +195,7 @@ const generated = await agent(
     '',
     CONTRACT,
     '',
+    'When the UI persists declared collection data, use the locked upsertRecord/deleteRecord helpers and queryCollection response shape. Read only records[].document for app fields. Do not make localStorage, IndexedDB, or an in-memory cache authoritative over native collection data. Do not swallow bridge errors or convert a rejected native write into UI success.',
     'Use platform tokens and adapters instead of scattered platform conditionals. Include loading, empty, error, success, disabled, offline, permission-denied, and reduced-motion states where relevant. Build actual copy and interaction paths, not a placeholder shell. Do not build or start anything in this phase.',
   ].join('\n'),
   { label: 'generate', phase: 'Generate', throwOnError: true },
@@ -222,8 +236,9 @@ for (let round = 0; round <= 2; round += 1) {
       JSON.stringify(design),
       '',
       'Use Browser when the capability exists: preview URL, required viewport matrix, console, navigation, and core interactions. Browser is also required for mobile-sized viewports when available; a narrow viewport alone does not prove a platform. Then use the real Local App WebView inspect_ui/act_on_ui/read_logs path to verify bridge/data/device context/system back semantics. Cover iPhone, Android phone, iPad portrait+landscape, Android tablet portrait+landscape, and desktop when those targets are in scope; inject platform context separately from viewport size.',
+      `For every declared collection that a core UI path writes, perform that real UI action, then call mcp__local_apps__query_data with {"app_id":"${appId}","collection":"<id>"} and verify the persisted record under records[].document. A localStorage-only value, optimistic UI state, or swallowed bridge rejection is a failed data roundtrip. Return data_roundtrip.status=passed only with this host-query evidence, not_applicable only when the app has no writable collection UI, otherwise failed and set ok=false.`,
       'If Browser is unavailable, use the existing inspect_ui/act_on_ui/read_logs path and report verification as degraded rather than claiming full visual QA.',
-      'Return ok, findings, checked matrix, browser_available, webview_checked, and degraded_verification. Do not repair source in this pass.',
+      'Return ok, findings, checked matrix, browser_available, webview_checked, degraded_verification, and data_roundtrip {status, collections, evidence}. Do not repair source in this pass.',
     ].join('\n'),
     {
       label: `verify-${round}`,

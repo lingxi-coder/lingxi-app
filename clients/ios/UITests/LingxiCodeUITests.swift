@@ -349,6 +349,27 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["drawer.shortcut.cron"].exists)
     }
 
+    func testChatToolbarIconsShareSizeAndSpacing() {
+        let sessionDetails = app.buttons["conversation.session-details"]
+        let themeToggle = app.buttons["conversation.theme-toggle"]
+        let newChat = app.buttons["conversation.new-chat"]
+
+        XCTAssertTrue(sessionDetails.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(themeToggle.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(newChat.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertGreaterThanOrEqual(themeToggle.frame.width, 28)
+        XCTAssertGreaterThanOrEqual(themeToggle.frame.height, 32)
+        XCTAssertEqual(sessionDetails.frame.width, themeToggle.frame.width, accuracy: 1)
+        XCTAssertEqual(themeToggle.frame.width, newChat.frame.width, accuracy: 1)
+        XCTAssertEqual(sessionDetails.frame.height, themeToggle.frame.height, accuracy: 1)
+        XCTAssertEqual(themeToggle.frame.height, newChat.frame.height, accuracy: 1)
+        XCTAssertEqual(
+            themeToggle.frame.midX - sessionDetails.frame.midX,
+            newChat.frame.midX - themeToggle.frame.midX,
+            accuracy: 1.5
+        )
+    }
+
     func testSessionDetailsOpensFromChatHeader() {
         let details = app.buttons["conversation.session-details"]
         XCTAssertTrue(details.waitForExistence(timeout: 8), app.debugDescription)

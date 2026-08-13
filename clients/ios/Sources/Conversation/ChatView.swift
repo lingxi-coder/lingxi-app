@@ -232,35 +232,49 @@ struct ChatView: View {
         .navigationTitle(convo.isNew ? String(localized: "chat_new_conversation") : session.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Button(action: onOpenSessionDetails) {
-                    Label("session_details_button", systemImage: "info.circle")
-                        .font(.system(size: 13, weight: .semibold))
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 0) {
+                    toolbarIconButton(
+                        systemName: "info.circle",
+                        label: String(localized: "session_details_button"),
+                        accessibilityIdentifier: "conversation.session-details",
+                        action: onOpenSessionDetails
+                    )
+                    toolbarIconButton(
+                        systemName: app.isDark ? "sun.max" : "moon",
+                        label: app.isDark
+                            ? String(localized: "chat_theme_light")
+                            : String(localized: "chat_theme_dark"),
+                        accessibilityIdentifier: "conversation.theme-toggle",
+                        action: app.toggleTheme
+                    )
+                    toolbarIconButton(
+                        systemName: "square.and.pencil",
+                        label: String(localized: "chat_new_chat"),
+                        accessibilityIdentifier: "conversation.new-chat",
+                        action: newChat
+                    )
                 }
-                .foregroundStyle(t.accent)
-                .accessibilityIdentifier("conversation.session-details")
-                toolbarIconButton(
-                    app.isDark ? .sun : .moon,
-                    color: t.text2,
-                    label: app.isDark
-                        ? String(localized: "chat_theme_light")
-                        : String(localized: "chat_theme_dark")
-                ) { app.toggleTheme() }
-                toolbarIconButton(
-                    .edit,
-                    color: t.accent,
-                    label: String(localized: "chat_new_chat")
-                ) { newChat() }
             }
         }
     }
 
-    private func toolbarIconButton(_ name: LXIconName, color: Color,
-                                   label: String, action: @escaping () -> Void) -> some View {
+    private func toolbarIconButton(
+        systemName: String,
+        label: String,
+        accessibilityIdentifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            LXIcon(name: name, size: 18, color: color, stroke: 1.8)
+            Image(systemName: systemName)
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(t.accent)
+                .frame(width: 32, height: 36)
+                .contentShape(.rect)
         }
         .accessibilityLabel(label)
+        .accessibilityIdentifier(accessibilityIdentifier)
     }
 
     // MARK: message list

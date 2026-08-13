@@ -211,12 +211,14 @@ pub(crate) async fn profile_apps(
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone()
     };
-    // Cloned BEFORE `llm`/`devices` move into the (maybe-never-run) init
-    // closure below, so they survive to refresh a CACHED profile too — see
-    // `SharedLlm`'s doc; the device handles carry the same stale-connection
-    // hazard.
+    // Clone every connection/build-scoped input BEFORE the (maybe-never-run)
+    // init closure consumes its copy. A cached profile retains the durable
+    // service and runtime table, but must not retain stale client handles or
+    // runtime capability metadata across engine reconnects.
     let refresh_llm = llm.clone();
     let refresh_devices = devices.clone();
+    let refresh_mobile_linux = mobile_linux.clone();
+    let refresh_runtime_root = runtime_root.clone();
     let profile = cell
         .get_or_try_init(|| async move {
             worker_runtime()
@@ -235,6 +237,11 @@ pub(crate) async fn profile_apps(
         })
         .await
         .cloned()?;
+    profile.host.refresh_runtime_configuration(
+        refresh_mobile_linux,
+        refresh_runtime_root,
+        physical_memory_bytes,
+    );
     profile.llm.replace(refresh_llm);
     profile.device.replace(refresh_devices);
     Ok(profile)
@@ -284,5 +291,55 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first.service, &second.service));
+    }
+
+    #[tokio::test]
+    async fn cached_profile_refreshes_runtime_configuration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("profile");
+        let runtime_root = temp.path().join("runtime");
+        std::fs::create_dir_all(runtime_root.join("node_modules/vite/bin"))
+            .expect("create Vite runtime fixture");
+        std::fs::write(
+            runtime_root.join("node_modules/vite/bin/vite.js"),
+            "fixture",
+        )
+        .expect("write Vite fixture");
+
+        let first = profile_apps(
+            root.clone(),
+            Arc::new(FixedClock::new(1_000)),
+            None,
+            false,
+            None,
+            128,
+            no_op_llm(),
+            crate::local_apps_device::DeviceCapabilities::default(),
+        )
+        .await
+        .expect("first profile");
+        let second = profile_apps(
+            root,
+            Arc::new(FixedClock::new(2_000)),
+            None,
+            true,
+            Some(runtime_root.clone()),
+            256,
+            no_op_llm(),
+            crate::local_apps_device::DeviceCapabilities::default(),
+        )
+        .await
+        .expect("second profile");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(second.host.physical_memory_bytes(), 256);
+        assert_eq!(
+            second
+                .host
+                .fixed_runtime_mount()
+                .expect("refreshed mount")
+                .host_path,
+            runtime_root.join("node_modules")
+        );
     }
 }

@@ -118,7 +118,8 @@ The workflow is deterministic and owns these phases in order:
 
 1. **Design** — invoke `$frontend-design`, produce/confirm platform and form
    factor, page structure, tokens, adapters, interactions, and asset decision.
-   For a new app with no `package.json`, use the existing `Shell` tool to run
+   For a new app with no `package.json`, use the existing `Shell` tool only when
+   the local-app workflow reports that its Node/npm toolchain is available. Run
    the official CLI in a newly created empty staging
    source root: `npm create vite@latest . -- --template react --no-interactive`.
    Use `--template react-ts` only when the confirmed specification explicitly
@@ -128,16 +129,18 @@ The workflow is deterministic and owns these phases in order:
    workspace already contains host `.lingxi/` metadata, so never target that
    non-empty directory directly. Copy the completed staging contents into the
    still-empty source root only after checking that no user source exists.
-   If `Shell` is unavailable, do not invent a replacement installer or scaffold
-   tool. Reuse an existing source tree when one already exists; otherwise copy
+   If `Shell` or its local-app Node/npm toolchain is unavailable, do not invent
+   a replacement installer or scaffold tool. Reuse an existing source tree when
+   one already exists; otherwise copy
    the repository-verified `.lingxi/vite-fallback/` into the source root as an
-   explicit `offline-fallback`, record that `Shell` was unavailable, and report
+   explicit `offline-fallback`, record why the toolchain was unavailable, and report
    that the official CLI did not run. If `Shell` is available but
    registry/network access is unavailable, use that same offline fallback and
    record the reason. Do not use the fallback for unrelated CLI failures or add
    a Vite wrapper/scaffold API.
-2. **Dependencies** — compare the confirmed package list with the app's
-   package manifest using the existing `Shell` tool in the app workspace. Show
+2. **Dependencies** — when the local-app Node/npm toolchain is available,
+   compare the confirmed package list with the app's package manifest using the
+   existing `Shell` tool in the app workspace. Show
    the exact displayed specs, then run `npm install -- <specs>` or
    `npm uninstall -- <specs>` through Shell; its existing network/command
    approval and command logs cover network access and lifecycle scripts. After
@@ -146,8 +149,8 @@ The workflow is deterministic and owns these phases in order:
    through the same Shell when the lockfile and installed tree differ. Optional
    `tailwindcss`/`@tailwindcss/vite`, `motion`, and `lucide-react` packages are
    valid proposals, but only install the exact specs shown and confirmed. If
-   `Shell` is unavailable, do not mutate dependencies; report the exact pending
-   package operations instead.
+   `Shell` or the current local-app Node/npm toolchain is unavailable, do not
+   mutate dependencies; report the exact pending package operations instead.
 3. **Generate** — invoke `$accessibility` and `$react-best-practices`; inject
    the LingXi bridge, `deviceContext`, source policy/manifest integration,
    platform adapter, complete React source, and all required states under the
@@ -171,10 +174,13 @@ never claim full Browser or native QA that was not run.
 
 Edit generated source only under `app/`, `src/`, `components/`, `lib/`,
 `styles/`, and `public/`. The normal project workflow owns `package.json`,
-lockfile, and `node_modules`; use the existing Shell tool in the app workspace
-for `npm install`, `npm uninstall`, `npm ci`, `npm run build`, or `npx vite`,
-never a new wrapper or MCP tool. The official Vite `index.html` and
-`vite.config.*` remain host-controlled; `src/main.*` may be minimally adapted
+lockfile, and `node_modules`; only when the current local-app workflow reports
+its Node/npm toolchain available, use the existing Shell tool in the app
+workspace for `npm install`, `npm uninstall`, `npm ci`, `npm run build`, or
+`npx vite`, never a new wrapper or MCP tool. Otherwise report the pending
+operation and use the repository-verified fallback where applicable. The
+official Vite `index.html` and `vite.config.*` remain host-controlled;
+`src/main.*` may be minimally adapted
 to import the checked-in bridge/deviceContext/platform adapter. The build is
 offline and only reads the installed app-local dependencies.
 Use only `window.lingxi.v1` for host data, network, device, and agent events.

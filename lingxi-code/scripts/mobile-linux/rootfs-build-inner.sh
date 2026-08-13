@@ -6,8 +6,8 @@
 # The vendored OpenMinis `prepare_alpine_rootfs.sh` only ever extracts a bare
 # minirootfs and runs fakefsify -- it never installs a single APK, which is why
 # `--local-app-runtime` could never satisfy `rootfs_tool.py verify-tree`. This
-# script is the missing step: it resolves the full recursive closure, installs
-# it OFFLINE, and hands back a tree that already contains node/npm/git/python.
+# script is the missing step: it downloads the committed hashed closure,
+# installs it OFFLINE, and hands back a tree with node/npm/git/python.
 #
 # Inputs (environment):
 #   LINGXI_ARCH             Alpine arch (aarch64 | x86_64)
@@ -28,6 +28,7 @@ ALPINE_VERSION="${LINGXI_ALPINE_VERSION:?LINGXI_ALPINE_VERSION required}"
 ALPINE_BRANCH="${LINGXI_ALPINE_BRANCH:?LINGXI_ALPINE_BRANCH required}"
 PKGS="${LINGXI_PACKAGES:?LINGXI_PACKAGES required}"
 EXPECTED_ROOTFS_SHA="${LINGXI_ROOTFS_SHA256:-}"
+PINS_JSON=/pins.json
 CDN=https://dl-cdn.alpinelinux.org/alpine
 
 OUT="/out/${ARCH}"
@@ -68,31 +69,55 @@ tar -xzf "${OUT}/minirootfs.tar.gz" -C "${TARGET}"
 printf '%s/%s/main\n%s/%s/community\n' "${CDN}" "${ALPINE_BRANCH}" "${CDN}" "${ALPINE_BRANCH}" \
   > "${TARGET}/etc/apk/repositories"
 cp /etc/resolv.conf "${TARGET}/etc/resolv.conf" 2>/dev/null || true
-apk --root "${TARGET}" --arch "${ARCH}" update >/dev/null 2>&1
+echo "[rootfs:${ARCH}] fetching the pinned APK closure"
+# Never ask the moving Alpine index to resolve dependencies here. The committed
+# pins already contain the complete, hashed closure; resolving again can mix a
+# newer transitive package (for example python3) with an older exact primary
+# pin and make the supposedly reproducible offline install impossible.
+python3 - "${PINS_JSON}" "${ARCH}" > "${OUT}/pinned-artifacts.tsv" <<'PY'
+import json, pathlib, sys
 
-echo "[rootfs:${ARCH}] resolving recursive APK closure"
-# Retried: a 60-package fetch against the public CDN routinely trips a transient
-# "I/O error" or "DNS: no address for host" on one package, and losing the whole
-# build to that is pure waste. Already-downloaded packages are skipped, so a
-# retry only fetches the gaps. Integrity is not weakened -- every artifact is
-# hashed and checked against the pins afterwards regardless of attempt count.
-FETCH_OK=0
-for attempt in 1 2 3; do
-  # shellcheck disable=SC2086
-  if apk --root "${TARGET}" --arch "${ARCH}" fetch --recursive \
-       --output "${REPO}/${ARCH}" $PKGS > "${OUT}/fetch.log" 2>&1; then
-    FETCH_OK=1
-    break
+pins = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+arch = sys.argv[2]
+abi = {"aarch64": "arm64-v8a", "x86_64": "x86_64"}[arch]
+record = pins.get("apk_artifacts", {}).get(abi)
+if not isinstance(record, dict) or record.get("closure_status") != "complete":
+    raise SystemExit(f"pinned APK closure is not complete for {abi}")
+artifacts = record.get("artifacts")
+if not isinstance(artifacts, list) or not artifacts:
+    raise SystemExit(f"pinned APK closure is empty for {abi}")
+for artifact in artifacts:
+    if artifact.get("availability") != "available" or artifact.get("arch") != arch:
+        raise SystemExit(f"invalid pinned artifact for {abi}: {artifact!r}")
+    url, digest = artifact.get("url"), artifact.get("sha256")
+    if not isinstance(url, str) or not isinstance(digest, str):
+        raise SystemExit(f"incomplete pinned artifact for {abi}: {artifact!r}")
+    print(url, digest, pathlib.PurePosixPath(url).name, sep="\t")
+PY
+
+: > "${OUT}/fetch.log"
+while IFS="$(printf '\t')" read -r url expected_sha filename; do
+  destination="${REPO}/${ARCH}/${filename}"
+  fetched=0
+  for attempt in 1 2 3; do
+    if curl -sSfL -o "${destination}.tmp" "${url}" >> "${OUT}/fetch.log" 2>&1; then
+      actual_sha="$(sha256sum "${destination}.tmp" | awk '{print $1}')"
+      if [ "${actual_sha}" != "${expected_sha}" ]; then
+        echo "[rootfs:${ARCH}] APK digest mismatch: ${filename}" >&2
+        exit 1
+      fi
+      mv "${destination}.tmp" "${destination}"
+      fetched=1
+      break
+    fi
+    echo "[rootfs:${ARCH}] fetch attempt ${attempt} failed: ${filename}" >&2
+    sleep 2
+  done
+  if [ "${fetched}" != "1" ]; then
+    echo "[rootfs:${ARCH}] failed to fetch pinned APK: ${filename}" >&2
+    exit 1
   fi
-  echo "[rootfs:${ARCH}] fetch attempt ${attempt} failed; retrying" >&2
-  grep -i error "${OUT}/fetch.log" | head -5 >&2 || true
-  sleep 5
-done
-if [ "${FETCH_OK}" != "1" ]; then
-  echo "[rootfs:${ARCH}] fetch failed after 3 attempts" >&2
-  tail -20 "${OUT}/fetch.log" >&2
-  exit 1
-fi
+done < "${OUT}/pinned-artifacts.tsv"
 
 # Alpine's published per-arch index rewrites noarch packages onto the concrete
 # arch and serves them from <repo>/<arch>/; there is no <repo>/noarch/ on the
@@ -192,60 +217,18 @@ fi
 apk --root "${TARGET}" info -v 2>/dev/null | sort > "${OUT}/installed.txt"
 
 echo "[rootfs:${ARCH}] emitting closure manifest"
-python3 - "${ARCH}" "${ALPINE_BRANCH}" "${CDN}" "${REPO}/${ARCH}" "${OUT}/closure.json" "${PKGS}" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
+python3 - "${PINS_JSON}" "${ARCH}" "${OUT}/closure.json" <<'PY'
+import json, pathlib, sys
 
-arch, branch, cdn, repo_dir, out_path, pkgs = sys.argv[1:7]
-repo_dir = pathlib.Path(repo_dir)
-primary = {spec.split("=", 1)[0] for spec in pkgs.split()}
-
-# Which upstream repository serves each package. Recorded per artifact so a
-# later refresh cannot silently move a package between main and community
-# without the pins showing it.
-origin = {}
-for section in ("main", "community"):
-    idx = pathlib.Path(f"/tmp/idx-{section}")
-    idx.mkdir(parents=True, exist_ok=True)
-    url = f"{cdn}/{branch}/{section}/{arch}/APKINDEX.tar.gz"
-    tarball = idx / "APKINDEX.tar.gz"
-    subprocess.run(["curl", "-sSfL", "-o", str(tarball), url], check=True)
-    subprocess.run(["tar", "-xzf", str(tarball), "-C", str(idx), "APKINDEX"], check=True)
-    text = (idx / "APKINDEX").read_text(encoding="utf-8", errors="replace")
-    for block in text.split("\n\n"):
-        fields = dict(
-            line.split(":", 1) for line in block.splitlines() if ":" in line
-        )
-        name, version = fields.get("P"), fields.get("V")
-        if name and version:
-            origin.setdefault((name, version), section)
-
-artifacts = []
-for apk in sorted(repo_dir.glob("*.apk")):
-    digest = hashlib.sha256(apk.read_bytes()).hexdigest()
-    stem = apk.name[: -len(".apk")]
-    name, _, version = stem.rpartition("-")
-    name, _, release = name.rpartition("-")
-    version = f"{release}-{version}"
-    section = origin.get((name, version))
-    if section is None:
-        print(f"cannot attribute {apk.name} to main or community", file=sys.stderr)
-        raise SystemExit(1)
-    artifacts.append({
-        "name": name,
-        "version": version,
-        "role": "primary" if name in primary else "transitive",
-        "repository": section,
-        "arch": arch,
-        "url": f"{cdn}/{branch}/{section}/{arch}/{apk.name}",
-        "sha256": digest,
-        "availability": "available",
-    })
-
+pins = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+arch, out_path = sys.argv[2:4]
+abi = {"aarch64": "arm64-v8a", "x86_64": "x86_64"}[arch]
+artifacts = pins["apk_artifacts"][abi]["artifacts"]
 pathlib.Path(out_path).write_text(
     json.dumps({"arch": arch, "artifacts": artifacts}, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
-print(f"   {len(artifacts)} artifacts")
+print(f"   {len(artifacts)} pinned artifacts")
 PY
 
 echo "[rootfs:${ARCH}] packing rootfs tarball"

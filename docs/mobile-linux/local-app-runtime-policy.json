@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "node_executable": "/usr/bin/node",
-  "next_executable": "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
   "vite_executable": "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js",
   "node_modules_mount": {
     "source": "bundled:local-app-runtime/node_modules",
@@ -18,38 +17,6 @@
     "fallback_only_when": "registry_or_network_unavailable"
   },
   "commands": {
-    "store_build": {
-      "argv": [
-        "/usr/bin/node",
-        "--max-old-space-size={build_node_old_space_size_mib}",
-        "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
-        "build"
-      ],
-      "environment": {
-        "LINGXI_APP_OUTPUT": "export",
-        "NODE_ENV": "production",
-        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
-      },
-      "network_policy": "disabled",
-      "memory_limit_policy": "physical_memory_tier",
-      "timeout_ms": 1800000
-    },
-    "full_build": {
-      "argv": [
-        "/usr/bin/node",
-        "--max-old-space-size={build_node_old_space_size_mib}",
-        "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
-        "build"
-      ],
-      "environment": {
-        "LINGXI_APP_OUTPUT": "server",
-        "NODE_ENV": "production",
-        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
-      },
-      "network_policy": "disabled",
-      "memory_limit_policy": "physical_memory_tier",
-      "timeout_ms": 1800000
-    },
     "vite_static_build": {
       "argv": [
         "/usr/bin/node",
@@ -64,26 +31,6 @@
       "network_policy": "disabled",
       "memory_limit_policy": "physical_memory_tier",
       "timeout_ms": 1800000
-    },
-    "full_start": {
-      "argv": [
-        "/usr/bin/node",
-        "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
-        "start",
-        "--hostname",
-        "127.0.0.1",
-        "--port",
-        "{loopback_port}"
-      ],
-      "environment": {
-        "LINGXI_APP_OUTPUT": "server",
-        "NODE_ENV": "production",
-        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
-      },
-      "network_policy": "loopback_only",
-      "memory_limit_bytes": 838860800,
-      "cold_start_timeout_ms": 120000,
-      "warm_start_timeout_ms": 30000
     }
   },
   "limits": {

@@ -18,9 +18,10 @@ The source and license baseline is fixed by
 | Alpine Node.js | 24.18.1-r0 | MIT |
 | Alpine npm / npx | 11.12.1-r0 | Artistic-2.0 |
 | Alpine Git | 2.54.0-r0 | GPL-2.0-only |
-| Next.js | 16.2.11 | MIT |
+| Vite | 8.2.1 | MIT |
+| Rolldown | 1.2.3 | MIT |
 | React / ReactDOM | 19.2.8 | MIT |
-| Next Linux musl SWC bindings | 16.2.11 | Apache-2.0 |
+| Rolldown Linux musl bindings | 1.2.3 | MIT |
 
 The complete GPL-3.0 text is stored at `LICENSE` in the pinned OpenMinis source.
 The complete PRoot GPL-2.0 text is stored at `COPYING` in the pinned PRoot

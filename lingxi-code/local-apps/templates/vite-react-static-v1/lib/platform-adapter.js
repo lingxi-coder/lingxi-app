@@ -54,13 +54,6 @@ const PLATFORM_ADAPTERS = {
   },
 };
 
-/**
- * Keep platform differences in one adapter layer, not page-wide branches.
- *
- * Tolerates a null/partial `context`: this runs on the first render in every
- * environment, including a plain desktop browser with no host bridge, and a
- * layout helper must never be the thing that throws.
- */
 export function getPlatformAdapter(context = getDeviceContext()) {
   const safeContext = normalizeDeviceContext(context);
   const key = `${safeContext.os}:${safeContext.formFactor}`;

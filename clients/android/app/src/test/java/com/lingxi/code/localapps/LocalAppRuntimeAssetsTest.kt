@@ -342,7 +342,7 @@ class LocalAppRuntimeAssetsTest {
          * The clause is `LocalAppsHostBroker::fixed_runtime_mount`
          * (engine-mobile/src/local_apps_host.rs:241); the prefix is
          * `AppError::NotYetAvailable`'s `#[error("not yet available: {0}")]`
-         * (local-apps/src/error.rs:64), which is what the fixed Next build's
+         * (local-apps/src/error.rs:64), which is what the fixed Vite build's
          * `.map_err(AppError::NotYetAvailable)` produces and what `fail_job`
          * writes into `last_error` verbatim. Preview start reaches the same
          * clause under `io error: ` instead; both are covered by keying on the

@@ -24,6 +24,12 @@ if [[ ! -d "${STAGED}" ]]; then
   echo "staged local-app runtime is missing: ${STAGED}" >&2
   exit 1
 fi
+for required in "${STAGED}/node_modules/vite/bin/vite.js"; do
+  if [[ ! -f "${required}" ]]; then
+    echo "staged local-app runtime is incomplete: ${required}" >&2
+    exit 1
+  fi
+done
 
 # Staging locks the tree to 0555/0444, so rm cannot descend into a previous
 # build's copy. Without the chmod, rm -rf fails and cp -R nests the new runtime

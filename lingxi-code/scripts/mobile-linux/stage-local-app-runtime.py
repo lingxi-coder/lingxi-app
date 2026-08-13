@@ -17,7 +17,6 @@ _VERIFY = importlib.util.module_from_spec(_VERIFY_SPEC)
 _VERIFY_SPEC.loader.exec_module(_VERIFY)
 
 EXPECTED_DEPENDENCIES = _VERIFY.EXPECTED_DEPENDENCIES
-EXPECTED_SWCS = _VERIFY.EXPECTED_SWCS
 EXPECTED_ROLLDOWN_BINDINGS = _VERIFY.EXPECTED_ROLLDOWN_BINDINGS
 fail = _VERIFY.fail
 load_json = _VERIFY.load_json
@@ -48,22 +47,6 @@ def validate_symlinks(root: pathlib.Path) -> None:
         except (OSError, ValueError) as exc:
             fail(f"node_modules symlink escapes or is broken: {path}: {exc}")
 
-
-def expected_swcs_for(platform: str) -> dict[str, str]:
-    """SWC packages a staged runtime must carry, and may carry only those.
-
-    iOS ships a single arm64/musl slice: devices are arm64 and the simulator on
-    Apple Silicon is too, so anything else is dead weight the build strips. One
-    Android asset tree serves every ABI in the APK, so it keeps the full pinned
-    set. Scoping this by platform rather than hardcoding arm64 keeps the iOS
-    slice from rejecting the x86_64 binding Android still requires.
-    """
-    if platform == "ios":
-        name = "@next/swc-linux-arm64-musl"
-        return {name: EXPECTED_SWCS[name]}
-    return dict(EXPECTED_SWCS)
-
-
 def expected_rolldown_bindings_for(platform: str) -> dict[str, str]:
     if platform == "ios":
         name = "@rolldown/binding-linux-arm64-musl"
@@ -73,7 +56,6 @@ def expected_rolldown_bindings_for(platform: str) -> dict[str, str]:
 
 def validate_node_modules(
     root: pathlib.Path,
-    allowed_swcs: dict[str, str],
     allowed_rolldown_bindings: dict[str, str],
 ) -> None:
     if not root.is_dir() or root.is_symlink():
@@ -87,22 +69,10 @@ def validate_node_modules(
         package = load_json(root / name / "package.json")
         if package.get("version") != version:
             fail(f"runtime node_modules did not resolve {name}@{version}")
-    allowed_swc_dirs = {name.removeprefix("@next/") for name in allowed_swcs}
-    swc_roots = [path for path in (root / "@next").iterdir()] if (root / "@next").is_dir() else []
-    for path in swc_roots:
-        if path.name.startswith("swc-") and path.name not in allowed_swc_dirs:
-            fail(f"runtime node_modules resolved an unexpected SWC package: @next/{path.name}")
-    for name, version in allowed_swcs.items():
-        package_root = root / pathlib.PurePosixPath(name)
-        package = load_json(package_root / "package.json")
-        if package.get("version") != version:
-            fail(f"runtime node_modules did not resolve {name}@{version}")
-        native_bindings = list(package_root.glob("*.node"))
-        if len(native_bindings) != 1 or native_bindings[0].is_symlink():
-            fail(f"runtime node_modules must contain one real native binding for {name}")
-    next_binary = root / "next" / "dist" / "bin" / "next"
-    if not next_binary.is_file() or next_binary.is_symlink():
-        fail("runtime node_modules is missing the fixed Next CLI")
+    if (root / "next").exists():
+        fail("runtime node_modules must not retain the Next.js package")
+    if (root / "@next").exists():
+        fail("runtime node_modules must not retain @next SWC packages")
     vite_binary = root / "vite" / "bin" / "vite.js"
     if not vite_binary.is_file() or vite_binary.is_symlink():
         fail("runtime node_modules is missing the fixed Vite CLI")
@@ -212,15 +182,14 @@ def main() -> None:
     assert_safe_output(repo, output)
 
     pins = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json")
-    template = repo / pins["next_runtime"]["template"]
+    template = repo / pins["local_app_runtime"]["template"]
     validate_apk_pins(pins, release=False, apk_dir=None)
     validate_lock(template, pins)
-    validate_source_policy(template)
+    validate_source_policy(template, pins)
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
-    allowed_swcs = expected_swcs_for(args.platform)
     allowed_rolldown_bindings = expected_rolldown_bindings_for(args.platform)
-    validate_node_modules(node_modules, allowed_swcs, allowed_rolldown_bindings)
+    validate_node_modules(node_modules, allowed_rolldown_bindings)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -258,7 +227,6 @@ def main() -> None:
             "variant": args.variant,
             "read_only": True,
             "package_lock_sha256": sha256(template / "package-lock.json"),
-            "resolved_swc": sorted(allowed_swcs),
             "resolved_rolldown_bindings": sorted(allowed_rolldown_bindings),
             "files": inventory(temporary),
         }

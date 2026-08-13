@@ -590,7 +590,7 @@
     <string name="local_apps_restore_code">Restore Code</string>
     <string name="local_apps_retry_generate">Retry Generation</string>
     <string name="local_apps_runtime_mode">Run Mode</string>
-    <string name="local_apps_runtime_next">Next.js Local Server</string>
+    <string name="local_apps_runtime_vite">Vite Local Server</string>
     <string name="local_apps_runtime_running">Running</string>
     <string name="local_apps_runtime_starting">Starting</string>
     <string name="local_apps_runtime_static">Static</string>
@@ -1114,7 +1114,7 @@
     <string name="local_apps_loading_workspace_detail">Editable source code will show once the app details return.</string>
     <string name="local_apps_loading_workspace_title">Loading workspace</string>
     <string name="local_apps_manifest_domains_title">HTTPS domains declared in the manifest</string>
-    <string name="local_apps_mode_direct">Direct · Next local service</string>
+    <string name="local_apps_mode_direct">Direct · Vite local service</string>
     <string name="local_apps_mode_direct_detail">Uses a production build; running instances are governed by the device\'s memory quota.</string>
     <string name="local_apps_mode_play">Play · Static app</string>
     <string name="local_apps_mode_play_detail">Uses a verified static export build.</string>

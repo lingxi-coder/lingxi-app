@@ -590,7 +590,7 @@
     <string name="local_apps_restore_code">コードを復元</string>
     <string name="local_apps_retry_generate">生成を再試行</string>
     <string name="local_apps_runtime_mode">実行モード</string>
-    <string name="local_apps_runtime_next">Next ローカルサービス</string>
+    <string name="local_apps_runtime_vite">Vite ローカルサービス</string>
     <string name="local_apps_runtime_running">実行中</string>
     <string name="local_apps_runtime_starting">起動中</string>
     <string name="local_apps_runtime_static">静的実行</string>
@@ -1114,7 +1114,7 @@
     <string name="local_apps_loading_workspace_detail">アプリの詳細が返却されると、編集可能なソースコードが表示されます。</string>
     <string name="local_apps_loading_workspace_title">ワークスペースを読み込み中</string>
     <string name="local_apps_manifest_domains_title">マニフェストで宣言された HTTPS ドメイン</string>
-    <string name="local_apps_mode_direct">Direct · Next ローカルサービス</string>
+    <string name="local_apps_mode_direct">Direct · Vite ローカルサービス</string>
     <string name="local_apps_mode_direct_detail">プロダクションビルドを使用し、実行インスタンスはデバイスのメモリクォータによって制御されます。</string>
     <string name="local_apps_mode_play">Play · 静的アプリ</string>
     <string name="local_apps_mode_play_detail">検証済みの静的エクスポート成果物を使用します。</string>

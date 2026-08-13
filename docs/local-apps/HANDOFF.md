@@ -56,14 +56,14 @@ The important ownership boundary is:
 | Workflow registration/tests | `lingxi-code/tools/workflow/src/builtins.rs` | Built-in registration and real QuickJS regression tests |
 | MCP surface | `lingxi-code/apps/engine-mobile/src/local_apps_mcp.rs` | Fixed in-process `local_apps` tool catalog and input validation |
 | Host broker | `lingxi-code/apps/engine-mobile/src/local_apps_host.rs` | Runtime, build coordination, logs, checkpoints, native bridge permissions, UI inspection/actions |
-| Builder | `lingxi-code/apps/engine-mobile/src/local_apps_build.rs` | Target detection, locked files, read-only dependency projection, offline Next/Vite builds |
+| Builder | `lingxi-code/apps/engine-mobile/src/local_apps_build.rs` | Vite validation, locked files, read-only dependency projection, offline builds |
 | Mobile composition | `lingxi-code/apps/engine-mobile/src/lib.rs`, `host.rs`, `workflow_support.rs` | Registers the workflow, MCP transport, Shell, runtime, and FFI seams |
 | Shared domain | `lingxi-code/local-apps/src/` | Manifest, app/runtime records, SQLite data, permissions, mailbox, atomic storage, Git checkpoints |
 | Wire protocol | `lingxi-code/client-protocol/src/local_apps.rs`, `clients/shared/src/protocol.ts` | DTOs, commands, events, compatibility snapshots |
 | iOS client | `clients/ios/Sources/LocalApps/` | SwiftUI library/detail views, store, WKWebView bridge and structured UI control |
 | Android client | `clients/android/app/src/main/java/com/lingxi/code/localapps/` | Compose screens, view model, WebView bridge and structured UI control |
-| Templates | `lingxi-code/local-apps/templates/` | Verified Next compatibility template and Vite offline fallback/locked integration files |
-| Runtime supply chain | `docs/mobile-linux/local-app-runtime-*.json`, `lingxi-code/scripts/mobile-linux/` | Pinned Node/Next/Vite runtime, SBOM, memory/network policy and verification |
+| Templates | `lingxi-code/local-apps/templates/` | Verified Vite offline fallback and locked integration files |
+| Runtime supply chain | `docs/mobile-linux/local-app-runtime-*.json`, `lingxi-code/scripts/mobile-linux/` | Pinned Node/Vite runtime, SBOM, memory/network policy and verification |
 
 ## 4. Product flow and state
 
@@ -79,7 +79,7 @@ The persisted workflow is intentionally small: `Draft` or `Ready`. Fine-grained 
 
 ### Scaffold and dependencies
 
-The normal new-app path is the official Vite CLI in a newly created, truly empty staging directory under the app workspace:
+When the local-app Node/npm toolchain is available, the normal new-app path is the official Vite CLI in a newly created, truly empty staging directory under the app workspace:
 
 ```bash
 npm create vite@latest . -- --template react --no-interactive
@@ -87,16 +87,21 @@ npm create vite@latest . -- --template react --no-interactive
 
 Use `react-ts` only when TypeScript was explicitly confirmed. Never target the workspace root directly because it already contains host-owned `.lingxi/` metadata.
 
-If registry/network access is unavailable, the agent may use only the repository-verified `.lingxi/vite-fallback/` contents and must report `scaffold_mode=offline-fallback` plus the reason. Other CLI failures stay failures.
+If the toolchain or registry/network access is unavailable, the agent may use only the repository-verified `.lingxi/vite-fallback/` contents and must report `scaffold_mode=offline-fallback` plus the reason. Other CLI failures stay failures.
 
-Package operations use the existing Mobile Linux Shell/Bash tool:
+When the current local-app Node/npm toolchain is available, package operations
+use the existing Mobile Linux Shell/Bash tool:
 
 - fresh scaffold: `npm install`
 - confirmed additions: `npm install -- <exact specs>`
 - confirmed removals: `npm uninstall -- <exact specs>`
 - lockfile reconciliation: `npm ci`
 
-There is deliberately no `manage_dependencies` MCP tool. npm already exists inside the mobile Linux environment. `--prefer-offline` can still access the network and therefore still requires approval; only npm's true `--offline` mode is classified as no-network.
+There is deliberately no `manage_dependencies` MCP tool. npm operations are
+allowed only after the current workflow reports the toolchain available;
+otherwise they remain explicit follow-up work. `--prefer-offline` can still
+access the network and therefore still requires approval; only npm's true
+`--offline` mode is classified as no-network.
 
 Tailwind, Motion, and Lucide are normal per-app dependencies when proposed and confirmed. They are not implicit defaults. ImageGen is conditional: use it for original raster assets when installed/configured; otherwise offer setup once or continue without it.
 
@@ -104,15 +109,13 @@ Tailwind, Motion, and Lucide are normal per-app dependencies when proposed and c
 
 `mcp__local_apps__build` performs the production build. The builder:
 
-- detects Next from `next.config.mjs` and Vite from `vite.config.*`;
-- rejects workspaces containing both target configurations;
+- requires Vite and rejects the retired `next.config.mjs` marker;
 - defaults an otherwise empty workspace to Vite;
 - runs with `NetworkPolicy::Disabled` and a 30-minute timeout;
 - selects a 2/3/4 GiB process budget from physical memory and assigns 75% to Node old space;
 - rejects a symlinked `node_modules` directory;
 - mounts application `node_modules` read-only and resolves it before the shared runtime modules;
 - uses the app-local `node_modules/vite/bin/vite.js` when it is a regular file, otherwise the verified shared Vite CLI;
-- continues to use the verified shared Next CLI;
 - writes build output outside the editable workspace.
 
 After a successful initial build, the workflow starts the runtime. After a repair build, it restarts the runtime and passes the new non-empty `preview_url` into the next verification round. The workflow rejects `ok=true` build results that omit the preview URL.
@@ -233,7 +236,7 @@ The intended acceptance matrix is:
 | --- | --- |
 | Workflow | Structured design/build/verification outputs; no repair after first success; repair → rebuild → restart → reverify; repaired URL propagated; successful build without URL rejected |
 | Shell approval | npm create/init/install aliases detected; `--prefer-offline` still gated; `--offline` not gated |
-| Builder | Next/Vite target detection; app-local Vite preference; shared fallback; node_modules never copied into source; memory budgets |
+| Builder | Vite-only validation; app-local Vite preference; shared fallback; node_modules never copied into source; memory budgets |
 | Checkpoint restore | changed lock requires `npm ci`; no-lock target removes stale dependencies and requires `npm install` |
 | Shared domain | manifest validation, atomic storage, runtime transitions, data bounds, checkpoint behavior |
 | Protocol | command/event snapshots and version guard |
@@ -294,7 +297,7 @@ Do not convert these gaps into claims of completed native QA.
 ### Build fails
 
 - Read the bounded build log with `read_logs`.
-- Confirm exactly one of Next or Vite config is present.
+- Confirm a Vite config is present and no retired Next config remains.
 - Confirm `node_modules` is a real directory, not a symlink.
 - Confirm the app-local Vite CLI exists when the installed Vite version should be used.
 - Do not solve a production build failure by enabling network.

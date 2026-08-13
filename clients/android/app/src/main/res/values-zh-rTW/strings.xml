@@ -590,7 +590,7 @@
     <string name="local_apps_restore_code">恢復程式碼</string>
     <string name="local_apps_retry_generate">重試生成</string>
     <string name="local_apps_runtime_mode">執行模式</string>
-    <string name="local_apps_runtime_next">Next 本地服務</string>
+    <string name="local_apps_runtime_vite">Vite 本地服務</string>
     <string name="local_apps_runtime_running">執行中</string>
     <string name="local_apps_runtime_starting">正在啟動</string>
     <string name="local_apps_runtime_static">靜態執行</string>
@@ -1114,7 +1114,7 @@
     <string name="local_apps_loading_workspace_detail">應用詳情返回後會顯示可編輯原始碼。</string>
     <string name="local_apps_loading_workspace_title">正在載入工作區</string>
     <string name="local_apps_manifest_domains_title">清單宣告的 HTTPS 域名</string>
-    <string name="local_apps_mode_direct">Direct · Next 本地服務</string>
+    <string name="local_apps_mode_direct">Direct · Vite 本地服務</string>
     <string name="local_apps_mode_direct_detail">使用生產建置，執行例項受裝置記憶體配額控制。</string>
     <string name="local_apps_mode_play">Play · 靜態應用</string>
     <string name="local_apps_mode_play_detail">使用已校驗的靜態匯出產物。</string>

@@ -12,7 +12,7 @@ The source baseline is immutable and machine-readable in
 - talloc 2.4.2
 - Base MobileLinux rootfs: Alpine 3.21.3 for `arm64-v8a` and `x86_64`
 - Local-app rootfs: Alpine 3.24.1, Node `24.18.1-r0`, Git `2.54.0-r0`,
-  npm `11.12.1-r0`, Next `16.2.11`, and React/ReactDOM `19.2.8`
+  npm `11.12.1-r0`, Vite `8.2.1`, Rolldown `1.2.3`, and React/ReactDOM `19.2.8`
 
 Android keeps one distribution dimension:
 
@@ -57,9 +57,10 @@ scripts through `/proc/self/exe`. `release_ready` remains false until the same
 closure is installed and checked on an x86_64 or qemu-backed host.
 
 The staging scripts accept only a host-prepared `node_modules` tree containing
-the exact Linux musl SWC bindings for ARM64 and x86_64. They reject package
-manager binaries and escaping symlinks, emit a per-file SHA-256 manifest, and
-stage immutable files for the runtime's read-only mount.
+the exact Linux musl Rolldown bindings for ARM64 and x86_64. They reject
+package manager binaries, escaping symlinks, and any top-level `next` or
+`@next` drift, emit a per-file SHA-256 manifest, and stage immutable files for
+the runtime's read-only mount.
 
 Native and rootfs outputs are generated under gitignored build/output
 directories. Reference-tree `.so`, loader, and rootfs binaries are never copied

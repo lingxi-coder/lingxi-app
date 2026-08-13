@@ -108,10 +108,12 @@ targets:
             "${SRCROOT}/scripts/stage-local-app-runtime.sh" \
               --variant "${VARIANT}" \
               --node-modules "${LINGXI_LOCAL_APP_NODE_MODULES}"
-          elif [[ "${CONFIGURATION}" == *Release ]] && [ ! -d "${STAGED}" ]; then
-            echo "error: LINGXI_LOCAL_APP_NODE_MODULES is required for release builds"
-            exit 1
           fi
+          "${SRCROOT}/scripts/validate-local-app-build-assets.sh" \
+            --configuration "${CONFIGURATION}" \
+            --platform "${PLATFORM_NAME}" \
+            --staged "${STAGED}" \
+            --rootfs-manifest "${SRCROOT}/build/linux-runtime/openminis/manifest.json"
           if [ -d "${STAGED}" ]; then
             DESTINATION="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/local-app-runtime"
             # The removal-and-copy lives in a script so that
@@ -121,7 +123,7 @@ targets:
               --staged "${STAGED}" \
               --destination "${DESTINATION}"
           else
-            echo "warning: Local-app runtime is not staged; generation is unavailable in this debug build"
+            echo "warning: Local-app runtime is not staged; generation is unavailable in this Store debug build"
           fi
       - name: Stage Alpine rootfs
         basedOnDependencyAnalysis: false

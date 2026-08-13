@@ -4,16 +4,12 @@
 # read from docs/mobile-linux/local-app-runtime-pins.json.
 #
 # This is the step the vendored OpenMinis `prepare_alpine_rootfs.sh` never had:
-# it resolves the recursive APK closure, installs it OFFLINE into a digest-
-# verified minirootfs. The output tarball is what should be handed to
+# it installs the committed, hashed APK closure OFFLINE into a digest-verified
+# minirootfs. The output tarball is what should be handed to
 # `fakefsify`, in place of the bare minirootfs.
 #
 # Usage:
-#   build-local-app-rootfs.sh --arch <aarch64|x86_64> [--output <dir>] [--emit-pins]
-#
-# With --emit-pins the resolved closure is written back into the pins file
-# instead of being checked against it. That is the only supported way to refresh
-# the closure: hand-editing the digests is what the verifier exists to catch.
+#   build-local-app-rootfs.sh --arch <aarch64|x86_64> [--output <dir>]
 #
 set -euo pipefail
 
@@ -32,7 +28,6 @@ BUILDER_IMAGE_X86_64="docker.io/library/alpine:3.24@sha256:79ff19e9084a00eece421
 
 ARCH=""
 OUTPUT=""
-EMIT_PINS=0
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
 
 usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -41,7 +36,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCH="${2:-}"; shift 2 ;;
     --output) OUTPUT="${2:-}"; shift 2 ;;
-    --emit-pins) EMIT_PINS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -92,6 +86,7 @@ mkdir -p "${OUTPUT}"
   -e LINGXI_ROOTFS_SHA256="${ROOTFS_SHA}" \
   -e LINGXI_PACKAGES="${PACKAGES}" \
   -v "${INNER}:/inner.sh:ro" \
+  -v "${PINS}:/pins.json:ro" \
   -v "${OUTPUT}:/out" \
   "${BUILDER_IMAGE}" \
   sh -c 'test "$(uname -m)" = "'"${ARCH}"'" || {
@@ -117,14 +112,8 @@ for apk in "${OUTPUT}/${ARCH}/repo/${ARCH}"/*.apk; do
 done
 echo "[rootfs] release apk-dir view: ${OUTPUT}/apk-closure (--apk-dir)"
 
-if [[ "${EMIT_PINS}" == "1" ]]; then
-  python3 "${SCRIPT_DIR}/update-local-app-pins.py" \
-    --pins "${PINS}" --arch "${ARCH}" --closure "${CLOSURE}"
-  echo "[rootfs] pins updated for ${ARCH}"
-else
-  python3 "${SCRIPT_DIR}/update-local-app-pins.py" \
-    --pins "${PINS}" --arch "${ARCH}" --closure "${CLOSURE}" --check
-  echo "[rootfs] closure matches the pins for ${ARCH}"
-fi
+python3 "${SCRIPT_DIR}/update-local-app-pins.py" \
+  --pins "${PINS}" --arch "${ARCH}" --closure "${CLOSURE}" --check
+echo "[rootfs] closure matches the pins for ${ARCH}"
 
 echo "[rootfs] output: ${OUTPUT}/${ARCH}/rootfs.tar.gz"

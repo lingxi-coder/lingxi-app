@@ -57,7 +57,7 @@ class LocalAppsViewModel(
     internal val _uiState = MutableStateFlow(
         LocalAppsUiState(
             distributionMode = if (distributionChannel == "full") {
-                LocalAppRuntimeMode.NextProduction
+                LocalAppRuntimeMode.ViteStatic
             } else {
                 LocalAppRuntimeMode.StaticExport
             },
@@ -780,7 +780,9 @@ private fun AppRuntimeDetailsDto.toUiRuntime(): LocalAppRuntime = LocalAppRuntim
     state = state.toUiRuntime(),
     mode = when (mode) {
         AppRuntimeModeDto.STATIC_EXPORT -> LocalAppRuntimeMode.StaticExport
-        AppRuntimeModeDto.NEXT_PRODUCTION -> LocalAppRuntimeMode.NextProduction
+        // Old persisted runtimes are migrated by the engine on their next
+        // start. Never project that legacy wire value back into current UI.
+        AppRuntimeModeDto.NEXT_PRODUCTION -> LocalAppRuntimeMode.ViteStatic
         null -> null
     },
     url = loopbackUrl,

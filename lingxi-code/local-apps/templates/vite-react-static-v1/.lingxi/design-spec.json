@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "template_id": "next-static-v1",
+  "template_id": "vite-react-static-v1",
   "template_version": 1,
   "answers": {},
   "legacy_fields": {}

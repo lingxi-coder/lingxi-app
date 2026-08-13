@@ -4,7 +4,6 @@
 //! WebView handles.  This broker is the single trust boundary for those
 //! operations and is also used by the native client command surface.
 
-use crate::local_apps_build::{detect_build_target, LocalAppBuildTarget};
 use crate::local_apps_mcp::LocalAppsMcpHost;
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
@@ -26,21 +25,17 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{sleep, timeout, Duration};
-use traits::{
-    LinuxCommandRequest, LinuxProcessHandle, MobileLinuxRuntime, MobileLinuxTaskSnapshot,
-    MobileLinuxTaskStatus, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
-};
+use traits::{MobileLinuxRuntime, MountPurpose, MountSpec};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const MAX_HTTP_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
-const FULL_RUNTIME_WATCH_POLL: Duration = Duration::from_millis(250);
 const MAX_NETWORK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const STATIC_ACCEPT_RETRY: Duration = Duration::from_millis(50);
 /// Consecutive `accept()` failures that retire the static server.  A burst of
@@ -53,7 +48,6 @@ const STATIC_ACCEPT_ERROR_LIMIT: u32 = 100;
 /// every shipped platform's ephemeral floor.
 const APP_PORT_WINDOW_FIRST: u16 = 20_000;
 const APP_PORT_WINDOW_LEN: u16 = 12_000;
-const LOCAL_APP_MEMORY_LIMIT_MB: u32 = 800;
 const LOCAL_APP_BRIDGE_CONTROL_BYTES: usize = 64 * 1024;
 const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
 const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
@@ -67,16 +61,6 @@ struct UiResolution {
 
 enum RuntimeHandle {
     Static { shutdown: oneshot::Sender<()> },
-    Full { process: LinuxProcessHandle },
-}
-
-impl RuntimeHandle {
-    fn process(&self) -> Option<&LinuxProcessHandle> {
-        match self {
-            Self::Static { .. } => None,
-            Self::Full { process } => Some(process),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,7 +83,6 @@ struct RuntimeEntry {
     state: RuntimeEntryState,
     last_used: u64,
     generation: u64,
-    uses_full_runtime: bool,
 }
 
 /// Releases a `Starting` reservation whose owner never resolved it.
@@ -358,12 +341,18 @@ pub(crate) fn remove_app_session_file(
     std::fs::remove_file(path).is_ok()
 }
 
-pub(crate) fn create_next_step_guidance(shell_available: Option<bool>) -> String {
-    match shell_available {
+pub(crate) fn create_next_step_guidance(npm_toolchain_available: Option<bool>) -> String {
+    match npm_toolchain_available {
         Some(true) => "Run local-app-build: Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript). Dependencies use the existing Shell for npm. Generate edits src/ and injects the bridge/platform adapter, then call build and preview via manage_runtime.".into(),
-        Some(false) => "Run local-app-build: Shell is unavailable, so reuse existing source if present or the repository-verified .lingxi/vite-fallback when the source root is still empty, report the Shell-unavailable reason, avoid npm dependency operations, then call build and preview via manage_runtime.".into(),
-        None => "Run local-app-build: If Shell is available, Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript); if Shell is unavailable, reuse existing source or the repository-verified .lingxi/vite-fallback and report that reason. Use npm dependency commands only when Shell is available, then call build and preview via manage_runtime.".into(),
+        Some(false) => "Run local-app-build: The local-app Node/npm toolchain is unavailable, so reuse existing source if present or the repository-verified .lingxi/vite-fallback when the source root is still empty, report the toolchain-unavailable reason, avoid npm dependency operations, then call build and preview via manage_runtime.".into(),
+        None => "Run local-app-build: If the local-app Node/npm toolchain is available, Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript); otherwise reuse existing source or the repository-verified .lingxi/vite-fallback and report the toolchain-unavailable reason. Use npm dependency commands only when that toolchain is available, then call build and preview via manage_runtime.".into(),
     }
+}
+
+struct LocalAppsRuntimeConfiguration {
+    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    physical_memory_bytes: u64,
+    runtime_root: Option<PathBuf>,
 }
 
 /// Profile-scoped broker.  The service is attached after its durable load has
@@ -371,14 +360,11 @@ pub(crate) fn create_next_step_guidance(shell_available: Option<bool>) -> String
 pub(crate) struct LocalAppsHostBroker {
     root: PathBuf,
     event_sink: Arc<dyn ClientEventSink>,
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
     /// Whether the current connection actually exposes the model-facing Shell
     /// tool. Kept separate from `mobile_linux`: an unavailable runtime object
     /// may still be present (for example an iOS simulator stub).
     shell_available: AtomicBool,
-    physical_memory_bytes: u64,
-    full_runtime: bool,
-    runtime_root: Option<PathBuf>,
     service: OnceLock<Arc<AppService>>,
     /// Set once at profile load (same call site as `attach_service`), so the
     /// broker's `llm.chat` bridge operation reaches the live model.
@@ -468,24 +454,17 @@ impl LocalAppsHostBroker {
         root: PathBuf,
         event_sink: Arc<dyn ClientEventSink>,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
-        full_runtime: bool,
+        _full_runtime: bool,
         runtime_root: Option<PathBuf>,
     ) -> Arc<Self> {
-        Self::new_with_physical_memory(
-            root,
-            event_sink,
-            mobile_linux,
-            full_runtime,
-            runtime_root,
-            0,
-        )
+        Self::new_with_physical_memory(root, event_sink, mobile_linux, false, runtime_root, 0)
     }
 
     pub(crate) fn new_with_physical_memory(
         root: PathBuf,
         event_sink: Arc<dyn ClientEventSink>,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
-        full_runtime: bool,
+        _full_runtime: bool,
         runtime_root: Option<PathBuf>,
         physical_memory_bytes: u64,
     ) -> Arc<Self> {
@@ -493,10 +472,11 @@ impl LocalAppsHostBroker {
             root,
             event_sink,
             shell_available: AtomicBool::new(mobile_linux.is_some()),
-            mobile_linux,
-            physical_memory_bytes,
-            full_runtime,
-            runtime_root,
+            runtime_configuration: RwLock::new(LocalAppsRuntimeConfiguration {
+                mobile_linux,
+                physical_memory_bytes,
+                runtime_root,
+            }),
             service: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
@@ -540,6 +520,34 @@ impl LocalAppsHostBroker {
         self.shell_available.load(Ordering::Acquire)
     }
 
+    pub(crate) fn refresh_runtime_configuration(
+        &self,
+        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+        runtime_root: Option<PathBuf>,
+        physical_memory_bytes: u64,
+    ) {
+        *self
+            .runtime_configuration
+            .write()
+            .expect("local-app runtime configuration poisoned") = LocalAppsRuntimeConfiguration {
+            mobile_linux,
+            physical_memory_bytes,
+            runtime_root,
+        };
+    }
+
+    fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
+        self.runtime_configuration
+            .read()
+            .expect("local-app runtime configuration poisoned")
+            .mobile_linux
+            .clone()
+    }
+
+    fn npm_toolchain_available(&self) -> bool {
+        self.shell_available() && self.fixed_runtime_mount().is_ok()
+    }
+
     pub(crate) fn attach_llm(
         &self,
         llm: Arc<crate::local_apps_profile::SharedLlm>,
@@ -552,10 +560,6 @@ impl LocalAppsHostBroker {
         device: Arc<crate::local_apps_device::SharedDeviceCapabilities>,
     ) -> Result<(), Arc<crate::local_apps_device::SharedDeviceCapabilities>> {
         self.device.set(device)
-    }
-
-    pub(crate) fn full_runtime_enabled(&self) -> bool {
-        self.full_runtime
     }
 
     pub(crate) async fn reset_permissions(&self, app_id: &str) -> Result<(), String> {
@@ -586,19 +590,22 @@ impl LocalAppsHostBroker {
     }
 
     pub(crate) fn physical_memory_bytes(&self) -> u64 {
-        self.physical_memory_bytes
+        self.runtime_configuration
+            .read()
+            .expect("local-app runtime configuration poisoned")
+            .physical_memory_bytes
     }
 
     pub(crate) fn fixed_runtime_mount(&self) -> Result<MountSpec, String> {
         let root = self
+            .runtime_configuration
+            .read()
+            .expect("local-app runtime configuration poisoned")
             .runtime_root
-            .as_ref()
-            .filter(|path| {
-                path.join("node_modules/next/dist/bin/next").is_file()
-                    && path.join("node_modules/vite/bin/vite.js").is_file()
-            })
+            .clone()
+            .filter(|path| path.join("node_modules/vite/bin/vite.js").is_file())
             .ok_or_else(|| {
-                "verified local-app Node runtime is unavailable or incomplete; stage the combined Next/Vite local-app-runtime first".to_string()
+                "verified local-app Node runtime is unavailable or incomplete; stage the Vite local-app-runtime first".to_string()
             })?;
         Ok(MountSpec {
             host_path: root.join("node_modules"),
@@ -1138,18 +1145,10 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
-        let layout = self.layout(app_id)?;
-        let uses_full_runtime = self.full_runtime
-            && matches!(
-                detect_build_target(&layout).map_err(|error| error.to_string())?,
-                LocalAppBuildTarget::NextStaticV1
-            );
         loop {
             let access_tick = self.next_request_id.fetch_add(1, Ordering::Relaxed);
             let mut wait_for_start = None;
-            let mut inspect_full_runtime = None;
             let mut return_running = false;
-            let mut victim = None;
             let mut reserved_generation = None;
             {
                 let mut runtimes = self.runtimes.lock().await;
@@ -1159,21 +1158,11 @@ impl LocalAppsHostBroker {
                         RuntimeEntryState::Starting { gate } => {
                             wait_for_start = Some(gate.subscribe());
                         }
-                        RuntimeEntryState::Running { handle } => {
-                            if let Some(process) = handle.process() {
-                                inspect_full_runtime = Some((entry.generation, process.id.clone()));
-                            } else {
-                                return_running = true;
-                            }
+                        RuntimeEntryState::Running { .. } => {
+                            return_running = true;
                         }
                     }
-                } else if !uses_full_runtime
-                    || runtimes
-                        .values()
-                        .filter(|entry| entry.uses_full_runtime)
-                        .count()
-                        < runtime_instance_quota(self.physical_memory_bytes)
-                {
+                } else {
                     let generation = self.next_request_id.fetch_add(1, Ordering::Relaxed);
                     let (gate, _) = watch::channel(RuntimeStartStatus::Pending);
                     runtimes.insert(
@@ -1182,20 +1171,9 @@ impl LocalAppsHostBroker {
                             state: RuntimeEntryState::Starting { gate },
                             last_used: access_tick,
                             generation,
-                            uses_full_runtime,
                         },
                     );
                     reserved_generation = Some(generation);
-                } else {
-                    victim = runtimes
-                        .iter()
-                        .filter(|(candidate, entry)| {
-                            *candidate != app_id
-                                && entry.uses_full_runtime
-                                && matches!(entry.state, RuntimeEntryState::Running { .. })
-                        })
-                        .min_by_key(|(_, entry)| entry.last_used)
-                        .map(|(candidate, _)| candidate.clone());
                 }
             }
             if let Some(receiver) = wait_for_start {
@@ -1212,38 +1190,10 @@ impl LocalAppsHostBroker {
                     "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}"))
                 }));
             }
-            if let Some((generation, process_id)) = inspect_full_runtime {
-                if let Some(detail) = self
-                    .inspect_full_runtime_terminal_detail(&process_id)
-                    .await?
-                {
-                    self.reconcile_full_runtime_exit(app_id, generation, &process_id, detail)
-                        .await?;
-                    continue;
-                }
-                let runtime = service
-                    .runtime_record(app_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                return Ok(json!({
-                    "app_id": app_id,
-                    "state": runtime.state,
-                    "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}"))
-                }));
-            }
-            if let Some(victim) = victim {
-                self.stop_runtime(&victim).await?;
-                continue;
-            }
             let Some(generation) = reserved_generation else {
-                return Err(format!(
-                    "runtime quota ({}) is temporarily saturated by apps that are still starting; retry shortly",
-                    runtime_instance_quota(self.physical_memory_bytes)
-                ));
+                return Err("runtime start reservation disappeared before completion".into());
             };
-            return self
-                .start_reserved_runtime(app_id, generation, uses_full_runtime)
-                .await;
+            return self.start_reserved_runtime(app_id, generation).await;
         }
     }
 
@@ -1278,57 +1228,25 @@ impl LocalAppsHostBroker {
         }
     }
 
-    async fn start_reserved_runtime(
-        &self,
-        app_id: &str,
-        generation: u64,
-        uses_full_runtime: bool,
-    ) -> Result<Value, String> {
+    async fn start_reserved_runtime(&self, app_id: &str, generation: u64) -> Result<Value, String> {
         let _reservation = RuntimeReservation {
             runtimes: Arc::clone(&self.runtimes),
             app_id: app_id.to_string(),
             generation,
         };
         let service = self.service()?;
-        let runtime_mount = if uses_full_runtime {
-            if self.mobile_linux.is_none() {
-                return self
-                    .fail_reserved_runtime_start(
-                        app_id,
-                        generation,
-                        None,
-                        "Full local-app runtime requires the mobile Linux runtime".into(),
-                    )
-                    .await;
-            }
-            match self.fixed_runtime_mount() {
-                Ok(mount) => Some(mount),
-                Err(error) => {
-                    return self
-                        .fail_reserved_runtime_start(app_id, generation, None, error)
-                        .await;
-                }
-            }
-        } else {
-            None
-        };
-        let static_root = if uses_full_runtime {
-            None
-        } else {
-            let layout = self.layout(app_id)?;
-            let root = layout.root().join(layout.build_rel(false)).join("out");
-            if !root.join("index.html").is_file() {
-                return self
-                    .fail_reserved_runtime_start(
-                        app_id,
-                        generation,
-                        None,
-                        "static build output is missing index.html; generate the app first".into(),
-                    )
-                    .await;
-            }
-            Some(root)
-        };
+        let layout = self.layout(app_id)?;
+        let static_root = layout.root().join(layout.build_rel(false)).join("out");
+        if !static_root.join("index.html").is_file() {
+            return self
+                .fail_reserved_runtime_start(
+                    app_id,
+                    generation,
+                    None,
+                    "static build output is missing index.html; generate the app first".into(),
+                )
+                .await;
+        }
         let current = service
             .runtime_record(app_id)
             .await
@@ -1374,32 +1292,8 @@ impl LocalAppsHostBroker {
                     .await;
             }
         };
-        // On the full runtime that listener is only a PROBE — the Next process
-        // binds the port itself — so it is released HERE rather than just
-        // before the spawn.  Closing a listening socket is not instantaneous:
-        // for a millisecond or so afterwards the kernel still answers a rebind
-        // of that same port with EADDRINUSE while NOTHING holds it (`lsof
-        // -iTCP:<port>` and `netstat -an` both empty at the moment of the
-        // refusal; the identical bind succeeds on its next attempt 1.2-2.8 ms
-        // later).  Whoever takes the port next must not land inside that
-        // window, and everything between here and the spawn — two record
-        // persistences, ~11 ms measured — is the distance that buys.  Releasing
-        // early costs nothing: on this path nothing ever reads the listener.
-        let static_listener = if uses_full_runtime {
-            drop(listener);
-            None
-        } else {
-            Some(listener)
-        };
         if let Err(error) = service
-            .set_runtime_mode(
-                app_id,
-                if uses_full_runtime {
-                    AppRuntimeMode::NextProduction
-                } else {
-                    AppRuntimeMode::StaticExport
-                },
-            )
+            .set_runtime_mode(app_id, AppRuntimeMode::StaticExport)
             .await
         {
             return self
@@ -1440,123 +1334,16 @@ impl LocalAppsHostBroker {
             lease.commit();
         }
 
-        let handle = if uses_full_runtime {
-            let runtime = self.mobile_linux.as_ref().ok_or_else(|| {
-                "Full local-app runtime requires the mobile Linux runtime".to_string()
-            })?;
-            let layout = self.layout(app_id)?;
-            let workspace = layout.root().join(layout.build_rel(true));
-            let workspace_guest = format!("/var/lingxi/local-app-build/{app_id}/full");
-            let app_node_modules_projection = match app_node_modules_projection(&layout, app_id) {
-                Ok(projection) => projection,
-                Err(error) => {
-                    return self
-                        .fail_reserved_runtime_start(app_id, generation, Some(port), error)
-                        .await;
-                }
-            };
-            let mut environment = [
-                ("LINGXI_APP_OUTPUT".into(), "server".into()),
-                (
-                    "NODE_PATH".into(),
-                    app_node_modules_projection
-                        .as_ref()
-                        .map(|mount| {
-                            format!(
-                                "{}:/opt/lingxi/local-app-runtime/node_modules",
-                                mount.guest_path
-                            )
-                        })
-                        .unwrap_or_else(|| "/opt/lingxi/local-app-runtime/node_modules".into()),
-                ),
-                ("NODE_ENV".into(), "production".into()),
-            ]
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>();
-            let request = LinuxCommandRequest {
-                command: "/usr/bin/node".into(),
-                args: vec![
-                    "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next".into(),
-                    "start".into(),
-                    "--hostname".into(),
-                    "127.0.0.1".into(),
-                    "--port".into(),
-                    port.to_string(),
-                ],
-                cwd: Some(workspace_guest.clone()),
-                env: {
-                    if let Some(mount) = &app_node_modules_projection {
-                        environment
-                            .insert("LINGXI_APP_NODE_MODULES".into(), mount.guest_path.clone());
-                    }
-                    environment
-                },
-                stdin: None,
-                timeout_ms: None,
-                network: NetworkPolicy::LoopbackOnly,
-                resource_limits: ResourceLimits {
-                    max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
-                    ..ResourceLimits::default()
-                },
-                mounts: {
-                    let mut mounts = vec![
-                        MountSpec {
-                            host_path: workspace,
-                            guest_path: workspace_guest,
-                            read_only: false,
-                            purpose: MountPurpose::LocalAppBuild,
-                        },
-                        runtime_mount.expect("full runtime mount was preflighted"),
-                    ];
-                    if let Some(mount) = app_node_modules_projection {
-                        mounts.push(mount);
-                    }
-                    mounts
-                },
-            };
-            let process = match runtime.spawn_background(request).await {
-                Ok(process) => process,
-                Err(error) => {
-                    let detail = format!("start fixed Next production server: {error}");
-                    return self
-                        .fail_reserved_runtime_start(app_id, generation, Some(port), detail)
-                        .await;
-                }
-            };
-            if let Err(error) = process.enforcement.ensure_for(
-                NetworkPolicy::LoopbackOnly,
-                ResourceLimits {
-                    max_memory_mb: Some(LOCAL_APP_MEMORY_LIMIT_MB),
-                    ..ResourceLimits::default()
-                },
-            ) {
-                let _ = runtime.kill(&process).await;
-                return self
-                    .fail_reserved_runtime_start(app_id, generation, Some(port), error.to_string())
-                    .await;
-            }
-            if let Err(error) = wait_for_loopback(port).await {
-                let _ = runtime.kill(&process).await;
-                return self
-                    .fail_reserved_runtime_start(app_id, generation, Some(port), error)
-                    .await;
-            }
-            RuntimeHandle::Full { process }
-        } else {
-            let (shutdown, receiver) = oneshot::channel();
-            // The entry outlives any single `MobileEngineHandle`'s runtime; so
-            // must the task that serves it, or a start reports `running`
-            // against a socket that died with the previous engine.
-            self.spawn_static_server(
-                service.clone(),
-                app_id.to_string(),
-                generation,
-                static_listener.expect("the static path keeps its probe listener"),
-                static_root.expect("static output was preflighted"),
-                receiver,
-            );
-            RuntimeHandle::Static { shutdown }
-        };
+        let (shutdown, receiver) = oneshot::channel();
+        self.spawn_static_server(
+            service.clone(),
+            app_id.to_string(),
+            generation,
+            listener,
+            static_root,
+            receiver,
+        );
+        let handle = RuntimeHandle::Static { shutdown };
         if let Err(error) = service
             .update_runtime_record(app_id, AppRuntimeState::Running, Some(port), None, None)
             .await
@@ -1572,10 +1359,6 @@ impl LocalAppsHostBroker {
                 )
                 .await;
         }
-        let watch_process = match &handle {
-            RuntimeHandle::Full { process } => Some(process.clone()),
-            RuntimeHandle::Static { .. } => None,
-        };
         let gate = {
             let mut runtimes = self.runtimes.lock().await;
             let Some(entry) = runtimes.get_mut(app_id) else {
@@ -1597,9 +1380,6 @@ impl LocalAppsHostBroker {
             }
         };
         let _ = gate.send(RuntimeStartStatus::Running);
-        if let Some(process) = watch_process {
-            self.spawn_full_runtime_exit_watch(app_id.to_string(), generation, process);
-        }
         Ok(json!({"app_id": app_id, "state": "running", "url": format!("http://127.0.0.1:{port}")}))
     }
 
@@ -1642,35 +1422,10 @@ impl LocalAppsHostBroker {
             )
             .await
             .map_err(|error| error.to_string())?;
-        let stop_result = match handle {
+        match handle {
             RuntimeHandle::Static { shutdown } => {
                 let _ = shutdown.send(());
-                Ok(())
             }
-            RuntimeHandle::Full { process } => match self.mobile_linux.as_ref() {
-                Some(runtime) => runtime
-                    .kill(&process)
-                    .await
-                    .map_err(|error| format!("stop Next process tree: {error}")),
-                None => Err("mobile Linux runtime disappeared".to_string()),
-            },
-        };
-        if let Err(detail) = stop_result {
-            // `stopping -> failed` is not an edge the table has, and the record
-            // must be left in a state it can LEAVE: stranded in `stopping` the
-            // app is unstartable for the rest of the process.  The kill error
-            // survives in `last_error`, and this bookkeeping write must never
-            // mask the real failure.
-            let _ = service
-                .update_runtime_record(
-                    app_id,
-                    AppRuntimeState::Stopped,
-                    runtime.port,
-                    None,
-                    Some(detail.clone()),
-                )
-                .await;
-            return Err(detail);
         }
         service
             .update_runtime_record(app_id, AppRuntimeState::Stopped, runtime.port, None, None)
@@ -1738,28 +1493,6 @@ impl LocalAppsHostBroker {
             RuntimeHandle::Static { shutdown } => {
                 let _ = shutdown.send(());
             }
-            RuntimeHandle::Full { process } => {
-                if let Some(runtime) = self.mobile_linux.as_ref() {
-                    let _ = runtime.kill(&process).await;
-                }
-            }
-        }
-    }
-
-    async fn inspect_full_runtime_terminal_detail(
-        &self,
-        process_id: &str,
-    ) -> Result<Option<String>, String> {
-        let runtime = self.mobile_linux.as_ref().ok_or_else(|| {
-            "Full local-app runtime requires the mobile Linux runtime".to_string()
-        })?;
-        match runtime.task_status(process_id).await {
-            Ok(Some(snapshot)) if !runtime_snapshot_is_terminal(snapshot.status) => Ok(None),
-            Ok(Some(snapshot)) => Ok(Some(full_runtime_exit_detail(process_id, Some(&snapshot)))),
-            Ok(None) => Ok(Some(full_runtime_exit_detail(process_id, None))),
-            Err(error) => Ok(Some(format!(
-                "inspect fixed Next production server {process_id}: {error}"
-            ))),
         }
     }
 
@@ -1780,79 +1513,6 @@ impl LocalAppsHostBroker {
         self.force_stop_recording(app_id).await;
         self.clear_media(app_id);
         self.session_permissions.lock().await.revoke_app(app_id);
-    }
-
-    async fn reconcile_full_runtime_exit(
-        &self,
-        app_id: &str,
-        generation: u64,
-        process_id: &str,
-        detail: String,
-    ) -> Result<bool, String> {
-        let removed = {
-            let mut runtimes = self.runtimes.lock().await;
-            let should_remove = runtimes.get(app_id).is_some_and(|entry| {
-                entry.generation == generation
-                    && matches!(
-                        &entry.state,
-                        RuntimeEntryState::Running {
-                            handle: RuntimeHandle::Full { process }
-                        } if process.id == process_id
-                    )
-            });
-            if should_remove {
-                runtimes.remove(app_id);
-                true
-            } else {
-                false
-            }
-        };
-        if !removed {
-            return Ok(false);
-        }
-        let runtime = self
-            .service()?
-            .runtime_record(app_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.service()?
-            .update_runtime_record(
-                app_id,
-                AppRuntimeState::Failed,
-                runtime.port,
-                runtime.pid,
-                Some(detail),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(true)
-    }
-
-    fn spawn_full_runtime_exit_watch(
-        &self,
-        app_id: String,
-        generation: u64,
-        process: LinuxProcessHandle,
-    ) {
-        let Some(runtime) = self.mobile_linux.as_ref().cloned() else {
-            return;
-        };
-        let Ok(service) = self.service() else {
-            return;
-        };
-        let runtimes = Arc::clone(&self.runtimes);
-        // WEAK on purpose: the watcher must be able to reclaim this app's
-        // recording/media/session grants when the process dies on its own,
-        // but it must not be what keeps the broker alive.
-        let broker = self.weak_self();
-        // Same lifetime rule as the static server: the watcher must outlive the
-        // engine runtime that happened to issue this start.
-        crate::local_apps_profile::worker_runtime().spawn(async move {
-            watch_full_runtime_exit(
-                runtimes, service, runtime, app_id, generation, process, broker,
-            )
-            .await;
-        });
     }
 
     /// Serves the static export on the anchored runtime, and reconciles the
@@ -1985,7 +1645,7 @@ impl LocalAppsHostBroker {
         }
         // Rebuild the restored source so the served output matches it.
         let builder = crate::local_apps_build::LocalAppBuilder {
-            mobile_linux: self.mobile_linux.clone(),
+            mobile_linux: self.mobile_linux(),
             host: self,
         };
         if let Err(error) = builder.build_workspace(&layout).await {
@@ -2025,7 +1685,7 @@ impl LocalAppsHostBroker {
     pub(crate) async fn scaffold_app_value(&self, app_id: &str) -> Result<(), String> {
         let layout = self.layout(app_id)?;
         let builder = crate::local_apps_build::LocalAppBuilder {
-            mobile_linux: self.mobile_linux.clone(),
+            mobile_linux: self.mobile_linux(),
             host: self,
         };
         builder
@@ -2044,27 +1704,17 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|e| e.to_string())?;
         let workspace = layout.root().join(layout.workspace_rel());
-        let shell_available = self.shell_available();
-        let setup_path = if shell_available {
-            "- The normal new-app path is the official Vite CLI through the existing Mobile Linux `Shell`: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
-             - If registry/network access is unavailable, use only `.lingxi/vite-fallback/` as the explicit offline fallback and report that mode/reason. Do not add a Vite wrapper or scaffold API.\n\
-             - Generated source must not edit `package.json` or `package-lock.json`; use the existing `Shell` tool for npm in this workspace. Preserve `index.html` and `vite.config.*`; `src/` is the official Vite source root and may receive the host bridge/deviceContext/platform adapter integration.\n\
-             - Show exact package specs in the confirmed design, then use the existing `Shell` tool from this workspace for `npm install`, `npm uninstall`, or `npm ci`. The existing shell network/command approval and logs apply; the subsequent build is offline.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history plus the package-lock digest, not a second package/version store.\n"
-        } else {
-            "- Shell is unavailable in this session. Do not claim or rely on the official Vite CLI or npm dependency commands.\n\
-             - If source already exists under `src/` or `app/`, extend it in place. If the source root is still empty, reuse only the repository-verified `.lingxi/vite-fallback/` files and report that Shell was unavailable.\n\
-             - Generated source must not edit `package.json` or `package-lock.json`; without Shell, leave dependency changes as explicit follow-up requirements instead of attempting npm operations. Preserve `index.html` and `vite.config.*`; `src/` remains the preferred source root when it already exists.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints remain workspace Git history plus the package-lock digest, not a second package/version store.\n"
-        };
-        let build_preview = if shell_available {
+        let setup_path =
+            "- Treat Node/npm as a current-session capability, never a persisted guarantee. Use npm only when the current local-app workflow explicitly reports that its Node/npm toolchain is available; then verify `command -v node` and `command -v npm` through the current `Shell`. If no current availability report exists, or either check fails, treat the toolchain as unavailable.\n\
+             - When the toolchain is available, the normal new-app path is the official Vite CLI: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
+             - If the toolchain or registry/network access is unavailable, reuse existing source when present; otherwise reuse only the repository-verified `.lingxi/vite-fallback/` files and report the reason. Do not add a Vite wrapper or scaffold API.\n\
+             - Generated source must not edit `package.json` or `package-lock.json`. Leave dependency changes as explicit follow-up requirements unless the current-session checks above pass. Preserve `index.html` and `vite.config.*`; `src/` remains the preferred source root when it already exists.\n\
+             - After those checks pass, show exact package specs in the confirmed design and use the current `Shell` for `npm install`, `npm uninstall`, or `npm ci`. Its existing network/command approval and logs apply; the subsequent build is offline.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history plus the package-lock digest, not a second package/version store.\n";
+        let build_preview =
             "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
-             (30-minute budget); an ordinary project may also use `npm run build` \
-             or `npx vite` for preview only through the existing Shell.\n"
-        } else {
-            "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
-             (30-minute budget).\n"
-        };
+             (30-minute budget). Use `npm run build` or `npx vite` for a Shell-only \
+             preview only after the current-session Node/npm checks above pass.\n";
         let context = format!(
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
@@ -2099,7 +1749,7 @@ impl LocalAppsHostBroker {
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
-        create_next_step_guidance(Some(self.shell_available()))
+        create_next_step_guidance(Some(self.npm_toolchain_available()))
     }
 
     async fn manage_runtime(&self, input: Value) -> Result<Value, String> {
@@ -2116,11 +1766,9 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let layout =
             AppLayout::new(self.root.clone(), app_id.clone()).map_err(|e| e.to_string())?;
         let builder = crate::local_apps_build::LocalAppBuilder {
-            mobile_linux: self.mobile_linux.clone(),
+            mobile_linux: self.mobile_linux(),
             host: self,
         };
-        let target =
-            crate::local_apps_build::detect_build_target(&layout).map_err(|e| e.to_string())?;
         builder
             .build_workspace(&layout)
             .await
@@ -2152,12 +1800,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         Ok(serde_json::json!({
             "ok": true,
             "app_id": app_id,
-            "target": match target {
-                crate::local_apps_build::LocalAppBuildTarget::NextStaticV1 => "next-static-v1",
-                crate::local_apps_build::LocalAppBuildTarget::ViteReactStaticV1 => {
-                    "vite-react-static-v1"
-                }
-            },
+            "target": "vite-react-static-v1",
             "hint": "start or restart the runtime with manage_runtime to serve the new build",
         }))
     }
@@ -2767,35 +2410,6 @@ fn reconcile_restored_dependencies(
     })
 }
 
-/// Resolve an app's ordinary workspace dependency directory for projection
-/// into the isolated build/full-runtime guest. The returned path is never a
-/// store or a host-managed package cache: it is exactly the app workspace's
-/// `node_modules`, and the caller mounts it read-only with app-first module
-/// resolution.
-fn app_node_modules_projection(
-    layout: &AppLayout,
-    app_id: &str,
-) -> Result<Option<MountSpec>, String> {
-    let app_node_modules = layout
-        .root()
-        .join(layout.workspace_rel())
-        .join("node_modules");
-    match std::fs::symlink_metadata(&app_node_modules) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err("workspace node_modules must not be a symlink".into())
-        }
-        Ok(metadata) if metadata.is_dir() => Ok(Some(MountSpec {
-            host_path: app_node_modules,
-            guest_path: format!("/var/lingxi/local-app-build/{app_id}/full-node_modules"),
-            read_only: true,
-            purpose: MountPurpose::External,
-        })),
-        Ok(_) => Err("workspace node_modules must be a directory".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("inspect workspace node_modules: {error}")),
-    }
-}
-
 /// Ports every OTHER app in this profile has already pinned, each paired with
 /// its owner.
 ///
@@ -2821,159 +2435,6 @@ async fn sibling_pinned_ports(service: &AppService, app_id: &str) -> Vec<(String
         }
     }
     pinned
-}
-
-async fn wait_for_loopback(port: u16) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "Next server did not become healthy on loopback port {port} within 120 seconds"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-fn runtime_snapshot_is_terminal(status: MobileLinuxTaskStatus) -> bool {
-    matches!(
-        status,
-        MobileLinuxTaskStatus::Completed
-            | MobileLinuxTaskStatus::Failed
-            | MobileLinuxTaskStatus::Cancelled
-            | MobileLinuxTaskStatus::TimedOut
-    )
-}
-
-fn full_runtime_exit_detail(
-    process_id: &str,
-    snapshot: Option<&MobileLinuxTaskSnapshot>,
-) -> String {
-    let Some(snapshot) = snapshot else {
-        return format!(
-            "fixed Next production server {process_id} disappeared from the mobile Linux runtime"
-        );
-    };
-    let status = match snapshot.status {
-        MobileLinuxTaskStatus::Queued => "queued",
-        MobileLinuxTaskStatus::Running => "running",
-        MobileLinuxTaskStatus::Backgrounded => "backgrounded",
-        MobileLinuxTaskStatus::Completed => "completed",
-        MobileLinuxTaskStatus::Failed => "failed",
-        MobileLinuxTaskStatus::Cancelled => "cancelled",
-        MobileLinuxTaskStatus::TimedOut => "timed_out",
-    };
-    match (snapshot.exit_code, snapshot.detail.as_deref()) {
-        (Some(exit_code), Some(detail)) => {
-            format!(
-                "fixed Next production server {process_id} {status} (exit {exit_code}): {detail}"
-            )
-        }
-        (Some(exit_code), None) => {
-            format!("fixed Next production server {process_id} {status} (exit {exit_code})")
-        }
-        (None, Some(detail)) => {
-            format!("fixed Next production server {process_id} {status}: {detail}")
-        }
-        (None, None) => format!("fixed Next production server {process_id} {status}"),
-    }
-}
-
-async fn watch_full_runtime_exit(
-    runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
-    service: Arc<AppService>,
-    runtime: Arc<dyn MobileLinuxRuntime>,
-    app_id: String,
-    generation: u64,
-    process: LinuxProcessHandle,
-    broker: std::sync::Weak<LocalAppsHostBroker>,
-) {
-    loop {
-        sleep(FULL_RUNTIME_WATCH_POLL).await;
-        let still_current = {
-            let runtimes = runtimes.lock().await;
-            runtimes.get(&app_id).is_some_and(|entry| {
-                entry.generation == generation
-                    && matches!(
-                        &entry.state,
-                        RuntimeEntryState::Running {
-                            handle: RuntimeHandle::Full { process: current }
-                        } if current.id == process.id
-                    )
-            })
-        };
-        if !still_current {
-            return;
-        }
-        let detail = match runtime.task_status(&process.id).await {
-            Ok(Some(snapshot)) if !runtime_snapshot_is_terminal(snapshot.status) => None,
-            Ok(Some(snapshot)) => Some(full_runtime_exit_detail(&process.id, Some(&snapshot))),
-            Ok(None) => Some(full_runtime_exit_detail(&process.id, None)),
-            Err(error) => Some(format!(
-                "inspect fixed Next production server {}: {error}",
-                process.id
-            )),
-        };
-        let Some(detail) = detail else {
-            continue;
-        };
-        let removed = {
-            let mut runtimes = runtimes.lock().await;
-            let should_remove = runtimes.get(&app_id).is_some_and(|entry| {
-                entry.generation == generation
-                    && matches!(
-                        &entry.state,
-                        RuntimeEntryState::Running {
-                            handle: RuntimeHandle::Full { process: current }
-                        } if current.id == process.id
-                    )
-            });
-            if should_remove {
-                runtimes.remove(&app_id);
-                true
-            } else {
-                false
-            }
-        };
-        if removed {
-            // The app's process died on its own (OOM, crash, guest exit).
-            // Nothing else runs on this path, so without this the recording
-            // it left behind keeps the iOS audio session leased with no
-            // handle able to release it.
-            if let Some(broker) = broker.upgrade() {
-                broker.release_app_runtime_state(&app_id).await;
-            }
-        }
-        if !removed {
-            return;
-        }
-        if let Ok(runtime_record) = service.runtime_record(&app_id).await {
-            let _ = service
-                .update_runtime_record(
-                    &app_id,
-                    AppRuntimeState::Failed,
-                    runtime_record.port,
-                    runtime_record.pid,
-                    Some(detail),
-                )
-                .await;
-        }
-        return;
-    }
-}
-
-fn runtime_instance_quota(bytes: u64) -> usize {
-    let gib = 1024_u64.pow(3);
-    if bytes >= 8 * gib {
-        3
-    } else if bytes >= 6 * gib {
-        2
-    } else {
-        1
-    }
 }
 
 /// Returns `None` on the requested shutdown, and `Some(detail)` when the
@@ -3016,9 +2477,8 @@ async fn run_static_server(
     }
 }
 
-/// The static twin of [`watch_full_runtime_exit`]'s tail: drop the entry this
-/// dead server owns and fail the record, so the next start is legal instead of
-/// short-circuiting on a stale `Running`.
+/// Drop the entry this dead server owns and fail the record, so the next start
+/// is legal instead of short-circuiting on a stale `Running`.
 async fn reconcile_static_runtime_exit(
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
     service: Arc<AppService>,
@@ -3243,8 +2703,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tempfile::TempDir;
     use traits::{
-        LinuxEnforcementReceipt, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
-        PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
+        LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
+        MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
+        NetworkPolicy, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
+        SandboxBackend,
     };
 
     #[derive(Default)]
@@ -3301,7 +2763,7 @@ mod tests {
 
         fn enforce_network_policy(request: &LinuxCommandRequest) -> Result<(), MobileLinuxError> {
             if matches!(request.network, NetworkPolicy::LoopbackOnly)
-                && request.resource_limits.max_memory_mb == Some(LOCAL_APP_MEMORY_LIMIT_MB)
+                && request.resource_limits.max_memory_mb == Some(800)
             {
                 Ok(())
             } else {
@@ -3575,9 +3037,6 @@ mod tests {
 
     fn create_runtime_root(root: &TempDir) -> PathBuf {
         let runtime_root = root.path().join("runtime-root");
-        let next_bin = runtime_root.join("node_modules/next/dist/bin/next");
-        fs::create_dir_all(next_bin.parent().unwrap()).expect("create runtime root");
-        fs::write(&next_bin, b"#!/bin/sh\n").expect("write next bin");
         let vite_bin = runtime_root.join("node_modules/vite/bin/vite.js");
         fs::create_dir_all(vite_bin.parent().unwrap()).expect("create Vite runtime root");
         fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write Vite bin");
@@ -3666,15 +3125,16 @@ mod tests {
         let full_build = root.path().join(layout.build_rel(true));
         fs::create_dir_all(&full_build).expect("create full build");
         let workspace = root.path().join(layout.workspace_rel());
-        fs::write(workspace.join("next.config.mjs"), "export default {};")
-            .expect("mark fixture as a legacy Next app");
+        fs::write(workspace.join("vite.config.mjs"), "export default {};")
+            .expect("mark fixture as a Vite app");
         record.id
     }
 
     async fn scaffolded_lingxi(
+        full_runtime: bool,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     ) -> (String, String) {
-        let (root, service, broker) = create_broker(false, mobile_linux).await;
+        let (root, service, broker) = create_broker(full_runtime, mobile_linux).await;
         let record = service
             .create_app(Some("Tracker"), "a test app", None)
             .await
@@ -3691,29 +3151,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scaffold_writes_shell_specific_lingxi_when_shell_is_available() {
+    async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (_app_id, lingxi) = scaffolded_lingxi(Some(runtime)).await;
+        let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
         assert!(
-            lingxi.contains("official Vite CLI through the existing Mobile Linux `Shell`"),
+            lingxi.contains("Treat Node/npm as a current-session capability"),
             "{lingxi}"
         );
         assert!(
-            lingxi.contains("use the existing `Shell` tool from this workspace for `npm install`, `npm uninstall`, or `npm ci`"),
+            lingxi.contains("verify `command -v node` and `command -v npm`"),
             "{lingxi}"
-        );
-        assert!(lingxi.contains("`npm run build`"), "{lingxi}");
-        assert!(
-            !lingxi.contains("Git/Bash capability"),
-            "the workspace contract must not promise Git/Bash unconditionally: {lingxi}"
         );
     }
 
     #[tokio::test]
-    async fn scaffold_writes_shell_unavailable_lingxi_when_shell_is_missing() {
-        let (_app_id, lingxi) = scaffolded_lingxi(None).await;
+    async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
+        let (_app_id, lingxi) = scaffolded_lingxi(true, None).await;
         assert!(
-            lingxi.contains("Shell is unavailable in this session"),
+            lingxi.contains("Treat Node/npm as a current-session capability"),
             "{lingxi}"
         );
         assert!(
@@ -3721,23 +3176,43 @@ mod tests {
             "{lingxi}"
         );
         assert!(
-            lingxi.contains("leave dependency changes as explicit follow-up requirements"),
+            lingxi.contains("Leave dependency changes as explicit follow-up requirements"),
             "{lingxi}"
         );
+        assert!(lingxi.contains("verify `command -v node` and `command -v npm`"));
+    }
+
+    #[tokio::test]
+    async fn persisted_lingxi_does_not_bake_in_toolchain_availability() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(true, Some(runtime)).await;
+        let record = service
+            .create_app(Some("Tracker"), "a test app", None)
+            .await
+            .expect("create app");
+        broker
+            .scaffold_app_value(&record.id)
+            .await
+            .expect("scaffold app");
+        broker.set_shell_available(false);
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
+        let lingxi =
+            std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
+                .expect("read LINGXI.md");
+
         assert!(
-            !lingxi.contains("`npm run build`") && !lingxi.contains("`npx vite`"),
-            "shell-free guidance must not promise shell-only preview commands: {lingxi}"
+            lingxi.contains("Treat Node/npm as a current-session capability"),
+            "{lingxi}"
         );
-        assert!(
-            !lingxi.contains("Git/Bash capability"),
-            "the workspace contract must not promise Git/Bash unconditionally: {lingxi}"
-        );
+        assert!(broker
+            .create_next_step()
+            .contains("local-app Node/npm toolchain is unavailable"));
     }
 
     #[tokio::test]
     async fn unavailable_runtime_object_does_not_make_shell_guidance_available() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let (root, service, broker) = create_broker(true, Some(runtime)).await;
         broker.set_shell_available(false);
         let record = service
             .create_app(Some("Tracker"), "a test app", None)
@@ -3753,16 +3228,10 @@ mod tests {
             std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
                 .expect("read LINGXI.md");
 
-        assert!(lingxi.contains("Shell is unavailable in this session"));
-        assert!(broker.create_next_step().contains("Shell is unavailable"));
-    }
-
-    fn mark_fixture_as_vite(root: &TempDir, app_id: &str) {
-        let layout = AppLayout::new(root.path().to_path_buf(), app_id).expect("layout");
-        let workspace = root.path().join(layout.workspace_rel());
-        fs::remove_file(workspace.join("next.config.mjs")).expect("remove legacy Next marker");
-        fs::write(workspace.join("vite.config.mjs"), "export default {};")
-            .expect("mark fixture as Vite");
+        assert!(lingxi.contains("Treat Node/npm as a current-session capability"));
+        assert!(broker
+            .create_next_step()
+            .contains("local-app Node/npm toolchain is unavailable"));
     }
 
     /// `create_app_fixture` with a CHOSEN id, for the one test whose exercised
@@ -3971,7 +3440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_full_runtime_start_reuses_one_spawn() {
+    async fn concurrent_starts_reuse_one_static_runtime() {
         let runtime = MockMobileLinuxRuntime::new(Duration::from_millis(40));
         let (root, service, broker) = create_broker(true, Some(runtime.clone())).await;
         let app_id = create_app_fixture(&root, &service, "Concurrent").await;
@@ -3994,115 +3463,16 @@ mod tests {
             })
             .collect();
         assert!(urls.windows(2).all(|pair| pair[0] == pair[1]));
-        assert_eq!(runtime.spawn_count(), 1);
+        assert_eq!(runtime.spawn_count(), 0);
         assert_eq!(broker.runtimes.lock().await.len(), 1);
-        let request = runtime.recorded_request().await;
-        assert_eq!(request.command, "/usr/bin/node");
         assert_eq!(
-            request.args,
-            vec![
-                "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next",
-                "start",
-                "--hostname",
-                "127.0.0.1",
-                "--port",
-                urls[0].rsplit_once(':').expect("runtime URL has a port").1,
-            ]
+            service
+                .runtime_record(&app_id)
+                .await
+                .expect("runtime record")
+                .mode,
+            Some(AppRuntimeMode::StaticExport)
         );
-        assert!(matches!(request.network, NetworkPolicy::LoopbackOnly));
-        assert_eq!(request.resource_limits.max_memory_mb, Some(800));
-        assert!(
-            request
-                .args
-                .iter()
-                .all(|argument| !argument.starts_with("--max-old-space-size=")),
-            "the 800 MiB Full runtime policy must stay distinct from build heap tuning"
-        );
-        assert_eq!(
-            request.env,
-            [
-                ("LINGXI_APP_OUTPUT".to_string(), "server".to_string(),),
-                (
-                    "NODE_PATH".to_string(),
-                    "/opt/lingxi/local-app-runtime/node_modules".to_string(),
-                ),
-                ("NODE_ENV".to_string(), "production".to_string()),
-            ]
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn full_runtime_projects_app_node_modules_read_only_before_shared_modules() {
-        let (root, service, _broker) = create_broker(false, None).await;
-        let app_id = create_app_fixture(&root, &service, "App modules").await;
-        let layout = AppLayout::new(root.path(), app_id.clone()).expect("layout");
-        let app_node_modules = root
-            .path()
-            .join(layout.workspace_rel())
-            .join("node_modules");
-        fs::create_dir_all(app_node_modules.join("app-only")).expect("app node_modules");
-        fs::write(app_node_modules.join("app-only/package.json"), "{}").expect("app package");
-
-        let mount = app_node_modules_projection(&layout, &app_id)
-            .expect("projection inspection")
-            .expect("app-local node_modules projection");
-        assert_eq!(mount.host_path, app_node_modules);
-        assert_eq!(
-            format!(
-                "{}:/opt/lingxi/local-app-runtime/node_modules",
-                mount.guest_path
-            ),
-            "/var/lingxi/local-app-build/".to_string()
-                + &app_id
-                + "/full-node_modules:/opt/lingxi/local-app-runtime/node_modules"
-        );
-        assert!(
-            mount.read_only,
-            "app dependencies must be read-only at runtime"
-        );
-        assert_eq!(mount.purpose, MountPurpose::External);
-    }
-
-    #[tokio::test]
-    async fn full_runtime_fails_closed_without_enforcement_receipt() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        runtime.set_enforcement_receipt(false);
-        let (root, service, broker) = create_broker(true, Some(runtime.clone())).await;
-        let app_id = create_app_fixture(&root, &service, "Unenforced").await;
-
-        let error = broker
-            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
-            .await
-            .expect_err("an unverifiable runtime policy must fail closed");
-
-        assert!(error.contains("network_policy_unavailable"), "{error}");
-        assert!(broker.runtimes.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn concurrent_full_starts_keep_node_quota_reserved_atomically() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::from_millis(40));
-        let (root, service, broker) = create_broker(true, Some(runtime)).await;
-        let quota = runtime_instance_quota(broker.physical_memory_bytes);
-        assert_eq!(quota, 1, "the zero-byte fallback is conservative");
-        let app_a = create_app_fixture(&root, &service, "A").await;
-        let app_b = create_app_fixture(&root, &service, "B").await;
-
-        let (result_a, result_b) = tokio::join!(
-            broker.manage_runtime_value(json!({"app_id": app_a, "action": "start"})),
-            broker.manage_runtime_value(json!({"app_id": app_b, "action": "start"})),
-        );
-
-        assert_eq!(
-            [result_a.as_ref(), result_b.as_ref()]
-                .into_iter()
-                .filter(|result| result.is_ok())
-                .count(),
-            1
-        );
-        assert_eq!(broker.runtimes.lock().await.len(), quota);
     }
 
     #[tokio::test]
@@ -4128,7 +3498,6 @@ mod tests {
         let mobile_linux = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (root, service, broker) = create_broker(true, Some(mobile_linux.clone())).await;
         let app_id = create_app_fixture(&root, &service, "Vite Static").await;
-        mark_fixture_as_vite(&root, &app_id);
 
         broker
             .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
@@ -4144,23 +3513,32 @@ mod tests {
                 .mode,
             Some(AppRuntimeMode::StaticExport)
         );
-        let runtimes = broker.runtimes.lock().await;
-        assert!(
-            !runtimes
-                .get(&app_id)
-                .expect("runtime entry")
-                .uses_full_runtime
-        );
     }
 
-    #[test]
-    fn runtime_quota_uses_host_physical_memory_thresholds() {
-        let gib = 1024_u64.pow(3);
-        assert_eq!(runtime_instance_quota(0), 1);
-        assert_eq!(runtime_instance_quota(6 * gib - 1), 1);
-        assert_eq!(runtime_instance_quota(6 * gib), 2);
-        assert_eq!(runtime_instance_quota(8 * gib - 1), 2);
-        assert_eq!(runtime_instance_quota(8 * gib), 3);
+    #[tokio::test]
+    async fn legacy_next_runtime_mode_is_migrated_on_start() {
+        let mobile_linux = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(true, Some(mobile_linux.clone())).await;
+        let app_id = create_app_fixture(&root, &service, "Legacy Mode").await;
+        service
+            .set_runtime_mode(&app_id, AppRuntimeMode::NextProduction)
+            .await
+            .expect("persist legacy runtime mode");
+
+        broker
+            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
+            .await
+            .expect("legacy runtime mode starts through static export");
+
+        assert_eq!(mobile_linux.spawn_count(), 0);
+        assert_eq!(
+            service
+                .runtime_record(&app_id)
+                .await
+                .expect("runtime record")
+                .mode,
+            Some(AppRuntimeMode::StaticExport)
+        );
     }
 
     /// Lowest ephemeral floor across the shipped platforms: Linux/Android
@@ -4819,59 +4197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_runtime_exit_marks_failed_and_allows_restart() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(true, Some(runtime.clone())).await;
-        let app_id = create_app_fixture(&root, &service, "Recover").await;
-
-        let started = broker
-            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
-            .await
-            .expect("initial start succeeds");
-        let first_url = started["url"].as_str().expect("url present").to_string();
-        let task_id = runtime.first_task_id().await;
-        runtime
-            .complete_task(&task_id, MobileLinuxTaskStatus::Failed, "process exited")
-            .await;
-
-        wait_until(
-            "runtime failure reconciliation",
-            Duration::from_secs(3),
-            || {
-                let service = service.clone();
-                let broker = broker.clone();
-                let app_id = app_id.clone();
-                async move {
-                    let runtime_record = service
-                        .runtime_record(&app_id)
-                        .await
-                        .expect("runtime record");
-                    runtime_record.state == AppRuntimeState::Failed
-                        && !broker.runtimes.lock().await.contains_key(&app_id)
-                }
-            },
-        )
-        .await;
-
-        let restarted = broker
-            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
-            .await
-            .expect("restart succeeds");
-        assert_eq!(runtime.spawn_count(), 2);
-        assert_eq!(restarted["state"], "running");
-        // The WebView reloads this URL, and every client-side store the app
-        // owns is keyed by its origin: a restart that moved the port would
-        // orphan the app's own data.  See `bind_stable_loopback`.
-        assert_eq!(restarted["url"].as_str(), Some(first_url.as_str()));
-        let runtime_record = service
-            .runtime_record(&app_id)
-            .await
-            .expect("runtime record");
-        assert_eq!(runtime_record.state, AppRuntimeState::Running);
-    }
-
-    #[tokio::test]
-    async fn explicit_stop_does_not_get_overwritten_by_exit_watch() {
+    async fn explicit_stop_remains_stopped() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (root, service, broker) = create_broker(true, Some(runtime)).await;
         let app_id = create_app_fixture(&root, &service, "Stop").await;
@@ -4884,7 +4210,7 @@ mod tests {
             .manage_runtime_value(json!({"app_id": app_id, "action": "stop"}))
             .await
             .expect("runtime stops");
-        sleep(FULL_RUNTIME_WATCH_POLL * 2).await;
+        sleep(STATIC_ACCEPT_RETRY * 2).await;
 
         let runtime_record = service
             .runtime_record(&app_id)
@@ -4896,9 +4222,12 @@ mod tests {
 
     #[tokio::test]
     async fn abandoned_runtime_reservation_is_released_for_the_next_start() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::from_secs(1));
-        let (root, service, broker) = create_broker(true, Some(runtime)).await;
+        let (root, service, broker) = create_broker(false, None).await;
         let app_id = create_app_fixture(&root, &service, "Abandoned").await;
+        // Keep the static-only start deterministically inside its reservation.
+        // The old version relied on the removed full-runtime spawn delay, so
+        // the start could already be Running by the time the test aborted it.
+        let allocation = broker.port_allocation.lock().await;
 
         let start = tokio::spawn({
             let broker = broker.clone();
@@ -4916,6 +4245,7 @@ mod tests {
         })
         .await;
         start.abort();
+        let _ = start.await;
 
         wait_until("reservation released", Duration::from_secs(3), || {
             let broker = broker.clone();
@@ -4923,6 +4253,7 @@ mod tests {
             async move { !broker.runtimes.lock().await.contains_key(&app_id) }
         })
         .await;
+        drop(allocation);
 
         let restarted = timeout(
             Duration::from_secs(10),
@@ -4931,41 +4262,6 @@ mod tests {
         .await
         .expect("a later start is not blocked by the abandoned reservation")
         .expect("restart succeeds");
-        assert_eq!(restarted["state"], "running");
-    }
-
-    #[tokio::test]
-    async fn failed_kill_leaves_a_runtime_state_the_table_can_leave() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(true, Some(runtime.clone())).await;
-        let app_id = create_app_fixture(&root, &service, "Wedge").await;
-
-        broker
-            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
-            .await
-            .expect("runtime starts");
-        runtime.set_fail_kill(true);
-        let error = broker
-            .manage_runtime_value(json!({"app_id": app_id, "action": "stop"}))
-            .await
-            .expect_err("a failed kill is reported to the caller");
-        assert!(error.contains("stop Next process tree"), "{error}");
-
-        let runtime_record = service
-            .runtime_record(&app_id)
-            .await
-            .expect("runtime record");
-        assert_eq!(runtime_record.state, AppRuntimeState::Stopped);
-        assert!(runtime_record
-            .last_error
-            .expect("kill failure is preserved")
-            .contains("did not reap"));
-
-        runtime.set_fail_kill(false);
-        let restarted = broker
-            .manage_runtime_value(json!({"app_id": app_id, "action": "start"}))
-            .await
-            .expect("the app is startable again");
         assert_eq!(restarted["state"], "running");
     }
 
@@ -5244,7 +4540,6 @@ mod tests {
                     },
                     last_used: 1,
                     generation,
-                    uses_full_runtime: false,
                 },
             );
             let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
@@ -5257,7 +4552,7 @@ mod tests {
                 receiver,
             );
 
-            // Both halves, the way `full_runtime_exit_marks_failed_and_allows_restart`
+            // Both halves of the static reconciliation path:
             // waits: `reconcile_static_runtime_exit` removes the entry BEFORE it
             // writes the record, so waking on the removal alone and reading the
             // record next reports the pre-write `running` under load.

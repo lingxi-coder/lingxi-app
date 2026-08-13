@@ -289,7 +289,7 @@ internal fun canSubmitBrief(brief: String): Boolean = brief.isNotBlank()
 
 @Composable
 private fun RuntimeModeBanner(mode: LocalAppRuntimeMode) {
-    val direct = mode == LocalAppRuntimeMode.NextProduction
+    val direct = mode == LocalAppRuntimeMode.ViteStatic
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = RoundedCornerShape(12.dp),

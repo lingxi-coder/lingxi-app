@@ -15,7 +15,10 @@
     "package.json",
     "package-lock.json",
     "app/main.jsx",
+    "app/globals.css",
+    "lib/device-context.js",
     "lib/lingxi-bridge.js",
+    "lib/platform-adapter.js",
     "node_modules"
   ],
   "forbidden_path_segments": [

@@ -4,8 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
-TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/next-static-v1"
-VITE_TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1"
+TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1"
 TEMP_ROOT="$(mktemp -d)"
 STAGED_OUTPUT="${REPO_ROOT}/clients/android/app/build/local-app-supply-chain-test-${RANDOM}"
 trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}"' EXIT
@@ -23,16 +22,14 @@ assert package_policy["npm_family_present"] is True
 assert package_policy["npm_scope"] == "app_workspace_shell_approval"
 assert package_policy["generation_jobs"] is False
 assert package_policy["mcp"] is False
+assert "next_executable" not in policy
 commands = policy["commands"]
-assert commands["store_build"]["network_policy"] == "disabled"
-assert commands["full_build"]["network_policy"] == "disabled"
-assert commands["full_start"]["network_policy"] == "loopback_only"
-for name in ("store_build", "full_build", "vite_static_build"):
-    command = commands[name]
-    assert command["memory_limit_policy"] == "physical_memory_tier"
-    assert "memory_limit_bytes" not in command
-    assert command["argv"][1] == "--max-old-space-size={build_node_old_space_size_mib}"
-assert commands["full_start"]["memory_limit_bytes"] == 838860800
+assert sorted(commands) == ["vite_static_build"]
+command = commands["vite_static_build"]
+assert command["network_policy"] == "disabled"
+assert command["memory_limit_policy"] == "physical_memory_tier"
+assert "memory_limit_bytes" not in command
+assert command["argv"][1] == "--max-old-space-size={build_node_old_space_size_mib}"
 limits = policy["limits"]
 assert limits["build_node_old_space_percent"] == 75
 assert limits["build_memory_tiers"] == [
@@ -67,7 +64,7 @@ assert ish_policy["watchdog_interval_ms"] == 250
 assert ish_policy["memory_accounting"] == "guest_backed_pages_by_execution_context"
 PY
 
-cp -R "${VITE_TEMPLATE}" "${TEMP_ROOT}/vite-compressed-size"
+cp -R "${TEMPLATE}" "${TEMP_ROOT}/vite-compressed-size"
 python3 - "${TEMP_ROOT}/vite-compressed-size/vite.config.mjs" <<'PY'
 import pathlib
 import sys
@@ -109,7 +106,7 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 value = json.loads(path.read_text(encoding="utf-8"))
-value["dependencies"]["next"] = "16.2.12"
+value["dependencies"]["vite"] = "8.2.2"
 path.write_text(json.dumps(value), encoding="utf-8")
 PY
 if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/dependency-drift"; then
@@ -145,32 +142,32 @@ if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/lock-dr
   exit 1
 fi
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/weak-csp"
-python3 - "${TEMP_ROOT}/weak-csp/next.config.mjs" <<'PY'
+cp -R "${TEMPLATE}" "${TEMP_ROOT}/external-script"
+python3 - "${TEMP_ROOT}/external-script/index.html" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 path.write_text(
-    path.read_text(encoding="utf-8").replace("frame-ancestors 'none'", ""),
+    path.read_text(encoding="utf-8").replace(
+        "</body>",
+        '    <script src="https://example.com/escape.js"></script>\n  </body>',
+    ),
     encoding="utf-8",
 )
 PY
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/weak-csp"; then
-  echo "expected a weakened server CSP to fail validation" >&2
+if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/external-script"; then
+  echo "expected an external script tag to fail validation" >&2
   exit 1
 fi
 
 NODE_MODULES="${TEMP_ROOT}/node_modules"
 mkdir -p \
-  "${NODE_MODULES}/next/dist/bin" \
   "${NODE_MODULES}/vite/bin" \
   "${NODE_MODULES}/react" \
   "${NODE_MODULES}/react-dom" \
   "${NODE_MODULES}/@rolldown/binding-linux-arm64-musl" \
-  "${NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
-  "${NODE_MODULES}/@next/swc-linux-arm64-musl" \
-  "${NODE_MODULES}/@next/swc-linux-x64-musl"
+  "${NODE_MODULES}/@rolldown/binding-linux-x64-musl"
 python3 - "${NODE_MODULES}" <<'PY'
 import json
 import pathlib
@@ -178,14 +175,11 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 packages = {
-    "next": "16.2.11",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "vite": "8.2.1",
     "@rolldown/binding-linux-arm64-musl": "1.2.3",
     "@rolldown/binding-linux-x64-musl": "1.2.3",
-    "@next/swc-linux-arm64-musl": "16.2.11",
-    "@next/swc-linux-x64-musl": "16.2.11",
 }
 for name, version in packages.items():
     package = root.joinpath(*name.split("/"))
@@ -193,10 +187,7 @@ for name, version in packages.items():
         json.dumps({"name": name, "version": version}),
         encoding="utf-8",
     )
-(root / "next/dist/bin/next").write_text("#!/usr/bin/env node\n", encoding="utf-8")
 (root / "vite/bin/vite.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
-(root / "@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
-(root / "@next/swc-linux-x64-musl/next-swc.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
@@ -207,13 +198,45 @@ python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --platform android \
   --variant play
 test -f "${STAGED_OUTPUT}/runtime-manifest.json"
-test ! -w "${STAGED_OUTPUT}/node_modules/next/package.json"
+test ! -w "${STAGED_OUTPUT}/node_modules/vite/package.json"
+test ! -e "${STAGED_OUTPUT}/node_modules/@next"
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${NODE_MODULES}" \
   --output "${STAGED_OUTPUT}" \
   --platform android \
   --variant play
+
+NEXT_DRIFT_NODE_MODULES="${TEMP_ROOT}/node-modules-next-drift"
+cp -R "${NODE_MODULES}" "${NEXT_DRIFT_NODE_MODULES}"
+mkdir -p "${NEXT_DRIFT_NODE_MODULES}/next" "${NEXT_DRIFT_NODE_MODULES}/@next/swc-linux-arm64-musl"
+python3 - "${NEXT_DRIFT_NODE_MODULES}" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+(root / "next/package.json").write_text(
+    json.dumps({"name": "next", "version": "0.0.0-forbidden"}),
+    encoding="utf-8",
+)
+(root / "@next/swc-linux-arm64-musl/package.json").write_text(
+    json.dumps({"name": "@next/swc-linux-arm64-musl", "version": "0.0.0-forbidden"}),
+    encoding="utf-8",
+)
+(root / "@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node").write_bytes(
+    bytes.fromhex("7f454c46") + b"fixture"
+)
+PY
+if python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  --repo-root "${REPO_ROOT}" \
+  --node-modules "${NEXT_DRIFT_NODE_MODULES}" \
+  --output "${TEMP_ROOT}/next-drift-output" \
+  --platform android \
+  --variant play; then
+  echo "expected staged runtime to reject Next/SWC drift" >&2
+  exit 1
+fi
 
 # The iOS bundle install step. The staged tree is 0555/0444, so a second build
 # cannot `rm -rf` the previous copy without first restoring write permission —
@@ -223,9 +246,10 @@ python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
 # clients/ios/scripts/install-staged-local-app-runtime.sh.
 INSTALL_STAGED="${TEMP_ROOT}/install-src/store"
 INSTALL_DEST="${TEMP_ROOT}/install-dest/local-app-runtime"
-mkdir -p "${INSTALL_STAGED}/node_modules/next/dist/bin"
+mkdir -p \
+  "${INSTALL_STAGED}/node_modules/vite/bin"
 printf '{"schema_version":1}\n' > "${INSTALL_STAGED}/runtime-manifest.json"
-printf '#!/usr/bin/env node\n' > "${INSTALL_STAGED}/node_modules/next/dist/bin/next"
+printf '#!/usr/bin/env node\n' > "${INSTALL_STAGED}/node_modules/vite/bin/vite.js"
 # Mirror stage-local-app-runtime.py: files 0444, directories 0555, root 0755.
 find "${INSTALL_STAGED}" -type f -exec chmod 0444 {} +
 find "${INSTALL_STAGED}" -mindepth 1 -type d -exec chmod 0555 {} +
@@ -241,13 +265,36 @@ if [ -e "${INSTALL_DEST}/store" ] || [ -e "${INSTALL_DEST}/local-app-runtime" ];
   exit 1
 fi
 test -f "${INSTALL_DEST}/runtime-manifest.json"
-test -f "${INSTALL_DEST}/node_modules/next/dist/bin/next"
+test -f "${INSTALL_DEST}/node_modules/vite/bin/vite.js"
 if "${REPO_ROOT}/clients/ios/scripts/install-staged-local-app-runtime.sh" \
   --staged "${TEMP_ROOT}/install-src/absent" \
   --destination "${INSTALL_DEST}" 2>/dev/null; then
   echo "expected a missing staged runtime to fail the install" >&2
   exit 1
 fi
+
+RUNTIME_ASSET_VALIDATOR="${REPO_ROOT}/clients/ios/scripts/validate-local-app-build-assets.sh"
+ROOTFS_MANIFEST="${TEMP_ROOT}/ios-rootfs-manifest.json"
+printf '{"local_app_runtime":false}\n' > "${ROOTFS_MANIFEST}"
+if "${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration FullDebug \
+  --platform iphoneos \
+  --staged "${INSTALL_STAGED}" \
+  --rootfs-manifest "${ROOTFS_MANIFEST}"; then
+  echo "expected FullDebug iphoneos to reject a bare rootfs" >&2
+  exit 1
+fi
+printf '{"local_app_runtime":true}\n' > "${ROOTFS_MANIFEST}"
+"${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration FullDebug \
+  --platform iphoneos \
+  --staged "${INSTALL_STAGED}" \
+  --rootfs-manifest "${ROOTFS_MANIFEST}"
+"${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration StoreDebug \
+  --platform iphoneos \
+  --staged "${TEMP_ROOT}/install-src/absent" \
+  --rootfs-manifest "${TEMP_ROOT}/missing-manifest.json"
 
 ROOTFS_PINS="${TEMP_ROOT}/rootfs-pins"
 mkdir -p "${ROOTFS_PINS}"

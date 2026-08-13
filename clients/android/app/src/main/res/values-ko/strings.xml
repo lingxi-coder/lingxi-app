@@ -590,7 +590,7 @@
     <string name="local_apps_restore_code">코드 복원</string>
     <string name="local_apps_retry_generate">다시 생성</string>
     <string name="local_apps_runtime_mode">실행 모드</string>
-    <string name="local_apps_runtime_next">Next 로컬 서비스</string>
+    <string name="local_apps_runtime_vite">Vite 로컬 서비스</string>
     <string name="local_apps_runtime_running">실행 중</string>
     <string name="local_apps_runtime_starting">시작하는 중</string>
     <string name="local_apps_runtime_static">정적 실행</string>
@@ -1114,7 +1114,7 @@
     <string name="local_apps_loading_workspace_detail">앱 세부 정보가 반환되면 편집 가능한 소스 코드가 표시됩니다.</string>
     <string name="local_apps_loading_workspace_title">작업 공간을 불러오는 중</string>
     <string name="local_apps_manifest_domains_title">매니페스트에 명시된 HTTPS 도메인</string>
-    <string name="local_apps_mode_direct">Direct · Next 로컬 서비스</string>
+    <string name="local_apps_mode_direct">Direct · Vite 로컬 서비스</string>
     <string name="local_apps_mode_direct_detail">프로덕션 빌드를 사용하며, 실행 인스턴스는 기기 메모리 할당량의 제한을 받습니다.</string>
     <string name="local_apps_mode_play">Play · 정적 앱</string>
     <string name="local_apps_mode_play_detail">검증된 정적 내보내기 결과물을 사용합니다.</string>

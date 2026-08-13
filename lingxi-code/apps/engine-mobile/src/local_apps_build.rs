@@ -1,5 +1,5 @@
 //! The local-app BUILD CORE: template scaffolding plus the fixed offline
-//! Next/Vite builds, extracted from the generation pipeline so that
+//! Vite build, extracted from the generation pipeline so that
 //! scaffold/build no longer belongs to the LLM-generation executor.
 
 use crate::local_apps_host::LocalAppsHostBroker;
@@ -18,19 +18,9 @@ const LOW_MEMORY_BUILD_BUDGET_MB: u32 = 2_048;
 const MID_MEMORY_BUILD_BUDGET_MB: u32 = 3_072;
 const HIGH_MEMORY_BUILD_BUDGET_MB: u32 = 4_096;
 const LOCAL_APP_BUILD_GUEST_ROOT: &str = "/var/lingxi/local-app-build";
-const SHARED_NEXT_EXECUTABLE: &str =
-    "/opt/lingxi/local-app-runtime/node_modules/next/dist/bin/next";
 const SHARED_VITE_EXECUTABLE: &str = "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js";
-const VITE_CONFIG_FILES: &[&str] = &[
-    "vite.config.js",
-    "vite.config.mjs",
-    "vite.config.ts",
-    "vite.config.mts",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
-    NextStaticV1,
     ViteReactStaticV1,
 }
 
@@ -74,7 +64,7 @@ pub(crate) const VITE_LOCKED_FILES: &[(&str, &[u8])] = &[
         "lib/lingxi-bridge.js",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/lib/lingxi-bridge.js"
+            "/../../local-apps/templates/vite-react-static-v1/lib/lingxi-bridge.js"
         )),
     ),
     (
@@ -91,28 +81,21 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
         "app/globals.css",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/app/globals.css"
-        )),
-    ),
-    (
-        "components/AppShell.jsx",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/components/AppShell.jsx"
+            "/../../local-apps/templates/vite-react-static-v1/app/globals.css"
         )),
     ),
     (
         "lib/device-context.js",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/lib/device-context.js"
+            "/../../local-apps/templates/vite-react-static-v1/lib/device-context.js"
         )),
     ),
     (
         "lib/platform-adapter.js",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/lib/platform-adapter.js"
+            "/../../local-apps/templates/vite-react-static-v1/lib/platform-adapter.js"
         )),
     ),
     ("public/.gitkeep", b""),
@@ -120,17 +103,13 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
 
 pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTarget, AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
-    let has_next = workspace.join("next.config.mjs").is_file();
-    let has_vite = VITE_CONFIG_FILES
-        .iter()
-        .any(|name| workspace.join(name).is_file());
-    match (has_next, has_vite) {
-        (true, false) => Ok(LocalAppBuildTarget::NextStaticV1),
-        (false, true) | (false, false) => Ok(LocalAppBuildTarget::ViteReactStaticV1),
-        (true, true) => Err(AppError::StorageCorrupt(
-            "workspace contains both Next and Vite build configurations".into(),
-        )),
+    if workspace.join("next.config.mjs").is_file() {
+        return Err(AppError::StorageCorrupt(
+            "workspace contains legacy Next build configuration; local apps now support Vite only"
+                .into(),
+        ));
     }
+    Ok(LocalAppBuildTarget::ViteReactStaticV1)
 }
 
 /// The subset of [`VITE_LOCKED_FILES`] the host re-pins from its compiled-in
@@ -143,15 +122,8 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
 /// is exactly what `.lingxi/source-policy.json` calls host-managed AND the
 /// host can reproduce byte-for-byte: the bridge (the app's only door to host
 /// data) and the policy file itself.
-fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
-    match target {
-        // The policy file describes the Vite workspace contract; a legacy
-        // Next workspace only gets the bridge.
-        LocalAppBuildTarget::NextStaticV1 => &["lib/lingxi-bridge.js"],
-        LocalAppBuildTarget::ViteReactStaticV1 => {
-            &[".lingxi/source-policy.json", "lib/lingxi-bridge.js"]
-        }
-    }
+fn repinned_host_managed_files(_target: LocalAppBuildTarget) -> &'static [&'static str] {
+    &[".lingxi/source-policy.json", "lib/lingxi-bridge.js"]
 }
 
 /// Rewrite every host-managed file from its compiled-in template unless it
@@ -204,21 +176,16 @@ pub(crate) fn node_old_space_mb(build_budget_mb: u32) -> u32 {
 }
 
 fn build_tool_executable(
-    target: LocalAppBuildTarget,
+    _target: LocalAppBuildTarget,
     workspace: &Path,
     app_node_modules_guest: &str,
 ) -> String {
-    match target {
-        LocalAppBuildTarget::NextStaticV1 => SHARED_NEXT_EXECUTABLE.into(),
-        LocalAppBuildTarget::ViteReactStaticV1 => {
-            let app_local_vite = workspace.join("node_modules/vite/bin/vite.js");
-            match std::fs::symlink_metadata(app_local_vite) {
-                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                    format!("{app_node_modules_guest}/vite/bin/vite.js")
-                }
-                _ => SHARED_VITE_EXECUTABLE.into(),
-            }
+    let app_local_vite = workspace.join("node_modules/vite/bin/vite.js");
+    match std::fs::symlink_metadata(app_local_vite) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            format!("{app_node_modules_guest}/vite/bin/vite.js")
         }
+        _ => SHARED_VITE_EXECUTABLE.into(),
     }
 }
 
@@ -248,30 +215,17 @@ impl LocalAppBuilder<'_> {
         Ok(())
     }
 
-    async fn run_fixed_build(
-        &self,
-        layout: &AppLayout,
-        target: LocalAppBuildTarget,
-        full: bool,
-    ) -> Result<(), AppError> {
+    async fn run_fixed_build(&self, layout: &AppLayout) -> Result<(), AppError> {
         let runtime = self.mobile_linux.as_ref().ok_or_else(|| {
             AppError::NotYetAvailable(
                 "the verified mobile Node runtime is unavailable in this build".into(),
             )
         })?;
-        let build_root = layout.root().join(layout.build_rel(full));
-        let build_channel = if full { "full" } else { "store" };
+        let build_root = layout.root().join(layout.build_rel(false));
+        let build_channel = "store";
         let build_guest_path = local_app_build_guest_path(layout.app_id(), build_channel);
-        let (tool_name, mut environment) = match target {
-            LocalAppBuildTarget::NextStaticV1 => (
-                "Next",
-                BTreeMap::from([(
-                    "LINGXI_APP_OUTPUT".into(),
-                    if full { "server" } else { "export" }.into(),
-                )]),
-            ),
-            LocalAppBuildTarget::ViteReactStaticV1 => ("Vite", BTreeMap::new()),
-        };
+        let tool_name = "Vite";
+        let mut environment = BTreeMap::new();
         let workspace = layout.root().join(layout.workspace_rel());
         let app_node_modules = workspace.join("node_modules");
         let app_node_modules_guest = format!("{build_guest_path}/node_modules");
@@ -294,7 +248,11 @@ impl LocalAppBuilder<'_> {
                 )));
             }
         };
-        let executable = build_tool_executable(target, &workspace, &app_node_modules_guest);
+        let executable = build_tool_executable(
+            LocalAppBuildTarget::ViteReactStaticV1,
+            &workspace,
+            &app_node_modules_guest,
+        );
         environment.insert(
             "NODE_PATH".into(),
             if app_node_modules_available {
@@ -360,7 +318,7 @@ impl LocalAppBuilder<'_> {
             .enforcement
             .ensure_for(NetworkPolicy::Disabled, resource_limits)
             .map_err(|error| AppError::Io(error.to_string()))?;
-        append_build_log(layout, full, &result.stdout, &result.stderr).await?;
+        append_build_log(layout, false, &result.stdout, &result.stderr).await?;
         if result.timed_out || result.cancelled || result.exit_code != 0 {
             return Err(AppError::Io(format!(
                 "fixed {tool_name} build exited {} (timed_out={}, cancelled={}): {}",
@@ -373,18 +331,8 @@ impl LocalAppBuilder<'_> {
         Ok(())
     }
 
-    pub(crate) async fn run_next_build(
-        &self,
-        layout: &AppLayout,
-        full: bool,
-    ) -> Result<(), AppError> {
-        self.run_fixed_build(layout, LocalAppBuildTarget::NextStaticV1, full)
-            .await
-    }
-
     pub(crate) async fn run_vite_build(&self, layout: &AppLayout) -> Result<(), AppError> {
-        self.run_fixed_build(layout, LocalAppBuildTarget::ViteReactStaticV1, false)
-            .await
+        self.run_fixed_build(layout).await
     }
 
     /// Prepare the repository-verified Vite project used only when the
@@ -411,8 +359,8 @@ impl LocalAppBuilder<'_> {
         Ok(())
     }
 
-    /// Copy the workspace into the build root(s) and run the fixed offline
-    /// build for the detected target.
+    /// Copy the workspace into the build root and run the fixed offline
+    /// Vite build.
     pub(crate) async fn build_workspace(&self, layout: &AppLayout) -> Result<(), AppError> {
         let workspace = layout.root().join(layout.workspace_rel());
         // Availability FIRST. `replace_build_source` below deletes the build
@@ -426,25 +374,9 @@ impl LocalAppBuilder<'_> {
         // Re-pin the host-managed files from the compiled-in templates on
         // EVERY build, before anything is copied into the build root.
         restore_host_managed_files(&workspace, target)?;
-        match target {
-            LocalAppBuildTarget::ViteReactStaticV1 => {
-                let build_root = layout.root().join(layout.build_rel(false));
-                replace_build_source(&workspace, &build_root)?;
-                self.run_vite_build(layout).await?;
-            }
-            LocalAppBuildTarget::NextStaticV1 => {
-                let build_modes: &[bool] = if self.host.full_runtime_enabled() {
-                    &[false, true]
-                } else {
-                    &[false]
-                };
-                for &full in build_modes {
-                    let build_root = layout.root().join(layout.build_rel(full));
-                    replace_build_source(&workspace, &build_root)?;
-                    self.run_next_build(layout, full).await?;
-                }
-            }
-        }
+        let build_root = layout.root().join(layout.build_rel(false));
+        replace_build_source(&workspace, &build_root)?;
+        self.run_vite_build(layout).await?;
         Ok(())
     }
 }
@@ -627,7 +559,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn empty_workspaces_use_vite_and_build_markers_are_exclusive() {
+    fn empty_workspaces_use_vite_and_reject_legacy_next_markers() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
         layout.initialize().expect("initialize");
@@ -638,16 +570,15 @@ mod tests {
 
         let workspace = layout.root().join(layout.workspace_rel());
         fs::write(workspace.join("next.config.mjs"), "export default {};").expect("Next marker");
-        assert_eq!(
-            detect_build_target(&layout).expect("Next marker selects Next"),
-            LocalAppBuildTarget::NextStaticV1
-        );
-        fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
+        let error = detect_build_target(&layout).expect_err("legacy Next marker must be rejected");
         assert!(
-            detect_build_target(&layout).is_err(),
-            "two build systems are ambiguous"
+            error
+                .to_string()
+                .contains("local apps now support Vite only"),
+            "{error:?}"
         );
         fs::remove_file(workspace.join("next.config.mjs")).expect("remove Next marker");
+        fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
         assert_eq!(
             detect_build_target(&layout).expect("Vite marker selects Vite"),
             LocalAppBuildTarget::ViteReactStaticV1
@@ -796,14 +727,9 @@ mod tests {
     /// actual `node` invocation.
     fn staged_runtime_root(root: &Path) -> std::path::PathBuf {
         let runtime_root = root.join("runtime");
-        for relative in [
-            "node_modules/next/dist/bin/next",
-            "node_modules/vite/bin/vite.js",
-        ] {
-            let path = runtime_root.join(relative);
-            fs::create_dir_all(path.parent().expect("bin parent")).expect("runtime bin dir");
-            fs::write(&path, "#!/usr/bin/env node\n").expect("runtime bin");
-        }
+        let vite = runtime_root.join("node_modules/vite/bin/vite.js");
+        fs::create_dir_all(vite.parent().expect("bin parent")).expect("runtime bin dir");
+        fs::write(&vite, "#!/usr/bin/env node\n").expect("runtime bin");
         runtime_root
     }
 
@@ -889,11 +815,11 @@ mod tests {
     fn platform_adapter_declares_distinct_phone_and_tablet_presentations() {
         let adapter = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/lib/platform-adapter.js"
+            "/../../local-apps/templates/vite-react-static-v1/lib/platform-adapter.js"
         ));
         let css = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/next-static-v1/app/globals.css"
+            "/../../local-apps/templates/vite-react-static-v1/app/globals.css"
         ));
         let vite_config = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

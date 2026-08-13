@@ -60,7 +60,7 @@ enum class LocalAppWorkflow { Draft, Ready }
 
 enum class LocalAppRuntimeState { Stopped, Starting, Running, Stopping, Failed }
 
-enum class LocalAppRuntimeMode { StaticExport, NextProduction }
+enum class LocalAppRuntimeMode { StaticExport, ViteStatic }
 
 @Immutable
 data class LocalAppRuntime(

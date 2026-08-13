@@ -177,7 +177,8 @@ pub struct AppCheckpoint {
 pub enum AppRuntimeMode {
     /// Store/Play static export served by the Rust loopback asset server.
     StaticExport,
-    /// Full/Direct fixed Next production server.
+    /// Legacy persisted mode from builds that used a framework server. New
+    /// runtimes always write [`Self::StaticExport`].
     NextProduction,
 }
 

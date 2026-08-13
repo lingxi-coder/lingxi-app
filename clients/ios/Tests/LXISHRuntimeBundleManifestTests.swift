@@ -37,7 +37,8 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         try """
         {
           "alpine_version": "3.24.1",
-          "rootfs_zip_sha256": "abc123"
+          "rootfs_zip_sha256": "abc123",
+          "local_app_runtime": true
         }
         """.write(to: manifestURL, atomically: true, encoding: .utf8)
         setenv("LINGXI_IOS_RUNTIME_MANIFEST", manifestURL.path, 1)
@@ -46,6 +47,52 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
 
         XCTAssertEqual(manifest.rootfsVersion, "3.24.1")
         XCTAssertEqual(manifest.archiveSha256, "abc123")
+        XCTAssertTrue(manifest.localAppRuntime)
+    }
+
+    func testManifestLoaderFailsClosedWhenLocalAppRuntimeCapabilityIsMissing() throws {
+        let manifestURL = temporaryRoot.appendingPathComponent("linux-runtime-manifest.json")
+        try """
+        {
+          "alpine_version": "3.24.1",
+          "rootfs_zip_sha256": "abc123"
+        }
+        """.write(to: manifestURL, atomically: true, encoding: .utf8)
+        setenv("LINGXI_IOS_RUNTIME_MANIFEST", manifestURL.path, 1)
+
+        XCTAssertFalse(LXISHRuntimeBundleMetadata.current().localAppRuntime)
+    }
+
+    func testLocalAppRuntimeRootRequiresRootfsCapabilityAndBuildTools() throws {
+        let runtimeRoot = temporaryRoot.appendingPathComponent("local-app-runtime", isDirectory: true)
+        let vite = runtimeRoot.appendingPathComponent("node_modules/vite/bin/vite.js")
+        try FileManager.default.createDirectory(
+            at: vite.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: vite)
+
+        XCTAssertNil(
+            LocalAppsRuntimeDistribution.resolveRuntimeRoot(
+                resourceURL: temporaryRoot,
+                manifest: .init(
+                    rootfsVersion: "3.24.1",
+                    archiveSha256: "abc123",
+                    localAppRuntime: false
+                )
+            )
+        )
+        XCTAssertEqual(
+            LocalAppsRuntimeDistribution.resolveRuntimeRoot(
+                resourceURL: temporaryRoot,
+                manifest: .init(
+                    rootfsVersion: "3.24.1",
+                    archiveSha256: "abc123",
+                    localAppRuntime: true
+                )
+            ),
+            runtimeRoot.path
+        )
     }
 
     func testExecutionPolicyRegistryFailsClosedWhenOwnershipIsLost() {

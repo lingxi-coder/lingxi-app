@@ -160,7 +160,7 @@ object LocalAppRuntimeAssets {
      * root. `LocalAppsHostBroker::fixed_runtime_mount`
      * (`engine-mobile/src/local_apps_host.rs:235-244`) is its only producer, and
      * it reaches a failed job's `detail` verbatim under a variant prefix —
-     * `not yet available: ` when the fixed Next build asks for the mount,
+     * `not yet available: ` when the fixed Vite build asks for the mount,
      * `io error: ` when preview start does — so a substring test is what
      * survives both.
      *
@@ -357,8 +357,7 @@ object LocalAppRuntimeAssets {
         }
         destination
             .takeIf {
-                File(it, "node_modules/next/dist/bin/next").isFile &&
-                    File(it, "node_modules/vite/bin/vite.js").isFile
+                File(it, "node_modules/vite/bin/vite.js").isFile
             }
             ?.absolutePath
     }.getOrNull()

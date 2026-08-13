@@ -25,7 +25,7 @@ pub const DATA_DATABASE_FILE: &str = "app.sqlite";
 pub const BUILD_DIR: &str = "build";
 /// Static Store/Play build output.
 pub const STORE_BUILD_DIR: &str = "store";
-/// Full/Direct Next production build output.
+/// Legacy Full/Direct build output retained for workspace migration.
 pub const FULL_BUILD_DIR: &str = "full";
 /// App-private log directory.
 pub const LOGS_DIR: &str = "logs";

@@ -21937,31 +21937,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Direct · Next 本地服务"
+            "value": "Direct · Vite 本地服务"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Direct · Next 本地服務"
+            "value": "Direct · Vite 本地服務"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Direct · Next local service"
+            "value": "Direct · Vite local service"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Direct · Next ローカルサービス"
+            "value": "Direct · Vite ローカルサービス"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Direct · Next 로컬 서비스"
+            "value": "Direct · Vite 로컬 서비스"
           }
         }
       }
@@ -24278,40 +24278,6 @@
         }
       }
     },
-    "local_apps_runtime_next": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next 本地服务"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next 本地服務"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next.js Local Server"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next ローカルサービス"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next 로컬 서비스"
-          }
-        }
-      }
-    },
     "local_apps_runtime_notice_staged_after_null": {
       "localizations": {
         "zh-Hans": {
@@ -24648,6 +24614,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "일시 중단됨"
+          }
+        }
+      }
+    },
+    "local_apps_runtime_vite": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vite 本地服务"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vite 本地服務"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vite Local Server"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vite ローカルサービス"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vite 로컬 서비스"
           }
         }
       }

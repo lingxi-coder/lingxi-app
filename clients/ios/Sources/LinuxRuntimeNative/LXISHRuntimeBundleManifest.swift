@@ -3,8 +3,13 @@ import Foundation
 struct LXISHRuntimeBundleManifest: Equatable {
     var rootfsVersion: String
     var archiveSha256: String?
+    var localAppRuntime: Bool
 
-    static let fallback = LXISHRuntimeBundleManifest(rootfsVersion: "1.0.0", archiveSha256: nil)
+    static let fallback = LXISHRuntimeBundleManifest(
+        rootfsVersion: "1.0.0",
+        archiveSha256: nil,
+        localAppRuntime: false
+    )
 }
 
 enum LXISHRuntimeBundleResources {
@@ -79,7 +84,15 @@ enum LXISHRuntimeBundleMetadata {
             in: json,
             keys: ["archive_sha256", "archiveSha256", "rootfs_zip_sha256", "rootfsZipSha256"]
         )
-        return LXISHRuntimeBundleManifest(rootfsVersion: version, archiveSha256: archiveSha256)
+        let localAppRuntime = boolean(
+            in: json,
+            keys: ["local_app_runtime", "localAppRuntime"]
+        ) ?? false
+        return LXISHRuntimeBundleManifest(
+            rootfsVersion: version,
+            archiveSha256: archiveSha256,
+            localAppRuntime: localAppRuntime
+        )
     }
 
     private static func string(in json: [String: Any], keys: [String]) -> String? {
@@ -88,6 +101,15 @@ enum LXISHRuntimeBundleMetadata {
                !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             {
                 return value.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return nil
+    }
+
+    private static func boolean(in json: [String: Any], keys: [String]) -> Bool? {
+        for key in keys {
+            if let value = json[key] as? Bool {
+                return value
             }
         }
         return nil

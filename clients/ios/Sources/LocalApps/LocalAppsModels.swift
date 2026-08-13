@@ -13,7 +13,7 @@ enum LocalAppsDistributionMode: String, Sendable {
     var runtimeLabel: String {
         switch self {
         case .store: String(localized: "local_apps_runtime_static")
-        case .full: String(localized: "local_apps_runtime_next")
+        case .full: String(localized: "local_apps_runtime_vite")
         }
     }
 }

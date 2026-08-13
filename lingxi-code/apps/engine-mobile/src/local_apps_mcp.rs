@@ -386,7 +386,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record and host metadata. The local-app-build workflow uses the official Vite CLI in an empty staging source root when the Shell tool is available (react by default, react-ts only for confirmed TypeScript), copies it into the app workspace without overwriting source, and otherwise reuses existing source or the repository-verified .lingxi/vite-fallback while reporting the Shell-unavailable reason. Generate under src/ (or app/ for the explicit fallback), use npm dependency operations only when Shell is available, then call build and preview via manage_runtime.",
+                "Create a local app record and host metadata. The local-app-build workflow uses the official Vite CLI in an empty staging source root when the local-app Node/npm toolchain is available (react by default, react-ts only for confirmed TypeScript), copies it into the app workspace without overwriting source, and otherwise reuses existing source or the repository-verified .lingxi/vite-fallback while reporting the toolchain-unavailable reason. Generate under src/ (or app/ for the explicit fallback), use npm dependency operations only when that toolchain is available, then call build and preview via manage_runtime.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -1109,13 +1109,13 @@ mod tests {
         assert!(
             create
                 .description
-                .contains("when the Shell tool is available"),
-            "create must only require the Vite CLI when Shell is available: {}",
+                .contains("when the local-app Node/npm toolchain is available"),
+            "create must only require the Vite CLI when the toolchain is available: {}",
             create.description
         );
         assert!(
-            create.description.contains("Shell-unavailable reason"),
-            "create must describe the Shell-unavailable fallback path: {}",
+            create.description.contains("toolchain-unavailable reason"),
+            "create must describe the toolchain-unavailable fallback path: {}",
             create.description
         );
         let descriptions = tools
@@ -1502,8 +1502,11 @@ mod tests {
             "a missed scaffold must be reported, not silent: {structured}"
         );
         let next_step = structured["next_step"].as_str().expect("next_step");
-        assert!(next_step.contains("If Shell is available"), "{next_step}");
-        assert!(next_step.contains("if Shell is unavailable"), "{next_step}");
+        assert_eq!(
+            next_step,
+            crate::local_apps_host::create_next_step_guidance(None),
+            "the hostless create path must use the canonical capability-neutral guidance"
+        );
         assert_eq!(
             service
                 .record(&app_id)

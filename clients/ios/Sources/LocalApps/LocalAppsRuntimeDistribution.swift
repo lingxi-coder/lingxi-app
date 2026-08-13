@@ -10,14 +10,21 @@ enum LocalAppsRuntimeDistribution {
     }
 
     static var runtimeRoot: String? {
-        guard let root = Bundle.main.resourceURL?
+        resolveRuntimeRoot(
+            resourceURL: Bundle.main.resourceURL,
+            manifest: LXISHRuntimeBundleMetadata.current()
+        )
+    }
+
+    static func resolveRuntimeRoot(
+        resourceURL: URL?,
+        manifest: LXISHRuntimeBundleManifest,
+        fileManager: FileManager = .default
+    ) -> String? {
+        guard manifest.localAppRuntime,
+              let root = resourceURL?
             .appendingPathComponent("local-app-runtime", isDirectory: true),
-              FileManager.default.fileExists(
-                atPath: root
-                    .appendingPathComponent("node_modules/next/dist/bin/next")
-                    .path
-              ),
-              FileManager.default.fileExists(
+              fileManager.fileExists(
                 atPath: root
                     .appendingPathComponent("node_modules/vite/bin/vite.js")
                     .path

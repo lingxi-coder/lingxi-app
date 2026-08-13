@@ -21,6 +21,7 @@
 //! | `emit_end_turn`             | `CostUpdate` **then** `TurnEnded`   |
 //! | `emit_compaction_completed` | `CompactionCompleted`               |
 //! | `emit_thinking` (§0.7)      | `ThinkingDelta`                     |
+//! | `emit_message_boundary`     | `MessageComplete`                   |
 //! | `emit_usage` (§0.7)         | `UsageUpdate`                       |
 //! | `emit_api_retry`            | `ApiRetry`                          |
 //!
@@ -54,6 +55,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client_protocol::events::{ClientEvent, TurnOutcomeDto};
+use client_protocol::message::{MessageBlockDto, MessageDto};
 use traits::{CostSnapshot, OutputStream};
 
 use crate::lowering::{lower_cost_snapshot, value_to_json_string};
@@ -66,8 +68,14 @@ use crate::sink::ClientEventSink;
 /// `Arc<dyn ClientEventSink>` as the permission gate and turn wrapper so all
 /// three feed the one outbound channel (mirrors the single `BridgeOutputStream`
 /// per TUI session).
+#[derive(Clone)]
 pub struct AdapterOutputStream {
     sink: Arc<dyn ClientEventSink>,
+    /// Ordered blocks for the API response currently being streamed. The
+    /// orchestrator calls `emit_message_boundary` after persistence and before
+    /// any terminal `emit_end_turn`, making this the production message-level
+    /// source of truth for mobile/web transcript reducers.
+    message_blocks: Arc<tokio::sync::Mutex<Vec<MessageBlockDto>>>,
     /// `tool_use_id` → `(tool name, call input)` for calls awaiting a result,
     /// in INSERTION ORDER.
     ///
@@ -82,7 +90,8 @@ pub struct AdapterOutputStream {
     ///
     /// A `std::sync::Mutex`, never held across an `.await`, so the struct
     /// stays `Send + Sync` without churning the async signatures.
-    pending: std::sync::Mutex<std::collections::VecDeque<(String, (String, serde_json::Value))>>,
+    pending:
+        Arc<std::sync::Mutex<std::collections::VecDeque<(String, (String, serde_json::Value))>>>,
 }
 
 /// Belt-and-braces bound on [`AdapterOutputStream::pending`] so a turn that
@@ -96,7 +105,17 @@ impl AdapterOutputStream {
     pub fn new(sink: Arc<dyn ClientEventSink>) -> Self {
         Self {
             sink,
-            pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            message_blocks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        }
+    }
+
+    /// Clear an unfinished response before a host starts a new turn or after a
+    /// hard failure that did not reach an engine message boundary.
+    pub async fn reset_message_buffer(&self) {
+        self.message_blocks.lock().await.clear();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
         }
     }
 
@@ -175,11 +194,36 @@ impl AdapterOutputStream {
             _ => TurnOutcomeDto::EndTurn,
         }
     }
+
+    async fn emit_buffered_message(&self, stop_reason: Option<&str>, include_empty: bool) {
+        let blocks = std::mem::take(&mut *self.message_blocks.lock().await);
+        if blocks.is_empty() && !include_empty {
+            return;
+        }
+        self.sink
+            .emit(ClientEvent::MessageComplete {
+                stop_reason: stop_reason.map(str::to_string),
+                message: Some(MessageDto {
+                    role: "assistant".to_string(),
+                    blocks,
+                }),
+            })
+            .await;
+    }
 }
 
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
     async fn emit_text(&self, text: &str) {
+        let mut blocks = self.message_blocks.lock().await;
+        if let Some(MessageBlockDto::Text { text: current }) = blocks.last_mut() {
+            current.push_str(text);
+        } else {
+            blocks.push(MessageBlockDto::Text {
+                text: text.to_string(),
+            });
+        }
+        drop(blocks);
         self.sink
             .emit(ClientEvent::TextDelta {
                 text: text.to_string(),
@@ -203,6 +247,15 @@ impl OutputStream for AdapterOutputStream {
         input: &serde_json::Value,
     ) {
         self.remember_call(id, tool, input);
+        self.message_blocks
+            .lock()
+            .await
+            .push(MessageBlockDto::ToolUse {
+                id: id.to_string(),
+                tool: tool.to_string(),
+                input_json: value_to_json_string(input),
+                header: Some(crate::tool_display::lower_tool_header(tool, input)),
+            });
         self.sink
             .emit(ClientEvent::ToolUseStarted {
                 id: id.to_string(),
@@ -274,6 +327,10 @@ impl OutputStream for AdapterOutputStream {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
+        // Guarded terminal paths can emit assistant text and end without the
+        // normal persisted-message callback. Flush that residual response here,
+        // still before the terminal marker.
+        self.emit_buffered_message(Some(stop_reason), false).await;
         // Emit the cumulative cost update BEFORE the turn-end marker so a client
         // can refresh its cost line in the same render pass it ends the turn —
         // exactly the ordering `BridgeOutputStream::emit_end_turn` uses
@@ -320,12 +377,42 @@ impl OutputStream for AdapterOutputStream {
     /// (the cryptographic signature only arrives on the completed thinking
     /// block, not per-delta) — see `traits::OutputStream::emit_thinking`.
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
+        let mut blocks = self.message_blocks.lock().await;
+        if let Some(MessageBlockDto::Thinking {
+            thinking: current,
+            signature: current_signature,
+        }) = blocks.last_mut()
+        {
+            current.push_str(thinking);
+            if signature.is_some() {
+                *current_signature = signature.map(str::to_string);
+            }
+        } else {
+            blocks.push(MessageBlockDto::Thinking {
+                thinking: thinking.to_string(),
+                signature: signature.map(str::to_string),
+            });
+        }
+        drop(blocks);
         self.sink
             .emit(ClientEvent::ThinkingDelta {
                 thinking: thinking.to_string(),
                 signature: signature.map(str::to_string),
             })
             .await;
+    }
+
+    async fn emit_redacted_thinking(&self, data: &str) {
+        self.message_blocks
+            .lock()
+            .await
+            .push(MessageBlockDto::RedactedThinking {
+                data: data.to_string(),
+            });
+    }
+
+    async fn emit_message_boundary(&self, stop_reason: Option<&str>, _request_id: Option<&str>) {
+        self.emit_buffered_message(stop_reason, true).await;
     }
 
     /// §0.7 "light up thinking/usage": lower each incremental token-usage
@@ -787,6 +874,61 @@ mod tests {
                 text: "via trait object".to_string()
             }
         );
+    }
+
+    /// One completed API response is emitted before the turn terminal, with
+    /// its text/reasoning/tool blocks in the same order the live callbacks
+    /// arrived. This is the ordering contract consumed by transcript UIs.
+    #[tokio::test]
+    async fn message_boundary_emits_ordered_complete_before_turn_ended() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let id = protocol::ToolUseId::new();
+
+        stream.emit_text("A").await;
+        stream.emit_thinking("reason", Some("sig")).await;
+        stream
+            .emit_tool_call(&id, "Read", &serde_json::json!({"path": "a"}))
+            .await;
+        stream.emit_text("B").await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        stream
+            .emit_end_turn("end_turn", &CostSnapshot::default())
+            .await;
+
+        let events = sink.events().await;
+        let complete = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::MessageComplete { .. }))
+            .expect("message complete");
+        let ended = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            .expect("turn ended");
+        assert!(
+            complete < ended,
+            "MessageComplete must precede TurnEnded: {events:?}"
+        );
+        match &events[complete] {
+            ClientEvent::MessageComplete {
+                message: Some(message),
+                ..
+            } => {
+                assert!(
+                    matches!(&message.blocks[0], MessageBlockDto::Text { text } if text == "A")
+                );
+                assert!(
+                    matches!(&message.blocks[1], MessageBlockDto::Thinking { thinking, .. } if thinking == "reason")
+                );
+                assert!(
+                    matches!(&message.blocks[2], MessageBlockDto::ToolUse { id: got, .. } if got == &id.to_string())
+                );
+                assert!(
+                    matches!(&message.blocks[3], MessageBlockDto::Text { text } if text == "B")
+                );
+            }
+            other => panic!("expected completed message, got {other:?}"),
+        }
     }
 
     /// The live turn and a resumed transcript must produce the SAME

@@ -276,6 +276,10 @@ pub struct OrchestratorTurnDriver {
     /// Used solely to emit a terminal [`ClientEvent::Error`] on turn failure;
     /// `None` to drop errors silently (e.g. tests that only assert success).
     error_sink: Option<Arc<dyn ClientEventSink>>,
+    /// Optional response accumulator paired with this orchestrator. Production
+    /// wiring supplies it so a hard failure cannot leak partial blocks into the
+    /// next turn; older/test drivers may omit it.
+    message_output: Option<client_adapter::AdapterOutputStream>,
     /// The connection's message queue, wired so each turn's fresh
     /// [`CancellationToken`] is REGISTERED with the queue at turn start (so a
     /// `Now`-priority enqueue aborts the in-flight turn) and CLEARED at turn end.
@@ -310,6 +314,7 @@ impl OrchestratorTurnDriver {
         Self {
             orchestrator,
             error_sink: None,
+            message_output: None,
             queue: None,
             cancel_reason: None,
             wakeup_scheduler: None,
@@ -351,11 +356,20 @@ impl OrchestratorTurnDriver {
         Self {
             orchestrator,
             error_sink: Some(error_sink),
+            message_output: None,
             queue: None,
             cancel_reason: None,
             wakeup_scheduler: None,
             loop_runtime: None,
         }
+    }
+
+    /// Attach the connection's concrete output adapter so response state can
+    /// be reset at turn boundaries and after hard failures.
+    #[must_use]
+    pub fn with_message_output(mut self, output: client_adapter::AdapterOutputStream) -> Self {
+        self.message_output = Some(output);
+        self
     }
 
     /// Wire the self-wakeup scheduler so each turn's completion edge can arm the
@@ -421,6 +435,9 @@ impl OrchestratorTurnDriver {
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
     ) {
+        if let Some(output) = &self.message_output {
+            output.reset_message_buffer().await;
+        }
         // NOW-ABORT wiring: register this turn's token with the queue so a `Now`
         // enqueue aborts it, and RESET the abort-reason flag to `UserInterrupt`
         // so a stale `QueueNowCommand` from the previous turn can't mislabel this
@@ -463,6 +480,9 @@ impl OrchestratorTurnDriver {
             // explicitly as a terminal `Error` event (when an error sink is wired)
             // rather than letting the client hang.
             Err(err) => {
+                if let Some(output) = &self.message_output {
+                    output.reset_message_buffer().await;
+                }
                 if let Some(sink) = &self.error_sink {
                     sink.emit(Self::error_event(&err)).await;
                     // `Error` is also used by non-turn commands, so clients

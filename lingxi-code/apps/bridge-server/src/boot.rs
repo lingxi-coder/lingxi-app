@@ -579,8 +579,8 @@ pub async fn assemble_with_provider_keys(
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
-    let output: Arc<dyn OutputStream> =
-        Arc::new(client_adapter::AdapterOutputStream::new(event_sink.clone()));
+    let message_output = client_adapter::AdapterOutputStream::new(event_sink.clone());
+    let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
     let permission_sink = connection.permission_sink();
 
     // The `computer` tool's `request_access` approval — the Electron-facing
@@ -690,6 +690,7 @@ pub async fn assemble_with_provider_keys(
     } else {
         Arc::new(
             OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
+                .with_message_output(message_output)
                 .with_queue(queue, cancel_reason)
                 .with_wakeup_scheduler(driver_wakeup_scheduler),
         )

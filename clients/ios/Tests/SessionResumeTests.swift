@@ -897,9 +897,9 @@ import XCTest
         }
 
         /// An assistant message carrying multiple block kinds must SPLIT: the
-        /// narrative blocks (text + thinking + compaction) flatten into one
-        /// bubble, while the tool call leaves the bubble entirely and becomes its
-        /// own `.toolCall` render row. Nothing may silently vanish.
+        /// narrative blocks remain message rows in wire order, while reasoning
+        /// and tools stay in the execution timeline. Nothing may silently vanish
+        /// or be rendered twice.
         func testSessionResumedSplitsRichAssistantBlocks() {
             let source = makeSource()
             let assistant = MessageDto(role: "assistant", blocks: [
@@ -914,10 +914,10 @@ import XCTest
             ])
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: [assistant]))
 
-            XCTAssertEqual(source.model.messages.count, 1)
-            let text = source.model.messages[0].text
+            XCTAssertEqual(source.model.messages.count, 2)
+            let text = source.model.messages.map(\.text).joined(separator: "\n")
             XCTAssertTrue(text.contains("正文"), "text block body must be present")
-            XCTAssertTrue(text.contains("推理"), "thinking block body must be present")
+            XCTAssertFalse(text.contains("推理"), "thinking belongs to the timeline, not the message bubble")
             XCTAssertTrue(text.contains("对话已压缩"),
                           "compact boundary must remain visible after resume")
             XCTAssertFalse(text.contains("hidden compact summary"),
@@ -944,6 +944,24 @@ import XCTest
                 ["t1"],
                 "restored tool activity keeps the wire block order"
             )
+            XCTAssertEqual(
+                source.model.visibleTimelineGroups.flatMap(\.rows).filter {
+                    if case .reasoning = $0 { return true }
+                    return false
+                }.count,
+                1
+            )
+            let timelineOrder = source.model.visibleTimelineGroups.flatMap(\.rows).map { row -> String in
+                switch row {
+                case let .message(message):
+                    return message.text.contains("正文") ? "message:text" : "message:compact"
+                case .reasoning: return "reasoning"
+                case .tool: return "tool"
+                case .notice: return "notice"
+                case .commandOutput: return "command-output"
+                }
+            }
+            XCTAssertEqual(timelineOrder, ["message:text", "reasoning", "message:compact", "tool"])
         }
 
         func testSessionResumedReconstructsTerminalRunAfterItsFinalAssistantMessage() {
@@ -993,6 +1011,40 @@ import XCTest
             XCTAssertEqual(run.status, .restored)
             XCTAssertEqual(run.tools.map(\.id), ["tool-restore"])
             XCTAssertEqual(run.tools.first?.status, .completed)
+        }
+
+        func testSessionResumedPreservesNarrativeToolInterleavingWithinOneAssistantMessage() {
+            let source = makeSource()
+            let messages: [MessageDto] = [
+                MessageDto(role: "assistant", blocks: [
+                    .text(text: "A"),
+                    .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil),
+                    .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"result":"a"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
+                    .text(text: "B"),
+                    .toolUse(id: "tool-2", tool: "Edit", inputJson: #"{"path":"b"}"#, header: nil),
+                    .toolResult(id: "tool-2", tool: "Edit", resultJson: #"{"result":"b"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
+                    .text(text: "C"),
+                ]),
+            ]
+
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+
+            let order = source.model.visibleTimelineGroups.flatMap(\.rows).map { row -> String in
+                switch row {
+                case let .message(message): return "message:\(message.text)"
+                case let .tool(_, trace): return "tool:\(trace.id)"
+                case .reasoning: return "reasoning"
+                case .notice: return "notice"
+                case .commandOutput: return "command-output"
+                }
+            }
+            XCTAssertEqual(order, [
+                "message:A",
+                "tool:tool-1",
+                "message:B",
+                "tool:tool-2",
+                "message:C",
+            ])
         }
 
         func testSessionResumedDoesNotPromoteAToolOutcomeToTheAgentOutcome() {

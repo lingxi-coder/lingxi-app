@@ -3,8 +3,8 @@
     "plan": "M5-09",
     "spec_section": "§3 M5-09 row + §4.6 (Slash commands)",
     "_claude_code_version": "see CHANGELOG v0.6.0 baseline",
-    "_count_history": "106-name surface (2026-07-14 H-BIN-11 slash-parity pass vs 2.1.207 added the five pre-lock-missed local-jsx commands background/cd/focus/tui/usage-credits, re-locking 101->106; unimplemented stays 47 because all five are target-implemented interactive_only). Prior: 101-name surface (2026-07-04 batch-8 tail added the net-new headless autocompact; the same batch-8 pass added fork/goal/recap/reload-skills/skill-doctor/stop -> 100; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status. | 2026-07-25: x402 removed (0 hits in the 2.1.220 oracle binary), re-locking 106->105; /agents description rebranded .claude/agents/ -> .lingxi/agents/ to match this workspace's paths. | 2026-07-25 (b): +auto-mode-setup (2.1.220 WIZARD-06 `{type:\"local\",supportsNonInteractive:!0}`), re-locking 105->106. It is palette-HIDDEN (`get isHidden(){return!_n()}` with `_n()=!isInteractive`), so /help is unchanged at 79 lines. | 2026-07-29: /btw moved from entitlement-gated non-goal to the production isolated side-query handler, re-locking unimplemented 46->45.",
-    "total_count_lock": 106,
+    "_count_history": "106-name surface (2026-07-14 H-BIN-11 slash-parity pass vs 2.1.207 added the five pre-lock-missed local-jsx commands background/cd/focus/tui/usage-credits, re-locking 101->106; unimplemented stays 47 because all five are target-implemented interactive_only). Prior: 101-name surface (2026-07-04 batch-8 tail added the net-new headless autocompact; the same batch-8 pass added fork/goal/recap/reload-skills/skill-doctor/stop -> 100; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status. | 2026-07-25: x402 removed (0 hits in the 2.1.220 oracle binary), re-locking 106->105; /agents description rebranded .claude/agents/ -> .lingxi/agents/ to match this workspace's paths. | 2026-07-25 (b): +auto-mode-setup (2.1.220 WIZARD-06 `{type:\"local\",supportsNonInteractive:!0}`), re-locking 105->106. It is palette-HIDDEN (`get isHidden(){return!_n()}` with `_n()=!isInteractive`), so /help is unchanged at 79 lines. | 2026-07-29: /btw moved from entitlement-gated non-goal to the production isolated side-query handler, re-locking unimplemented 46->45. | 2026-08-13: +workflows, the pre-existing 2.1.205 local-jsx command already implemented by the TUI; shared/headless clients receive a live task-registry snapshot, re-locking 106->107.",
+    "total_count_lock": 107,
     "core_count_lock": 19,
     "unimplemented_count_lock": 45,
     "stub_literal_template": "{name}: not implemented in v0.6.0 (M5)",
@@ -1025,6 +1025,16 @@
       "target_status": "deferred",
       "requires_tui": false,
       "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "workflows",
+      "is_core": false,
+      "implemented": true,
+      "description": "Browse running and completed workflows",
+      "claude_type": "local-jsx",
+      "rust_status": "implemented_handle_bound",
+      "target_status": "implemented",
+      "requires_tui": false
     }
   ]
 }

@@ -11,8 +11,8 @@
 //! This is exactly the spec §8 "prove from a Swift/Kotlin unit test" smoke test,
 //! runnable on the host: `submit(SendPrompt)` against a stubbed streaming client
 //! drives the SAME `client-adapter` lowering pipeline both transports share, and
-//! the registered listener receives a `TextDelta` then a `TurnEnded` — the same
-//! two-event signature the bridge-server e2e asserts from the SAME
+//! the registered listener receives `TextDelta`, `MessageComplete`, then
+//! `TurnEnded` — the same message/turn boundaries shipped through the SAME
 //! `client-protocol` DTOs.
 //!
 //! Requires `--features uniffi` (the FFI surface lives behind that feature).
@@ -66,11 +66,12 @@ async fn start_new_session(handle: &std::sync::Arc<engine_mobile::MobileEngineHa
 }
 
 /// F3-06: `submit(SendPrompt)` drives the streaming turn on the handle-owned
-/// runtime and the registered listener receives `TextDelta` then `TurnEnded`.
+/// runtime and the registered listener receives `TextDelta`, `MessageComplete`,
+/// then `TurnEnded`.
 ///
 /// The walking skeleton: connect (build the engine) → register a listener →
 /// `submit(SendPrompt)` against a stubbed `StreamingApiClient` → assert the
-/// streamed `TextDelta` precedes the terminal `TurnEnded`.
+/// completed message lands between the streamed delta and terminal turn.
 #[test]
 fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -137,8 +138,7 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
         listener.received.lock().await.clone()
     });
 
-    // (5) Assert the two-event signature: a `TextDelta` carrying the scripted
-    //     text precedes the terminal `TurnEnded { EndTurn }`.
+    // (5) Assert the message/turn boundary order.
     let text_idx = events
         .iter()
         .position(|e| matches!(e, ClientEvent::TextDelta { text } if text.contains("hello from the skeleton")))
@@ -149,9 +149,14 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
         .position(|e| matches!(e, ClientEvent::TurnEnded { .. }))
         .unwrap_or_else(|| panic!("expected a terminal TurnEnded; got {events:?}"));
 
+    let message_complete_idx = events
+        .iter()
+        .position(|e| matches!(e, ClientEvent::MessageComplete { .. }))
+        .unwrap_or_else(|| panic!("expected MessageComplete; got {events:?}"));
+
     assert!(
-        text_idx < turn_ended_idx,
-        "TextDelta must precede TurnEnded; events: {events:?}"
+        text_idx < message_complete_idx && message_complete_idx < turn_ended_idx,
+        "TextDelta must precede MessageComplete, which must precede TurnEnded; events: {events:?}"
     );
 
     // The terminal `TurnEnded` carries the `end_turn` outcome (the same lowering

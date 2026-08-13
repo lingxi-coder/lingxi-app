@@ -879,7 +879,8 @@ enum ConversationSourceFactory {
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
                 return MockConversationSource.uiTestFixture(
                     cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1",
-                    multiAgent: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_MULTI_AGENT"] == "1"
+                    multiAgent: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_MULTI_AGENT"] == "1",
+                    holdTurn: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_HOLD_TURN"] == "1"
                 )
             }
         #endif
@@ -938,6 +939,7 @@ enum ConversationSourceFactory {
 @MainActor
 final class MockConversationSource: ConversationSource {
     let model = ConversationModel(messages: MockData.messagesDefault)
+    private var cannedReplyDelay: TimeInterval = 1.1
 
     /// Bumped on cancel / new-chat so an in-flight canned reply timer no-ops when
     /// it fires (the mock's analog of the engine's cancel token).
@@ -948,8 +950,13 @@ final class MockConversationSource: ConversationSource {
     private var turnSpeechSequence: UInt64 = 0
 
     #if DEBUG
-        static func uiTestFixture(cancelledRun: Bool = false, multiAgent: Bool = false) -> MockConversationSource {
+        static func uiTestFixture(
+            cancelledRun: Bool = false,
+            multiAgent: Bool = false,
+            holdTurn: Bool = false
+        ) -> MockConversationSource {
             let source = MockConversationSource()
+            source.cannedReplyDelay = holdTurn ? 30 : 1.1
             let terminalToolStatus: ConversationToolStatus = cancelledRun ? .cancelled : .completed
             let terminalShellStatus: ConversationShellStatus = cancelledRun ? .cancelled : .completed
             let terminalRunStatus: ConversationExecutionStatus = cancelledRun ? .cancelled : .completed
@@ -999,6 +1006,11 @@ final class MockConversationSource: ConversationSource {
                 elapsedMs: 29
             )
             let toolTraces = cancelledRun ? [webSearchTrace, shellTrace] : [shellTrace, readTrace, searchTrace]
+            let user = Message(role: .user, text: "Hello")
+            let assistant = Message(
+                role: .ai,
+                text: "Hello! I'm ready to help with your software engineering tasks."
+            )
             let run = ConversationExecutionRun(
                 id: "ui-run",
                 sessionId: "ui-session",
@@ -1022,15 +1034,10 @@ final class MockConversationSource: ConversationSource {
                     : [
                         .reasoning(id: "ui-thought", text: "检查当前项目工作区。"),
                         .tool(id: shellTrace.id),
-                        .textBoundary(id: "ui-text-boundary"),
+                        .textBoundary(id: "ui-text-boundary", messageID: assistant.id),
                         .tool(id: readTrace.id),
                         .tool(id: searchTrace.id),
                     ]
-            )
-            let user = Message(role: .user, text: "Hello")
-            let assistant = Message(
-                role: .ai,
-                text: "Hello! I'm ready to help with your software engineering tasks."
             )
             source.model.messages = [user, assistant]
             source.model.items = [.message(user), .run(run), .message(assistant)]
@@ -1143,7 +1150,7 @@ final class MockConversationSource: ConversationSource {
         )
         nextTurnId &+= 1
         activeTurnToken = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + cannedReplyDelay) { [weak self] in
             guard let self,
                   self.turnToken == generation,
                   self.activeTurnToken == token
@@ -1341,6 +1348,11 @@ final class MockConversationSource: ConversationSource {
         private var streamingIndex: Int?
         /// The matching render-list slot for the in-flight assistant message.
         private var streamingItemIndex: Int?
+        /// Narrative rows opened during the current assistant API response. A
+        /// tool/reasoning event can split one response into multiple timeline
+        /// rows; MessageComplete reconciles its structured payload back onto
+        /// these stable identities instead of replacing only the last fragment.
+        private var currentResponseMessageIDs: [UUID] = []
         /// Monotonic per-turn correlator, also passed as the engine `turnId` so a
         /// `cancel` narrows to the exact in-flight turn. `nil` between turns.
         private var currentTurnId: UInt64?
@@ -1645,6 +1657,7 @@ final class MockConversationSource: ConversationSource {
             sessionEpoch &+= 1
             streamingIndex = nil
             streamingItemIndex = nil
+            currentResponseMessageIDs = []
             currentTurnId = nil
             activeTurnEpoch = nil
             activeRunItemIndex = nil
@@ -1655,6 +1668,7 @@ final class MockConversationSource: ConversationSource {
         private func clearTurnPointers(keepEpoch: Bool = true) {
             streamingIndex = nil
             streamingItemIndex = nil
+            currentResponseMessageIDs = []
             currentTurnId = nil
             activeTurnEpoch = keepEpoch ? activeTurnEpoch : nil
             activeRunItemIndex = nil
@@ -1674,10 +1688,22 @@ final class MockConversationSource: ConversationSource {
         }
 
         private func finalAssistantTextForActiveTurn() -> String {
-            guard let streamingIndex,
-                  model.messages.indices.contains(streamingIndex)
-            else { return "" }
-            let message = model.messages[streamingIndex]
+            let message: Message?
+            if let streamingIndex,
+               model.messages.indices.contains(streamingIndex) {
+                message = model.messages[streamingIndex]
+            } else if let activeRunItemIndex,
+                      model.items.indices.contains(activeRunItemIndex),
+                      case let .run(run) = model.items[activeRunItemIndex],
+                      let messageID = run.activities.reversed().compactMap({ activity -> UUID? in
+                          guard case let .textBoundary(_, messageID) = activity else { return nil }
+                          return messageID
+                      }).first {
+                message = model.messages.first(where: { $0.id == messageID })
+            } else {
+                message = nil
+            }
+            guard let message else { return "" }
             guard case .ai = message.role else { return "" }
             if let detail = model.messageDetails[message.id] {
                 return detail.blocks.compactMap { block -> String? in
@@ -1753,6 +1779,29 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        private func replaceMessage(
+            id: UUID,
+            with message: Message,
+            detail: ConversationMessageDetail?
+        ) {
+            guard let messageIndex = model.messages.firstIndex(where: { $0.id == id }) else {
+                appendMessage(message, detail: detail)
+                return
+            }
+            let stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
+            model.messages[messageIndex] = stableMessage
+            if let itemIndex = model.items.firstIndex(where: { item in
+                guard case let .message(existing) = item else { return false }
+                return existing.id == id
+            }) {
+                model.items[itemIndex] = .message(stableMessage)
+            }
+            model.messageDetails.removeValue(forKey: id)
+            if let detail {
+                model.messageDetails[id] = detail
+            }
+        }
+
         private func ensureActiveRun() -> ConversationExecutionRun {
             if let itemIndex = activeRunItemIndex,
                model.items.indices.contains(itemIndex),
@@ -1803,10 +1852,16 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        private func appendTextBoundaryActivity() {
+        private func appendTextBoundaryActivity(messageID: UUID) {
             updateActiveRun { run in
-                if case .textBoundary = run.activities.last { return }
-                run.activities.append(.textBoundary(id: "boundary-\(UUID().uuidString)"))
+                guard !run.activities.contains(where: { activity in
+                    guard case let .textBoundary(_, existingMessageID) = activity else { return false }
+                    return existingMessageID == messageID
+                }) else { return }
+                run.activities.append(.textBoundary(
+                    id: "boundary-\(UUID().uuidString)",
+                    messageID: messageID
+                ))
             }
         }
 
@@ -2069,6 +2124,7 @@ final class MockConversationSource: ConversationSource {
             model.statusLine = nil
             streamingIndex = nil
             streamingItemIndex = nil
+            currentResponseMessageIDs = []
             currentTurnId = prompt.turnId
             activeTurnEpoch = sessionEpoch
             let token = ConversationTurnToken(
@@ -2105,6 +2161,7 @@ final class MockConversationSource: ConversationSource {
             model.statusLine = nil
             streamingIndex = nil
             streamingItemIndex = nil
+            currentResponseMessageIDs = []
             currentTurnId = turnId
             activeTurnEpoch = sessionEpoch
             pendingSlashRaw = raw
@@ -2146,6 +2203,13 @@ final class MockConversationSource: ConversationSource {
                 !model.isSelectedAgentReadOnly
             else { return nil }
 
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The engine command catalog is authoritative. Until it arrives we
+            // cannot distinguish a valid local slash command from prompt text,
+            // so keep the draft untouched instead of accidentally sending it
+            // to the model through non-Composer call sites.
+            guard model.slashCommandsLoaded || !trimmed.hasPrefix("/") else { return nil }
+
             model.isNew = false
             model.notice = nil
             appendMessage(Message(role: .user, text: text))
@@ -2153,8 +2217,8 @@ final class MockConversationSource: ConversationSource {
             let turnId = nextTurnId
             nextTurnId &+= 1
             if model.slashCommandsLoaded,
-               SlashCommandMatcher.exactCommand(in: text, catalog: model.slashCommands) != nil {
-                return startSlashCommand(raw: text, turnId: turnId)
+               SlashCommandMatcher.exactCommand(in: trimmed, catalog: model.slashCommands) != nil {
+                return startSlashCommand(raw: trimmed, turnId: turnId)
             }
             return startPrompt(TurnPrompt(text: text, turnId: turnId))
         }
@@ -2495,14 +2559,15 @@ final class MockConversationSource: ConversationSource {
 
         /// Pull the background-task rows (out-of-band, like `listSessions`).
         /// Each row lands on `apply` as a `TaskRow` event → the pinned panel.
-        /// Uses the LIVE handle only — this is called from `apply`, where a
-        /// handle necessarily exists in production; never trigger a build
-        /// (hermetic `applyForTesting` callers must stay engine-free).
+        /// Uses the live handle in production, while allowing the injected
+        /// command submitter to keep this path covered by hermetic tests.
+        /// Neither route triggers an engine build.
         func refreshBackgroundTasks() {
-            guard let handle else { return }
-            Task {
+            guard handle != nil || testCommandSubmitter != nil else { return }
+            Task { [weak self] in
+                guard let self else { return }
                 // Best-effort: the panel self-heals on the next status push.
-                try? await handle.submit(command: .taskList(statusFilter: nil))
+                try? await self.submitCommand(.taskList(statusFilter: nil))
             }
         }
 
@@ -2514,7 +2579,9 @@ final class MockConversationSource: ConversationSource {
             status: BackgroundTaskSnapshot.Status
         ) {
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
-                model.backgroundTasks[index].status = status
+                if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
+                    model.backgroundTasks[index].status = status
+                }
                 if let description, !description.isEmpty {
                     model.backgroundTasks[index].descriptionText = description
                 }
@@ -2986,6 +3053,7 @@ final class MockConversationSource: ConversationSource {
                 model.notice = nil
                 streamingIndex = nil
                 streamingItemIndex = nil
+                currentResponseMessageIDs = []
                 updateActiveRun {
                     $0.status = .running
                     $0.retry = nil
@@ -3015,8 +3083,9 @@ final class MockConversationSource: ConversationSource {
 
             case let .textDelta(text):
                 guard acceptTurnEvent(event) else { return }
-                appendTextBoundaryActivity()
-                appendDelta(text)
+                if let messageID = appendDelta(text) {
+                    appendTextBoundaryActivity(messageID: messageID)
+                }
                 let activity = text
                     .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
                     .first
@@ -3130,6 +3199,10 @@ final class MockConversationSource: ConversationSource {
                 // client-side summarizer below survives only as the fallback for
                 // an engine too old to send one.
                 let derivedHeader = header.map(Self.toolHeader(from:))
+                // A tool starts a new timeline phase. The next text delta must
+                // open a distinct message row rather than append across the tool.
+                streamingIndex = nil
+                streamingItemIndex = nil
                 appendToolActivity(id: id)
                 if ConversationExecutionParsing.isShellTool(tool) {
                     let started = ConversationExecutionParsing.shellStarted(id: id, inputJson: inputJson)
@@ -3259,6 +3332,14 @@ final class MockConversationSource: ConversationSource {
                         : (isError ? String(localized: "chat_tool_failed \(tool)") : String(localized: "chat_tool_completed \(tool)"))
                     model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 }
+                if !isError,
+                   tool.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("Workflow") == .orderedSame {
+                    // Workflow returns as soon as the background task is
+                    // launched. Pull its registry row now; later terminal
+                    // transitions arrive through TaskStatusChanged.
+                    refreshBackgroundTasks()
+                }
 
             case let .usageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
                 guard acceptTurnEvent(event) else { return }
@@ -3332,10 +3413,33 @@ final class MockConversationSource: ConversationSource {
             case let .messageComplete(_, message):
                 guard acceptTurnEvent(event) else { return }
                 if let message {
-                    appendTextBoundaryActivity()
-                    let lowered = Self.message(from: message)
-                    replaceStreamingMessage(lowered.message, detail: lowered.detail)
+                    let segments = Self.narrativeSegments(from: message)
+                    // If an out-of-band notice split streamed text but does not
+                    // appear in MessageDto, the final payload can contain fewer
+                    // narrative segments than the ledger. In that case retain
+                    // the already-correct streamed rows instead of merging and
+                    // duplicating their suffix.
+                    if segments.count >= currentResponseMessageIDs.count {
+                        for (index, segment) in segments.enumerated() {
+                            if currentResponseMessageIDs.indices.contains(index) {
+                                replaceMessage(
+                                    id: currentResponseMessageIDs[index],
+                                    with: segment.message,
+                                    detail: segment.detail
+                                )
+                            } else {
+                                appendMessage(segment.message, detail: segment.detail)
+                                appendTextBoundaryActivity(messageID: segment.message.id)
+                            }
+                        }
+                    }
                 }
+                // One MessageComplete closes one assistant API response. Tool
+                // execution may continue the same user turn, but the next text
+                // belongs to a new narrative row after those tool activities.
+                streamingIndex = nil
+                streamingItemIndex = nil
+                currentResponseMessageIDs = []
 
             case let .turnEnded(outcome, _, _):
                 let accepted = acceptTurnEvent(event)
@@ -3651,19 +3755,33 @@ final class MockConversationSource: ConversationSource {
         /// PR-4 item 1 guard: only append when a turn is actually in flight. After
         /// a cancel/turn-end we drop `streaming`/`streamingIndex`, so a late delta
         /// arriving from the engine must NOT resurrect or corrupt a message.
-        private func appendDelta(_ delta: String) {
-            guard model.streaming else { return }
-            if let i = streamingIndex, model.messages.indices.contains(i) {
+        private func appendDelta(_ delta: String) -> UUID? {
+            guard model.streaming else { return nil }
+            if let i = streamingIndex,
+               model.messages.indices.contains(i),
+               activeRunEndsWithBoundary(for: model.messages[i].id) {
                 let updated = Message(role: .ai,
                                       tag: model.messages[i].tag,
                                       text: model.messages[i].text + delta)
                 replaceStreamingMessage(updated)
+                return model.messages[i].id
             } else {
                 let opened = Message(role: .ai, text: delta)
                 appendMessage(opened)
                 streamingIndex = model.messages.count - 1
                 streamingItemIndex = model.items.count - 1
+                currentResponseMessageIDs.append(opened.id)
+                return opened.id
             }
+        }
+
+        private func activeRunEndsWithBoundary(for messageID: UUID) -> Bool {
+            guard let itemIndex = activeRunItemIndex,
+                  model.items.indices.contains(itemIndex),
+                  case let .run(run) = model.items[itemIndex],
+                  case let .textBoundary(_, boundaryMessageID) = run.activities.last
+            else { return false }
+            return boundaryMessageID == messageID
         }
 
         private func publishTurnSpeechDelta(_ delta: String) {
@@ -3905,16 +4023,36 @@ final class MockConversationSource: ConversationSource {
             )
         }
 
-        fileprivate static func message(from dto: MessageDto) -> RenderedMessage {
+        /// Split an assistant response at tool/reasoning boundaries. The run
+        /// ledger owns those activities; message bubbles retain only narrative
+        /// text and compact-boundary content.
+        private static func narrativeSegments(from dto: MessageDto) -> [RenderedMessage] {
             let role: Role = (dto.role == "user") ? .user : .ai
-            let detail = detail(from: dto.blocks)
-            let body = text(from: detail?.blocks ?? [])
-            return RenderedMessage(message: Message(role: role, text: body), detail: detail)
-        }
+            var segments: [RenderedMessage] = []
+            var narrative: [ConversationMessageBlock] = []
 
-        private static func detail(from blocks: [MessageBlockDto]) -> ConversationMessageDetail? {
-            let lowered = blocks.compactMap(messageBlock(from:))
-            return lowered.isEmpty ? nil : ConversationMessageDetail(blocks: lowered)
+            func flush() {
+                guard !narrative.isEmpty else { return }
+                let detail = ConversationMessageDetail(blocks: narrative)
+                segments.append(RenderedMessage(
+                    message: Message(role: role, text: text(from: narrative)),
+                    detail: detail
+                ))
+                narrative = []
+            }
+
+            for block in dto.blocks {
+                switch block {
+                case .text, .compactBoundary:
+                    if let lowered = messageBlock(from: block) {
+                        narrative.append(lowered)
+                    }
+                case .thinking, .redactedThinking, .toolUse, .toolResult:
+                    flush()
+                }
+            }
+            flush()
+            return segments
         }
 
         /// Lower ONE wire block. `nil` for a block with nothing to show (blank
@@ -4152,6 +4290,7 @@ final class MockConversationSource: ConversationSource {
                 }
                 var narrative: [ConversationMessageBlock] = []
                 var narrativeSequence = 0
+                var reasoningSequence = 0
 
                 func flushNarrative() {
                     guard !narrative.isEmpty else { return }
@@ -4167,6 +4306,10 @@ final class MockConversationSource: ConversationSource {
                     out.details[message.id] = detail
                     if isAssistant {
                         pendingRunAnchorMessageID = message.id
+                        appendActivity(.textBoundary(
+                            id: "boundary-\(messageIdentity)-\(narrativeSequence)",
+                            messageID: message.id
+                        ))
                     }
                     narrative = []
                 }
@@ -4239,23 +4382,31 @@ final class MockConversationSource: ConversationSource {
 
                     default:
                         if let lowered = messageBlock(from: block) {
-                            narrative.append(lowered)
                             if isAssistant,
                                case let .thinking(text, _) = lowered {
-                                if let index = pendingRun?.activities.lastIndex(where: {
-                                    if case .reasoning = $0 { return true }
-                                    return false
-                                }),
+                                flushNarrative()
+                                if let index = pendingRun?.activities.indices.last,
                                    case let .reasoning(id, current) = pendingRun?.activities[index] {
                                     pendingRun?.activities[index] = .reasoning(id: id, text: current + text)
                                 } else {
-                                    appendActivity(.reasoning(id: "reasoning-\(messageIdentity)-\(narrative.count)", text: text))
+                                    reasoningSequence += 1
+                                    appendActivity(.reasoning(
+                                        id: "reasoning-\(messageIdentity)-\(reasoningSequence)",
+                                        text: text
+                                    ))
                                 }
                                 pendingRun?.reasoning += text
-                            } else if isAssistant, case .text = lowered {
-                                appendActivity(.textBoundary(id: "boundary-\(messageIdentity)-\(narrative.count)"))
-                            } else if isAssistant, case .compactBoundary = lowered {
-                                appendActivity(.textBoundary(id: "boundary-\(messageIdentity)-\(narrative.count)"))
+                            } else if isAssistant, case .redactedThinking = lowered {
+                                flushNarrative()
+                                let text = String(localized: "chat_redacted_thinking")
+                                reasoningSequence += 1
+                                appendActivity(.reasoning(
+                                    id: "reasoning-\(messageIdentity)-\(reasoningSequence)-redacted",
+                                    text: text
+                                ))
+                                pendingRun?.reasoning += text
+                            } else {
+                                narrative.append(lowered)
                             }
                         }
                     }

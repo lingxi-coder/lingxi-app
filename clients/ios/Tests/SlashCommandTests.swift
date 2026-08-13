@@ -107,6 +107,33 @@ import XCTest
             )
         }
 
+        func testComposerWaitsForSlashCatalogBeforeSubmittingSlashInput() {
+            XCTAssertTrue(
+                ComposerSubmissionPolicy.isWaitingForSlashCatalog(
+                    draft: "/help",
+                    slashCommandsLoaded: false
+                )
+            )
+            XCTAssertTrue(
+                ComposerSubmissionPolicy.isWaitingForSlashCatalog(
+                    draft: "  /review staged changes",
+                    slashCommandsLoaded: false
+                )
+            )
+            XCTAssertFalse(
+                ComposerSubmissionPolicy.isWaitingForSlashCatalog(
+                    draft: "ordinary prompt",
+                    slashCommandsLoaded: false
+                )
+            )
+            XCTAssertFalse(
+                ComposerSubmissionPolicy.isWaitingForSlashCatalog(
+                    draft: "/help",
+                    slashCommandsLoaded: true
+                )
+            )
+        }
+
         func testCatalogReducerUpdatesSlashCommandsAndSkills() {
             let source = makeSource()
 
@@ -164,6 +191,19 @@ import XCTest
 
             submitted.removeAll()
             source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output", isError: false))
+            XCTAssertNotNil(source.send("  /help spaced topic  "))
+            await flushTasks()
+            guard case let .runSlashCommand(spacedRaw, spacedTurnId) = try XCTUnwrap(submitted.first) else {
+                return XCTFail("expected normalized runSlashCommand")
+            }
+            XCTAssertEqual(spacedRaw, "/help spaced topic")
+
+            submitted.removeAll()
+            source.applyForTesting(.slashCommandResult(
+                turnId: spacedTurnId,
+                display: "spaced help output",
+                isError: false
+            ))
             XCTAssertNotNil(source.send("/unknown"))
             await flushTasks()
             guard case let .sendPrompt(text, _, _, unknownTurnId) = try XCTUnwrap(submitted.first) else {

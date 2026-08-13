@@ -77,3 +77,4 @@ Commands:
   /usage                Show session cost, plan usage, and what's contributing to your limits
   /version              Print version information
   /voice                Toggle voice mode
+  /workflows            Browse running and completed workflows

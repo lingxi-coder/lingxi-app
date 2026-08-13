@@ -61,10 +61,24 @@ final class ConversationRenderLayoutTests: XCTestCase {
         XCTAssertEqual(groups.map(\.id), [
             items[0].id,
             "run:run-1:reasoning",
-            "run:run-1:tools:read-1,read-2",
+            "run:run-1:tools:read-1",
             "run:run-1:notice:notice-1",
             items[2].id,
         ])
+    }
+
+    func testGrowingToolBatchKeepsStableGroupIdentity() {
+        var active = run(id: "run-batch", status: .running)
+        active.tools = [tool(id: "read-1", name: "Read"), tool(id: "read-2", name: "Read")]
+        active.activities = [.tool(id: "read-1"), .tool(id: "read-2")]
+
+        let initial = try! XCTUnwrap(ConversationRenderLayout.timelineGroups([.run(active)]).first)
+        active.tools.append(tool(id: "read-3", name: "Read"))
+        active.activities.append(.tool(id: "read-3"))
+        let grown = try! XCTUnwrap(ConversationRenderLayout.timelineGroups([.run(active)]).first)
+
+        XCTAssertEqual(initial.id, grown.id)
+        XCTAssertEqual(grown.rows.count, 3)
     }
 
     func testTimelineGroupIDsStayStableWhenEarlierRowsChange() {
@@ -93,26 +107,28 @@ final class ConversationRenderLayoutTests: XCTestCase {
     }
 
     func testTimelineActivityLedgerPreservesTextBoundaries() {
+        let message = Message(role: .ai, text: "between tools")
         var active = run(id: "run-ordered", status: .running)
         active.tools = [tool(id: "one", name: "Read"), tool(id: "two", name: "Edit")]
         active.activities = [
             .reasoning(id: "think", text: "inspect"),
             .tool(id: "one"),
-            .textBoundary(id: "text-1"),
+            .textBoundary(id: "text-1", messageID: message.id),
             .tool(id: "two"),
             .notice(id: "done"),
         ]
         active.notices = [ConversationExecutionNotice(id: "done", kind: .info, text: "finished")]
 
-        let groups = ConversationRenderLayout.timelineGroups([.run(active)])
+        let groups = ConversationRenderLayout.timelineGroups([.message(message), .run(active)])
         XCTAssertEqual(groups.map(\.id), [
             "think",
             "run:run-ordered:tools:one",
+            "message:\(message.id.uuidString)",
             "run:run-ordered:tools:two",
             "run:run-ordered:notice:done",
         ])
         XCTAssertEqual(groups[1].rows.count, 1)
-        XCTAssertEqual(groups[2].rows.count, 1)
+        XCTAssertEqual(groups[3].rows.count, 1)
     }
 
     func testEveryTerminalOutcomeHasItsOwnVisualTone() {

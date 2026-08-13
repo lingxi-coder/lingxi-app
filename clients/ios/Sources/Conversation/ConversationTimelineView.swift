@@ -108,7 +108,7 @@ struct ConversationTimelineView: View {
         func flushTools() {
             guard !pendingTools.isEmpty else { return }
             if pendingTools.count >= 2 {
-                let id = "timeline-batch:\(group.id):\(pendingTools.map(\.0).joined(separator: ","))"
+                let id = "timeline-batch:\(group.id)"
                 result.append(.toolBatch(id: id, tools: pendingTools.map(\.1)))
             } else if let one = pendingTools.first {
                 result.append(.tool(id: one.0, trace: one.1))

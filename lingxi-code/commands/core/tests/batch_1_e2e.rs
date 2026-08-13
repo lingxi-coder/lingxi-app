@@ -62,10 +62,9 @@ async fn help_dispatch() {
             assert!(display.contains(
                 "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
             ));
-            // 79 newlines (header + 78 visible lines) after the 105-name
-            // re-lock dropped `x402`; the hidden/disabled commands are
-            // filtered out to match claude-code's /help.
-            assert_eq!(display.matches('\n').count(), 79);
+            // 80 newlines (header + 79 visible command lines); hidden and
+            // disabled commands remain filtered out.
+            assert_eq!(display.matches('\n').count(), 80);
         }
         other => panic!("{other:?}"),
     }

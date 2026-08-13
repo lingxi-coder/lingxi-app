@@ -3,7 +3,7 @@
 //! roots call. Built on the `command-api` runtime.
 //!
 //! After [`register_all_builtin_commands`] runs, the registry holds the locked
-//! 106-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
+//! 107-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
 //! then overwrite the implemented entries with their real handle/auth-bound
 //! handlers (batch 8 = `autocompact`/`fork`/`goal`/`recap`/`reload-skills`/
 //! `skill-doctor`/`stop`). See spec §19.
@@ -61,6 +61,7 @@ pub mod subtask;
 pub mod templates;
 pub mod usage;
 pub mod version;
+pub mod workflows;
 
 mod core_placeholders;
 
@@ -115,6 +116,7 @@ pub use subtask::SubtaskHandler;
 pub use templates::OLD_INIT_PROMPT;
 pub use usage::UsageHandler;
 pub use version::VersionHandler;
+pub use workflows::WorkflowsHandler;
 
 pub use custom_commands::{
     load_and_register_custom_commands, load_and_register_managed_custom_commands,

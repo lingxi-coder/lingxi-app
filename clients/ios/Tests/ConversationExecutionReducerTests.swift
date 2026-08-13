@@ -113,6 +113,48 @@ import XCTest
             XCTAssertEqual(groups.map(\.status), [.running, .running, nil, .running])
         }
 
+        func testLiveTimelineInterleavesTextToolAndLaterText() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 81, sessionId: "session-a")
+            source.applyForTesting(.turnStarted(turnId: 81))
+            source.applyForTesting(.textDelta(text: "A"))
+            source.applyForTesting(.toolUseStarted(
+                id: "tool-a",
+                tool: "Read",
+                inputJson: #"{"path":"a"}"#,
+                header: nil
+            ))
+            source.applyForTesting(.textDelta(text: "B"))
+            source.applyForTesting(.messageComplete(
+                stopReason: "tool_use",
+                message: MessageDto(role: "assistant", blocks: [
+                    .text(text: "A"),
+                    .toolUse(id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil),
+                    .text(text: "B"),
+                ])
+            ))
+
+            let order = source.model.visibleTimelineGroups.flatMap(\.rows).map { row -> String in
+                switch row {
+                case let .message(message): return "message:\(message.text)"
+                case let .tool(_, trace): return "tool:\(trace.id)"
+                case .reasoning: return "reasoning"
+                case .notice: return "notice"
+                case .commandOutput: return "command-output"
+                }
+            }
+            XCTAssertEqual(order, ["message:A", "tool:tool-a", "message:B"])
+
+            source.applyForTesting(
+                .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost)
+            )
+            XCTAssertEqual(
+                source.model.turnCompletion?.finalAssistantText,
+                "B",
+                "closing MessageComplete must not erase the final text used by turn completion"
+            )
+        }
+
         func testSettledDurableTurnRequestsAuthoritativeSessionRefresh() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 31, sessionId: "session-a")
@@ -241,18 +283,25 @@ import XCTest
             XCTAssertEqual(run.workers.first?.name, "worker-1")
         }
 
-        func testMessageCompleteStoresStructuredBlocks() {
+        func testMessageCompleteKeepsThoughtAndToolsOutOfMessageBubble() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 9, sessionId: "session-a")
 
             source.applyForTesting(.turnStarted(turnId: 9))
-            source.applyForTesting(.textDelta(text: "draft"))
+            source.applyForTesting(.thinkingDelta(thinking: "推理", signature: nil))
+            source.applyForTesting(.toolUseStarted(
+                id: "t1",
+                tool: "Read",
+                inputJson: #"{"path":"/tmp/a"}"#,
+                header: nil
+            ))
+            source.applyForTesting(.textDelta(text: "正文"))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
                 message: MessageDto(role: "assistant", blocks: [
-                    .text(text: "正文"),
                     .thinking(thinking: "推理", signature: nil),
                     .toolUse(id: "t1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: nil),
+                    .text(text: "正文"),
                     .toolResult(id: "t1", tool: "Read", resultJson: #"{"result":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
                 ])))
 
@@ -261,15 +310,27 @@ import XCTest
             let detail = source.model.messageDetails[message.id]
 
             XCTAssertNotNil(detail)
-            XCTAssertEqual(detail?.blocks.count, 4)
-            XCTAssertTrue(message.text.contains("正文"))
-            XCTAssertTrue(message.text.contains("推理"))
-            if case let .toolUse(_, tool, inputSummary, _, _)? = detail?.blocks[2] {
-                XCTAssertEqual(tool, "Read")
-                XCTAssertEqual(inputSummary, "/tmp/a")
-            } else {
-                XCTFail("expected structured tool use block")
-            }
+            XCTAssertEqual(detail?.blocks, [.text("正文")])
+            XCTAssertEqual(message.text, "正文")
+
+            let rows = source.model.visibleTimelineGroups.flatMap(\.rows)
+            XCTAssertEqual(rows.filter { if case .reasoning = $0 { return true }; return false }.count, 1)
+            XCTAssertEqual(rows.filter { if case .tool = $0 { return true }; return false }.count, 1)
+            XCTAssertEqual(rows.filter { if case .message = $0 { return true }; return false }.count, 1)
+        }
+
+        func testUnloadedSlashCatalogNeverRoutesSlashTextAsPrompt() async {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in submitted.append(command) }
+
+            XCTAssertFalse(source.model.slashCommandsLoaded)
+            XCTAssertNil(source.send("  /help  "))
+            await flushTasks()
+
+            XCTAssertTrue(submitted.isEmpty)
+            XCTAssertTrue(source.model.messages.isEmpty)
+            XCTAssertFalse(source.model.streaming)
         }
 
         func testStreamingMessageKeepsStableIdentityAcrossUpdates() {

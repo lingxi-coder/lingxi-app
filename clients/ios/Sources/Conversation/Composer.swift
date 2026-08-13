@@ -193,14 +193,15 @@ struct Composer: View {
                         // PR-4 item 2: the Stop button replaces Send while a turn
                         // is in flight — tapping it cancels the in-flight turn.
                         Button(action: onStop) {
-                            LXIcon(name: .stop, size: 14, color: .white)
-                                .frame(width: 40, height: 40)
-                                .background(t.danger)
-                                .clipShape(.rect(cornerRadius: 12))
-                                .shadow(color: t.danger.tint(0.40), radius: 6, y: 4)
+                            ComposerTurnActionIcon(
+                                systemName: "stop.fill",
+                                symbolSize: 11,
+                                background: t.danger
+                            )
                         }
                         .buttonStyle(ComposerActionButtonStyle())
                         .accessibilityLabel("composer_stop")
+                        .accessibilityIdentifier("composer.stop")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Match Android: ordinary recording and Flow Mode are
                         // distinct controls instead of overloading one tap.
@@ -261,17 +262,17 @@ struct Composer: View {
                         .opacity(sendEnabled ? 1 : 0.45)
                     } else {
                         Button(action: send) {
-                            LXIcon(name: .arrowUp, size: 16, color: .white)
-                                .frame(width: 40, height: 40)
-                                .background(t.accent)
-                                .clipShape(.rect(cornerRadius: 12))
-                                .shadow(color: t.accent.tint(0.40), radius: 6, y: 4)
+                            ComposerTurnActionIcon(
+                                systemName: "arrow.up",
+                                symbolSize: 15,
+                                background: t.accent
+                            )
                         }
                         .buttonStyle(ComposerActionButtonStyle())
                         .accessibilityLabel("composer_send")
                         .accessibilityIdentifier("composer.send")
-                        .disabled(!sendEnabled)
-                        .opacity(sendEnabled ? 1 : 0.45)
+                        .disabled(!canSubmitDraft)
+                        .opacity(canSubmitDraft ? 1 : 0.45)
                     }
                 }
             }
@@ -414,10 +415,23 @@ struct Composer: View {
     }
 
     private var shouldShowSlashPanel: Bool {
-        guard draft.hasPrefix("/"), !draft.dropFirst().contains(where: \.isWhitespace),
-              dismissedSlashDraft != draft
-        else { return false }
-        return !slashCommandsLoaded || !slashSuggestions.isEmpty
+        guard dismissedSlashDraft != draft else { return false }
+        if isWaitingForSlashCatalog { return true }
+        guard draft.hasPrefix("/"), !draft.dropFirst().contains(where: \.isWhitespace) else {
+            return false
+        }
+        return !slashSuggestions.isEmpty
+    }
+
+    private var isWaitingForSlashCatalog: Bool {
+        ComposerSubmissionPolicy.isWaitingForSlashCatalog(
+            draft: draft,
+            slashCommandsLoaded: slashCommandsLoaded
+        )
+    }
+
+    private var canSubmitDraft: Bool {
+        sendEnabled && !isWaitingForSlashCatalog
     }
 
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
@@ -429,7 +443,12 @@ struct Composer: View {
 
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !streaming, !isCancelling, !slashCommandPending, sendEnabled else { return }
+        guard !trimmed.isEmpty,
+              !streaming,
+              !isCancelling,
+              !slashCommandPending,
+              canSubmitDraft
+        else { return }
         if slashCommandsLoaded,
            SlashCommandMatcher.shouldAcceptSuggestion(for: draft, catalog: slashCommands),
            let suggestion = slashSuggestions.first {
@@ -441,6 +460,13 @@ struct Composer: View {
     }
 }
 
+enum ComposerSubmissionPolicy {
+    static func isWaitingForSlashCatalog(draft: String, slashCommandsLoaded: Bool) -> Bool {
+        !slashCommandsLoaded
+            && draft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
+    }
+}
+
 private struct ComposerActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -449,6 +475,24 @@ private struct ComposerActionButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
             .opacity(configuration.isPressed ? 0.86 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct ComposerTurnActionIcon: View {
+    let systemName: String
+    let symbolSize: CGFloat
+    let background: Color
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.system(size: symbolSize, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 40, height: 40)
+            .background(background, in: Circle())
+            .overlay {
+                Circle().stroke(.white.opacity(0.14), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
     }
 }
 

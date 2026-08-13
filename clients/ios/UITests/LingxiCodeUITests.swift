@@ -68,6 +68,40 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertEqual(input.value as? String, "keyboard draft")
     }
 
+    func testComposerSendTransitionsToMatchingStopControl() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_HOLD_TURN"] = "1"
+        app.launchArguments += ["-theme", "light"]
+        app.launch()
+
+        let input = app.textFields["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText("composer action icon")
+
+        let send = app.buttons["composer.send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertEqual(send.frame.width, send.frame.height, accuracy: 1)
+
+        let sendScreenshot = XCTAttachment(screenshot: app.screenshot())
+        sendScreenshot.name = "Composer-Send-Action"
+        sendScreenshot.lifetime = .keepAlways
+        add(sendScreenshot)
+
+        send.tap()
+        let stop = app.buttons["composer.stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 1), app.debugDescription)
+        XCTAssertEqual(stop.frame.width, stop.frame.height, accuracy: 1)
+
+        let stopScreenshot = XCTAttachment(screenshot: app.screenshot())
+        stopScreenshot.name = "Composer-Stop-Action"
+        stopScreenshot.lifetime = .keepAlways
+        add(stopScreenshot)
+
+        stop.tap()
+        XCTAssertTrue(waitUntilGone(stop, timeout: 3), app.debugDescription)
+    }
+
     func testSlashCommandSuggestionsFilterSelectAndSubmit() {
         let input = app.textFields["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
@@ -383,6 +417,27 @@ final class LingxiCodeUITests: XCTestCase {
 
         app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
+    }
+
+    func testThemeToggleUsesCompleteSystemGlyphAndUpdatesItsAction() {
+        let themeToggle = app.buttons["conversation.theme-toggle"]
+        XCTAssertTrue(themeToggle.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertGreaterThanOrEqual(themeToggle.frame.width, 28)
+        XCTAssertGreaterThanOrEqual(themeToggle.frame.height, 32)
+
+        let initialLabel = themeToggle.label
+        XCTAssertTrue(
+            initialLabel == "切换到深色主题" || initialLabel == "切换到浅色主题",
+            app.debugDescription
+        )
+
+        themeToggle.tap()
+        let expectedLabel = initialLabel == "切换到深色主题" ? "切换到浅色主题" : "切换到深色主题"
+        let labelChanged = expectation(
+            for: NSPredicate(format: "label == %@", expectedLabel),
+            evaluatedWith: themeToggle
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [labelChanged], timeout: 5), .completed, app.debugDescription)
     }
 
     func testAppIntegrationExposesRealSystemActions() {

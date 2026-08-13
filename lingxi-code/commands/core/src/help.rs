@@ -1,4 +1,4 @@
-//! `/help` — emits the locked rendering of the 99-command surface.
+//! `/help` — emits the locked rendering of the builtin-command surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`
 //! Task 5.
@@ -69,9 +69,8 @@ mod tests {
                 // Hidden/disabled commands are filtered out of /help.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 79 newlines total (1 header + 78 visible commands, after the
-                // removal of the previously-visible /x402).
-                assert_eq!(s.matches('\n').count(), 79);
+                // 80 newlines total (1 header + 79 visible commands).
+                assert_eq!(s.matches('\n').count(), 80);
             }
             other => panic!("expected Done, got {other:?}"),
         }

@@ -2077,6 +2077,11 @@ pub trait OutputStream: Send + Sync {
     /// client-adapter overrides this to surface a `ClientEvent::ThinkingDelta`.
     async fn emit_thinking(&self, _thinking: &str, _signature: Option<&str>) {}
 
+    /// Preserve an opaque redacted-thinking block at the completed-message
+    /// boundary. Most interactive surfaces have no incremental representation
+    /// for this provider payload, so the default remains a no-op.
+    async fn emit_redacted_thinking(&self, _data: &str) {}
+
     /// Update how subsequent thinking blocks are presented. `"omitted"`
     /// suppresses them; `"summarized"` restores the sink's normal collapsed or
     /// structured representation. The default is a no-op for sinks that never

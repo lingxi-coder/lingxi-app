@@ -62,16 +62,29 @@ enum ConversationRenderLayout {
     static func timelineGroups(_ items: [ConversationRenderItem]) -> [ConversationTimelineGroup] {
         var groups: [ConversationTimelineGroup] = []
         var consumedBoundaryMessages: Set<UUID> = []
+        let messagesByID: [UUID: Message] = Dictionary(uniqueKeysWithValues: items.compactMap { item in
+            guard case let .message(message) = item else { return nil }
+            return (message.id, message)
+        })
+        let boundaryMessageIDs: Set<UUID> = Set(items.flatMap { item -> [UUID] in
+            guard case let .run(run) = item else { return [] }
+            return run.activities.compactMap { activity in
+                guard case let .textBoundary(_, messageID) = activity else { return nil }
+                return messageID
+            }
+        })
 
         func appendGroup(id: String, runID: String?, status: ConversationExecutionStatus? = nil, rows: [ConversationTimelineRow]) {
             guard !rows.isEmpty else { return }
             groups.append(ConversationTimelineGroup(id: id, runID: runID, rows: rows, status: status))
         }
 
-        for (itemIndex, item) in items.enumerated() {
+        for item in items {
             switch item {
             case let .message(message):
-                guard !consumedBoundaryMessages.contains(message.id) else { continue }
+                guard !boundaryMessageIDs.contains(message.id),
+                      !consumedBoundaryMessages.contains(message.id)
+                else { continue }
                 appendGroup(id: item.id, runID: nil, rows: [.message(message)])
             case let .commandOutput(output):
                 appendGroup(id: item.id, runID: nil, rows: [.commandOutput(output)])
@@ -81,18 +94,10 @@ enum ConversationRenderLayout {
                 appendGroup(id: item.id, runID: nil, rows: [.tool(runID: nil, trace: trace)])
             case let .run(run):
                 var pendingTools: [ConversationToolTrace] = []
-                let boundaryMessage: Message? = {
-                    let nextIndex = items.index(after: itemIndex)
-                    guard items.indices.contains(nextIndex),
-                          case let .message(message) = items[nextIndex]
-                    else { return nil }
-                    return message
-                }()
-                var insertedBoundaryMessage = false
                 func flushTools() {
                     guard !pendingTools.isEmpty else { return }
                     appendGroup(
-                        id: "run:\(run.id):tools:\(pendingTools.map(\.id).joined(separator: ","))",
+                        id: "run:\(run.id):tools:\(pendingTools[0].id)",
                         runID: run.id,
                         status: run.status,
                         rows: pendingTools.map { .tool(runID: run.id, trace: $0) }
@@ -127,16 +132,16 @@ enum ConversationRenderLayout {
                         if let notice = run.notices.first(where: { $0.id == id }) {
                             appendGroup(id: "run:\(run.id):notice:\(id)", runID: run.id, status: run.status, rows: [.notice(runID: run.id, notice: notice)])
                         }
-                    case .textBoundary:
+                    case let .textBoundary(_, messageID):
                         flushTools()
-                        if let boundaryMessage, !insertedBoundaryMessage {
+                        if let boundaryMessage = messagesByID[messageID],
+                           !consumedBoundaryMessages.contains(messageID) {
                             appendGroup(
                                 id: "message:\(boundaryMessage.id.uuidString)",
                                 runID: nil,
                                 rows: [.message(boundaryMessage)]
                             )
                             consumedBoundaryMessages.insert(boundaryMessage.id)
-                            insertedBoundaryMessage = true
                         }
                     }
                 }
@@ -731,13 +736,14 @@ enum ConversationExecutionActivity: Equatable, Identifiable {
     case reasoning(id: String, text: String)
     case tool(id: String)
     case notice(id: String)
-    /// A narrative assistant text boundary. It is intentionally not rendered
-    /// as a standalone row; it flushes adjacent tool grouping.
-    case textBoundary(id: String)
+    /// A narrative assistant text boundary. It binds the wire-order activity
+    /// to its concrete message row so restored turns can interleave multiple
+    /// narrative segments and tools without guessing from item adjacency.
+    case textBoundary(id: String, messageID: UUID)
 
     var id: String {
         switch self {
-        case let .reasoning(id, _), let .tool(id), let .notice(id), let .textBoundary(id): return id
+        case let .reasoning(id, _), let .tool(id), let .notice(id), let .textBoundary(id, _): return id
         }
     }
 }

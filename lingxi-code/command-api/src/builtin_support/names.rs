@@ -40,22 +40,24 @@
 //! (`Configure usage credits to keep working when you hit a limit`, two objects
 //! gated by `bnr()` = `!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null
 //! || isOverageProvisioningAllowed())`, split interactive/non-interactive on
-//! `isNonInteractiveSession()`). The current-oracle total is **106**: 105 after
+//! `isNonInteractiveSession()`). That oracle total was **106**: 105 after
 //! removing the stale `x402` entry, plus `auto-mode-setup` (2.1.220 WIZARD-06,
 //! `{type:"local",name:"auto-mode-setup",supportsNonInteractive:!0}`).
 //! `usage-credits` is hidden from the default palette / `/help` because `bnr()`
 //! resolves `false` in a fresh session with no subscription or rate-limit
 //! status (see [`is_palette_hidden`] + [`USAGE_CREDITS_BNR_GATED`]); the other
-//! four are visible.
+//! four are visible. The 2026-08-13 follow-up adds the pre-existing 2.1.205
+//! `local-jsx` `/workflows` command already implemented by the TUI, re-locking
+//! the shared registry surface at **107**.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **106** for the current oracle.
+/// ASCII-sorted. Locked at length **107** for the current oracle.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 106] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -162,6 +164,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 106] = &[
     "usage-credits",
     "version",
     "voice",
+    "workflows",
 ];
 
 /// The 18 core commands that ship with real implementations in M5-10 / M5-11.
@@ -217,7 +220,7 @@ pub const BUILTIN_CORE_NAMES: &[&str; 19] = &[
 /// "slash-commands-stubs" bucket (d) + Batch 6.
 ///
 /// NOTE: this is purely additive documentation — it changes **no** runtime
-/// behavior and does **not** alter the locked 99-name surface.
+/// behavior and does **not** alter the locked command surface.
 pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
     ("ant-trace", "USER_TYPE==='ant' (Anthropic-internal only)"),
     (
@@ -660,6 +663,7 @@ pub fn core_description(name: &str) -> &'static str {
         // (`name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0`).
         "extra-usage" => "Renamed to /usage-credits",
         "voice" => "Toggle voice mode",
+        "workflows" => "Browse running and completed workflows",
         // Batch-8 implemented commands (real handlers in `command-core`); their
         // `description()` bodies carry the verbatim oracle strings, mirrored here
         // so the palette / `/help` rows never show the placeholder fallback.
@@ -688,8 +692,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_106() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+    fn total_count_locked_at_107() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
     }
 
     #[test]
@@ -901,7 +905,7 @@ mod tests {
     // non-goals: every name is a real builtin that claude-code itself ships as a
     // stub/gated, so it must remain on the UnimplementedCommandHandler by
     // design. The tests assert the *classification invariant* only — they make
-    // no change to the locked 99-name surface (`parity_slash_commands_102`).
+    // no change to the locked command surface (`parity_slash_commands_102`).
     // ========================================================================
 
     #[test]
@@ -1006,7 +1010,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
     }
 
     // ========================================================================
@@ -1111,7 +1115,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
     }
 
     #[test]

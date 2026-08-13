@@ -102,6 +102,13 @@ struct ChatView: View {
                     .padding(.bottom, 4)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                if convo.selectedAgentID == ConversationModel.mainAgentID,
+                   !convo.backgroundTasks.isEmpty {
+                    TasksStatusPanel(tasks: convo.backgroundTasks)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 4)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 runtimeFooter
                 if !convo.isSelectedAgentReadOnly, voiceInteraction.isPresented {
                     InlineVoicePanel(
@@ -547,7 +554,8 @@ struct ChatView: View {
                     label: String(localized: "chat_error_generic_headline"),
                     detail: message,
                     color: t.danger,
-                    isAnimated: false
+                    isAnimated: false,
+                    onDismiss: dismissRuntimeError
                 )
             }
         }
@@ -606,28 +614,43 @@ struct ChatView: View {
         detail: String?,
         color: Color,
         isAnimated: Bool,
-        icon: LXIconName? = nil
+        icon: LXIconName? = nil,
+        onDismiss: (() -> Void)? = nil
     ) -> some View {
         HStack(spacing: 8) {
-            if let icon {
-                LXIcon(name: icon, size: 15, color: color, stroke: 1.7)
-                    .frame(width: 18)
-            } else {
-                LLMActivityIndicator(isActive: isAnimated, color: color)
-                    .frame(width: 18)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(label)
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(color)
-                if let detail, !detail.isEmpty {
-                    Text(detail)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(t.text4)
-                        .lineLimit(1)
+            HStack(spacing: 8) {
+                if let icon {
+                    LXIcon(name: icon, size: 15, color: color, stroke: 1.7)
+                        .frame(width: 18)
+                } else {
+                    LLMActivityIndicator(isActive: isAnimated, color: color)
+                        .frame(width: 18)
                 }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(label)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(color)
+                    if let detail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(t.text4)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .accessibilityElement(children: .combine)
+
+            if let onDismiss {
+                Button(action: onDismiss) {
+                    LXIcon(name: .x, size: 13, color: t.text3, stroke: 2)
+                        .frame(width: 28, height: 28)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("chat_dismiss_error")
+                .accessibilityIdentifier("conversation.runtime-error.dismiss")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
@@ -636,8 +659,16 @@ struct ChatView: View {
                 .fill(t.border.opacity(0.35))
                 .frame(height: 0.5)
         }
-        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("conversation.llm-status")
+    }
+
+    private func dismissRuntimeError() {
+        if let status = captureStatus,
+           !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            captureStatus = nil
+        } else {
+            source.dismissError()
+        }
     }
 
     // MARK: actions

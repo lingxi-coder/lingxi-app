@@ -486,6 +486,9 @@ async fn pump_stream_inner(
         match action {
             RouterAction::Continue => {}
             RouterAction::AppendAssistantBlock(block) => {
+                if let ContentBlock::RedactedThinking { data } = &block {
+                    output.emit_redacted_thinking(data).await;
+                }
                 turn.assistant_blocks.push(block);
             }
             RouterAction::DispatchToolUse {

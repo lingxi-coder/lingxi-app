@@ -9330,11 +9330,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // P2-04: suppressed when a `MessageDisplay` hook is active — the
                             // completed-message pass renders the (possibly substituted) text
                             // once, so skip the direct emit to avoid double display.
-                            if !display_hook_active {
-                                for blk in &pumped_from_fallback.assistant_blocks {
-                                    if let ContentBlock::Text { text } = blk {
+                            for blk in &pumped_from_fallback.assistant_blocks {
+                                match blk {
+                                    ContentBlock::Text { text } if !display_hook_active => {
                                         self.output.emit_text(text).await;
                                     }
+                                    ContentBlock::Thinking {
+                                        thinking,
+                                        signature,
+                                    } => {
+                                        self.output
+                                            .emit_thinking(thinking, signature.as_deref())
+                                            .await;
+                                    }
+                                    ContentBlock::RedactedThinking { data } => {
+                                        self.output.emit_redacted_thinking(data).await;
+                                    }
+                                    _ => {}
                                 }
                             }
 

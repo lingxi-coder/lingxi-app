@@ -269,6 +269,117 @@ impl RecordingSink {
     }
 }
 
+#[derive(Default)]
+struct RegistrationSink {
+    statuses: StdMutex<Vec<(String, TaskStatus)>>,
+    registered: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl TaskStatusSink for RegistrationSink {
+    async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.statuses
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), status));
+    }
+
+    async fn is_registered(&self, _task_id: &str) -> bool {
+        self.registered.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl RegistrationSink {
+    fn last_status(&self) -> Option<TaskStatus> {
+        self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+    }
+
+    fn statuses(&self) -> Vec<(String, TaskStatus)> {
+        self.statuses.lock().unwrap().clone()
+    }
+
+    fn set_registered(&self, registered: bool) {
+        self.registered
+            .store(registered, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct TranscriptOverrideSpawner {
+    overrides: StdMutex<Vec<Option<PathBuf>>>,
+    retarget_marker: StdMutex<Vec<String>>,
+    transcript_lines: bool,
+}
+
+#[async_trait]
+impl SubagentSpawner for TranscriptOverrideSpawner {
+    async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+        vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
+            when_to_use: String::new(),
+            tools_description: String::new(),
+        }]
+    }
+
+    async fn spawn(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_with_progress(request, inherit, None).await
+    }
+
+    async fn spawn_with_progress(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        let override_dir = agent::workflow_transcript_subdir_override();
+        self.overrides.lock().unwrap().push(override_dir.clone());
+        self.retarget_marker.lock().unwrap().push(format!(
+            "seen:{}",
+            override_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+        let agent_id = protocol::AgentId::new();
+        if self.transcript_lines {
+            let dir = override_dir.expect("workflow transcript override present");
+            std::fs::create_dir_all(&dir).expect("create transcript dir");
+            let path = dir.join(format!("agent-{agent_id}.jsonl"));
+            std::fs::write(
+                path,
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "message": protocol::ConversationMessage::Assistant {
+                            id: protocol::MessageId::new(),
+                            content: vec![protocol::ContentBlock::Text {
+                                text: "hello from child".to_string(),
+                            }],
+                            stop_reason: None,
+                        }
+                    })
+                ),
+            )
+            .expect("write transcript line");
+        }
+        Ok(SubagentResult::Completed {
+            agent_id,
+            content: Value::String("ok".to_string()),
+            usage: SubagentUsage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            total_tokens: 0,
+            assistant_message_count: 0,
+            response_char_count: 0,
+            last_request_id: None,
+        })
+    }
+}
+
 // ---- Helpers ------------------------------------------------------------
 
 fn make_ctx(fs: Arc<dyn FileSystem>) -> TaskContext {
@@ -287,6 +398,7 @@ fn workflow_input(script: &str) -> TaskSpawnInput {
         run_id: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
+        transcript_subdir: None,
         launched_from_subagent: false,
     }
 }
@@ -887,9 +999,10 @@ async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
     let worktree = Arc::new(RecordingWorktreeManager::default());
     let spawner = WorkflowIsolationSpawner {
         inner: inner.clone(),
-        worktree: worktree.clone(),
+        worktree: Some(worktree.clone()),
         slug_prefix: "w123".to_string(),
         sequence: AtomicU64::new(0),
+        transcript_subdir: None,
     };
     let request = make_request(
         DEFAULT_WORKFLOW_SUBAGENT,
@@ -1028,6 +1141,184 @@ async fn handler_spools_live_progress_then_the_result() {
 }
 
 #[tokio::test]
+async fn handler_waits_for_registry_publication_before_reporting_status() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let spawner = Arc::new(EchoSpawner::default());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let sink = Arc::new(RegistrationSink::default());
+    let handler = make_handler(spawner, mgr, sink.clone());
+
+    let handle = handler
+        .spawn(workflow_input("return 1;"), make_ctx(fs))
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        sink.statuses().is_empty(),
+        "worker must not report Running/Completed before the registry publishes the row"
+    );
+
+    sink.set_registered(true);
+    for _ in 0..200 {
+        if sink.last_status().is_some_and(TaskStatus::is_terminal) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let statuses = sink.statuses();
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|(_, status)| *status)
+            .collect::<Vec<_>>(),
+        vec![TaskStatus::Running, TaskStatus::Completed],
+        "publication should unblock the normal Running→Completed sequence"
+    );
+    assert!(handle.task_id.starts_with('w'));
+}
+
+#[tokio::test]
+async fn handler_registration_wait_exits_immediately_on_kill() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let spawner = Arc::new(EchoSpawner::default());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let sink = Arc::new(RegistrationSink::default());
+    let handler = make_handler(spawner, mgr, sink);
+    let ctx = make_ctx(fs.clone());
+
+    let handle = handler
+        .spawn(workflow_input("return 1;"), ctx.clone())
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill succeeds during registration wait");
+
+    for _ in 0..200 {
+        if handler.workers.lock().await.is_empty() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("workflow worker did not exit registration wait after cancellation");
+}
+
+#[tokio::test]
+async fn workflow_transcript_root_stays_pinned_across_retarget() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let spawner = Arc::new(TranscriptOverrideSpawner::default());
+    let sink = Arc::new(RecordingSink::default());
+    let handler = make_handler(spawner.clone(), mgr, sink.clone());
+    let transcript_root = dir
+        .path()
+        .join("session-a")
+        .join("subagents")
+        .join("workflows")
+        .join("wf_pin");
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalWorkflow {
+                workflow_id: "wf".into(),
+                script: "await agent('a'); await agent('b'); return 'done';".into(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: Some("wf_pin".into()),
+                invocation_mode: Some("inline".to_string()),
+                workflow_source: Some("inline".to_string()),
+                transcript_subdir: Some(transcript_root.clone()),
+                launched_from_subagent: false,
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+    let seen = spawner.overrides.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![Some(transcript_root.clone()), Some(transcript_root)]
+    );
+    assert!(handle.task_id.starts_with('w'));
+}
+
+#[tokio::test]
+async fn workflow_transcript_dir_matches_child_transcript_location() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let spawner = Arc::new(TranscriptOverrideSpawner {
+        transcript_lines: true,
+        ..Default::default()
+    });
+    let sink = Arc::new(RecordingSink::default());
+    let handler = make_handler(spawner, mgr, sink.clone());
+    let transcript_root = dir
+        .path()
+        .join("session-a")
+        .join("subagents")
+        .join("workflows")
+        .join("wf_real_dir");
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalWorkflow {
+                workflow_id: "wf".into(),
+                script: "await agent('child'); return 'done';".into(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: Some("wf_real_dir".into()),
+                invocation_mode: Some("inline".to_string()),
+                workflow_source: Some("inline".to_string()),
+                transcript_subdir: Some(transcript_root.clone()),
+                launched_from_subagent: false,
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+    let entries = std::fs::read_dir(&transcript_root)
+        .expect("workflow transcript dir exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(
+        entries.iter().any(|path| path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| { name.starts_with("agent-") && name.ends_with(".jsonl") })),
+        "child transcript must be written inside the workflow transcript dir: {entries:?}"
+    );
+}
+
+#[tokio::test]
 async fn resume_replays_journaled_agent_results_without_respawning() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
@@ -1078,6 +1369,7 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
         run_id: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
+        transcript_subdir: None,
         launched_from_subagent: false,
     };
     let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
@@ -1161,6 +1453,7 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
         run_id: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
+        transcript_subdir: None,
         launched_from_subagent: false,
     };
     h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();

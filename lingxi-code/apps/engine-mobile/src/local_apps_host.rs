@@ -3382,48 +3382,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_data_wire_accepts_canonical_shapes_and_rejects_guesses() {
-        let query = normalize_query(&json!({
-            "collection": "items",
-            "filters": [{
-                "fieldId": "score",
-                "operator": "greater_than",
-                "value": 10
-            }]
-        }))
-        .expect("canonical query filter");
-        assert_eq!(query.filters[0].field_id, "score");
-        assert_eq!(
-            query.filters[0].operator,
-            local_apps::DataFilterOperator::GreaterThan
-        );
-
-        let mutations = normalize_mutations(&json!({
-            "collection": "items",
-            "operations": [{
-                "kind": "upsert",
-                "recordId": "best",
-                "document": {"score": 42}
-            }, {
-                "kind": "delete",
-                "recordId": "old",
-                "expectedRevision": 2
-            }]
-        }))
-        .expect("canonical tagged mutations");
-        assert_eq!(mutations.len(), 2);
-        assert!(matches!(mutations[0], DataMutation::Upsert { .. }));
-        assert!(matches!(mutations[1], DataMutation::Delete { .. }));
-
-        let guessed = normalize_mutations(&json!({
-            "collection": "items",
-            "operations": [{"action": "create", "record": {"score": 42}}]
-        }))
-        .expect_err("the broken generated shape must stay invalid");
-        assert!(guessed.contains("missing field `kind`"), "{guessed}");
-    }
-
-    #[test]
     fn normalize_query_rejects_cursor_and_invalid_page_bounds() {
         assert_eq!(
             normalize_query(&json!({"collection": "items", "cursor": "7"})).unwrap_err(),

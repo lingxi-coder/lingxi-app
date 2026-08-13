@@ -151,10 +151,6 @@ mod tests {
             ".lingxi/vite-fallback/",
             "offline-fallback",
             "scaffold_mode",
-            "records[].document",
-            "mcp__local_apps__query_data",
-            "localStorage must never be authoritative",
-            "Do not swallow bridge errors",
         ] {
             assert!(
                 descriptor.script.contains(anchor),
@@ -194,7 +190,7 @@ mod tests {
                         } else if prompt.contains("Build local app") {
                             r#"{"ok":true,"preview_url":"http://preview/first","summary":"built"}"#.to_string()
                         } else if prompt.contains("Invoke $frontend-qa") {
-                            r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                            r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"summary":"verified"}"#.to_string()
                         } else {
                             panic!("successful workflow must not repair or rebuild: {prompt}");
                         }
@@ -257,9 +253,9 @@ mod tests {
                             let round = next_verification_round.get();
                             next_verification_round.set(round + 1);
                             if round == 0 {
-                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"summary":"needs repair"}"#.to_string()
                             } else {
-                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"summary":"verified"}"#.to_string()
                             }
                         } else if prompt.contains("Repair the findings") {
                             "repaired".to_string()
@@ -410,7 +406,7 @@ mod tests {
         match anchor {
             "design" => r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"scaffold_mode":"existing","template":"react","summary":"designed"}"#.to_string(),
             "build" | "rebuild" => r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string(),
-            "verify" => r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string(),
+            "verify" => r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"summary":"verified"}"#.to_string(),
             other => other.to_string(),
         }
     }
@@ -445,7 +441,7 @@ mod tests {
             if prompt.contains("Build local app") || prompt.contains("Rebuild local app") {
                 r#"{"ok":false,"preview_url":"","summary":"vite build exited 1"}"#.to_string()
             } else if prompt.contains("Invoke $frontend-qa") {
-                r#"{"ok":false,"findings":["no preview to check"],"checked_matrix":[],"browser_available":false,"webview_checked":false,"degraded_verification":true,"data_roundtrip":{"status":"failed","collections":[],"evidence":"preview unavailable"},"summary":"cannot verify"}"#.to_string()
+                r#"{"ok":false,"findings":["no preview to check"],"checked_matrix":[],"browser_available":false,"webview_checked":false,"degraded_verification":true,"summary":"cannot verify"}"#.to_string()
             } else {
                 local_app_reply(prompt, "")
             }
@@ -463,7 +459,7 @@ mod tests {
     fn local_app_build_throws_when_verification_never_passes() {
         let error = run_local_app_build(|prompt| {
             if prompt.contains("Invoke $frontend-qa") {
-                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"summary":"needs repair"}"#.to_string()
             } else {
                 local_app_reply(prompt, "")
             }

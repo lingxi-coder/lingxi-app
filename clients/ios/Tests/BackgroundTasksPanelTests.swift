@@ -90,6 +90,74 @@ import XCTest
                 "the terminal status keeps appending the transcript notice"
             )
         }
+
+        /// Once a task reaches a terminal state, stale non-terminal updates
+        /// may still backfill the description but must not downgrade status.
+        func testTerminalStatusStaysMonotonicWhileStaleUpdatesBackfillDescription() {
+            let terminalCases: [(TaskStatusDto, BackgroundTaskSnapshot.Status)] = [
+                (.completed, .completed),
+                (.failed, .failed),
+                (.cancelled, .cancelled),
+            ]
+
+            for (terminalWireStatus, terminalSnapshotStatus) in terminalCases {
+                let source = makeSource()
+                let taskID = "wmo6xnbac-\(terminalSnapshotStatus)"
+                let description = "workflow \(terminalSnapshotStatus)"
+
+                source.applyForTesting(.taskStatusChanged(taskId: taskID, status: terminalWireStatus))
+                XCTAssertEqual(source.model.backgroundTasks.first?.status, terminalSnapshotStatus)
+                XCTAssertEqual(
+                    source.model.backgroundTasks.first?.descriptionText,
+                    "",
+                    "push-first placeholder should stay empty until a row arrives"
+                )
+
+                source.applyForTesting(.taskRow(task: row(
+                    id: taskID,
+                    status: .running,
+                    description: description
+                )))
+                XCTAssertEqual(source.model.backgroundTasks.first?.status, terminalSnapshotStatus)
+                XCTAssertEqual(
+                    source.model.backgroundTasks.first?.descriptionText,
+                    description,
+                    "stale task rows should still backfill human-readable descriptions"
+                )
+
+                source.applyForTesting(.taskStatusChanged(taskId: taskID, status: .running))
+                XCTAssertEqual(
+                    source.model.backgroundTasks.first?.status,
+                    terminalSnapshotStatus,
+                    "stale running pushes must not reopen terminal tasks"
+                )
+                XCTAssertEqual(source.model.backgroundTasks.first?.descriptionText, description)
+            }
+        }
+
+        /// The Workflow tool only launches the background run. Once that tool
+        /// returns, the client must pull the registry row so the pinned panel
+        /// can show the run while it continues outside the turn.
+        func testSuccessfulWorkflowLaunchRefreshesTaskRows() async {
+            let source = makeSource()
+            let refreshed = expectation(description: "TaskList submitted")
+            source.setCommandSubmitterForTesting { command in
+                if case .taskList = command {
+                    refreshed.fulfill()
+                }
+            }
+            source.beginTurnForTesting()
+
+            source.applyForTesting(.toolUseResult(
+                id: "workflow-tool",
+                tool: "Workflow",
+                resultJson: #"{"status":"async_launched","taskId":"wmo6xnbac"}"#,
+                isError: false,
+                display: nil
+            ))
+
+            await fulfillment(of: [refreshed], timeout: 1)
+        }
     }
 
 #endif

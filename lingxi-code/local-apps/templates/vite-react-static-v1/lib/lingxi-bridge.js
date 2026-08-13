@@ -54,13 +54,6 @@ export function getDeviceContext() {
   );
 }
 
-/**
- * Query a declared collection.
- *
- * Filters are `{ fieldId, operator, value }`. The resolved page is
- * `{ records, nextOffset? }`; app fields live in `records[].document`, while
- * recordId, revision, createdAtMs, and updatedAtMs are host-owned metadata.
- */
 export async function queryCollection(request) {
   const bridge = getLingXiBridge();
   if (!bridge?.data?.query) {
@@ -75,29 +68,6 @@ export async function mutateCollection(request) {
     throw new Error("LingXi data bridge is unavailable");
   }
   return bridge.data.mutate(request);
-}
-
-/** Upsert one complete document using the native tagged mutation contract. */
-export async function upsertRecord(
-  collection,
-  recordId,
-  document,
-  expectedRevision,
-) {
-  const operation = { kind: "upsert", recordId, document };
-  if (expectedRevision !== undefined) {
-    operation.expectedRevision = expectedRevision;
-  }
-  return mutateCollection({ collection, operations: [operation] });
-}
-
-/** Delete one record using the native tagged mutation contract. */
-export async function deleteRecord(collection, recordId, expectedRevision) {
-  const operation = { kind: "delete", recordId };
-  if (expectedRevision !== undefined) {
-    operation.expectedRevision = expectedRevision;
-  }
-  return mutateCollection({ collection, operations: [operation] });
 }
 
 export async function requestNetwork(request) {

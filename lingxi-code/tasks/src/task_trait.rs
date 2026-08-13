@@ -126,6 +126,9 @@ pub enum TaskSpawnInput {
         /// The workflow source: path for `scriptPath`, name for `named`, or
         /// `"inline"` for an inline script.
         workflow_source: Option<String>,
+        /// Launch-pinned transcript directory for every child this workflow
+        /// spawns. `None` keeps the spawner's session-derived default.
+        transcript_subdir: Option<std::path::PathBuf>,
         /// `true` when launched from a subagent context (`t.agentId != null`).
         launched_from_subagent: bool,
     },

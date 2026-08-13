@@ -238,8 +238,9 @@ pub struct MobileConfig {
     /// tests stay deterministic (they never touch the real filesystem). Mirrors
     /// `engine_desktop::DesktopConfig::memory_provider`.
     pub memory_provider: Option<Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>>,
-    /// Whether local apps run through the fixed Next production server. Store
-    /// builds keep this false and serve the static export instead.
+    /// Legacy distribution flag retained at the host boundary. Local apps are
+    /// built with Vite and served through the static loopback server in every
+    /// distribution.
     pub local_apps_full_runtime: bool,
     /// Host path containing the verified, read-only `node_modules` runtime
     /// bundle. Its `node_modules` child is mounted at the canonical read-only
@@ -428,6 +429,10 @@ pub struct MobileRuntime {
     /// synthesize boundary events (`TurnStarted` / `MessageComplete`) and emit
     /// listing replies, so everything rides one outbound channel.
     pub event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    /// Cloneable handle to the response accumulator behind `output`, retained
+    /// so hard turn failures cannot leak partial message blocks into a later
+    /// prompt on this long-lived mobile connection.
+    pub message_output: AdapterOutputStream,
     /// The session transcript writer shared with the orchestrator.
     ///
     /// Mobile keeps one orchestrator alive while New/Resume changes the active
@@ -2417,7 +2422,8 @@ async fn build_mobile_inner_with_ask(
     //     Mobile binds the `AdapterPermissionGate` (no always-allow mode), then
     //     wraps it with a local `PolicyPermissionGate` so the core policy binds.
     let event_sink = ListenerSink::arc(listener.clone());
-    let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(event_sink.clone()));
+    let message_output = AdapterOutputStream::new(event_sink.clone());
+    let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
 
     // (3c) No `.with_persist` on mobile: a device session has no project
     // `.lingxi/settings.local.json` convention to write back to, so AllowAlways
@@ -2882,6 +2888,17 @@ async fn build_mobile_inner_with_ask(
         &cwd.to_string_lossy(),
         &main_session_uuid,
     );
+    let subagent_transcript_home = cfg.lingxi_home.clone();
+    let subagent_transcript_cwd = cwd.to_string_lossy().into_owned();
+    let subagent_active_session = active_session_uuid.clone();
+    let subagents_dir_provider = Arc::new(move || {
+        let session_uuid = subagent_active_session.lock().ok()?.clone();
+        Some(orchestrator::transcript_paths::subagents_dir(
+            &subagent_transcript_home,
+            &subagent_transcript_cwd,
+            &session_uuid,
+        ))
+    });
     let subagent_env_renderer = build_mobile_subagent_env_renderer(
         cwd.clone(),
         mobile_runtime_environment.as_ref(),
@@ -2900,6 +2917,7 @@ async fn build_mobile_inner_with_ask(
             cwd.clone(),
             Some(main_subagents_dir.clone()),
         )
+        .with_subagents_dir_provider(subagents_dir_provider)
         .with_transcript_fs(fs.clone())
         .with_subagent_env_renderer(subagent_env_renderer);
     if let Some(environment) = mobile_runtime_environment.clone() {
@@ -2932,12 +2950,14 @@ async fn build_mobile_inner_with_ask(
     // (d) The LocalWorkflow handler. Its tool-dispatch seam is a deferred
     // invoker (filled with the real `RegistryToolInvoker` once `tools`
     // exists) and its terminal status writes through a deferred
-    // `RegistryStatusSink` (bound once the registry `Arc` exists) — without
-    // it a finished workflow is stuck `Running` forever. The output-pool
+    // mobile status sink (its registry delegate is bound once the registry
+    // `Arc` exists) — without it a finished workflow is stuck `Running`
+    // forever and the client never sees its terminal state. The output-pool
     // cells are published after the orchestrator is built.
     let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
-    let local_workflow_status_sink =
-        Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    let local_workflow_status_sink = Arc::new(
+        crate::workflow_support::MobileWorkflowStatusSink::new(event_sink.clone()),
+    );
     let local_workflow_output_pool: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
         Arc::new(std::sync::OnceLock::new());
     let local_workflow_turn_baseline: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
@@ -3461,6 +3481,12 @@ async fn build_mobile_inner_with_ask(
     let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
         Arc::new(RwLock::new(command_api::CommandRegistry::new()));
     let mut reg = mobile_command_registry(handle.clone(), auth.clone());
+    // `/workflows`: mobile cannot open the TUI picker, so bind the shared
+    // command handler to the same live registry that powers workflow tools and
+    // return the picker's snapshot as a structured command-output result.
+    reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
+        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    )));
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
     // `/stop`): wired here in the uniffi composition root because it needs the
     // shared `Arc<tokio::sync::RwLock<CommandRegistry>>` (tokio is uniffi-only in
@@ -3544,6 +3570,7 @@ async fn build_mobile_inner_with_ask(
         permission_gate: adapter_gate,
         listener,
         event_sink,
+        message_output,
         session_writer,
         oauth_supported,
         credentials,
@@ -3752,6 +3779,76 @@ fn session_agent_transcript_revision(raw: &[u8]) -> u64 {
         .filter_map(|value| value.get("message").cloned())
         .filter_map(|message| serde_json::from_value::<protocol::ConversationMessage>(message).ok())
         .count() as u64
+}
+
+fn session_agent_transcript_event(
+    requested_session_id: protocol::SessionId,
+    current_session_id: protocol::SessionId,
+    agent_id: String,
+    messages: Vec<client_protocol::message::MessageDto>,
+    revision: u64,
+) -> Option<ClientEvent> {
+    if requested_session_id != current_session_id {
+        return None;
+    }
+    let next_message_index = messages.len() as u64;
+    Some(ClientEvent::SessionAgentTranscript {
+        session_id: requested_session_id.as_uuid().to_string(),
+        agent_id,
+        messages,
+        next_message_index,
+        revision,
+    })
+}
+
+fn session_agent_id_from_path(path: &std::path::Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("agent-"))
+        .and_then(|id| id.strip_suffix(".jsonl"))
+        .and_then(protocol::AgentId::parse_prefixed)
+        .map(|id| id.to_string())
+}
+
+async fn collect_session_agent_transcript_paths(
+    root: &std::path::Path,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut paths = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let meta = tokio::fs::symlink_metadata(&path).await?;
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if file_type.is_file() && session_agent_id_from_path(&path).is_some() {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+async fn find_session_agent_transcript_path(
+    root: &std::path::Path,
+    agent_id: &str,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    Ok(collect_session_agent_transcript_paths(root)
+        .await?
+        .into_iter()
+        .find(|path| session_agent_id_from_path(path).as_deref() == Some(agent_id)))
 }
 
 /// Seed one transcript offset according to the connection baseline.
@@ -3963,33 +4060,13 @@ impl SessionAgentPump {
             &self.session_cwd,
             &session_id.as_uuid().to_string(),
         );
-        let mut entries = match tokio::fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // A missing directory means there were no existing paths at
-                // connection startup. Treat it as an empty, successful
-                // baseline: the first child created afterwards must be tailed
-                // from byte 0.
-                *baseline_ready = true;
-                return SessionAgentPollResult::Success;
-            }
+        let paths = match collect_session_agent_transcript_paths(&dir).await {
+            Ok(paths) => paths,
             Err(_) => return SessionAgentPollResult::Retry,
         };
         let establishing_baseline = !*baseline_ready;
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(_) => return SessionAgentPollResult::Retry,
-            };
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            let Some(agent_id) = name
-                .strip_prefix("agent-")
-                .and_then(|id| id.strip_suffix(".jsonl"))
-                .and_then(protocol::AgentId::parse_prefixed)
-                .map(|id| id.to_string())
-            else {
+        for path in paths {
+            let Some(agent_id) = session_agent_id_from_path(&path) else {
                 continue;
             };
             let raw = match tokio::fs::read(&path).await {
@@ -4061,7 +4138,7 @@ impl SessionAgentPump {
                         self.event_sink
                             .emit(ClientEvent::SessionAgentUpdated {
                                 session_id: session_id.as_uuid().to_string(),
-                                agent: self.summary_for_agent(&agent_id, status, session_id).await,
+                                agent: self.summary_for_agent(&agent_id, status, &path).await,
                             })
                             .await;
                     }
@@ -4104,16 +4181,10 @@ impl SessionAgentPump {
         &self,
         agent_id: &str,
         status: &str,
-        session_id: protocol::SessionId,
+        path: &std::path::Path,
     ) -> SessionAgentSummaryDto {
-        let dir = orchestrator::transcript_paths::subagents_dir(
-            &self.lingxi_home,
-            &self.session_cwd,
-            &session_id.as_uuid().to_string(),
-        );
-        let path = session::forked_skill::agent_transcript_path(&dir, agent_id);
         if let Some(mut summary) =
-            MobileEngineHandle::read_agent_summary(agent_id.to_string(), &path).await
+            MobileEngineHandle::read_agent_summary(agent_id.to_string(), path).await
         {
             // The lifecycle line being consumed is authoritative. A
             // concurrent summary read can otherwise observe the append just
@@ -4269,10 +4340,11 @@ impl TurnLifecycleListener {
     }
 
     fn is_live_turn_payload(event: &ClientEvent) -> bool {
+        // AskUserQuestion is connection-scoped: a background workflow can park
+        // on it after the launching conversation turn has already ended.
         matches!(
             event,
-            ClientEvent::AskUserQuestion { .. }
-                | ClientEvent::SystemNotice { .. }
+            ClientEvent::SystemNotice { .. }
                 | ClientEvent::TextDelta { .. }
                 | ClientEvent::ToolUseStarted { .. }
                 | ClientEvent::ToolHeartbeat { .. }
@@ -4711,17 +4783,20 @@ impl MobileEngineHandle {
         );
 
         let wrapper = TurnWrapper::new(self.event_sink.clone());
+        self.inner.message_output.reset_message_buffer().await;
         wrapper.emit_turn_started(turn_id).await;
 
         let orch = self.inner.orchestrator.clone();
         let sink = self.event_sink.clone();
         let active_cancel = self.active_cancel.clone();
+        let message_output = self.inner.message_output.clone();
         let task_turn = turn.clone();
         let task = self.runtime.spawn(async move {
             let result = orch
                 .run_turn_streaming_with_cancel(&text, task_turn.cancel.clone())
                 .await;
             if let Err(err) = &result {
+                message_output.reset_message_buffer().await;
                 sink.emit(client_adapter::map_orchestrator_error(err)).await;
             }
 
@@ -5922,12 +5997,14 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("task stop failed: {e}"),
                     })?;
-                self.event_sink
-                    .emit(ClientEvent::TaskStatusChanged {
-                        task_id: record.task_id.clone(),
-                        status: client_adapter::lowering::lower_task_status(&record.status),
-                    })
-                    .await;
+                if record.task_type != "local_workflow" {
+                    self.event_sink
+                        .emit(ClientEvent::TaskStatusChanged {
+                            task_id: record.task_id.clone(),
+                            status: client_adapter::lowering::lower_task_status(&record.status),
+                        })
+                        .await;
+                }
                 Ok(())
             }
 
@@ -6365,7 +6442,8 @@ impl MobileEngineHandle {
                     status = match status_value {
                         "completed" => "completed",
                         "failed" => "failed",
-                        "killed" | "cancelled" => "killed",
+                        "killed" => "killed",
+                        "cancelled" => "cancelled",
                         "idle" => "idle",
                         "running" => "running",
                         _ => "unknown",
@@ -6440,18 +6518,12 @@ impl MobileEngineHandle {
                 .then(|| format!("{} messages · {}", snapshot.n_messages, snapshot.model)),
             updated_at_ms: None,
         }];
-        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                let Some(agent_id) = file_name
-                    .strip_prefix("agent-")
-                    .and_then(|id| id.strip_suffix(".jsonl"))
-                    .and_then(protocol::AgentId::parse_prefixed)
-                    .map(|id| id.to_string())
-                else {
+        if let Ok(paths) = collect_session_agent_transcript_paths(&dir).await {
+            for path in paths {
+                let Some(agent_id) = session_agent_id_from_path(&path) else {
                     continue;
                 };
-                if let Some(summary) = Self::read_agent_summary(agent_id, &entry.path()).await {
+                if let Some(summary) = Self::read_agent_summary(agent_id, &path).await {
                     agents.push(summary);
                 }
             }
@@ -6465,11 +6537,12 @@ impl MobileEngineHandle {
             .await;
     }
 
-    async fn load_session_agent_transcript(
+    async fn load_session_agent_transcript_for_session(
         &self,
+        session_id: protocol::SessionId,
+        dir: &std::path::Path,
         agent_id: &str,
     ) -> Result<(Vec<client_protocol::message::MessageDto>, u64), ClientError> {
-        let (session_id, dir) = self.session_agent_dir().await;
         let (messages, revision) = if agent_id == "main" {
             let uuid = session_id.as_uuid();
             let replayed = orchestrator::replay_session_state(
@@ -6498,10 +6571,15 @@ impl MobileEngineHandle {
                     message: format!("malformed session agent id: {agent_id:?}"),
                 }
             })?;
-            // Reconstruct the filename from the parsed UUID, never from raw
-            // client input, so `..`/separator path traversal is impossible.
-            let path = session::forked_skill::agent_transcript_path(&dir, &parsed.to_string());
-            let raw = tokio::fs::read(path).await.unwrap_or_default();
+            let path = find_session_agent_transcript_path(dir, &parsed.to_string())
+                .await
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("load session agent transcript failed: {error}"),
+                })?;
+            let raw = match path {
+                Some(path) => tokio::fs::read(path).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
             (
                 parse_session_agent_messages(&raw),
                 session_agent_transcript_revision(&raw),
@@ -6514,18 +6592,20 @@ impl MobileEngineHandle {
     }
 
     async fn emit_session_agent_transcript(&self, agent_id: String) -> Result<(), ClientError> {
-        let session_id = self.inner.orchestrator.current_session_id().await;
-        let (messages, revision) = self.load_session_agent_transcript(&agent_id).await?;
-        let next_message_index = messages.len() as u64;
-        self.event_sink
-            .emit(ClientEvent::SessionAgentTranscript {
-                session_id: session_id.as_uuid().to_string(),
-                agent_id,
-                messages,
-                next_message_index,
-                revision,
-            })
-            .await;
+        let (requested_session_id, dir) = self.session_agent_dir().await;
+        let (messages, revision) = self
+            .load_session_agent_transcript_for_session(requested_session_id, &dir, &agent_id)
+            .await?;
+        let current_session_id = self.inner.orchestrator.current_session_id().await;
+        if let Some(event) = session_agent_transcript_event(
+            requested_session_id,
+            current_session_id,
+            agent_id,
+            messages,
+            revision,
+        ) {
+            self.event_sink.emit(event).await;
+        }
         Ok(())
     }
 
@@ -8344,12 +8424,16 @@ mod tests {
 
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, PermissionRequestSink};
+    use client_protocol::events::ClientEvent;
+    use traits::OrchestratorHandle as _;
 
     use super::{
         baseline_for_session_activation, build_mobile, classify_provider_connection_response,
-        complete_transcript_prefix_len, lower_session_agent_snapshot, mobile_cron_schedule_error,
-        provider_models_endpoint, seed_session_agent_offset, seed_session_agent_tool_index,
-        session_agent_conversation_is_visible, session_agent_transcript_revision,
+        collect_session_agent_transcript_paths, complete_transcript_prefix_len,
+        find_session_agent_transcript_path, lower_session_agent_snapshot,
+        mobile_cron_schedule_error, provider_models_endpoint, seed_session_agent_offset,
+        seed_session_agent_tool_index, session_agent_conversation_is_visible,
+        session_agent_transcript_event, session_agent_transcript_revision,
         should_signal_session_agent_ready, MobileConfig, MobileCronStoreHandle,
         SessionAgentPollResult,
     };
@@ -8407,6 +8491,44 @@ mod tests {
         assert_eq!(empty_baseline_offsets.get(&first_after_empty), Some(&0));
     }
 
+    #[tokio::test]
+    async fn session_agent_helpers_find_nested_workflow_transcripts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nested = temp.path().join("workflows").join("wf_nested");
+        tokio::fs::create_dir_all(&nested)
+            .await
+            .expect("create nested transcript dir");
+        let agent_id = protocol::AgentId::new().to_string();
+        let path = nested.join(format!("agent-{agent_id}.jsonl"));
+        tokio::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "message": protocol::ConversationMessage::Assistant {
+                    id: protocol::MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text {
+                        text: "nested child".to_string(),
+                    }],
+                    stop_reason: None,
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .await
+        .expect("write nested transcript");
+
+        let paths = collect_session_agent_transcript_paths(temp.path())
+            .await
+            .expect("scan nested transcript tree");
+        assert_eq!(paths, vec![path.clone()]);
+        assert_eq!(
+            find_session_agent_transcript_path(temp.path(), &agent_id)
+                .await
+                .expect("find nested transcript"),
+            Some(path)
+        );
+    }
+
     #[test]
     fn session_agent_pump_readiness_waits_for_successful_baseline() {
         assert!(!should_signal_session_agent_ready(
@@ -8451,6 +8573,58 @@ mod tests {
             lower_session_agent_snapshot(first.as_bytes()).len(),
             lower_session_agent_snapshot(second.as_bytes()).len(),
             "hidden compact records may revise content without changing visible count"
+        );
+    }
+
+    #[test]
+    fn session_agent_transcript_event_is_dropped_after_session_switch() {
+        let requested_session_id = protocol::SessionId::new();
+        let current_session_id = protocol::SessionId::new();
+
+        assert!(session_agent_transcript_event(
+            requested_session_id,
+            current_session_id,
+            "agent:test".to_string(),
+            Vec::new(),
+            0,
+        )
+        .is_none());
+
+        let event = session_agent_transcript_event(
+            requested_session_id,
+            requested_session_id,
+            "agent:test".to_string(),
+            Vec::new(),
+            7,
+        )
+        .expect("same-session transcript event");
+        let ClientEvent::SessionAgentTranscript {
+            session_id,
+            next_message_index,
+            revision,
+            ..
+        } = event
+        else {
+            panic!("expected session-agent transcript event");
+        };
+        assert_eq!(session_id, requested_session_id.as_uuid().to_string());
+        assert_eq!(next_message_index, 0);
+        assert_eq!(revision, 7);
+    }
+
+    #[test]
+    fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
+        let agent_id = protocol::AgentId::nil().to_string();
+        let transcript_path = format!("/tmp/subagents/workflows/wf_1/agent-{agent_id}.jsonl");
+        assert_eq!(
+            super::session_agent_id_from_path(std::path::Path::new(&transcript_path)),
+            Some(agent_id)
+        );
+        assert_eq!(
+            super::session_agent_id_from_path(std::path::Path::new(
+                "/tmp/subagents/workflows/wf_1/not-an-agent.txt"
+            )),
+            None
         );
     }
 
@@ -8655,6 +8829,24 @@ mod tests {
             .expect("summary");
         assert_eq!(summary.agent_type, "researcher");
         assert_eq!(summary.name, "researcher");
+    }
+
+    #[tokio::test]
+    async fn session_agent_summary_preserves_cancelled_status() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agent-agent:test.jsonl");
+        tokio::fs::write(
+            &path,
+            r#"{"agent_type":"researcher","status":"cancelled"}
+"#,
+        )
+        .await
+        .expect("write cancelled transcript metadata");
+
+        let summary = MobileEngineHandle::read_agent_summary("agent:test".to_string(), &path)
+            .await
+            .expect("summary");
+        assert_eq!(summary.status, "cancelled");
     }
 
     #[test]
@@ -9179,12 +9371,18 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let platform: Arc<dyn traits::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
-        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let listener = Arc::new(FakeListener::default());
+        let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
         let perm_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
-        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
-            .await
-            .expect("build_mobile");
+        let rt = build_mobile(
+            test_config(tmp.path()),
+            platform,
+            listener_for_build,
+            perm_sink,
+        )
+        .await
+        .expect("build_mobile");
 
         let launcher = crate::workflow_support::MobileWorkflowLauncher {
             registry: rt.task_registry.clone(),
@@ -9217,6 +9415,14 @@ mod tests {
                 .is_some_and(|r| r.starts_with("wf_")),
             "{launched:?}"
         );
+        let transcript_dir = launched
+            .transcript_dir
+            .as_deref()
+            .expect("workflow launch returns its transcript directory");
+        assert!(
+            std::path::Path::new(transcript_dir).is_dir(),
+            "launcher must create the transcript directory before a child can append JSONL"
+        );
 
         // Poll to a terminal status (the script thread is fast; bound the wait).
         let registry: &dyn traits::task_registry::TaskRegistryHandle = &*rt.task_registry;
@@ -9234,6 +9440,15 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert_eq!(status, "completed", "the QuickJS run must complete");
+        assert!(
+            listener.received.lock().await.iter().any(|event| matches!(
+                event,
+                ClientEvent::TaskStatusChanged { task_id, status }
+                    if task_id == &launched.task_id
+                        && *status == client_protocol::listings::TaskStatusDto::Completed
+            )),
+            "workflow completion must be pushed to the mobile client"
+        );
 
         // The spool captured the phase header + the log line.
         let chunk = registry
@@ -9452,6 +9667,140 @@ mod tests {
             .expect("build_mobile_engine failed");
         handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
+    }
+
+    #[test]
+    fn submit_lists_and_loads_nested_workflow_agents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let session_id = handle.inner.orchestrator.current_session_id().await;
+            let dir = orchestrator::transcript_paths::subagents_dir(
+                &handle.lingxi_home,
+                &handle.session_cwd,
+                &session_id.as_uuid().to_string(),
+            )
+            .join("workflows")
+            .join("wf_nested");
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .expect("create nested workflow dir");
+            let expected_agent_id = protocol::AgentId::new().to_string();
+            let transcript_path = dir.join(format!("agent-{expected_agent_id}.jsonl"));
+            let body = [
+                serde_json::to_string(&serde_json::json!({
+                    "agent_name": "wf child",
+                    "agent_type": "workflow-subagent",
+                    "status": "running"
+                }))
+                .unwrap(),
+                serde_json::to_string(&serde_json::json!({
+                    "message": protocol::ConversationMessage::Assistant {
+                        id: protocol::MessageId::new(),
+                        content: vec![protocol::ContentBlock::Text {
+                            text: "nested workflow child".to_string(),
+                        }],
+                        stop_reason: None,
+                    }
+                }))
+                .unwrap(),
+            ]
+            .join("\n")
+                + "\n";
+            tokio::fs::write(&transcript_path, body)
+                .await
+                .expect("write nested transcript");
+
+            handle
+                .submit(ClientCommand::ListSessionAgents)
+                .await
+                .expect("list session agents");
+            let listed = listener.received.lock().await.clone();
+            assert!(listed.iter().any(|event| matches!(
+                event,
+                Ev::SessionAgentList { agents, .. }
+                    if agents.iter().any(|agent| agent.agent_id == expected_agent_id)
+            )));
+
+            handle
+                .submit(ClientCommand::LoadSessionAgentTranscript {
+                    agent_id: expected_agent_id.clone(),
+                })
+                .await
+                .expect("load nested session agent transcript");
+            let loaded = listener.received.lock().await.clone();
+            assert!(loaded.iter().any(|event| matches!(
+                event,
+                Ev::SessionAgentTranscript { agent_id, messages, .. }
+                    if agent_id == &expected_agent_id
+                        && messages.iter().any(|message| message.blocks.iter().any(|block| {
+                            matches!(
+                                block,
+                                client_protocol::message::MessageBlockDto::Text { text }
+                                    if text.contains("nested workflow child")
+                            )
+                        }))
+            )));
+        });
+    }
+
+    #[test]
+    fn submit_task_stop_skips_second_workflow_status_event() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let task_id = handle
+                .inner
+                .task_registry
+                .create(
+                    tasks::TaskType::LocalWorkflow,
+                    tasks::TaskSpawnInput::LocalWorkflow {
+                        workflow_id: "workflow".to_string(),
+                        script: "return null;".to_string(),
+                        resume_from_run_id: None,
+                        args: None,
+                        run_id: None,
+                        invocation_mode: Some("inline".to_string()),
+                        workflow_source: Some("inline".to_string()),
+                        transcript_subdir: None,
+                        launched_from_subagent: false,
+                    },
+                    "workflow".to_string(),
+                )
+                .await
+                .expect("create workflow placeholder");
+            listener
+                .on_event(Ev::TaskStatusChanged {
+                    task_id: task_id.clone(),
+                    status: client_protocol::listings::TaskStatusDto::Cancelled,
+                })
+                .await;
+
+            handle
+                .submit(ClientCommand::TaskStop {
+                    task_id: task_id.clone(),
+                })
+                .await
+                .expect("task stop succeeds");
+
+            let events = listener.received.lock().await.clone();
+            let stop_events = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        Ev::TaskStatusChanged { task_id: event_task_id, .. }
+                            if event_task_id == &task_id
+                    )
+                })
+                .count();
+            assert_eq!(
+                stop_events, 1,
+                "workflow TaskStop should rely on the sink emission, not emit a second status event"
+            );
+        });
     }
 
     #[test]
@@ -10027,7 +10376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_listener_drops_unowned_live_turn_payloads() {
+    async fn lifecycle_listener_drops_unowned_live_payloads_but_forwards_questions() {
         let inner = Arc::new(FakeListener::default());
         let active = Arc::new(tokio::sync::Mutex::new(None));
         let listener = super::TurnLifecycleListener::new(inner.clone(), active);
@@ -10054,8 +10403,21 @@ mod tests {
                 is_error: false,
             })
             .await;
+        listener
+            .on_event(Ev::AskUserQuestion {
+                request: client_protocol::ask_user_question::AskUserQuestionRequestDto {
+                    request_id: 7,
+                    questions: Vec::new(),
+                    timeout_secs: None,
+                },
+            })
+            .await;
 
-        assert!(inner.received.lock().await.is_empty());
+        let events = inner.received.lock().await;
+        assert!(matches!(
+            events.as_slice(),
+            [Ev::AskUserQuestion { request }] if request.request_id == 7
+        ));
     }
 
     /// A connection owns at most one live turn. A second `SendPrompt` must be

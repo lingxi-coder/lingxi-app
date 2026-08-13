@@ -2514,9 +2514,7 @@ final class MockConversationSource: ConversationSource {
             status: BackgroundTaskSnapshot.Status
         ) {
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
-                if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
-                    model.backgroundTasks[index].status = status
-                }
+                model.backgroundTasks[index].status = status
                 if let description, !description.isEmpty {
                     model.backgroundTasks[index].descriptionText = description
                 }

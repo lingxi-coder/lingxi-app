@@ -32,6 +32,32 @@ use traits::subagent_spawn::{
     SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
 };
 
+tokio::task_local! {
+    static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
+}
+
+/// Runs a future with a workflow-scoped child transcript directory override.
+pub async fn with_transcript_subdir_override<F, T>(
+    transcript_subdir: Option<std::path::PathBuf>,
+    future: F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE
+        .scope(transcript_subdir, future)
+        .await
+}
+
+/// Return the current workflow-scoped transcript-directory override, if one is
+/// active on this async task.
+pub fn workflow_transcript_subdir_override() -> Option<std::path::PathBuf> {
+    WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
 /// Production [`SubagentSpawner`] backed by a [`StateMachinePool`].
 ///
 /// Constructed and registered on the host `BuiltinToolContext` so
@@ -170,7 +196,7 @@ pub struct PoolSubagentSpawner {
     /// Engine cwd stamped on that `HookContext`. Set at boot via
     /// [`Self::with_hook_context`]; defaults to an empty path.
     hook_cwd: std::path::PathBuf,
-    /// FIX C: the MAIN session's subagents directory —
+    /// FIX C: a fallback session's subagents directory —
     /// `<lingxi_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`
     /// (claude-code `getAgentTranscriptPath`'s base dir). Precomputed at the
     /// composition root and set at boot via [`Self::with_hook_context`] (the
@@ -181,6 +207,11 @@ pub struct PoolSubagentSpawner {
     /// `…/subagents/agent-<id>.jsonl` instead of the prior `/tmp` placeholder.
     /// `None` ⇒ the `/tmp` placeholder stands (byte-identical legacy).
     hook_subagents_dir: Option<std::path::PathBuf>,
+    /// Optional live override for [`Self::hook_subagents_dir`]. Mobile sessions
+    /// can retarget after the spawner is built, so resolving the directory at
+    /// spawn time keeps new child transcripts under the active session rather
+    /// than the boot session. `None` preserves the static desktop/test path.
+    subagents_dir_provider: Option<Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>>,
     /// Filesystem the child uses to APPEND its conversation to
     /// `<hook_subagents_dir>/agent-<id>.jsonl`. Set with the subagents dir at
     /// boot: naming the path without wiring a writer is what left the
@@ -274,6 +305,7 @@ impl PoolSubagentSpawner {
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             hook_subagents_dir: None,
+            subagents_dir_provider: None,
             transcript_fs: None,
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
@@ -565,6 +597,28 @@ impl PoolSubagentSpawner {
         self.hook_cwd = cwd;
         self.hook_subagents_dir = subagents_dir;
         self
+    }
+
+    /// Builder: resolve the transcript directory at child-spawn time. The live
+    /// value takes precedence over [`Self::with_hook_context`]'s static fallback.
+    #[must_use]
+    pub fn with_subagents_dir_provider(
+        mut self,
+        provider: Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>,
+    ) -> Self {
+        self.subagents_dir_provider = Some(provider);
+        self
+    }
+
+    fn resolved_subagents_dir(&self) -> Option<std::path::PathBuf> {
+        self.subagents_dir_provider
+            .as_ref()
+            .and_then(|provider| provider())
+            .or_else(|| self.hook_subagents_dir.clone())
+    }
+
+    fn resolved_transcript_subdir(&self) -> Option<std::path::PathBuf> {
+        workflow_transcript_subdir_override().or_else(|| self.resolved_subagents_dir())
     }
 
     /// Builder: the filesystem each child appends its transcript through.
@@ -1113,8 +1167,8 @@ impl PoolSubagentSpawner {
         // prompt + fork-context + preload (see `SubagentContext::resumed_history`).
         ctx.resumed_history = request.resumed_history.clone();
         // Seed the child's REAL transcript_subdir when the host wired one.
-        if let Some(subagents_dir) = &self.hook_subagents_dir {
-            ctx.transcript_subdir = subagents_dir.clone();
+        if let Some(subagents_dir) = self.resolved_transcript_subdir() {
+            ctx.transcript_subdir = subagents_dir;
             // Only wire the writer alongside a REAL subagents dir — writing a
             // transcript into the `/tmp` placeholder would scatter files a
             // resume could never find.
@@ -3608,6 +3662,48 @@ mod tests {
             "the one-shot spawn path must NOT park"
         );
         assert!(!one_shot.is_async);
+    }
+
+    #[tokio::test]
+    async fn workflow_transcript_override_stays_pinned_across_session_retarget() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let active_dir = Arc::new(Mutex::new(std::path::PathBuf::from(
+            "/sessions/a/subagents",
+        )));
+        let provider_dir = active_dir.clone();
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_hook_context(
+                protocol::SessionId::nil(),
+                std::path::PathBuf::new(),
+                Some(std::path::PathBuf::from("/sessions/fallback/subagents")),
+            )
+            .with_subagents_dir_provider(Arc::new(move || {
+                provider_dir.lock().ok().map(|dir| dir.clone())
+            }));
+
+        assert_eq!(
+            spawner.resolved_subagents_dir().as_deref(),
+            Some(std::path::Path::new("/sessions/a/subagents"))
+        );
+        *active_dir.lock().unwrap() = std::path::PathBuf::from("/sessions/b/subagents");
+        assert_eq!(
+            spawner.resolved_subagents_dir().as_deref(),
+            Some(std::path::Path::new("/sessions/b/subagents"))
+        );
+
+        let workflow_dir =
+            std::path::PathBuf::from("/sessions/a/subagents/workflows/wf_launch_session");
+        let pinned = with_transcript_subdir_override(Some(workflow_dir.clone()), async {
+            spawner.resolved_transcript_subdir()
+        })
+        .await;
+        assert_eq!(pinned, Some(workflow_dir));
+        assert_eq!(
+            spawner.resolved_transcript_subdir().as_deref(),
+            Some(std::path::Path::new("/sessions/b/subagents")),
+            "the workflow override must be task-scoped and leave ordinary agents on the active session"
+        );
     }
 
     /// Canceling a persistent launch while the pool is paused after the runner

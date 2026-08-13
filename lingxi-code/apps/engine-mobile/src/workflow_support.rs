@@ -15,6 +15,59 @@
 
 use std::sync::Arc;
 
+/// Mobile workflow status adapter: persist every worker transition in the task
+/// registry, then publish the same transition to the native conversation UI.
+///
+/// The registry sink remains the source of truth. This wrapper only closes the
+/// previously missing engine-to-client leg; without it a completed workflow was
+/// visible to `TaskList` but never produced the existing `TaskStatusChanged`
+/// event unless the user stopped it manually.
+pub(crate) struct MobileWorkflowStatusSink {
+    registry: Arc<tasks::registry_status_sink::RegistryStatusSink>,
+    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+}
+
+impl MobileWorkflowStatusSink {
+    pub(crate) fn new(event_sink: Arc<dyn client_adapter::ClientEventSink>) -> Self {
+        Self {
+            registry: Arc::new(tasks::registry_status_sink::RegistryStatusSink::new()),
+            event_sink,
+        }
+    }
+
+    pub(crate) fn bind(&self, registry: Arc<dyn traits::task_registry::TaskRegistryHandle>) {
+        self.registry.bind(registry);
+    }
+}
+
+#[async_trait::async_trait]
+impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
+    async fn set_status(&self, task_id: &str, status: tasks::TaskStatus) {
+        tasks::handlers::TaskStatusSink::set_status(&*self.registry, task_id, status).await;
+        let wire = match status {
+            tasks::TaskStatus::Pending => "pending",
+            tasks::TaskStatus::Running => "running",
+            tasks::TaskStatus::Completed => "completed",
+            tasks::TaskStatus::Failed => "failed",
+            tasks::TaskStatus::Killed => "killed",
+        };
+        self.event_sink
+            .emit(client_protocol::events::ClientEvent::TaskStatusChanged {
+                task_id: task_id.to_string(),
+                status: client_adapter::lowering::lower_task_status(wire),
+            })
+            .await;
+    }
+
+    async fn is_registered(&self, task_id: &str) -> bool {
+        tasks::handlers::TaskStatusSink::is_registered(&*self.registry, task_id).await
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        tasks::handlers::TaskStatusSink::is_terminal(&*self.registry, task_id).await
+    }
+}
+
 /// Late-bound [`traits::tool_invoker::ToolInvoker`] resolving the composition
 /// cycle: the `LocalWorkflowHandler` is registered into the `TaskRegistry`
 /// (needs `&mut` — BEFORE the registry is `Arc`-wrapped), yet must dispatch
@@ -133,7 +186,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             // in the task handler). An unchecked `../…` or absolute value
             // would write outside the scratch dir, e.g. over the workspace's
             // host-managed `lib/lingxi-bridge.js`.
-            if !is_valid_run_id(rid) {
+            if !tool_workflow::is_valid_run_id(rid) {
                 return Err(tool_workflow::WorkflowLaunchError(format!(
                     "resumeFromRunId {rid:?} is not a workflow run id (expected wf_ followed by \
                      at least 6 lowercase alphanumerics or dashes)"
@@ -192,12 +245,15 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 &self.cwd.to_string_lossy(),
                 &session_uuid,
             );
-            subagents
-                .join("workflows")
-                .join(&run_id)
-                .to_str()
-                .map(str::to_string)
+            subagents.join("workflows").join(&run_id)
         };
+        std::fs::create_dir_all(&transcript_dir).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot create workflow transcript directory '{}': {error}",
+                transcript_dir.display()
+            ))
+        })?;
+        let transcript_dir_wire = transcript_dir.to_str().map(str::to_string);
         let (invocation_mode, workflow_source) =
             if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
                 ("scriptPath".to_string(), p.to_string())
@@ -225,6 +281,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                     run_id: Some(run_id.clone()),
                     invocation_mode: Some(invocation_mode),
                     workflow_source: Some(workflow_source),
+                    transcript_subdir: Some(transcript_dir.clone()),
                     launched_from_subagent: false,
                 },
                 "Workflow".to_string(),
@@ -237,27 +294,14 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             script_path,
             workflow_name,
             summary,
-            transcript_dir,
+            transcript_dir: transcript_dir_wire,
         })
     }
 }
 
-/// The `resumeFromRunId` shape the Workflow tool's schema advertises
-/// (`^wf_[a-z0-9-]{6,}$`) — enforced in code because the id becomes a file
-/// name and nothing in this workspace validates JSON-Schema `pattern`.
-fn is_valid_run_id(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("wf_") else {
-        return false;
-    };
-    rest.len() >= 6
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 #[cfg(test)]
 mod run_id_tests {
-    use super::is_valid_run_id;
+    use tool_workflow::is_valid_run_id;
 
     /// The minted shape is accepted; every escape shape a resume id could
     /// carry into `dir.join(format!("{run_id}.js"))` is refused.

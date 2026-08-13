@@ -1359,6 +1359,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             run_id,
             invocation_mode: _,
             workflow_source: _,
+            transcript_subdir: _,
             launched_from_subagent: _,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,

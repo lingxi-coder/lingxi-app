@@ -1478,6 +1478,12 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         // registry from its `ToolUseContext`, so the gate lives here in the
         // launcher (which owns the registry). Message byte-exact (`ED` = TaskStop).
         if let Some(rid) = spec.resume_from_run_id.as_deref().filter(|s| !s.is_empty()) {
+            if !tool_workflow::is_valid_run_id(rid) {
+                return Err(tool_workflow::WorkflowLaunchError(format!(
+                    "resumeFromRunId {rid:?} is not a workflow run id (expected wf_ followed by \
+                     at least 6 lowercase alphanumerics or dashes)"
+                )));
+            }
             if let Some(task_id) = self.registry.find_running_workflow_by_run_id(rid).await {
                 return Err(tool_workflow::WorkflowLaunchError(format!(
                     "Workflow {rid} is still running (task {task_id}). Stop it first with \
@@ -1530,12 +1536,15 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 &self.cwd.to_string_lossy(),
                 &self.session_uuid,
             );
-            subagents
-                .join("workflows")
-                .join(&run_id)
-                .to_str()
-                .map(str::to_string)
+            subagents.join("workflows").join(&run_id)
         };
+        std::fs::create_dir_all(&transcript_dir).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot create workflow transcript directory '{}': {error}",
+                transcript_dir.display()
+            ))
+        })?;
+        let transcript_dir_wire = transcript_dir.to_str().map(str::to_string);
         // Derive telemetry fields for tengu_workflow_launched (oracle §7).
         let (invocation_mode, workflow_source) =
             if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
@@ -1569,6 +1578,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                     run_id: Some(run_id.clone()),
                     invocation_mode: Some(invocation_mode),
                     workflow_source: Some(workflow_source),
+                    transcript_subdir: Some(transcript_dir.clone()),
                     // `t.agentId != null` in claude-code: the Workflow tool is called
                     // from a subagent when a sub-session invokes it. LingXi does not
                     // thread the calling agent id to the launcher at this time; treat
@@ -1585,7 +1595,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             script_path,
             workflow_name,
             summary,
-            transcript_dir,
+            transcript_dir: transcript_dir_wire,
         })
     }
 }
@@ -9115,6 +9125,11 @@ pub async fn build(
         shared_command_registry.clone(),
     )
     .await;
+    // The TUI intercepts `/workflows` to open its interactive picker. Bind the
+    // same registry-backed text projection for headless/bridge dispatch paths.
+    reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
+        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    )));
     reg.register_builtin_handler(worktree_command_handler);
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.

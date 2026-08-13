@@ -77,6 +77,8 @@ const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
 
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
+const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Build a throw-channel result slot carrying `message`.
 fn wf_throw(message: &str) -> String {
     format!("{WF_THROW_PREFIX}{message}")
@@ -387,9 +389,10 @@ impl LocalWorkflowHandler {
 
 struct WorkflowIsolationSpawner {
     inner: Arc<dyn SubagentSpawner>,
-    worktree: Arc<dyn traits::worktree::WorktreeManager>,
+    worktree: Option<Arc<dyn traits::worktree::WorktreeManager>>,
     slug_prefix: String,
     sequence: AtomicU64,
+    transcript_subdir: Option<PathBuf>,
 }
 
 impl WorkflowIsolationSpawner {
@@ -400,12 +403,20 @@ impl WorkflowIsolationSpawner {
         progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let worktree = if request.isolation.as_deref() == Some("worktree") {
+            let Some(manager) = self.worktree.as_ref() else {
+                // Mobile and other minimal builds document `isolation:"worktree"`
+                // as a plain spawn fallback when no worktree manager is wired.
+                return agent::with_transcript_subdir_override(
+                    self.transcript_subdir.clone(),
+                    self.inner.spawn_with_progress(request, inherit, progress),
+                )
+                .await;
+            };
             let seq = self
                 .sequence
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let slug = format!("workflow-agent-{}-{seq}", self.slug_prefix);
-            let handle = self
-                .worktree
+            let handle = manager
                 .create_worktree(&slug, None, &[])
                 .await
                 .map_err(|e| {
@@ -422,15 +433,34 @@ impl WorkflowIsolationSpawner {
             request.worktree.clone()
         };
 
-        let result = self
-            .inner
-            .spawn_with_progress(request, inherit, progress)
-            .await;
-        if let Some(handle) = worktree.as_ref() {
-            let _ = traits::worktree::agent_worktree_result(self.worktree.as_ref(), handle).await;
+        let result = agent::with_transcript_subdir_override(
+            self.transcript_subdir.clone(),
+            self.inner.spawn_with_progress(request, inherit, progress),
+        )
+        .await;
+        if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
+            let _ = traits::worktree::agent_worktree_result(manager.as_ref(), handle).await;
         }
         result
     }
+}
+
+async fn wait_for_workflow_registration(
+    status_sink: &Arc<dyn TaskStatusSink>,
+    runtime: &Arc<dyn RuntimeSpawner>,
+    task_id: &str,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    let start = std::time::Instant::now();
+    while !status_sink.is_registered(task_id).await {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed)
+            || start.elapsed() >= REGISTRATION_TIMEOUT
+        {
+            return false;
+        }
+        runtime.sleep(std::time::Duration::from_millis(1)).await;
+    }
+    true
 }
 
 #[async_trait]
@@ -1327,6 +1357,7 @@ impl Task for LocalWorkflowHandler {
             run_id: provided_run_id,
             invocation_mode,
             workflow_source,
+            transcript_subdir,
             launched_from_subagent,
         } = input
         else {
@@ -1358,6 +1389,7 @@ impl Task for LocalWorkflowHandler {
         let workers = self.workers.clone();
         let output_manager = self.output_manager.clone();
         let fs = ctx.fs.clone();
+        let runtime = ctx.runtime.clone();
         let token_budget_total = self.token_budget_total;
         // The shared `budget.spent()` pool (main loop + all workflows), published
         // by the root once the orchestrator exists. `None` in tests ⇒ the run
@@ -1409,6 +1441,18 @@ impl Task for LocalWorkflowHandler {
         let worker = Box::pin({
             let shared_agent_count = shared_agent_count.clone();
             async move {
+                let registered = wait_for_workflow_registration(
+                    &status_sink,
+                    &runtime,
+                    &worker_task_id,
+                    &worker_cancel,
+                )
+                .await;
+                if !registered {
+                    workers.lock().await.remove(&worker_task_id);
+                    return;
+                }
+
                 status_sink
                     .set_status(&worker_task_id, TaskStatus::Running)
                     .await;
@@ -1545,12 +1589,19 @@ impl Task for LocalWorkflowHandler {
                     if let Some(worktree) = worktree_manager.clone() {
                         Arc::new(WorkflowIsolationSpawner {
                             inner: spawner.clone(),
-                            worktree,
+                            worktree: Some(worktree),
                             slug_prefix: worker_task_id.clone(),
                             sequence: AtomicU64::new(0),
+                            transcript_subdir: transcript_subdir.clone(),
                         })
                     } else {
-                        spawner.clone()
+                        Arc::new(WorkflowIsolationSpawner {
+                            inner: spawner.clone(),
+                            worktree: None,
+                            slug_prefix: worker_task_id.clone(),
+                            sequence: AtomicU64::new(0),
+                            transcript_subdir: transcript_subdir.clone(),
+                        })
                     };
                 let run = run_workflow_script(
                     &script,

@@ -1092,6 +1092,7 @@ mod tests {
                     run_id: None,
                     invocation_mode: None,
                     workflow_source: None,
+                    transcript_subdir: None,
                     launched_from_subagent: false,
                 },
                 make_ctx(fs),

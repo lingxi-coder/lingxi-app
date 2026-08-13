@@ -362,6 +362,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 run_id: Some("wf_budget".into()),
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
+                transcript_subdir: None,
                 launched_from_subagent: false,
             },
             "background workflow".into(),

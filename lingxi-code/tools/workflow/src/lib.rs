@@ -121,6 +121,20 @@ impl std::fmt::Display for WorkflowLaunchError {
 }
 impl std::error::Error for WorkflowLaunchError {}
 
+/// Return whether `value` matches the workflow run-id shape accepted by the
+/// tool schema. Hosts must enforce this before using a resume id as a path
+/// component; JSON Schema validation is not guaranteed on every call path.
+#[must_use]
+pub fn is_valid_run_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("wf_") else {
+        return false;
+    };
+    rest.len() >= 6
+        && rest
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 fn user_config_home_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));

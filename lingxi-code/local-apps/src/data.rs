@@ -26,6 +26,10 @@ pub const MAX_QUERY_PAGE_SIZE: u32 = 100;
 pub const MAX_MUTATION_BATCH_SIZE: usize = 50;
 /// Largest filter count accepted by one query.
 pub const MAX_QUERY_FILTERS: usize = 16;
+/// Largest member list accepted by an `in` filter.
+pub const MAX_FILTER_IN_VALUES: usize = 20;
+/// Largest UTF-8 byte length accepted for a caller-owned record id.
+pub const MAX_RECORD_ID_BYTES: usize = 128;
 /// Largest serialized record document.
 pub const MAX_RECORD_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Pre-migration database copies retained under `apps/<id>/data/backups/`.
@@ -73,8 +77,22 @@ pub enum DataFilterOperator {
     GreaterThanOrEqual,
     /// String contains a literal substring.
     Contains,
-    /// Equal to one member of a scalar array (maximum 20).
+    /// Equal to one member of a scalar array (maximum [`MAX_FILTER_IN_VALUES`]).
     In,
+}
+
+impl DataFilterOperator {
+    /// Every serialized filter operator in stable catalog order.
+    pub const ALL: [Self; 8] = [
+        Self::Equal,
+        Self::NotEqual,
+        Self::LessThan,
+        Self::LessThanOrEqual,
+        Self::GreaterThan,
+        Self::GreaterThanOrEqual,
+        Self::Contains,
+        Self::In,
+    ];
 }
 
 /// Manifest-field filter used by [`DataQuery`].
@@ -645,10 +663,10 @@ fn validate_query(collection: &DataCollectionSchema, query: &DataQuery) -> Resul
                 let values = filter.value.as_array().ok_or_else(|| {
                     AppError::InvalidRequest("in filter value must be an array".into())
                 })?;
-                if values.is_empty() || values.len() > 20 {
-                    return Err(AppError::InvalidRequest(
-                        "in filter must contain 1..=20 scalar values".into(),
-                    ));
+                if values.is_empty() || values.len() > MAX_FILTER_IN_VALUES {
+                    return Err(AppError::InvalidRequest(format!(
+                        "in filter must contain 1..={MAX_FILTER_IN_VALUES} scalar values"
+                    )));
                 }
                 for value in values {
                     validate_filter_value(field, value)?;
@@ -883,12 +901,12 @@ fn validate_expected_revision(revision: Option<u64>) -> Result<(), AppError> {
 
 fn validate_record_id(record_id: &str) -> Result<(), AppError> {
     if record_id.is_empty()
-        || record_id.len() > 128
+        || record_id.len() > MAX_RECORD_ID_BYTES
         || record_id.chars().any(char::is_control)
         || record_id.trim() != record_id
     {
         Err(AppError::InvalidRequest(format!(
-            "invalid record id {record_id:?}: expected 1..=128 non-control bytes"
+            "invalid record id {record_id:?}: expected 1..={MAX_RECORD_ID_BYTES} non-control bytes"
         )))
     } else {
         Ok(())

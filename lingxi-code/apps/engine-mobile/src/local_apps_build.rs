@@ -812,6 +812,25 @@ mod tests {
     }
 
     #[test]
+    fn the_locked_bridge_exposes_the_native_data_wire_contract() {
+        let bridge = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../local-apps/templates/vite-react-static-v1/lib/lingxi-bridge.js"
+        ));
+        for anchor in [
+            "records[].document",
+            "export async function upsertRecord",
+            "kind: \"upsert\"",
+            "recordId",
+            "document",
+            "export async function deleteRecord",
+            "kind: \"delete\"",
+        ] {
+            assert!(bridge.contains(anchor), "bridge missing {anchor}");
+        }
+    }
+
+    #[test]
     fn platform_adapter_declares_distinct_phone_and_tablet_presentations() {
         let adapter = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

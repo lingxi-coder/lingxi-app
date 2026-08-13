@@ -41,8 +41,8 @@ pub use checkpoints::AppCheckpointStore;
 pub use data::{
     AppDataStore, DataFilter, DataFilterOperator, DataMigrationPreview, DataMigrationResult,
     DataMutation, DataMutationResult, DataPage, DataQuery, DataRecord, DataSchemaState,
-    DataSortDirection, DataSortKey, DATA_SCHEMA_VERSION, MAX_MUTATION_BATCH_SIZE,
-    MAX_QUERY_PAGE_SIZE,
+    DataSortDirection, DataSortKey, DATA_SCHEMA_VERSION, MAX_FILTER_IN_VALUES,
+    MAX_MUTATION_BATCH_SIZE, MAX_QUERY_FILTERS, MAX_QUERY_PAGE_SIZE, MAX_RECORD_ID_BYTES,
 };
 pub use error::{AppError, AppErrorCode};
 pub use events::{

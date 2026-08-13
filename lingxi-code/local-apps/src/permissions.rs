@@ -39,6 +39,24 @@ pub enum AppCapability {
     AgentNotify,
 }
 
+impl AppCapability {
+    /// Every serialized capability in stable catalog order.
+    ///
+    /// The MCP schema serializes this list through Serde, so its advertised
+    /// strings cannot drift from manifest and permission decoding.
+    pub const ALL: [Self; 9] = [
+        Self::DataMutation,
+        Self::UiControl,
+        Self::Camera,
+        Self::PhotoLibrary,
+        Self::Microphone,
+        Self::Location,
+        Self::Notifications,
+        Self::Llm,
+        Self::AgentNotify,
+    ];
+}
+
 /// User decision returned by a capability prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -243,10 +261,26 @@ mod tests {
     }
 
     #[test]
-    fn device_and_llm_capability_wire_spellings_are_snake_case() {
+    fn all_capability_wire_spellings_are_snake_case() {
         // These strings are the wire contract shared by plan JSON, the
         // persisted manifest, and permissions.json — pin them.
+        assert_eq!(
+            serde_json::to_value(AppCapability::ALL).unwrap(),
+            serde_json::json!([
+                "data_mutation",
+                "ui_control",
+                "camera",
+                "photo_library",
+                "microphone",
+                "location",
+                "notifications",
+                "llm",
+                "agent_notify"
+            ])
+        );
         for (capability, wire) in [
+            (AppCapability::DataMutation, "\"data_mutation\""),
+            (AppCapability::UiControl, "\"ui_control\""),
             (AppCapability::Camera, "\"camera\""),
             (AppCapability::PhotoLibrary, "\"photo_library\""),
             (AppCapability::Microphone, "\"microphone\""),

@@ -47,7 +47,7 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::listings::SlashCommandDto;
+use client_protocol::listings::{SessionAgentSummaryDto, SlashCommandDto};
 use client_protocol::local_apps::{AppCreateOriginDto, AppEventDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
@@ -404,6 +404,10 @@ pub struct MobileRuntime {
     pub orchestrator: Arc<ConversationOrchestrator>,
     /// Slash-command dispatcher seeded with the builtin + mobile handlers.
     pub dispatcher: RegistrySlashDispatcher,
+    /// Shared registry snapshot that both dispatch and listings read. Mobile
+    /// must not maintain a second slash-command table beside the live engine
+    /// registry.
+    pub slash_registry: Arc<RwLock<command_api::CommandRegistry>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -487,6 +491,15 @@ pub struct MobileRuntime {
     /// reads as the app's origin conversation. Updated by
     /// `retarget_session_writer` on every session change.
     pub(crate) active_session_uuid: Arc<std::sync::Mutex<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlashAuthoritySnapshot {
+    session_id: String,
+    model: String,
+    permission_mode: String,
+    auth: client_protocol::listings::AuthStateDto,
+    catalog: Vec<SlashCommandDto>,
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -3525,6 +3538,7 @@ async fn build_mobile_inner_with_ask(
     Ok(MobileRuntime {
         orchestrator: orch,
         dispatcher,
+        slash_registry: shared_command_registry,
         auth,
         oauth,
         permission_gate: adapter_gate,
@@ -3638,6 +3652,10 @@ pub struct MobileEngineHandle {
     /// The session enumerator's `cwd` key (its sanitized form selects the project
     /// subdir under `lingxi_home/projects/`). Captured from the `MobileConfig`.
     session_cwd: String,
+    /// Lifecycle watermark used by the child-agent pump. Session switches
+    /// publish this only after their SessionStarted/SessionResumed (or
+    /// SessionEnded for ClearSession) event has entered the shared sink.
+    session_lifecycle_tx: tokio::sync::watch::Sender<String>,
     /// The platform filesystem handle the JSONL reader reads each session file
     /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
     /// `fs` the orchestrator's tools use — captured from the `Platform` so the
@@ -3691,6 +3709,468 @@ impl Drop for MobileEngineHandle {
         }
         // Drop the strong observer after unregistering its weak fanout entry.
         self.app_domain_observer.take();
+    }
+}
+
+/// State owned exclusively by the transcript watcher task.
+///
+/// Do not capture `MobileEngineHandle` (even through a `Weak`) here: the
+/// watcher must not keep the runtime/FFI owner in its future or repeatedly
+/// upgrade it across poll/sleep boundaries.  The task only needs these cloned
+/// session inputs and the shared orchestrator/sink.
+struct SessionAgentPump {
+    orchestrator: Arc<ConversationOrchestrator>,
+    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    lingxi_home: std::path::PathBuf,
+    session_cwd: String,
+    ready_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    session_lifecycle_rx: tokio::sync::watch::Receiver<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionAgentPollResult {
+    /// The directory was scanned successfully and the connection baseline is
+    /// now valid (including an empty or not-yet-created directory).
+    Success,
+    /// A transient filesystem failure prevented a complete scan. The caller
+    /// must retry without publishing readiness or dropping offsets.
+    Retry,
+}
+
+fn should_signal_session_agent_ready(first_poll: bool, result: SessionAgentPollResult) -> bool {
+    first_poll && result == SessionAgentPollResult::Success
+}
+
+/// Count valid append-only JSONL message records in a transcript prefix. This
+/// monotonic raw watermark includes hidden compact-summary and lifecycle
+/// records, so replacing a summary cannot be mistaken for an equal visible
+/// message snapshot.
+fn session_agent_transcript_revision(raw: &[u8]) -> u64 {
+    raw.split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter_map(|value| value.get("message").cloned())
+        .filter_map(|message| serde_json::from_value::<protocol::ConversationMessage>(message).ok())
+        .count() as u64
+}
+
+/// Seed one transcript offset according to the connection baseline.
+/// Existing paths seen during the first scan are history; paths first seen on
+/// a later scan are new live agents and must be tailed from byte zero.
+fn complete_transcript_prefix_len(raw: &[u8]) -> usize {
+    raw.iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1)
+}
+
+fn seed_session_agent_offset(
+    offsets: &mut HashMap<std::path::PathBuf, u64>,
+    path: &std::path::Path,
+    raw: &[u8],
+    baseline_ready: bool,
+) -> bool {
+    let first_discovery = !offsets.contains_key(path);
+    offsets.entry(path.to_path_buf()).or_insert_with(|| {
+        if baseline_ready {
+            0
+        } else {
+            complete_transcript_prefix_len(raw) as u64
+        }
+    });
+    first_discovery
+}
+
+/// The initial connection needs a history baseline; a later session switch
+/// must replay discovered paths from zero so a fast child created during
+/// ResumeSession cannot disappear before the first asynchronous poll.
+fn baseline_for_session_activation(has_seen_previous_session: bool) -> bool {
+    has_seen_previous_session
+}
+
+/// Match the transcript lowering rules: compact-summary and transcript-only
+/// user records mutate/serve the scrollback snapshot but do not become
+/// standalone MessageDto rows. Agent indexes count only rows that the full
+/// transcript and live stream can both expose.
+fn session_agent_conversation_is_visible(message: &protocol::ConversationMessage) -> bool {
+    !matches!(
+        message,
+        protocol::ConversationMessage::User {
+            is_compact_summary: true,
+            ..
+        } | protocol::ConversationMessage::User {
+            is_visible_in_transcript_only: true,
+            ..
+        }
+    )
+}
+
+/// Prime one agent's tool-call side table from complete transcript lines while
+/// establishing the baseline. No events are emitted for this history; the
+/// side effect keeps a later live `ToolResult` paired with its pre-existing
+/// `ToolUse`.
+fn seed_session_agent_tool_index(
+    raw: &[u8],
+    index: &mut client_adapter::turn::ToolUseIndex,
+) -> u64 {
+    let mut visible_count: u64 = 0;
+    for line in raw.split_inclusive(|byte| *byte == b'\n') {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let Ok(conversation) =
+            serde_json::from_value::<protocol::ConversationMessage>(message.clone())
+        else {
+            continue;
+        };
+        if matches!(&conversation, protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype.starts_with("agent_"))
+        {
+            continue;
+        }
+        if !session_agent_conversation_is_visible(&conversation) {
+            continue;
+        }
+        let _ = client_adapter::lowering::lower_conversation_message_with(&conversation, index);
+        visible_count = visible_count.saturating_add(1);
+    }
+    visible_count
+}
+
+/// Lower a complete JSONL prefix into the same snapshot DTOs used by the
+/// explicit transcript-load command. This is intentionally prefix-scoped: a
+/// compact-summary mutation can trigger a replacement snapshot before later
+/// visible live rows in the same filesystem read are emitted.
+fn lower_session_agent_snapshot(raw: &[u8]) -> Vec<client_protocol::message::MessageDto> {
+    client_adapter::lowering::lower_transcript(&parse_session_agent_messages(raw))
+}
+
+fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage> {
+    let mut messages = Vec::new();
+    for line in raw.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let Ok(conversation) =
+            serde_json::from_value::<protocol::ConversationMessage>(message.clone())
+        else {
+            continue;
+        };
+        if matches!(
+            &conversation,
+            protocol::ConversationMessage::System {
+                subtype: Some(subtype),
+                ..
+            } if subtype.starts_with("agent_")
+        ) {
+            continue;
+        }
+        messages.push(conversation);
+    }
+    messages
+}
+
+impl SessionAgentPump {
+    async fn run(mut self) {
+        let mut offsets: HashMap<std::path::PathBuf, u64> = HashMap::new();
+        let mut tool_indexes: HashMap<String, client_adapter::turn::ToolUseIndex> = HashMap::new();
+        let mut message_indexes: HashMap<String, u64> = HashMap::new();
+        let mut session_id: Option<protocol::SessionId> = None;
+        let mut baseline_ready = false;
+        let mut first_poll = true;
+        loop {
+            let current_session_id = self.orchestrator.current_session_id().await;
+            let current_session_key = current_session_id.as_uuid().to_string();
+            if self.session_lifecycle_rx.borrow().as_str() != current_session_key {
+                // Resume/New/clear update the orchestrator before emitting
+                // their lifecycle event. Wait for that event's sink call to
+                // complete before replaying the new session, so clients never
+                // see indexed agent messages before they reset their snapshot.
+                if self.session_lifecycle_rx.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            if session_id != Some(current_session_id) {
+                // Offsets, tool pairing and the startup baseline are scoped to
+                // one session. On the initial connection we establish a
+                // history baseline. On a later session switch, replay paths
+                // from zero: a child can be created between ResumeSession and
+                // this first async poll, and dropping it is worse than a
+                // duplicate that iOS can merge by message id.
+                let had_previous_session = session_id.is_some();
+                offsets.clear();
+                tool_indexes.clear();
+                message_indexes.clear();
+                baseline_ready = baseline_for_session_activation(had_previous_session);
+                session_id = Some(current_session_id);
+            }
+            let poll_result = self
+                .poll(
+                    current_session_id,
+                    &mut offsets,
+                    &mut tool_indexes,
+                    &mut message_indexes,
+                    &mut baseline_ready,
+                )
+                .await;
+            if poll_result == SessionAgentPollResult::Retry && !baseline_ready {
+                // A partially scanned startup baseline is not authoritative:
+                // discard seeded offsets/indexes so the next attempt includes
+                // any bytes appended while the directory was unavailable.
+                offsets.clear();
+                tool_indexes.clear();
+                message_indexes.clear();
+            }
+            if should_signal_session_agent_ready(first_poll, poll_result) {
+                // The connection constructor waits for this signal before it
+                // returns the handle. This closes the startup race where a
+                // caller can submit the first prompt (and create a child)
+                // before the pump has established its history baseline.
+                first_poll = false;
+                if let Some(ready_tx) = self.ready_tx.take() {
+                    let _ = ready_tx.send(Ok(()));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn poll(
+        &self,
+        session_id: protocol::SessionId,
+        offsets: &mut HashMap<std::path::PathBuf, u64>,
+        tool_indexes: &mut HashMap<String, client_adapter::turn::ToolUseIndex>,
+        message_indexes: &mut HashMap<String, u64>,
+        baseline_ready: &mut bool,
+    ) -> SessionAgentPollResult {
+        let dir = orchestrator::transcript_paths::subagents_dir(
+            &self.lingxi_home,
+            &self.session_cwd,
+            &session_id.as_uuid().to_string(),
+        );
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A missing directory means there were no existing paths at
+                // connection startup. Treat it as an empty, successful
+                // baseline: the first child created afterwards must be tailed
+                // from byte 0.
+                *baseline_ready = true;
+                return SessionAgentPollResult::Success;
+            }
+            Err(_) => return SessionAgentPollResult::Retry,
+        };
+        let establishing_baseline = !*baseline_ready;
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => return SessionAgentPollResult::Retry,
+            };
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(agent_id) = name
+                .strip_prefix("agent-")
+                .and_then(|id| id.strip_suffix(".jsonl"))
+                .and_then(protocol::AgentId::parse_prefixed)
+                .map(|id| id.to_string())
+            else {
+                continue;
+            };
+            let raw = match tokio::fs::read(&path).await {
+                Ok(raw) => raw,
+                Err(_) => return SessionAgentPollResult::Retry,
+            };
+            let first_discovery =
+                seed_session_agent_offset(offsets, &path, &raw, !establishing_baseline);
+            let offset = *offsets.get(&path).expect("offset seeded");
+
+            if establishing_baseline {
+                // The first successful scan establishes the connection
+                // baseline. Existing transcript history is delivered by the
+                // explicit transcript-load command, not replayed as live
+                // events. A file created after this scan starts from offset 0.
+                let index = tool_indexes.entry(agent_id.clone()).or_default();
+                let prefix_len = complete_transcript_prefix_len(&raw);
+                let visible_count = seed_session_agent_tool_index(&raw[..prefix_len], index);
+                message_indexes.insert(agent_id, visible_count);
+                continue;
+            }
+            if first_discovery {
+                // A child created after connection setup is announced before
+                // its first live message so the agent picker can render its
+                // metadata/status immediately.
+                let summary = MobileEngineHandle::read_agent_summary(agent_id.clone(), &path)
+                    .await
+                    .unwrap_or_else(|| SessionAgentSummaryDto {
+                        agent_id: agent_id.clone(),
+                        name: agent_id.clone(),
+                        agent_type: "unknown".to_string(),
+                        status: "running".to_string(),
+                        latest_activity: None,
+                        updated_at_ms: None,
+                    });
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentUpdated {
+                        session_id: session_id.as_uuid().to_string(),
+                        agent: summary,
+                    })
+                    .await;
+            }
+            let start = (offset as usize).min(raw.len());
+            let tail = &raw[start..];
+            let mut consumed = start;
+            for line in tail.split_inclusive(|byte| *byte == b'\n') {
+                if !line.ends_with(b"\n") {
+                    break;
+                }
+                consumed += line.len();
+                let line = line.strip_suffix(b"\n").unwrap_or(line);
+                if line.is_empty() {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let Some(message) = value.get("message") else {
+                    continue;
+                };
+                let Ok(conversation) =
+                    serde_json::from_value::<protocol::ConversationMessage>(message.clone())
+                else {
+                    continue;
+                };
+                if matches!(&conversation, protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype.starts_with("agent_"))
+                {
+                    if let Some(status) = value.get("status").and_then(serde_json::Value::as_str) {
+                        self.event_sink
+                            .emit(ClientEvent::SessionAgentUpdated {
+                                session_id: session_id.as_uuid().to_string(),
+                                agent: self.summary_for_agent(&agent_id, status, session_id).await,
+                            })
+                            .await;
+                    }
+                    continue;
+                }
+                if !session_agent_conversation_is_visible(&conversation) {
+                    // Compact-summary/transcript-only rows mutate the visible
+                    // scrollback without getting their own MessageDto index.
+                    // Publish a prefix snapshot now, before any later visible
+                    // rows from this read, so clients replace stale content
+                    // even when the visible count is unchanged.
+                    self.emit_agent_transcript_snapshot(session_id, &agent_id, &raw[..consumed])
+                        .await;
+                    continue;
+                }
+                let index = tool_indexes.entry(agent_id.clone()).or_default();
+                let dto =
+                    client_adapter::lowering::lower_conversation_message_with(&conversation, index);
+                let message_index = message_indexes.entry(agent_id.clone()).or_default();
+                let current_message_index = *message_index;
+                *message_index = (*message_index).saturating_add(1);
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentMessage {
+                        session_id: session_id.as_uuid().to_string(),
+                        agent_id: agent_id.clone(),
+                        message_index: current_message_index,
+                        message: dto,
+                    })
+                    .await;
+            }
+            offsets.insert(path, consumed.min(raw.len()) as u64);
+        }
+        // Even an empty but readable directory establishes the baseline. A
+        // later file then correctly enters the `offset = 0` path above.
+        *baseline_ready = true;
+        SessionAgentPollResult::Success
+    }
+
+    async fn summary_for_agent(
+        &self,
+        agent_id: &str,
+        status: &str,
+        session_id: protocol::SessionId,
+    ) -> SessionAgentSummaryDto {
+        let dir = orchestrator::transcript_paths::subagents_dir(
+            &self.lingxi_home,
+            &self.session_cwd,
+            &session_id.as_uuid().to_string(),
+        );
+        let path = session::forked_skill::agent_transcript_path(&dir, agent_id);
+        if let Some(mut summary) =
+            MobileEngineHandle::read_agent_summary(agent_id.to_string(), &path).await
+        {
+            // The lifecycle line being consumed is authoritative. A
+            // concurrent summary read can otherwise observe the append just
+            // before its status field and incorrectly downgrade completion.
+            summary.status = status.to_string();
+            return summary;
+        }
+        SessionAgentSummaryDto {
+            agent_id: agent_id.to_string(),
+            name: agent_id.to_string(),
+            agent_type: "unknown".to_string(),
+            status: status.to_string(),
+            latest_activity: None,
+            updated_at_ms: None,
+        }
+    }
+
+    async fn emit_agent_transcript_snapshot(
+        &self,
+        session_id: protocol::SessionId,
+        agent_id: &str,
+        raw_prefix: &[u8],
+    ) {
+        let messages = lower_session_agent_snapshot(raw_prefix);
+        let next_message_index = messages.len() as u64;
+        let revision = session_agent_transcript_revision(raw_prefix);
+        self.event_sink
+            .emit(ClientEvent::SessionAgentTranscript {
+                session_id: session_id.as_uuid().to_string(),
+                agent_id: agent_id.to_string(),
+                messages,
+                next_message_index,
+                revision,
+            })
+            .await;
+    }
+}
+
+impl MobileEngineHandle {
+    /// Start a connection-scoped watcher for child-agent transcript changes.
+    /// Agent runners persist every message before publishing their terminal
+    /// event, so tailing the engine-owned JSONL gives iOS live updates without
+    /// introducing a second event ownership path in the task subsystem.
+    fn start_session_agent_event_pump(
+        self: &Arc<Self>,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let pump = SessionAgentPump {
+            orchestrator: self.inner.orchestrator.clone(),
+            event_sink: self.event_sink.clone(),
+            lingxi_home: self.lingxi_home.clone(),
+            session_cwd: self.session_cwd.clone(),
+            ready_tx: Some(ready_tx),
+            session_lifecycle_rx: self.session_lifecycle_tx.subscribe(),
+        };
+        let _ = self.runtime.spawn(pump.run());
+        ready_rx
     }
 }
 
@@ -4079,6 +4559,7 @@ impl MobileEngineHandle {
                         messages,
                     })
                     .await;
+                let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())
             }
             Err(error) => {
@@ -4132,6 +4613,7 @@ impl MobileEngineHandle {
                         messages: Vec::new(),
                     })
                     .await;
+                let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())
             }
         }
@@ -4722,8 +5204,8 @@ impl MobileEngineHandle {
     ///   recorded tool name back up for an `AllowAlways` rule append.
     /// - `SetModel` → [`OrchestratorHandle::switch_model`], confirmed by a
     ///   `ModelChanged` event.
-    /// - `RunSlashCommand` → the mobile slash dispatcher (LOSSY display surfaced
-    ///   as a `TextDelta`, mirroring the bridge-server router).
+    /// - `RunSlashCommand` → the mobile slash dispatcher; local results use
+    ///   `SlashCommandResult`, while prompt commands enter the normal turn stream.
     /// - `RefreshListings` / `ListModels` → the `list_*` handle reads, lowered to
     ///   their listing events through the shared `client_adapter::lowering` fns.
     /// - `ForceCompact` / `ClearSession` / `RequestExit` / `Login` / `Logout` →
@@ -4963,25 +5445,42 @@ impl MobileEngineHandle {
             // expanded prompt AS a turn through the SAME streaming path as
             // `SendPrompt` (claude-code injects the expanded prompt as the user
             // message), so a typed `/loop` actually schedules + executes.
-            ClientCommand::RunSlashCommand { raw } => {
+            ClientCommand::RunSlashCommand { raw, turn_id } => {
+                let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
                     traits::SlashDispatchResult::RunAsTurn { prompt } => {
-                        self.start_streaming_turn(prompt, None).await?;
+                        self.start_streaming_turn(prompt, turn_id).await?;
                     }
-                    traits::SlashDispatchResult::Handled { display }
-                    | traits::SlashDispatchResult::Unknown { display, .. } => {
+                    traits::SlashDispatchResult::Handled { display } => {
                         self.event_sink
-                            .emit(ClientEvent::TextDelta { text: display })
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display,
+                                is_error: false,
+                            })
+                            .await;
+                    }
+                    traits::SlashDispatchResult::Unknown { display, .. } => {
+                        self.event_sink
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display,
+                                is_error: true,
+                            })
                             .await;
                     }
                     traits::SlashDispatchResult::NotASlashCommand => {
                         self.event_sink
-                            .emit(ClientEvent::TextDelta {
-                                text: format!("not a slash command: {raw}"),
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display: format!("not a slash command: {raw}"),
+                                is_error: true,
                             })
                             .await;
                     }
                 }
+                let after = self.capture_slash_authority().await;
+                self.emit_slash_authority_changes(&before, &after).await;
                 Ok(())
             }
 
@@ -4991,6 +5490,13 @@ impl MobileEngineHandle {
                     self.emit_listing(kind).await;
                 }
                 Ok(())
+            }
+            ClientCommand::ListSessionAgents => {
+                self.emit_session_agent_list().await;
+                Ok(())
+            }
+            ClientCommand::LoadSessionAgentTranscript { agent_id } => {
+                self.emit_session_agent_transcript(agent_id).await
             }
 
             // ── Auth ─────────────────────────────────────────────────────────
@@ -5089,6 +5595,9 @@ impl MobileEngineHandle {
                 self.retarget_session_writer(handle.current_session_id().await, &self.session_cwd)
                     .await;
                 self.event_sink.emit(ClientEvent::SessionEnded).await;
+                let _ = self
+                    .session_lifecycle_tx
+                    .send(handle.current_session_id().await.as_uuid().to_string());
                 Ok(())
             }
             ClientCommand::RequestExit => {
@@ -5190,8 +5699,11 @@ impl MobileEngineHandle {
                 // bare UUID. Never leak the display prefix into persisted state.
                 let session_id = new_session_id.as_uuid().to_string();
                 self.event_sink
-                    .emit(ClientEvent::SessionStarted { session_id })
+                    .emit(ClientEvent::SessionStarted {
+                        session_id: session_id.clone(),
+                    })
                     .await;
+                let _ = self.session_lifecycle_tx.send(session_id);
                 Ok(())
             }
 
@@ -5762,6 +6274,351 @@ impl MobileEngineHandle {
         }
     }
 
+    /// Return the directory containing child-agent transcripts for the live
+    /// connection session. The path is derived exclusively from engine-owned
+    /// session state; callers never get to supply a filesystem path.
+    async fn session_agent_dir(&self) -> (protocol::SessionId, std::path::PathBuf) {
+        let session_id = self.inner.orchestrator.current_session_id().await;
+        let dir = orchestrator::transcript_paths::subagents_dir(
+            &self.lingxi_home,
+            &self.session_cwd,
+            &session_id.as_uuid().to_string(),
+        );
+        (session_id, dir)
+    }
+
+    fn agent_summary_activity(messages: &[client_protocol::message::MessageDto]) -> Option<String> {
+        let text = messages
+            .iter()
+            .rev()
+            .flat_map(|message| message.blocks.iter())
+            .find_map(|block| match block {
+                client_protocol::message::MessageBlockDto::Text { text }
+                | client_protocol::message::MessageBlockDto::Thinking { thinking: text, .. } => {
+                    let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+                    // Terminal lifecycle records are persisted as synthetic
+                    // system messages (for resumability) and should not mask
+                    // the last useful user/assistant activity in the compact
+                    // agent row.
+                    if matches!(
+                        line,
+                        "completed" | "cancelled" | "failed" | "idle" | "running"
+                    ) {
+                        return None;
+                    }
+                    (!line.is_empty()).then(|| line.chars().take(160).collect())
+                }
+                _ => None,
+            });
+        text
+    }
+
+    fn hide_agent_lifecycle_messages(
+        messages: Vec<protocol::ConversationMessage>,
+    ) -> Vec<protocol::ConversationMessage> {
+        messages
+            .into_iter()
+            .filter(|message| {
+                !matches!(
+                    message,
+                    protocol::ConversationMessage::System {
+                        subtype: Some(subtype),
+                        ..
+                    } if subtype.starts_with("agent_")
+                )
+            })
+            .collect()
+    }
+
+    async fn read_agent_summary(
+        agent_id: String,
+        path: &std::path::Path,
+    ) -> Option<SessionAgentSummaryDto> {
+        let messages = Self::hide_agent_lifecycle_messages(
+            session::agent_rows::read_transcript_messages(path.parent()?, &agent_id).await,
+        );
+        let raw = tokio::fs::read_to_string(path).await.ok();
+        let mut status = "running".to_string();
+        let mut metadata_name: Option<String> = None;
+        let mut metadata_type: Option<String> = None;
+        let mut latest_activity =
+            Self::agent_summary_activity(&client_adapter::lowering::lower_transcript(&messages));
+        if let Some(raw) = raw {
+            for line in raw.lines().rev().filter(|line| !line.trim().is_empty()) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                metadata_name = value
+                    .get("agent_name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or(metadata_name);
+                metadata_type = value
+                    .get("agent_type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or(metadata_type);
+                if let Some(status_value) = value.get("status").and_then(serde_json::Value::as_str)
+                {
+                    status = match status_value {
+                        "completed" => "completed",
+                        "failed" => "failed",
+                        "killed" | "cancelled" => "killed",
+                        "idle" => "idle",
+                        "running" => "running",
+                        _ => "unknown",
+                    }
+                    .to_string();
+                    if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+                        if !error.is_empty() {
+                            latest_activity = Some(error.chars().take(160).collect());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        let row = session::agent_rows::read_row(path.parent()?, &agent_id).await;
+        let (row_name, row_type, idle) = row
+            .map(|row| {
+                (
+                    row.request.name.or(row.request.description),
+                    (!row.request.subagent_type.is_empty()).then_some(row.request.subagent_type),
+                    true,
+                )
+            })
+            .unwrap_or((None, None, false));
+        let agent_type = metadata_type
+            .or(row_type)
+            .unwrap_or_else(|| "unknown".to_string());
+        let name = metadata_name
+            .or(row_name)
+            .or_else(|| (agent_type != "unknown").then(|| agent_type.clone()))
+            .unwrap_or_else(|| {
+                agent_id
+                    .strip_prefix("agent:")
+                    .unwrap_or(&agent_id)
+                    .chars()
+                    .take(8)
+                    .collect()
+            });
+        if idle && status == "running" {
+            status = "idle".to_string();
+        }
+        let updated_at_ms = tokio::fs::metadata(path)
+            .await
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        Some(SessionAgentSummaryDto {
+            agent_id,
+            name,
+            agent_type,
+            status,
+            latest_activity: latest_activity.take(),
+            updated_at_ms,
+        })
+    }
+
+    async fn emit_session_agent_list(&self) {
+        let (session_id, dir) = self.session_agent_dir().await;
+        let snapshot = self.inner.orchestrator.get_status_snapshot().await;
+        let status = if self.active_cancel.lock().await.is_some() {
+            "running"
+        } else {
+            "idle"
+        };
+        let mut agents = vec![SessionAgentSummaryDto {
+            agent_id: "main".to_string(),
+            name: "Main agent".to_string(),
+            agent_type: "main".to_string(),
+            status: status.to_string(),
+            latest_activity: (snapshot.n_messages > 0)
+                .then(|| format!("{} messages · {}", snapshot.n_messages, snapshot.model)),
+            updated_at_ms: None,
+        }];
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let Some(agent_id) = file_name
+                    .strip_prefix("agent-")
+                    .and_then(|id| id.strip_suffix(".jsonl"))
+                    .and_then(protocol::AgentId::parse_prefixed)
+                    .map(|id| id.to_string())
+                else {
+                    continue;
+                };
+                if let Some(summary) = Self::read_agent_summary(agent_id, &entry.path()).await {
+                    agents.push(summary);
+                }
+            }
+        }
+        agents[1..].sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        self.event_sink
+            .emit(ClientEvent::SessionAgentList {
+                session_id: session_id.as_uuid().to_string(),
+                agents,
+            })
+            .await;
+    }
+
+    async fn load_session_agent_transcript(
+        &self,
+        agent_id: &str,
+    ) -> Result<(Vec<client_protocol::message::MessageDto>, u64), ClientError> {
+        let (session_id, dir) = self.session_agent_dir().await;
+        let (messages, revision) = if agent_id == "main" {
+            let uuid = session_id.as_uuid();
+            let replayed = orchestrator::replay_session_state(
+                &self.lingxi_home,
+                &self.session_cwd,
+                uuid,
+                self.fs.clone(),
+            )
+            .await
+            .map_err(|error| ClientError::Rejected {
+                message: format!("load main transcript failed: {error}"),
+            })?;
+            let path = orchestrator::transcript_paths::main_transcript_path(
+                &self.lingxi_home,
+                &self.session_cwd,
+                &uuid.to_string(),
+            );
+            let raw = tokio::fs::read(path).await.unwrap_or_default();
+            (
+                replayed.state.history,
+                session_agent_transcript_revision(&raw),
+            )
+        } else {
+            let parsed = protocol::AgentId::parse_prefixed(agent_id).ok_or_else(|| {
+                ClientError::Rejected {
+                    message: format!("malformed session agent id: {agent_id:?}"),
+                }
+            })?;
+            // Reconstruct the filename from the parsed UUID, never from raw
+            // client input, so `..`/separator path traversal is impossible.
+            let path = session::forked_skill::agent_transcript_path(&dir, &parsed.to_string());
+            let raw = tokio::fs::read(path).await.unwrap_or_default();
+            (
+                parse_session_agent_messages(&raw),
+                session_agent_transcript_revision(&raw),
+            )
+        };
+        Ok((
+            client_adapter::lowering::lower_transcript(&messages),
+            revision,
+        ))
+    }
+
+    async fn emit_session_agent_transcript(&self, agent_id: String) -> Result<(), ClientError> {
+        let session_id = self.inner.orchestrator.current_session_id().await;
+        let (messages, revision) = self.load_session_agent_transcript(&agent_id).await?;
+        let next_message_index = messages.len() as u64;
+        self.event_sink
+            .emit(ClientEvent::SessionAgentTranscript {
+                session_id: session_id.as_uuid().to_string(),
+                agent_id,
+                messages,
+                next_message_index,
+                revision,
+            })
+            .await;
+        Ok(())
+    }
+
+    fn slash_command_catalog_from_registry(
+        reg: &command_api::CommandRegistry,
+    ) -> Vec<SlashCommandDto> {
+        let mut commands: Vec<_> = reg
+            .palette_commands()
+            .into_iter()
+            .map(|command| SlashCommandDto {
+                hidden: command_api::builtin_support::names::is_palette_hidden(&command.name),
+                source: command_source_string(command.source).to_string(),
+                name: command.name,
+                description: command.description,
+                aliases: command.aliases,
+                argument_hint: command.argument_hint,
+                menu_description: command.menu_description,
+            })
+            .collect();
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands
+    }
+
+    async fn slash_command_catalog_snapshot(&self) -> Vec<SlashCommandDto> {
+        let reg = self.inner.slash_registry.read().await;
+        Self::slash_command_catalog_from_registry(&reg)
+    }
+
+    async fn capture_slash_authority(&self) -> SlashAuthoritySnapshot {
+        let snapshot = self.inner.orchestrator.get_status_snapshot().await;
+        SlashAuthoritySnapshot {
+            session_id: self
+                .inner
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string(),
+            model: traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            permission_mode: self
+                .inner
+                .orchestrator
+                .permission_mode()
+                .unwrap_or_else(|| PermissionMode::Default.wire_str().to_string()),
+            auth: lower_auth_state(self.inner.auth.current_user().await),
+            catalog: self.slash_command_catalog_snapshot().await,
+        }
+    }
+
+    async fn emit_slash_authority_changes(
+        &self,
+        before: &SlashAuthoritySnapshot,
+        after: &SlashAuthoritySnapshot,
+    ) {
+        if before.session_id != after.session_id {
+            self.retarget_session_writer(
+                self.inner.orchestrator.current_session_id().await,
+                &self.session_cwd,
+            )
+            .await;
+            self.event_sink.emit(ClientEvent::SessionEnded).await;
+            let _ = self.session_lifecycle_tx.send(after.session_id.clone());
+        }
+        if before.model != after.model {
+            self.event_sink
+                .emit(ClientEvent::ModelChanged {
+                    model: after.model.clone(),
+                })
+                .await;
+        }
+        if before.permission_mode != after.permission_mode {
+            self.event_sink
+                .emit(ClientEvent::PermissionModeChanged {
+                    mode: after.permission_mode.clone(),
+                })
+                .await;
+        }
+        if before.auth != after.auth {
+            self.event_sink
+                .emit(ClientEvent::AuthState {
+                    state: after.auth.clone(),
+                })
+                .await;
+        }
+        if before.catalog != after.catalog {
+            self.event_sink
+                .emit(ClientEvent::CommandsChanged {
+                    commands: after.catalog.clone(),
+                })
+                .await;
+        }
+    }
+
     /// Pull a single listing kind and emit its listing event through the
     /// connection's event sink, reusing the shared `client_adapter::lowering`
     /// parity fns (decision §0.2). Listing kinds with no engine handle on mobile
@@ -5814,18 +6671,7 @@ impl MobileEngineHandle {
                 // display result; the following snapshot is the structured
                 // source of truth for the settings UI.
                 let _ = self.inner.dispatcher.dispatch("/reload-skills").await;
-                let commands = self
-                    .inner
-                    .dispatcher
-                    .list_commands()
-                    .await
-                    .into_iter()
-                    .map(|command| SlashCommandDto {
-                        name: command.name,
-                        description: command.description,
-                        source: command_source_string(command.source).to_string(),
-                    })
-                    .collect();
+                let commands = self.slash_command_catalog_snapshot().await;
                 self.event_sink
                     .emit(ClientEvent::SlashCommandCatalog { commands })
                     .await;
@@ -7114,6 +7960,15 @@ pub fn build_mobile_engine_inner(
             Some(ask_user_question_tx),
         ))
         .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+    let initial_session_key = runtime.block_on(async {
+        inner
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string()
+    });
+    let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key);
 
     let skill_count = crate::mobile_skill_registry().len();
     let event_sink = inner.event_sink.clone();
@@ -7431,7 +8286,7 @@ pub fn build_mobile_engine_inner(
         }
     }
 
-    Ok(Arc::new(MobileEngineHandle {
+    let handle = Arc::new(MobileEngineHandle {
         runtime,
         inner,
         event_sink,
@@ -7441,6 +8296,7 @@ pub fn build_mobile_engine_inner(
         skill_count,
         lingxi_home,
         session_cwd,
+        session_lifecycle_tx,
         fs,
         firer_cfg,
         firer_platform,
@@ -7451,7 +8307,34 @@ pub fn build_mobile_engine_inner(
         app_client_subscription,
         app_domain_subscription,
         app_domain_observer,
-    }))
+    });
+    // Establish the watcher baseline before exposing the connection. Without
+    // this readiness barrier, a first prompt could spawn a fast child between
+    // `spawn` and the pump's first scan and have that child mistaken for
+    // pre-existing history.
+    let pump_ready = handle.start_session_agent_event_pump();
+    let pump_result = handle.runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), pump_ready).await
+    });
+    match pump_result {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            return Err(MobileEngineError::Internal(format!(
+                "session-agent watcher failed before readiness: {error}"
+            )))
+        }
+        Ok(Err(_)) => {
+            return Err(MobileEngineError::Internal(
+                "session-agent watcher stopped before readiness".to_string(),
+            ))
+        }
+        Err(_) => {
+            return Err(MobileEngineError::Internal(
+                "session-agent watcher baseline timed out".to_string(),
+            ))
+        }
+    }
+    Ok(handle)
 }
 
 #[cfg(test)]
@@ -7463,8 +8346,12 @@ mod tests {
     use client_adapter::{ClientEventListener, PermissionRequestSink};
 
     use super::{
-        build_mobile, classify_provider_connection_response, mobile_cron_schedule_error,
-        provider_models_endpoint, MobileConfig, MobileCronStoreHandle,
+        baseline_for_session_activation, build_mobile, classify_provider_connection_response,
+        complete_transcript_prefix_len, lower_session_agent_snapshot, mobile_cron_schedule_error,
+        provider_models_endpoint, seed_session_agent_offset, seed_session_agent_tool_index,
+        session_agent_conversation_is_visible, session_agent_transcript_revision,
+        should_signal_session_agent_ready, MobileConfig, MobileCronStoreHandle,
+        SessionAgentPollResult,
     };
     // F3-06: the off-device host shim now lives in `crate::test_support` (the
     // single, non-drifting definition shared with the `skeleton_test.rs`
@@ -7475,6 +8362,300 @@ mod tests {
         test_config, CollectingPermissionSink as RecordingPermissionSink, FakeListener,
         HostFakePlatform,
     };
+
+    #[test]
+    fn session_agent_pump_baselines_history_but_tails_new_paths() {
+        let existing = std::path::PathBuf::from("agent-existing.jsonl");
+        let new_path = std::path::PathBuf::from("agent-new.jsonl");
+        let mut offsets = HashMap::new();
+
+        assert!(seed_session_agent_offset(
+            &mut offsets,
+            &existing,
+            b"existing history\npartial suffix",
+            false,
+        ));
+        assert_eq!(offsets.get(&existing), Some(&17));
+
+        assert!(seed_session_agent_offset(
+            &mut offsets,
+            &new_path,
+            b"new child",
+            true
+        ));
+        assert_eq!(offsets.get(&new_path), Some(&0));
+
+        // Polling an already-known path never resets its tail position.
+        assert!(!seed_session_agent_offset(
+            &mut offsets,
+            &new_path,
+            b"new child now longer",
+            true,
+        ));
+        assert_eq!(offsets.get(&new_path), Some(&0));
+
+        // A missing directory is treated as an empty baseline. The first
+        // path created after that scan follows the same byte-zero rule.
+        let mut empty_baseline_offsets = HashMap::new();
+        let first_after_empty = std::path::PathBuf::from("agent-first.jsonl");
+        assert!(seed_session_agent_offset(
+            &mut empty_baseline_offsets,
+            &first_after_empty,
+            b"first child",
+            true,
+        ));
+        assert_eq!(empty_baseline_offsets.get(&first_after_empty), Some(&0));
+    }
+
+    #[test]
+    fn session_agent_pump_readiness_waits_for_successful_baseline() {
+        assert!(!should_signal_session_agent_ready(
+            true,
+            SessionAgentPollResult::Retry
+        ));
+        assert!(should_signal_session_agent_ready(
+            true,
+            SessionAgentPollResult::Success
+        ));
+        assert!(!should_signal_session_agent_ready(
+            false,
+            SessionAgentPollResult::Success
+        ));
+    }
+
+    #[test]
+    fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
+        let visible = protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "visible".to_string(),
+            }],
+            stop_reason: None,
+        };
+        let compact = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "replacement summary".to_string(),
+            }],
+            is_meta: false,
+            is_compact_summary: true,
+            is_visible_in_transcript_only: false,
+        };
+        let first = serde_json::to_string(&serde_json::json!({"message": visible})).unwrap() + "\n";
+        let second = first.clone()
+            + &serde_json::to_string(&serde_json::json!({"message": compact})).unwrap()
+            + "\n";
+        assert_eq!(session_agent_transcript_revision(first.as_bytes()), 1);
+        assert_eq!(session_agent_transcript_revision(second.as_bytes()), 2);
+        assert_eq!(
+            lower_session_agent_snapshot(first.as_bytes()).len(),
+            lower_session_agent_snapshot(second.as_bytes()).len(),
+            "hidden compact records may revise content without changing visible count"
+        );
+    }
+
+    #[test]
+    fn session_switch_replays_fast_child_instead_of_baselining_it_away() {
+        let path = std::path::PathBuf::from("agent-fast.jsonl");
+        let mut offsets = HashMap::new();
+
+        // Initial connection treats existing history as already delivered by
+        // the explicit transcript-load command.
+        assert!(seed_session_agent_offset(
+            &mut offsets,
+            &path,
+            b"old message\n",
+            false,
+        ));
+        assert_eq!(offsets.get(&path), Some(&12));
+
+        // ResumeSession clears offsets, but its first asynchronous poll must
+        // replay from zero so a child created during the switch is observable.
+        offsets.clear();
+        assert!(baseline_for_session_activation(true));
+        assert!(seed_session_agent_offset(
+            &mut offsets,
+            &path,
+            b"fast child message\n",
+            baseline_for_session_activation(true),
+        ));
+        assert_eq!(offsets.get(&path), Some(&0));
+    }
+
+    #[test]
+    fn session_agent_pump_primes_tool_index_from_baseline_history() {
+        let tool_id = protocol::ToolUseId::from("toolu_seed");
+        let assistant = protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: tool_id.clone(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "/tmp/example.txt"}),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".to_string()),
+        };
+        let line = serde_json::json!({"message": assistant}).to_string() + "\n";
+        let mut index = client_adapter::turn::ToolUseIndex::default();
+        seed_session_agent_tool_index(line.as_bytes(), &mut index);
+
+        let result = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tool_id,
+                content: "ok".to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let dto = client_adapter::lowering::lower_conversation_message_with(&result, &mut index);
+        let client_protocol::message::MessageBlockDto::ToolResult { tool, .. } = &dto.blocks[0]
+        else {
+            panic!("expected paired tool result");
+        };
+        assert_eq!(tool, "Read");
+    }
+
+    #[test]
+    fn session_agent_index_excludes_hidden_transcript_records() {
+        let hidden_summary = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: Vec::new(),
+            is_meta: false,
+            is_compact_summary: true,
+            is_visible_in_transcript_only: false,
+        };
+        let hidden_transcript_only = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: Vec::new(),
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: true,
+        };
+        let visible = protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: Vec::new(),
+            stop_reason: None,
+        };
+        assert!(!session_agent_conversation_is_visible(&hidden_summary));
+        assert!(!session_agent_conversation_is_visible(
+            &hidden_transcript_only
+        ));
+        assert!(session_agent_conversation_is_visible(&visible));
+    }
+
+    #[test]
+    fn session_agent_baseline_rewinds_to_last_complete_line_for_partial_suffix() {
+        let complete_id = protocol::ToolUseId::from("toolu_complete");
+        let partial_id = protocol::ToolUseId::from("toolu_partial");
+        let complete = protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: complete_id,
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "/tmp/complete.txt"}),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".to_string()),
+        };
+        let partial = protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: partial_id.clone(),
+                name: "Write".to_string(),
+                input: serde_json::json!({"file_path": "/tmp/partial.txt"}),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".to_string()),
+        };
+        let complete_line = serde_json::json!({"message": complete}).to_string();
+        let partial_line = serde_json::json!({"message": partial}).to_string();
+        let raw = format!("{complete_line}\n{partial_line}");
+        let boundary = complete_transcript_prefix_len(raw.as_bytes());
+        assert_eq!(boundary, complete_line.len() + 1);
+
+        let mut offsets = HashMap::new();
+        let path = std::path::PathBuf::from("agent-partial.jsonl");
+        assert!(seed_session_agent_offset(
+            &mut offsets,
+            &path,
+            raw.as_bytes(),
+            false,
+        ));
+        assert_eq!(offsets.get(&path), Some(&(boundary as u64)));
+
+        // ToolUseIndex receives exactly the same complete prefix as the
+        // baseline offset; the unterminated suffix is deferred to the next
+        // poll and cannot accidentally pair a live result.
+        let mut index = client_adapter::turn::ToolUseIndex::default();
+        seed_session_agent_tool_index(&raw.as_bytes()[..boundary], &mut index);
+        let result = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: partial_id,
+                content: "ok".to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let dto = client_adapter::lowering::lower_conversation_message_with(&result, &mut index);
+        let client_protocol::message::MessageBlockDto::ToolResult { tool, .. } = &dto.blocks[0]
+        else {
+            panic!("expected paired tool result");
+        };
+        assert!(tool.is_empty(), "partial suffix must not be indexed early");
+
+        // Once the writer completes that suffix (the next poll sees its
+        // terminating newline), the tail starts exactly at boundary and the
+        // deferred message is emitted. Re-run the same lowering path to prove
+        // the partial line is not lost or treated as baseline history.
+        let completed_raw = format!("{raw}\n");
+        let resumed_line = &completed_raw[boundary..completed_raw.len() - 1];
+        let resumed_value: serde_json::Value = serde_json::from_str(resumed_line)
+            .expect("completed suffix must parse as one transcript line");
+        let resumed_message: protocol::ConversationMessage = serde_json::from_value(
+            resumed_value
+                .get("message")
+                .cloned()
+                .expect("transcript line message"),
+        )
+        .expect("completed suffix message");
+        let resumed_dto =
+            client_adapter::lowering::lower_conversation_message_with(&resumed_message, &mut index);
+        let client_protocol::message::MessageBlockDto::ToolUse { tool, .. } =
+            &resumed_dto.blocks[0]
+        else {
+            panic!("expected deferred tool-use event");
+        };
+        assert_eq!(tool, "Write");
+    }
+
+    #[tokio::test]
+    async fn session_agent_summary_uses_metadata_type_when_name_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agent-agent:test.jsonl");
+        tokio::fs::write(
+            &path,
+            r#"{"agent_type":"researcher","status":"running"}
+"#,
+        )
+        .await
+        .expect("write transcript metadata");
+
+        let summary = MobileEngineHandle::read_agent_summary("agent:test".to_string(), &path)
+            .await
+            .expect("summary");
+        assert_eq!(summary.agent_type, "researcher");
+        assert_eq!(summary.name, "researcher");
+    }
 
     #[test]
     fn android_recurring_schedule_enforces_fifteen_minute_floor() {

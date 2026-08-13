@@ -55,6 +55,589 @@ import XCTest
             XCTAssertTrue(source.model.engineSessionsLoaded)
         }
 
+        func testSessionAgentListIsScopedAndSelectable() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let summary = SessionAgentSummaryDto(
+                agentId: "agent:child-1",
+                name: "researcher",
+                agentType: "explorer",
+                status: "running",
+                latestActivity: "搜索代码",
+                updatedAtMs: 42
+            )
+
+            source.applyForTesting(.sessionAgentList(sessionId: "old-session", agents: [summary]))
+            XCTAssertEqual(source.model.agentSummaries.map(\.id), [ConversationModel.mainAgentID])
+
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [summary]))
+            XCTAssertEqual(source.model.agentSummaries.map(\.id), [ConversationModel.mainAgentID, "agent:child-1"])
+            XCTAssertEqual(
+                source.model.agentSummaries.first?.name,
+                String(localized: "chat_agent_main")
+            )
+            source.model.upsertAgentSummary(ConversationAgentSummary(
+                id: ConversationModel.mainAgentID,
+                name: "main",
+                agentType: "main",
+                status: "idle",
+                latestActivity: "12 messages · model"
+            ))
+            XCTAssertEqual(source.model.agentSummaries.first?.latestActivity, "12 messages · model")
+            source.applyForTesting(.sessionAgentUpdated(
+                sessionId: "session-a",
+                agent: SessionAgentSummaryDto(
+                    agentId: ConversationModel.mainAgentID,
+                    name: "Remote main",
+                    agentType: "main",
+                    status: "idle",
+                    latestActivity: "12 messages · model",
+                    updatedAtMs: nil
+                )
+            ))
+            XCTAssertEqual(source.model.agentSummaries.first?.name, String(localized: "chat_agent_main"))
+            XCTAssertNil(source.model.agentSummaries.first?.latestActivity)
+            source.selectAgent("agent:child-1")
+            XCTAssertTrue(source.model.isSelectedAgentReadOnly)
+            XCTAssertEqual(source.model.selectedAgentSummary?.latestActivity, "搜索代码")
+        }
+
+        func testSessionAgentTranscriptReplacesOnlySelectedChildView() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(agentId: "agent:child-1", name: "worker", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+            ]))
+            source.selectAgent("agent:child-1")
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: "agent:child-1",
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "child result")])],
+                nextMessageIndex: 1,
+                revision: 1
+            ))
+
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["child result"])
+            XCTAssertTrue(source.model.isSelectedAgentReadOnly)
+            source.selectAgent(ConversationModel.mainAgentID)
+            XCTAssertFalse(source.model.isSelectedAgentReadOnly)
+        }
+
+        func testLiveChildPushDoesNotPretendTranscriptIsLoaded() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "working",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+
+            // A live tail can beat the durable transcript reply. It must be
+            // visible immediately, but remain eligible for a full load when the
+            // user selects this child.
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 0,
+                message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")])
+            ))
+            XCTAssertFalse(source.model.agentTranscripts[agentID]?.loaded ?? true)
+
+            source.selectAgent(agentID)
+            XCTAssertTrue(source.model.isAgentTranscriptLoading)
+        }
+
+        func testLiveBeforeSelectionSurvivesStaleFullAgentSnapshot() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            let same = MessageDto(role: "assistant", blocks: [.text(text: "same")])
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "working",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+
+            // The child can emit before the user opens its transcript. Keep it
+            // pending by session/agent, otherwise selecting it would reset the
+            // queue and a stale snapshot would erase this newer occurrence.
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 1,
+                message: same
+            ))
+            source.selectAgent(agentID)
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [same],
+                nextMessageIndex: 1,
+                revision: 1
+            ))
+
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["same", "same"])
+        }
+
+        func testSessionAgentTranscriptIDsAreStableAndOccurrenceAware() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            let repeated = MessageDto(role: "assistant", blocks: [.text(text: "same")])
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+            ]))
+            source.selectAgent(agentID)
+
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [repeated, repeated],
+                nextMessageIndex: 2,
+                revision: 1
+            ))
+            let firstIDs = source.model.selectedAgentMessages.map(\.id)
+            XCTAssertEqual(firstIDs.count, 2)
+            XCTAssertNotEqual(firstIDs[0], firstIDs[1])
+
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [repeated, repeated],
+                nextMessageIndex: 2,
+                revision: 1
+            ))
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.id), firstIDs)
+        }
+
+        func testTranscriptRevisionAcceptsCompactBoundaryWithSameVisibleWatermark() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "idle",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            source.selectAgent(agentID)
+
+            let initial = MessageDto(role: "assistant", blocks: [.text(text: "visible")])
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [initial],
+                nextMessageIndex: 1,
+                revision: 10
+            ))
+            XCTAssertEqual(source.model.selectedAgentMessages.count, 1)
+            XCTAssertEqual(source.model.agentTranscripts[agentID]?.revision, 10)
+
+            // Compaction can replace the content/details while retaining the
+            // same number of visible rows. The raw revision is the only fence
+            // that distinguishes this legitimate update from a stale reply.
+            let compacted = MessageDto(role: "assistant", blocks: [
+                .compactBoundary(messagesBefore: 4, messagesAfter: 1, summary: "fresh compact summary")
+            ])
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [compacted],
+                nextMessageIndex: 1,
+                revision: 11
+            ))
+            XCTAssertEqual(source.model.selectedAgentMessages.count, 1)
+            XCTAssertEqual(source.model.agentTranscripts[agentID]?.revision, 11)
+            let summaries = source.model.selectedAgentMessageDetails.values
+                .flatMap(\.blocks)
+                .compactMap { block -> String? in
+                    guard case let .compactBoundary(_, _, summary) = block else { return nil }
+                    return summary
+                }
+            XCTAssertEqual(summaries, ["fresh compact summary"])
+        }
+
+        func testOlderTranscriptRevisionCannotReplaceNewerSnapshot() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "idle",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            source.selectAgent(agentID)
+
+            let fresh = MessageDto(role: "assistant", blocks: [.text(text: "fresh")])
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [fresh],
+                nextMessageIndex: 1,
+                revision: 20
+            ))
+
+            let delayed = MessageDto(role: "assistant", blocks: [.text(text: "delayed stale")])
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [delayed],
+                nextMessageIndex: 1,
+                revision: 19
+            ))
+
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["fresh"])
+            XCTAssertEqual(source.model.agentTranscripts[agentID]?.revision, 20)
+        }
+
+        func testHigherRevisionSnapshotCannotEraseLoadedLiveTail() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "working",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            source.selectAgent(agentID)
+
+            let history = MessageDto(role: "assistant", blocks: [.text(text: "history")])
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [history],
+                nextMessageIndex: 1,
+                revision: 10
+            ))
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 1,
+                message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")])
+            ))
+
+            // A hidden/lifecycle record can advance the raw revision before
+            // the live visible row. If that older snapshot is delivered late,
+            // its lower visible watermark must not erase the indexed tail.
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [history],
+                nextMessageIndex: 1,
+                revision: 11
+            ))
+
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["history", "live tail"])
+            XCTAssertEqual(source.model.agentTranscripts[agentID]?.nextMessageIndex, 2)
+            XCTAssertEqual(source.model.agentTranscripts[agentID]?.revision, 10)
+        }
+
+        func testSessionAgentToolResultUpdatesExistingToolRun() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", status: "working", latestActivity: nil, updatedAtMs: nil)
+            ]))
+            source.selectAgent(agentID)
+
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 0,
+                message: MessageDto(role: "assistant", blocks: [
+                    .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: nil)
+                ])
+            ))
+            let liveRun = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
+                guard case let .run(run) = item else { return nil }
+                return run
+            }
+            XCTAssertEqual(liveRun.count, 1)
+            XCTAssertEqual(liveRun[0].tools.first?.status, .running)
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 1,
+                message: MessageDto(role: "user", blocks: [
+                    .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil)
+                ])
+            ))
+
+            let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
+                guard case let .run(run) = item else { return nil }
+                return run
+            }
+            XCTAssertEqual(runs.count, 1)
+            XCTAssertEqual(runs[0].tools.count, 1)
+            XCTAssertEqual(runs[0].tools[0].id, "tool-1")
+            XCTAssertEqual(runs[0].tools[0].status, .completed)
+            XCTAssertEqual(
+                Set(source.model.selectedAgentItems.map(\.id)).count,
+                source.model.selectedAgentItems.count
+            )
+        }
+
+        func testSnapshotAheadOfLiveToolUseCannotRegressCompletedRun() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "working",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            source.selectAgent(agentID)
+
+            let use = MessageDto(role: "assistant", blocks: [
+                .toolUse(id: "tool-snapshot", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: nil)
+            ])
+            let result = MessageDto(role: "user", blocks: [
+                .toolResult(id: "tool-snapshot", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil)
+            ])
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [use, result],
+                nextMessageIndex: 2,
+                revision: 1
+            ))
+
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 1,
+                message: use
+            ))
+
+            let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
+                guard case let .run(run) = item else { return nil }
+                return run
+            }
+            XCTAssertEqual(runs.count, 1)
+            XCTAssertEqual(runs[0].status, .restored)
+            XCTAssertEqual(runs[0].tools.first?.status, .completed)
+        }
+
+        func testPureAssistantAgentPushesKeepDistinctRunItems() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", status: "working", latestActivity: nil, updatedAtMs: nil)
+            ]))
+            source.selectAgent(agentID)
+
+            for (index, text) in ["first", "second"].enumerated() {
+                source.applyForTesting(.sessionAgentMessage(
+                    sessionId: "session-a",
+                    agentId: agentID,
+                    messageIndex: UInt64(index),
+                    message: MessageDto(role: "assistant", blocks: [.text(text: text)])
+                ))
+            }
+            let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
+                guard case let .run(run) = item else { return nil }
+                return run
+            }
+            XCTAssertEqual(runs.count, 2)
+            XCTAssertEqual(Set(runs.map(\.id)).count, 2)
+        }
+
+        func testLateAgentTranscriptFailureCannotOverwriteNewSelection() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let first = "agent:first"
+            let second = "agent:second"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(agentId: first, name: "first", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil),
+                SessionAgentSummaryDto(agentId: second, name: "second", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+            ]))
+            source.selectAgent(first)
+            source.selectAgent(second)
+            source.model.failAgentTranscript(first, sessionID: "session-a", message: "stale")
+            XCTAssertNil(source.model.agentTranscriptError)
+            XCTAssertEqual(source.model.selectedAgentID, second)
+            XCTAssertTrue(source.model.isAgentTranscriptLoading)
+        }
+
+        func testRepeatedAgentLoadsIgnoreFailureFromOlderGeneration() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "idle",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            let firstRequest = source.model.markAgentTranscriptLoading(
+                agentID,
+                sessionID: "session-a"
+            )
+            let secondRequest = source.model.markAgentTranscriptLoading(
+                agentID,
+                sessionID: "session-a"
+            )
+            XCTAssertNotEqual(firstRequest, secondRequest)
+
+            source.model.failAgentTranscript(
+                agentID,
+                sessionID: "session-a",
+                message: "stale",
+                requestKey: firstRequest
+            )
+            XCTAssertNil(source.model.agentTranscriptError)
+            source.model.failAgentTranscript(
+                agentID,
+                sessionID: "session-a",
+                message: "current",
+                requestKey: secondRequest
+            )
+            XCTAssertEqual(source.model.agentTranscriptError, "current")
+        }
+
+        func testOldSessionAgentEventsCannotRepopulateClearedCache() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-old"
+            let agentID = "agent:old"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-old", agents: [
+                SessionAgentSummaryDto(agentId: agentID, name: "old", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+            ]))
+            source.selectAgent(agentID)
+            source.model.activeSessionId = "session-new"
+            source.model.clearAgentState()
+
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-old",
+                agentId: agentID,
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "stale")])],
+                nextMessageIndex: 1,
+                revision: 1
+            ))
+            XCTAssertTrue(source.model.agentTranscripts.isEmpty)
+            XCTAssertEqual(source.model.selectedAgentID, ConversationModel.mainAgentID)
+        }
+
+        func testLiveAgentMessageMergesWithTranscriptReplyAndMarksAgentWorking() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: "agent:child-1",
+                    name: "worker",
+                    agentType: "general",
+                    status: "idle",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            source.selectAgent("agent:child-1")
+
+            let live = MessageDto(role: "assistant", blocks: [.text(text: "live tail")])
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: "agent:child-1",
+                messageIndex: 0,
+                message: live
+            ))
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["live tail"])
+            XCTAssertEqual(source.model.selectedAgentSummary?.status, "working")
+
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: "agent:child-1",
+                messages: [
+                    MessageDto(role: "assistant", blocks: [.text(text: "history")]),
+                    live
+                ],
+                nextMessageIndex: 2,
+                revision: 2
+            ))
+
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["history", "live tail"])
+            XCTAssertEqual(
+                source.model.selectedAgentMessages.filter { $0.text == "live tail" }.count,
+                1
+            )
+        }
+
+        func testStaleFullAgentReplyKeepsIndexedLiveSameTextTail() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+            let same = MessageDto(role: "assistant", blocks: [.text(text: "same")])
+            source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "worker",
+                    agentType: "general",
+                    status: "working",
+                    latestActivity: nil,
+                    updatedAtMs: nil
+                )
+            ]))
+            source.selectAgent(agentID)
+
+            // The live event is newer than the snapshot requested at load
+            // start. It has the same text as the historical row, so signature
+            // occurrence alone would collapse it into the snapshot's index 0.
+            source.applyForTesting(.sessionAgentMessage(
+                sessionId: "session-a",
+                agentId: agentID,
+                messageIndex: 1,
+                message: same
+            ))
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: "session-a",
+                agentId: agentID,
+                messages: [same],
+                nextMessageIndex: 1,
+                revision: 1
+            ))
+
+            XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["same", "same"])
+            XCTAssertEqual(
+                Set(source.model.selectedAgentMessages.map(\.id)).count,
+                2,
+                "indexed live tail must retain a distinct stable render identity"
+            )
+        }
+
         func testSessionIndexPreservesPendingRestoreAndUnlistedActiveSession() {
             XCTAssertFalse(
                 ConversationSessionIndexPolicy.shouldSynchronize(
@@ -353,6 +936,14 @@ import XCTest
             XCTAssertEqual(restoredRuns.first?.tools.first?.tool, "Read")
             XCTAssertEqual(restoredRuns.first?.tools.first?.status, .completed,
                            "the tool_result settles the row its tool_use opened")
+            XCTAssertEqual(
+                restoredRuns.first?.activities.compactMap { activity -> String? in
+                    if case let .tool(id) = activity { return id }
+                    return nil
+                },
+                ["t1"],
+                "restored tool activity keeps the wire block order"
+            )
         }
 
         func testSessionResumedReconstructsTerminalRunAfterItsFinalAssistantMessage() {
@@ -386,13 +977,17 @@ import XCTest
             let kinds = source.model.items.map { item -> String in
                 switch item {
                 case .message: return "message"
+                case .commandOutput: return "command-output"
                 case .run: return "run"
                 case .notice: return "notice"
                 case .toolCall: return "tool"
                 }
             }
-            XCTAssertEqual(kinds, ["message", "message", "message", "run"])
-            guard case let .run(run)? = source.model.items.last else {
+            XCTAssertEqual(kinds, ["message", "message", "run", "message"])
+            guard case let .run(run)? = source.model.items.first(where: {
+                if case .run = $0 { return true }
+                return false
+            }) else {
                 return XCTFail("the restored turn must retain its terminal result")
             }
             XCTAssertEqual(run.status, .restored)
@@ -465,16 +1060,18 @@ import XCTest
                            "the tool-result-only turn must not become a user bubble")
             XCTAssertEqual(userMessages.first?.text, "继续")
 
-            // Order is preserved: assistant text, the tool row, then the follow-up.
+            // Order is preserved: the activity starts before assistant text,
+            // then the follow-up user message.
             let kinds = source.model.items.map { item -> String in
                 switch item {
                 case .message: return "message"
+                case .commandOutput: return "command-output"
                 case .toolCall: return "tool"
                 case .run: return "run"
                 case .notice: return "notice"
                 }
             }
-            XCTAssertEqual(kinds, ["message", "run", "message"])
+            XCTAssertEqual(kinds, ["run", "message", "message"])
         }
 
         /// A zero-message resume (a session with no transcript) must still adopt

@@ -131,9 +131,11 @@ export type ClientCommand =
   | { type: 'set_model'; model: string }
   | { type: 'list_models' }
   // ── Slash commands ──────────────────────────────────────────────────────────
-  | { type: 'run_slash_command'; raw: string }
+  | { type: 'run_slash_command'; raw: string; turn_id?: number }
   // ── Listings ────────────────────────────────────────────────────────────────
   | { type: 'refresh_listings'; which: ListingKindDto[] }
+  | { type: 'list_session_agents' }
+  | { type: 'load_session_agent_transcript'; agent_id: string }
   // ── Session lifecycle (decision §0.5) ───────────────────────────────────────
   | { type: 'new_session'; cwd?: string; model?: string }
   | { type: 'resume_session'; session_id: string; cwd?: string }
@@ -207,6 +209,12 @@ export type ToolVerbDto =
   | 'update' | 'create' | 'read' | 'search' | 'shell' | 'output'
   | 'kill' | 'fetch' | 'task' | 'todo' | 'skill' | 'generic';
 
+/** Stable semantic icon identity for one tool-call header. */
+export type ToolIconDto =
+  | 'read' | 'search' | 'list' | 'edit' | 'terminal' | 'globe'
+  | 'workflow' | 'list_checks' | 'sparkles' | 'plug' | 'output'
+  | 'stop' | 'wrench';
+
 /** A second header line with its own glyph, e.g. `$ cargo test`. */
 export interface ToolSubLineDto {
   prefix: string;
@@ -216,6 +224,7 @@ export interface ToolSubLineDto {
 /** The parameterized tool-call header — `Update(src/host.rs)`. */
 export interface ToolHeaderDto {
   verb: ToolVerbDto;
+  icon?: ToolIconDto;
   /** English label. Localizing clients key off `verb` instead. */
   label: string;
   primary?: string;
@@ -465,6 +474,16 @@ export interface SessionRowDto {
   path: string;
 }
 
+/** One live agent instance attached to the active session. */
+export interface SessionAgentSummaryDto {
+  agent_id: string;
+  name: string;
+  agent_type: string;
+  status: string;
+  latest_activity?: string;
+  updated_at_ms?: number;
+}
+
 /** Connection status for an MCP server (listings.rs `McpStatusDto`). */
 export type McpStatusDto =
   | { type: 'connected' }
@@ -498,6 +517,10 @@ export interface SlashCommandDto {
   name: string;
   description: string;
   source: string;
+  aliases?: string[];
+  argument_hint?: string;
+  menu_description?: string;
+  hidden?: boolean;
 }
 
 /** Memory tier (listings.rs `MemoryTierDto`). */
@@ -945,6 +968,23 @@ export type ClientEvent =
   | { type: 'session_ended' }
   | { type: 'session_resumed'; session_id: string; messages: MessageDto[] }
   | { type: 'session_list'; sessions: SessionRowDto[] }
+  | { type: 'session_agent_list'; session_id: string; agents: SessionAgentSummaryDto[] }
+  | {
+      type: 'session_agent_transcript';
+      session_id: string;
+      agent_id: string;
+      messages: MessageDto[];
+      next_message_index: number;
+      revision: number;
+    }
+  | { type: 'session_agent_updated'; session_id: string; agent: SessionAgentSummaryDto }
+  | {
+      type: 'session_agent_message';
+      session_id: string;
+      agent_id: string;
+      message_index: number;
+      message: MessageDto;
+    }
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string }
   | { type: 'model_changed'; model: string }
@@ -961,6 +1001,7 @@ export type ClientEvent =
   | { type: 'hooks'; hooks: HookDto[] }
   | { type: 'agents'; agents: AgentDto[] }
   | { type: 'slash_command_catalog'; commands: SlashCommandDto[] }
+  | { type: 'slash_command_result'; turn_id?: number; display: string; is_error?: boolean }
   | { type: 'memory_entries'; entries: MemoryEntryDto[] }
   | { type: 'status_snapshot'; snapshot: StatusSnapshotDto }
   | { type: 'settings_snapshot'; effective_json: string; provenance_json: string }

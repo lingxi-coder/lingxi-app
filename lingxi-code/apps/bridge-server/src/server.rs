@@ -1043,16 +1043,20 @@ impl BridgeConnection {
             // connection owns the driver + queue + turn-running flag). Display-
             // only / unknown / no-dispatcher cases fall back to the router's
             // text-surface path.
-            ClientCommand::RunSlashCommand { raw } => {
-                let disposition = match self.router.as_ref() {
+            ClientCommand::RunSlashCommand { raw, turn_id } => {
+                let outcome = match self.router.as_ref() {
                     Some(router) => router.dispatch_slash(&raw).await,
                     None => None,
                 };
-                match disposition {
+                let authority_events = outcome
+                    .as_ref()
+                    .map(|outcome| outcome.authority_events.clone())
+                    .unwrap_or_default();
+                match outcome.map(|outcome| outcome.result) {
                     Some(traits::SlashDispatchResult::RunAsTurn { prompt }) => {
                         // Run the expanded prompt exactly like a direct user
                         // prompt (enqueue-or-spawn; no images).
-                        self.handle_send_prompt(prompt, Vec::new(), None).await;
+                        self.handle_send_prompt(prompt, Vec::new(), turn_id).await;
                     }
                     // Display-only / unknown result: surface the SAME dispatch
                     // result's text directly. We must NOT re-`route()` here —
@@ -1061,16 +1065,30 @@ impl BridgeConnection {
                     // `handle()` (and any of its `EmitEffects`/`InjectMessage`
                     // side effects) twice and discard the first result. Reuse
                     // the already-computed disposition instead.
-                    Some(traits::SlashDispatchResult::Handled { display })
-                    | Some(traits::SlashDispatchResult::Unknown { display, .. }) => {
+                    Some(traits::SlashDispatchResult::Handled { display }) => {
                         self.unscoped_event_sink()
-                            .emit(ClientEvent::TextDelta { text: display })
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display,
+                                is_error: false,
+                            })
+                            .await;
+                    }
+                    Some(traits::SlashDispatchResult::Unknown { display, .. }) => {
+                        self.unscoped_event_sink()
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display,
+                                is_error: true,
+                            })
                             .await;
                     }
                     Some(traits::SlashDispatchResult::NotASlashCommand) => {
                         self.unscoped_event_sink()
-                            .emit(ClientEvent::TextDelta {
-                                text: format!("not a slash command: {raw}"),
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display: format!("not a slash command: {raw}"),
+                                is_error: true,
                             })
                             .await;
                     }
@@ -1081,12 +1099,15 @@ impl BridgeConnection {
                         if let Some(router) = self.router.clone() {
                             router
                                 .route(
-                                    ClientCommand::RunSlashCommand { raw },
+                                    ClientCommand::RunSlashCommand { raw, turn_id },
                                     self.unscoped_event_sink(),
                                 )
                                 .await;
                         }
                     }
+                }
+                for event in authority_events {
+                    self.unscoped_event_sink().emit(event).await;
                 }
             }
             // The FULL command surface (model, listings, slash, tasks, session
@@ -1586,8 +1607,11 @@ mod tests {
         ) {
             self.routed.store(true, Ordering::SeqCst);
         }
-        async fn dispatch_slash(&self, _raw: &str) -> Option<traits::SlashDispatchResult> {
-            Some(self.result.clone())
+        async fn dispatch_slash(&self, _raw: &str) -> Option<crate::router::SlashDispatchOutcome> {
+            Some(crate::router::SlashDispatchOutcome {
+                result: self.result.clone(),
+                authority_events: Vec::new(),
+            })
         }
     }
 
@@ -1618,6 +1642,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/loop 5m /babysit-prs".to_string(),
+                turn_id: Some(41),
             })
             .await;
 
@@ -1660,6 +1685,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/help".to_string(),
+                turn_id: Some(42),
             })
             .await;
 

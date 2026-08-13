@@ -993,7 +993,17 @@ async fn run_subagent_loop(
             agent_id,
             fs,
         )
+        .with_metadata(
+            ctx.agent_name.clone(),
+            Some(ctx.agent_definition.agent_type.clone()),
+        )
     });
+    // Mark a child as live before its first round-trip. A persistent child may
+    // later transition to `idle` without terminating; the lifecycle records
+    // make that distinction observable to mobile clients tailing the file.
+    if let Some(writer) = transcript.as_ref() {
+        let _ = writer.record_terminal("running", None).await;
+    }
     // A RESTORED run starts with its transcript already on disk, so its
     // watermark starts past the recovered messages — otherwise the first flush
     // would append the whole conversation a second time. A fresh run starts at
@@ -1252,6 +1262,9 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                             )
                             .await;
+                            if let Some(writer) = transcript.as_ref() {
+                                let _ = writer.record_terminal("completed", None).await;
+                            }
                             let _ = out_tx
                                 .send(SubagentEvent::Completed {
                                     agent_id,
@@ -1613,6 +1626,14 @@ async fn run_subagent_loop(
                 // Persist all messages before publishing the terminal event; the
                 // consumer is allowed to tear down a one-shot runner immediately.
                 flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+                // Keep lifecycle state alongside the transcript so clients that
+                // discover an agent after completion can distinguish it from a
+                // still-running child. Persistent agents retain their parked row
+                // and are projected as idle by the session-agent listing.
+                if let Some(writer) = transcript.as_ref() {
+                    let status = if ctx.persistent { "idle" } else { "completed" };
+                    let _ = writer.record_terminal(status, None).await;
+                }
                 let _ = out_tx
                     .send(SubagentEvent::Completed {
                         agent_id,
@@ -1639,6 +1660,10 @@ async fn run_subagent_loop(
             // reason rather than a hard failure, so the parent can still consume
             // whatever work was produced.
             flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+            if let Some(writer) = transcript.as_ref() {
+                let status = if ctx.persistent { "idle" } else { "completed" };
+                let _ = writer.record_terminal(status, None).await;
+            }
             let _ = out_tx
                 .send(SubagentEvent::Completed {
                     agent_id,
@@ -1674,11 +1699,17 @@ async fn run_subagent_loop(
         // event channel has already closed, no message can ever arrive again, so we
         // terminate gracefully.
         if !event_channel_open {
+            if let Some(writer) = transcript.as_ref() {
+                let _ = writer.record_terminal("completed", None).await;
+            }
             return;
         }
         loop {
             match event_rx.recv().await {
                 Some(engine::Event::UserMessage { content, .. }) => {
+                    if let Some(writer) = transcript.as_ref() {
+                        let _ = writer.record_terminal("running", None).await;
+                    }
                     // Append the injected message to history (minting our own
                     // MessageId, consistent with the assistant-id minting above —
                     // the event's message_id / request_id are the host's bookkeeping)
@@ -1699,8 +1730,14 @@ async fn run_subagent_loop(
                 }
                 // Ignore any other event while idle and keep parking.
                 Some(_) => {}
-                // Channel closed -> graceful terminate.
-                None => return,
+                // Channel closed -> graceful terminal shutdown. A persistent
+                // child is idle only while this channel remains open.
+                None => {
+                    if let Some(writer) = transcript.as_ref() {
+                        let _ = writer.record_terminal("completed", None).await;
+                    }
+                    return;
+                }
             }
         }
     }

@@ -80,7 +80,7 @@ final class AssistantMessageCollapsePolicyTests: XCTestCase {
             title: "Shell"
         )
 
-        XCTAssertEqual(ToolDisplayText.icon(header: read, tool: "Read"), .search)
+        XCTAssertEqual(ToolDisplayText.icon(header: read, tool: "Read"), .bookOpen)
         XCTAssertEqual(ToolDisplayText.icon(header: shell, tool: "Shell"), .terminal)
         XCTAssertNotEqual(
             ToolDisplayText.icon(header: read, tool: "Read"),
@@ -91,8 +91,8 @@ final class AssistantMessageCollapsePolicyTests: XCTestCase {
     func testLegacyToolNamesStillGetSpecificIcons() {
         XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "WebSearch"), .globe)
         XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "bash"), .terminal)
-        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "Write"), .edit)
-        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "Search documentation"), .book)
+        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "Write"), .pencil)
+        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "Search documentation"), .search)
     }
 
     func testStructuredToolExpansionKeysAreScopedToTheirMessage() {

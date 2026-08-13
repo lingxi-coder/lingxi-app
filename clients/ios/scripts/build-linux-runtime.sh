@@ -167,12 +167,16 @@ echo "[build-linux-runtime] Building pinned OpenMinis iSH (${BUILD_TYPE})"
   echo "iSH network-policy patch is missing: ${ISH_NETWORK_POLICY_PATCH}" >&2
   exit 1
 }
-git -C "${ISH_SOURCE}" apply --check "${ISH_NETWORK_POLICY_PATCH}"
-git -C "${ISH_SOURCE}" apply "${ISH_NETWORK_POLICY_PATCH}"
+# This patch is intentionally generated with zero context so it remains small
+# beside the pinned iSH snapshot. Tell git to honor the exact hunk line numbers;
+# without this flag git may relocate insertion-only hunks to EOF and leave the
+# source uncompilable.
+git -C "${ISH_SOURCE}" apply --unidiff-zero --check "${ISH_NETWORK_POLICY_PATCH}"
+git -C "${ISH_SOURCE}" apply --unidiff-zero "${ISH_NETWORK_POLICY_PATCH}"
 ISH_POLICY_PATCH_APPLIED=1
 restore_ish_policy_source() {
   if [[ "${ISH_POLICY_PATCH_APPLIED:-0}" == "1" ]]; then
-    if ! git -C "${ISH_SOURCE}" apply --reverse "${ISH_NETWORK_POLICY_PATCH}"; then
+    if ! git -C "${ISH_SOURCE}" apply --reverse --unidiff-zero "${ISH_NETWORK_POLICY_PATCH}"; then
       echo "failed to restore pinned iSH source after policy build" >&2
       return 1
     fi
@@ -191,7 +195,7 @@ bash "${BUILD_ISH}" "${BUILD_TYPE}"
 restore_ish_policy_source
 # Prove the pinned checkout is back at the pre-build state. A failed or partial
 # reverse must stop staging instead of silently shipping from a dirty submodule.
-git -C "${ISH_SOURCE}" apply --check "${ISH_NETWORK_POLICY_PATCH}"
+git -C "${ISH_SOURCE}" apply --unidiff-zero --check "${ISH_NETWORK_POLICY_PATCH}"
 trap - EXIT INT TERM
 
 FAKEFSIFY="${DEPS_DIR}/ish/build-native/tools/fakefsify"

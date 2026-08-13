@@ -51,7 +51,8 @@ use client_protocol::events::{AttachmentDto, ClientEvent, CostDto, ErrorKindDto,
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
+    TaskStatusDto,
 };
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
@@ -68,7 +69,8 @@ use client_protocol::permission::{
 };
 use client_protocol::tool_display::{
     CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
-    StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto, ToolVerbDto,
+    StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolIconDto, ToolResultDisplayDto,
+    ToolVerbDto,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -181,6 +183,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 // added wire shape completely unexercised.
                 header: Some(ToolHeaderDto {
                     verb: ToolVerbDto::Read,
+                    icon: Some(ToolIconDto::Read),
                     label: "Read".to_string(),
                     primary: Some("/tmp/example.txt".to_string()),
                     qualifier: None,
@@ -325,6 +328,53 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/session_agent_list.json",
+            ClientEvent::SessionAgentList {
+                session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                agents: vec![SessionAgentSummaryDto {
+                    agent_id: "main".to_string(),
+                    name: "Main agent".to_string(),
+                    agent_type: "main".to_string(),
+                    status: "running".to_string(),
+                    latest_activity: Some("Working on the selected conversation".to_string()),
+                    updated_at_ms: Some(1_750_000_000_000),
+                }],
+            },
+        ),
+        (
+            "event/session_agent_transcript.json",
+            ClientEvent::SessionAgentTranscript {
+                session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+                messages: vec![canonical_message()],
+                next_message_index: 1,
+                revision: 1,
+            },
+        ),
+        (
+            "event/session_agent_updated.json",
+            ClientEvent::SessionAgentUpdated {
+                session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                agent: SessionAgentSummaryDto {
+                    agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+                    name: "Researcher".to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    status: "completed".to_string(),
+                    latest_activity: Some("Finished source review".to_string()),
+                    updated_at_ms: Some(1_750_000_000_123),
+                },
+            },
+        ),
+        (
+            "event/session_agent_message.json",
+            ClientEvent::SessionAgentMessage {
+                session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+                message_index: 0,
+                message: canonical_message(),
+            },
+        ),
+        (
             "event/session_list.json",
             ClientEvent::SessionList {
                 sessions: vec![SessionRowDto {
@@ -415,7 +465,19 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     name: "model".to_string(),
                     description: "Switch the active model".to_string(),
                     source: "builtin".to_string(),
+                    aliases: vec!["m".to_string()],
+                    argument_hint: Some("[model]".to_string()),
+                    menu_description: Some("Switch model".to_string()),
+                    hidden: false,
                 }],
+            },
+        ),
+        (
+            "event/slash_command_result.json",
+            ClientEvent::SlashCommandResult {
+                turn_id: Some(12),
+                display: "Switched model to opus".to_string(),
+                is_error: false,
             },
         ),
         (
@@ -674,6 +736,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     name: "compact".to_string(),
                     description: "Compact the conversation history.".to_string(),
                     source: "builtin".to_string(),
+                    aliases: vec!["cmp".to_string()],
+                    argument_hint: None,
+                    menu_description: Some("Compact chat".to_string()),
+                    hidden: false,
                 }],
             },
         ),
@@ -774,12 +840,23 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
                 raw: "/model opus".to_string(),
+                turn_id: Some(7),
             },
         ),
         (
             "command/refresh_listings.json",
             ClientCommand::RefreshListings {
                 which: vec![ListingKindDto::Mcp, ListingKindDto::Agents],
+            },
+        ),
+        (
+            "command/list_session_agents.json",
+            ClientCommand::ListSessionAgents,
+        ),
+        (
+            "command/load_session_agent_transcript.json",
+            ClientCommand::LoadSessionAgentTranscript {
+                agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
             },
         ),
         (

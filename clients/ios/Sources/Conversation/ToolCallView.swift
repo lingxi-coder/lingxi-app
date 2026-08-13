@@ -23,6 +23,9 @@ struct ToolCallView: View {
     @Environment(\.theme) private var t
     let trace: ConversationToolTrace
     var isExpanded: Bool = false
+    /// Timeline mode uses Codex's borderless, dense row treatment. The legacy
+    /// execution card can keep the original surface by leaving this false.
+    var compact: Bool = false
     var onToggle: () -> Void = {}
 
     var body: some View {
@@ -34,12 +37,24 @@ struct ToolCallView: View {
             resultBlock
             legacyFallback
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, compact ? 10 : 10)
+        .padding(.vertical, compact ? 5 : 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+        .background(compact ? Color.clear : t.surface)
+        .clipShape(RoundedRectangle(cornerRadius: compact ? 0 : 10))
+        .overlay {
+            if !compact {
+                RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if compact {
+                Rectangle()
+                    .fill(t.border.opacity(0.45))
+                    .frame(height: 0.5)
+                    .padding(.leading, 32)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityValue(trace.status.label)
         .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
@@ -55,16 +70,21 @@ struct ToolCallView: View {
                 color: ToolDisplayText.iconColor(header: trace.header, tool: trace.tool, palette: t),
                 stroke: 1.65
             )
+            .accessibilityIdentifier(
+                "conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)"
+            )
             titleText
             Spacer(minLength: 4)
-            Text(trace.status.label)
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(statusColor)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(statusColor.opacity(0.12))
-                .clipShape(Capsule())
-                .accessibilityIdentifier("conversation.tool-call.\(trace.id).status")
+            if !compact || trace.status == .failed || trace.status == .cancelled {
+                Text(trace.status.label)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(statusColor.opacity(0.12))
+                    .clipShape(Capsule())
+                    .accessibilityIdentifier("conversation.tool-call.\(trace.id).status")
+            }
             if let elapsed = ConversationExecutionParsing.formatDuration(trace.elapsedMs) {
                 Text(elapsed)
                     .font(.system(size: 11))
@@ -244,19 +264,7 @@ enum ToolDisplayText {
     /// compatibility fallback.
     static func icon(header: ConversationToolHeader?, tool: String) -> LXIconName {
         if let header {
-            switch header.verb {
-            case .update: return .edit
-            case .create: return .plus
-            case .read: return .search
-            case .search: return .book
-            case .shell: return .terminal
-            case .output: return .message
-            case .kill: return .stop
-            case .fetch: return .globe
-            case .task, .skill: return .skill
-            case .todo: return .check
-            case .generic: break
-            }
+            return iconName(for: header.icon(for: tool))
         }
 
         let normalized = tool.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -266,35 +274,62 @@ enum ToolDisplayText {
         if normalized.contains("fetch") || normalized.contains("web") || normalized.contains("url") || normalized.contains("browser") {
             return .globe
         }
-        if normalized.contains("read") || normalized.contains("file") || normalized.contains("grep") {
+        if normalized.contains("ls") || normalized.contains("list") {
+            return .listFiles
+        }
+        if normalized.contains("read") || normalized.contains("file") {
+            return .bookOpen
+        }
+        if normalized.contains("search") || normalized.contains("grep") || normalized.contains("glob") || normalized.contains("documentation") || normalized.contains("docs") {
             return .search
         }
-        if normalized.contains("search") || normalized.contains("documentation") || normalized.contains("docs") {
-            return .book
-        }
         if normalized.contains("write") || normalized.contains("create") || normalized.contains("edit") || normalized.contains("update") {
-            return .edit
+            return .pencil
         }
-        if normalized.contains("task") || normalized.contains("agent") || normalized.contains("skill") {
-            return .skill
+        if normalized.contains("task") || normalized.contains("agent") || normalized.contains("workflow") {
+            return .workflow
+        }
+        if normalized.contains("skill") {
+            return .sparkles
         }
         if normalized.contains("todo") || normalized.contains("plan") {
-            return .check
+            return .listChecks
+        }
+        if normalized.contains("mcp") || normalized.contains("plugin") {
+            return .plug
         }
         if normalized.contains("kill") || normalized.contains("stop") || normalized.contains("cancel") {
-            return .stop
+            return .squareStop
         }
-        return .workflow
+        return .wrench
+    }
+
+    private static func iconName(for icon: ConversationToolIcon) -> LXIconName {
+        switch icon {
+        case .read: return .bookOpen
+        case .search: return .search
+        case .list: return .listFiles
+        case .edit: return .pencil
+        case .terminal: return .terminal
+        case .globe: return .globe
+        case .workflow: return .workflow
+        case .listChecks: return .listChecks
+        case .sparkles: return .sparkles
+        case .plug: return .plug
+        case .output: return .message
+        case .stop: return .squareStop
+        case .wrench: return .wrench
+        }
     }
 
     static func iconColor(header: ConversationToolHeader?, tool: String, palette: Palette) -> Color {
         switch icon(header: header, tool: tool) {
-        case .edit, .plus: return palette.accent2
-        case .search, .book: return palette.accent
+        case .edit, .pencil, .plus: return palette.accent2
+        case .search, .book, .bookOpen, .listFiles: return palette.accent
         case .terminal: return palette.text3
         case .globe: return palette.accent3
-        case .skill, .check: return palette.ok
-        case .stop, .warning: return palette.danger
+        case .skill, .sparkles, .check, .listChecks: return palette.ok
+        case .stop, .squareStop, .warning: return palette.danger
         default: return palette.text3
         }
     }

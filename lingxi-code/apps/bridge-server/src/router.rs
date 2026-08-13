@@ -34,7 +34,7 @@
 //! | `RefreshListings{Doctor}` | `run_doctor_checks` | `DoctorReport` |
 //! | `RefreshListings{Auth}` / `Login` / `Logout` | `AuthHandle::*` | `AuthState` |
 //! | `RefreshListings{Tasks}` / `TaskList` | `TaskRegistryHandle::list` | `TaskRow`× |
-//! | `RunSlashCommand` | `SlashCommandDispatcher::dispatch` | `TextDelta` (lossy display) |
+//! | `RunSlashCommand` | `SlashCommandDispatcher::dispatch` | `SlashCommandResult` or normal turn stream |
 //! | `TaskOutput` | `TaskRegistryHandle::output` | `TaskOutputChunk` |
 //! | `TaskStop` | `TaskRegistryHandle::kill` | `TaskStatusChanged` |
 //! | `ForceCompact` | `force_compact` | `CompactionCompleted` |
@@ -134,9 +134,20 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// Plugin prompt commands — claude-code injects the expanded prompt as the
     /// user message). Returns `None` when no dispatcher is wired (the connection
     /// then falls back to the display-only `route` path).
-    async fn dispatch_slash(&self, _raw: &str) -> Option<traits::SlashDispatchResult> {
+    async fn dispatch_slash(&self, _raw: &str) -> Option<SlashDispatchOutcome> {
         None
     }
+}
+
+/// One already-dispatched slash result plus authoritative out-of-band changes
+/// observed during that same dispatch. Keeping both together lets the bridge
+/// connection route prompt commands without dispatching the command twice.
+#[derive(Debug, Clone)]
+pub struct SlashDispatchOutcome {
+    /// The single engine dispatch result for the submitted command.
+    pub result: traits::SlashDispatchResult,
+    /// Full authoritative state/catalog events produced by that dispatch.
+    pub authority_events: Vec<ClientEvent>,
 }
 
 /// Lower an `Option<LoginInfo>` to the auth-state DTO (`current_user` → wire).
@@ -173,6 +184,15 @@ pub struct EngineCommandRouter {
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlashAuthoritySnapshot {
+    session_id: String,
+    model: String,
+    permission_mode: Option<String>,
+    auth: AuthStateDto,
+    catalog: Option<Vec<SlashCommandDto>>,
 }
 
 impl EngineCommandRouter {
@@ -379,14 +399,21 @@ impl EngineCommandRouter {
     async fn slash_command_catalog(&self) -> Option<Vec<SlashCommandDto>> {
         let registry = self.slash_registry.as_ref()?;
         let reg = registry.read().await;
+        Some(Self::slash_command_catalog_from_registry(&reg))
+    }
+
+    fn slash_command_catalog_from_registry(reg: &CommandRegistry) -> Vec<SlashCommandDto> {
         let mut commands: Vec<SlashCommandDto> = reg
-            .list_all()
+            .palette_commands()
             .into_iter()
-            .filter(|cmd| !is_palette_hidden(&cmd.name))
             .map(|cmd| SlashCommandDto {
-                name: cmd.name.clone(),
-                description: cmd.description.clone(),
+                hidden: is_palette_hidden(&cmd.name),
                 source: command_source_string(cmd.source).to_string(),
+                name: cmd.name,
+                description: cmd.description,
+                aliases: cmd.aliases,
+                argument_hint: cmd.argument_hint,
+                menu_description: cmd.menu_description,
             })
             .collect();
         if !commands.iter().any(|cmd| cmd.name == "reload-plugins")
@@ -396,10 +423,67 @@ impl EngineCommandRouter {
                 name: "reload-plugins".to_string(),
                 description: core_description("reload-plugins").to_string(),
                 source: "builtin".to_string(),
+                aliases: Vec::new(),
+                argument_hint: None,
+                menu_description: None,
+                hidden: false,
             });
         }
         commands.sort_by(|a, b| a.name.cmp(&b.name));
-        Some(commands)
+        commands
+    }
+
+    async fn capture_slash_authority(&self) -> SlashAuthoritySnapshot {
+        let snapshot = self.handle.get_status_snapshot().await;
+        SlashAuthoritySnapshot {
+            session_id: self.handle.current_session_id().await.to_string(),
+            model: traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            permission_mode: self.handle.permission_mode().await,
+            auth: lower_auth_state(self.auth.current_user().await),
+            catalog: self.slash_command_catalog().await,
+        }
+    }
+
+    async fn emit_slash_authority_changes(
+        &self,
+        before: &SlashAuthoritySnapshot,
+        after: &SlashAuthoritySnapshot,
+        sink: &dyn ClientEventSink,
+    ) {
+        for event in Self::slash_authority_change_events(before, after) {
+            sink.emit(event).await;
+        }
+    }
+
+    fn slash_authority_change_events(
+        before: &SlashAuthoritySnapshot,
+        after: &SlashAuthoritySnapshot,
+    ) -> Vec<ClientEvent> {
+        let mut events = Vec::new();
+        if before.session_id != after.session_id {
+            events.push(ClientEvent::SessionEnded);
+        }
+        if before.model != after.model {
+            events.push(ClientEvent::ModelChanged {
+                model: after.model.clone(),
+            });
+        }
+        if before.permission_mode != after.permission_mode {
+            if let Some(mode) = after.permission_mode.clone() {
+                events.push(ClientEvent::PermissionModeChanged { mode });
+            }
+        }
+        if before.auth != after.auth {
+            events.push(ClientEvent::AuthState {
+                state: after.auth.clone(),
+            });
+        }
+        if before.catalog != after.catalog {
+            if let Some(commands) = after.catalog.clone() {
+                events.push(ClientEvent::CommandsChanged { commands });
+            }
+        }
+        events
     }
 
     /// Pull + emit a single listing kind. Listing kinds with no engine handle in
@@ -555,9 +639,15 @@ impl Drop for TaskPoll {
 
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
-    async fn dispatch_slash(&self, raw: &str) -> Option<traits::SlashDispatchResult> {
+    async fn dispatch_slash(&self, raw: &str) -> Option<SlashDispatchOutcome> {
         let dispatcher = self.dispatcher.as_ref()?;
-        Some(dispatcher.dispatch(raw).await)
+        let before = self.capture_slash_authority().await;
+        let result = dispatcher.dispatch(raw).await;
+        let after = self.capture_slash_authority().await;
+        Some(SlashDispatchOutcome {
+            result,
+            authority_events: Self::slash_authority_change_events(&before, &after),
+        })
     }
 
     // The full command dispatch is one match over the command surface; splitting
@@ -710,29 +800,31 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_listing(ListingKindDto::Models, &*sink).await;
             }
 
-            // ── Slash commands (LOSSY: display surfaced as TextDelta) ────────
-            ClientCommand::RunSlashCommand { raw } => {
-                let before_catalog = self.slash_command_catalog().await;
+            // ── Slash commands ──────────────────────────────────────────────
+            ClientCommand::RunSlashCommand { raw, turn_id } => {
                 if let Some(dispatcher) = self.dispatcher.as_ref() {
-                    let display = match dispatcher.dispatch(&raw).await {
-                        traits::SlashDispatchResult::Handled { display }
-                        | traits::SlashDispatchResult::Unknown { display, .. } => display,
+                    let before = self.capture_slash_authority().await;
+                    let (display, is_error) = match dispatcher.dispatch(&raw).await {
+                        traits::SlashDispatchResult::Handled { display } => (display, false),
+                        traits::SlashDispatchResult::Unknown { display, .. } => (display, true),
                         // A `type: "prompt"` command reached the display-only
                         // fallback (the connection should have intercepted it via
                         // `dispatch_slash` and run it as a turn). Surface the
                         // expanded prompt so nothing is silently dropped.
-                        traits::SlashDispatchResult::RunAsTurn { prompt } => prompt,
+                        traits::SlashDispatchResult::RunAsTurn { prompt } => (prompt, false),
                         traits::SlashDispatchResult::NotASlashCommand => {
-                            format!("not a slash command: {raw}")
+                            (format!("not a slash command: {raw}"), true)
                         }
                     };
-                    sink.emit(ClientEvent::TextDelta { text: display }).await;
-                    let after_catalog = self.slash_command_catalog().await;
-                    if let (Some(before), Some(commands)) = (before_catalog, after_catalog) {
-                        if before != commands {
-                            sink.emit(ClientEvent::CommandsChanged { commands }).await;
-                        }
-                    }
+                    sink.emit(ClientEvent::SlashCommandResult {
+                        turn_id,
+                        display,
+                        is_error,
+                    })
+                    .await;
+                    let after = self.capture_slash_authority().await;
+                    self.emit_slash_authority_changes(&before, &after, &*sink)
+                        .await;
                 } else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,

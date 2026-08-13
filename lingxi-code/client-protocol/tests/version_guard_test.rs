@@ -274,6 +274,42 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SessionResumed.session_id", "String");
     put("ClientEvent::SessionResumed.messages", "Vec<MessageDto>");
 
+    put("ClientEvent::SessionAgentList", "session_agent_list");
+    put("ClientEvent::SessionAgentList.session_id", "String");
+    put(
+        "ClientEvent::SessionAgentList.agents",
+        "Vec<SessionAgentSummaryDto>",
+    );
+
+    put(
+        "ClientEvent::SessionAgentTranscript",
+        "session_agent_transcript",
+    );
+    put("ClientEvent::SessionAgentTranscript.session_id", "String");
+    put("ClientEvent::SessionAgentTranscript.agent_id", "String");
+    put(
+        "ClientEvent::SessionAgentTranscript.messages",
+        "Vec<MessageDto>",
+    );
+    put(
+        "ClientEvent::SessionAgentTranscript.next_message_index",
+        "u64",
+    );
+    put("ClientEvent::SessionAgentTranscript.revision", "u64");
+
+    put("ClientEvent::SessionAgentUpdated", "session_agent_updated");
+    put("ClientEvent::SessionAgentUpdated.session_id", "String");
+    put(
+        "ClientEvent::SessionAgentUpdated.agent",
+        "SessionAgentSummaryDto",
+    );
+
+    put("ClientEvent::SessionAgentMessage", "session_agent_message");
+    put("ClientEvent::SessionAgentMessage.session_id", "String");
+    put("ClientEvent::SessionAgentMessage.agent_id", "String");
+    put("ClientEvent::SessionAgentMessage.message_index", "u64");
+    put("ClientEvent::SessionAgentMessage.message", "MessageDto");
+
     put("ClientEvent::SessionList", "session_list");
     put("ClientEvent::SessionList.sessions", "Vec<SessionRowDto>");
 
@@ -326,6 +362,10 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::SlashCommandCatalog.commands",
         "Vec<SlashCommandDto>",
     );
+    put("ClientEvent::SlashCommandResult", "slash_command_result");
+    put("ClientEvent::SlashCommandResult.turn_id", "Option<u64>");
+    put("ClientEvent::SlashCommandResult.display", "String");
+    put("ClientEvent::SlashCommandResult.is_error", "bool");
 
     put("ClientEvent::MemoryEntries", "memory_entries");
     put("ClientEvent::MemoryEntries.entries", "Vec<MemoryEntryDto>");
@@ -530,11 +570,22 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::RunSlashCommand", "run_slash_command");
     put("ClientCommand::RunSlashCommand.raw", "String");
+    put("ClientCommand::RunSlashCommand.turn_id", "Option<u64>");
 
     put("ClientCommand::RefreshListings", "refresh_listings");
     put(
         "ClientCommand::RefreshListings.which",
         "Vec<ListingKindDto>",
+    );
+
+    put("ClientCommand::ListSessionAgents", "list_session_agents");
+    put(
+        "ClientCommand::LoadSessionAgentTranscript",
+        "load_session_agent_transcript",
+    );
+    put(
+        "ClientCommand::LoadSessionAgentTranscript.agent_id",
+        "String",
     );
 
     put("ClientCommand::NewSession", "new_session");
@@ -732,10 +783,25 @@ fn current_contract_index() -> ContractIndex {
     put("ToolVerbDto::Skill", "skill");
     put("ToolVerbDto::Generic", "generic");
 
+    put("ToolIconDto::Read", "read");
+    put("ToolIconDto::Search", "search");
+    put("ToolIconDto::List", "list");
+    put("ToolIconDto::Edit", "edit");
+    put("ToolIconDto::Terminal", "terminal");
+    put("ToolIconDto::Globe", "globe");
+    put("ToolIconDto::Workflow", "workflow");
+    put("ToolIconDto::ListChecks", "list_checks");
+    put("ToolIconDto::Sparkles", "sparkles");
+    put("ToolIconDto::Plug", "plug");
+    put("ToolIconDto::Output", "output");
+    put("ToolIconDto::Stop", "stop");
+    put("ToolIconDto::Wrench", "wrench");
+
     put("ToolSubLineDto.prefix", "String");
     put("ToolSubLineDto.text", "String");
 
     put("ToolHeaderDto.verb", "ToolVerbDto");
+    put("ToolHeaderDto.icon", "Option<ToolIconDto>");
     put("ToolHeaderDto.label", "String");
     put("ToolHeaderDto.primary", "Option<String>");
     put("ToolHeaderDto.qualifier", "Option<String>");
@@ -914,9 +980,20 @@ fn current_contract_index() -> ContractIndex {
     put("AgentDto.description", "String");
     put("AgentDto.tools_allowed", "Vec<String>");
 
+    put("SessionAgentSummaryDto.agent_id", "String");
+    put("SessionAgentSummaryDto.name", "String");
+    put("SessionAgentSummaryDto.agent_type", "String");
+    put("SessionAgentSummaryDto.status", "String");
+    put("SessionAgentSummaryDto.latest_activity", "Option<String>");
+    put("SessionAgentSummaryDto.updated_at_ms", "Option<u64>");
+
     put("SlashCommandDto.name", "String");
     put("SlashCommandDto.description", "String");
     put("SlashCommandDto.source", "String");
+    put("SlashCommandDto.aliases", "Vec<String>");
+    put("SlashCommandDto.argument_hint", "Option<String>");
+    put("SlashCommandDto.menu_description", "Option<String>");
+    put("SlashCommandDto.hidden", "bool");
 
     put("MemoryEntryDto.path", "String");
     put("MemoryEntryDto.tier", "MemoryTierDto");
@@ -1511,8 +1588,8 @@ fn contract_index_covers_every_dto() {
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
-        TaskStatusDto,
+        MemoryTierDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto,
+        TaskRowDto, TaskStatusDto,
     };
     use client_protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
@@ -1564,6 +1641,7 @@ fn contract_index_covers_every_dto() {
     };
     let _header = ToolHeaderDto {
         verb: ToolVerbDto::Generic,
+        icon: None,
         label: String::new(),
         primary: None,
         qualifier: None,
@@ -1717,10 +1795,22 @@ fn contract_index_covers_every_dto() {
             description: String::new(),
             tools_allowed: vec![],
         },
+        SessionAgentSummaryDto {
+            agent_id: String::new(),
+            name: String::new(),
+            agent_type: String::new(),
+            status: String::new(),
+            latest_activity: None,
+            updated_at_ms: None,
+        },
         SlashCommandDto {
             name: String::new(),
             description: String::new(),
             source: String::new(),
+            aliases: vec![],
+            argument_hint: None,
+            menu_description: None,
+            hidden: false,
         },
         MemoryEntryDto {
             path: String::new(),

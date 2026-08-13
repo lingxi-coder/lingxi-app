@@ -115,6 +115,11 @@ const TOOL_VERBS = [
   'kill', 'fetch', 'task', 'todo', 'skill', 'generic',
 ];
 
+const TOOL_ICONS = [
+  'read', 'search', 'list', 'edit', 'terminal', 'globe', 'workflow',
+  'list_checks', 'sparkles', 'plug', 'output', 'stop', 'wrench',
+];
+
 const SYNTAX_CLASSES = [
   'plain', 'keyword', 'type_name', 'function', 'string_lit', 'number',
   'comment', 'punctuation', 'operator', 'variable', 'constant', 'attribute',
@@ -131,6 +136,9 @@ const PLAN_TASK_STATES = ['pending', 'in_progress', 'completed'];
 function validateToolHeader(v: unknown): void {
   const o = rec(v);
   assert.ok(TOOL_VERBS.includes(o['verb'] as string), `unknown ToolVerbDto "${String(o['verb'])}"`);
+  if ('icon' in o) {
+    assert.ok(TOOL_ICONS.includes(o['icon'] as string), `unknown ToolIconDto "${String(o['icon'])}"`);
+  }
   assert.ok(isString(o['label']) && isString(o['title']));
   for (const opt of ['primary', 'qualifier']) {
     if (opt in o) assert.ok(isString(o[opt]));
@@ -140,6 +148,18 @@ function validateToolHeader(v: unknown): void {
     const sub = rec(o['sub_line']);
     assert.ok(isString(sub['prefix']) && isString(sub['text']));
   }
+}
+
+function validateSessionAgent(v: unknown): void {
+  const a = rec(v);
+  assert.ok(
+    isString(a['agent_id']) &&
+      isString(a['name']) &&
+      isString(a['agent_type']) &&
+      isString(a['status']),
+  );
+  if ('latest_activity' in a) assert.ok(isString(a['latest_activity']));
+  if ('updated_at_ms' in a) assert.ok(isNumber(a['updated_at_ms']));
 }
 
 function validateStructuredDiff(v: unknown): void {
@@ -676,10 +696,16 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'run_slash_command':
       assert.ok(isString(o['raw']));
+      if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
       break;
     case 'refresh_listings':
       assert.ok(Array.isArray(o['which']));
       for (const k of o['which'] as unknown[]) validateListingKind(k);
+      break;
+    case 'list_session_agents':
+      break;
+    case 'load_session_agent_transcript':
+      assert.ok(isString(o['agent_id']));
       break;
     case 'new_session':
       if ('cwd' in o) assert.ok(isString(o['cwd']));
@@ -854,6 +880,32 @@ function validateEvent(name: string, v: unknown): void {
         );
       }
       break;
+    case 'session_agent_list':
+      assert.ok(isString(o['session_id']) && Array.isArray(o['agents']));
+      for (const a of o['agents'] as unknown[]) validateSessionAgent(a);
+      break;
+    case 'session_agent_transcript':
+      assert.ok(
+        isString(o['session_id']) &&
+          isString(o['agent_id']) &&
+          Array.isArray(o['messages']) &&
+          isNumber(o['next_message_index']) &&
+          isNumber(o['revision']),
+      );
+      for (const m of o['messages'] as unknown[]) validateMessage(m);
+      break;
+    case 'session_agent_updated':
+      assert.ok(isString(o['session_id']));
+      validateSessionAgent(o['agent']);
+      break;
+    case 'session_agent_message':
+      assert.ok(
+        isString(o['session_id']) &&
+          isString(o['agent_id']) &&
+          isNumber(o['message_index']),
+      );
+      validateMessage(o['message']);
+      break;
     case 'model_list':
       assert.ok(Array.isArray(o['models']) && isString(o['current']));
       break;
@@ -902,7 +954,16 @@ function validateEvent(name: string, v: unknown): void {
       for (const cmd of o['commands'] as unknown[]) {
         const r = rec(cmd);
         assert.ok(isString(r['name']) && isString(r['description']) && isString(r['source']));
+        if ('aliases' in r) assert.ok(Array.isArray(r['aliases']) && r['aliases'].every(isString));
+        if ('argument_hint' in r) assert.ok(isString(r['argument_hint']));
+        if ('menu_description' in r) assert.ok(isString(r['menu_description']));
+        if ('hidden' in r) assert.ok(isBool(r['hidden']));
       }
+      break;
+    case 'slash_command_result':
+      if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
+      assert.ok(isString(o['display']));
+      if ('is_error' in o) assert.ok(isBool(o['is_error']));
       break;
     case 'memory_entries':
       assert.ok(Array.isArray(o['entries']));
@@ -1100,7 +1161,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 41, `expected 41 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 43, `expected 43 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1108,7 +1169,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 52, `expected 52 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 57, `expected 57 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

@@ -12,50 +12,42 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
-    func testStructuredShellCardOpensProjectTerminal() {
+    func testTimelineHidesAgentRunAndShowsCompactExecutionRows() {
         XCTAssertFalse(app.staticTexts["理解需求"].exists)
         let llmStatus = app.descendants(matching: .any)["conversation.llm-status"]
-        XCTAssertTrue(llmStatus.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["已暂停"].exists, app.debugDescription)
+        XCTAssertFalse(app.staticTexts["已暂停"].exists, app.debugDescription)
         let userMessage = app.descendants(matching: .any)["conversation.message.user"]
         let agentRun = app.descendants(matching: .any)["conversation.agent-run"]
         let assistantMessage = app.descendants(matching: .any)["conversation.message.assistant"]
         XCTAssertTrue(userMessage.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Agent 运行"].waitForExistence(timeout: 5))
-        XCTAssertTrue(agentRun.exists)
+        XCTAssertFalse(app.staticTexts["Agent 运行"].exists)
+        XCTAssertFalse(agentRun.exists)
+        XCTAssertFalse(app.buttons["conversation.agent-picker"].exists)
         XCTAssertTrue(assistantMessage.exists)
-        XCTAssertLessThanOrEqual(userMessage.frame.maxY, agentRun.frame.minY + 0.5)
-        XCTAssertLessThanOrEqual(agentRun.frame.maxY, assistantMessage.frame.minY + 0.5)
-        XCTAssertEqual(agentRun.frame.minX, assistantMessage.frame.minX, accuracy: 1)
+        let thought = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.thought.")
+        ).firstMatch
+        XCTAssertTrue(thought.waitForExistence(timeout: 5), app.debugDescription)
+        let tool = app.descendants(matching: .any)["conversation.tool-call.ui-shell"]
+        XCTAssertTrue(tool.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell.icon.terminal"].exists)
+        let batch = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.tool-batch.")
+        ).firstMatch
+        XCTAssertTrue(batch.exists, app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.tool-call.ui-read"].exists)
+        batch.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-read"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-read.icon.bookOpen"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search.icon.search"].exists)
 
-        let runToggle = app.buttons["conversation.agent-run.toggle"]
-        XCTAssertTrue(runToggle.waitForExistence(timeout: 5), app.debugDescription)
-        runToggle.tap()
-        XCTAssertTrue(
-            app.staticTexts["/workspace/ui-test"].waitForExistence(timeout: 5),
-            app.debugDescription
-        )
-        let toolStatus = app.staticTexts["conversation.tool-call.ui-shell.status"]
-        XCTAssertTrue(toolStatus.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(toolStatus.label, "已完成")
-
-        let openTerminal = app.buttons["在终端打开"]
-        XCTAssertTrue(openTerminal.waitForExistence(timeout: 5))
-        openTerminal.tap()
-
-        // The terminal has no navigation title any more — it is the shell, and
-        // a title bar is not part of one. Identify it by the root's identifier,
-        // which does not depend on chrome, and leave via the system back
-        // button, which is the only dismissal the iOS build has ever had (the
-        // "关闭" button exists solely in TerminalView's macOS branch).
-        // Type-agnostic query on purpose: the identifier rides on the
-        // ScrollView-rooted transcript now, and a SwiftUI ScrollView surfaces
-        // as .scrollView, which `otherElements` (.other only) never matches —
-        // exactly why this file queries the chat transcript via
-        // `app.scrollViews["conversation.message-list"]`.
-        XCTAssertTrue(app.descendants(matching: .any)["terminal.root"].waitForExistence(timeout: 8))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 5), app.debugDescription)
+        // A normal completed turn has no persistent runtime footer.
+        XCTAssertTrue(waitUntilGone(llmStatus, timeout: 5), app.debugDescription)
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "iOS-CodexTimeline"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
     func testComposerTracksKeyboardAndKeepsVoiceModesSeparate() {
@@ -74,6 +66,40 @@ final class LingxiCodeUITests: XCTestCase {
         dismissKeyboard.tap()
         XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 2))
         XCTAssertEqual(input.value as? String, "keyboard draft")
+    }
+
+    func testSlashCommandSuggestionsFilterSelectAndSubmit() {
+        let input = app.textFields["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+
+        input.tap()
+        input.typeText("/")
+        let help = app.buttons["composer.slash-command.help"]
+        let review = app.buttons["composer.slash-command.review"]
+        XCTAssertTrue(help.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(review.exists, app.debugDescription)
+        let suggestionList = app.scrollViews["composer.slash-command-list"]
+        XCTAssertTrue(suggestionList.exists, app.debugDescription)
+        XCTAssertGreaterThanOrEqual(suggestionList.frame.height, 220)
+        XCTAssertGreaterThan(help.frame.height, 40)
+
+        input.typeText("re")
+        XCTAssertTrue(review.waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertFalse(help.exists, app.debugDescription)
+        review.tap()
+
+        XCTAssertEqual(input.value as? String, "/review")
+        XCTAssertFalse(review.exists, app.debugDescription)
+
+        input.typeText(" [instructions]")
+        XCTAssertTrue(app.staticTexts["[instructions]"].exists, app.debugDescription)
+        let send = app.buttons["composer.send"]
+        XCTAssertTrue(send.isHittable, app.debugDescription)
+        send.tap()
+        XCTAssertTrue(
+            app.staticTexts["/review [instructions]"].waitForExistence(timeout: 5),
+            app.debugDescription
+        )
     }
 
     func testVoiceModesShareInlinePanelAndConfigurationDeepLink() {
@@ -123,10 +149,16 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_CANCELLED_RUN"] = "1"
         app.launch()
 
-        let runToggle = app.buttons["conversation.agent-run.toggle"]
-        XCTAssertTrue(runToggle.waitForExistence(timeout: 8), app.debugDescription)
-        runToggle.tap()
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.agent-run"].exists)
         XCTAssertTrue(app.staticTexts["WebSearch"].waitForExistence(timeout: 8), app.debugDescription)
+        let batch = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.tool-batch.")
+        ).firstMatch
+        XCTAssertTrue(batch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.tool-call.ui-web-search"].exists)
+        batch.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-web-search"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell"].waitForExistence(timeout: 5), app.debugDescription)
         let webSearchStatus = app.staticTexts["conversation.tool-call.ui-web-search.status"]
         XCTAssertTrue(webSearchStatus.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(webSearchStatus.label, "已取消")
@@ -140,6 +172,30 @@ final class LingxiCodeUITests: XCTestCase {
         screenshot.name = "取消后工具终态"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    func testMultiAgentDockSwitchesTranscriptAndRestoresMain() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
+        app.launch()
+
+        let picker = app.buttons["conversation.agent-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 8), app.debugDescription)
+        picker.tap()
+        let childRow = app.buttons["conversation.agent-row.ui-child"]
+        XCTAssertTrue(childRow.waitForExistence(timeout: 5), app.debugDescription)
+        childRow.tap()
+
+        XCTAssertTrue(app.staticTexts["Child agent completed the requested check."].waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.agent-read-only"].exists, app.debugDescription)
+        XCTAssertFalse(app.textFields["composer.input"].exists, app.debugDescription)
+
+        picker.tap()
+        let mainRow = app.buttons["conversation.agent-row.main"]
+        XCTAssertTrue(mainRow.waitForExistence(timeout: 5), app.debugDescription)
+        mainRow.tap()
+        XCTAssertTrue(app.staticTexts["Hello! I'm ready to help with your software engineering tasks."].waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
     func testDrawerTabsCreateAndSwitchProject() {

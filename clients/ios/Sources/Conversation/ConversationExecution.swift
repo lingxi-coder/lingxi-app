@@ -2,6 +2,10 @@ import Foundation
 
 enum ConversationRenderItem: Identifiable, Equatable {
     case message(Message)
+    /// Structured output produced by a local/display slash command. This is a
+    /// transcript artifact, not an assistant message, and is therefore never
+    /// fed into text-to-speech.
+    case commandOutput(ConversationCommandOutput)
     case run(ConversationExecutionRun)
     /// One restored tool call — the `toolUse` block of an assistant turn merged
     /// with the `toolResult` block that answers it from the FOLLOWING user turn.
@@ -17,6 +21,8 @@ enum ConversationRenderItem: Identifiable, Equatable {
         switch self {
         case let .message(message):
             return "message:\(message.id.uuidString)"
+        case let .commandOutput(output):
+            return "command-output:\(output.id)"
         case let .run(run):
             return "run:\(run.id)"
         case let .toolCall(trace):
@@ -28,23 +34,18 @@ enum ConversationRenderItem: Identifiable, Equatable {
 }
 
 /// Splits transient asynchronous agent execution from durable transcript rows.
-/// Only the latest execution with live asynchronous work is pinned with
-/// Tasks/Todos above the composer. Once all work is terminal, its result
-/// remains in the transcript so the user can see the outcome after a later
-/// turn begins.
+/// Runs are activity projections rather than transcript rows. `pinnedRun` is
+/// retained for older surfaces, while new surfaces should consume timeline
+/// groups.
 enum ConversationRenderLayout {
     private static func hasLiveWork(_ run: ConversationExecutionRun) -> Bool {
         run.status == .running || run.activeWorkers > 0
     }
 
     static func transcriptItems(_ items: [ConversationRenderItem]) -> [ConversationRenderItem] {
-        guard let pinnedIndex = items.lastIndex(where: {
-            if case let .run(run) = $0 { return hasLiveWork(run) }
-            return false
-        }) else { return items }
-
-        return items.enumerated().compactMap { index, item in
-            index == pinnedIndex ? nil : item
+        items.filter { item in
+            if case .run = item { return false }
+            return true
         }
     }
 
@@ -55,10 +56,143 @@ enum ConversationRenderLayout {
         return nil
     }
 
+    /// Project execution activity into stable, compact timeline groups. New
+    /// runs use their wire-order activity ledger; older runs fall back to the
+    /// legacy reasoning/tools/notices buckets.
+    static func timelineGroups(_ items: [ConversationRenderItem]) -> [ConversationTimelineGroup] {
+        var groups: [ConversationTimelineGroup] = []
+        var consumedBoundaryMessages: Set<UUID> = []
+
+        func appendGroup(id: String, runID: String?, status: ConversationExecutionStatus? = nil, rows: [ConversationTimelineRow]) {
+            guard !rows.isEmpty else { return }
+            groups.append(ConversationTimelineGroup(id: id, runID: runID, rows: rows, status: status))
+        }
+
+        for (itemIndex, item) in items.enumerated() {
+            switch item {
+            case let .message(message):
+                guard !consumedBoundaryMessages.contains(message.id) else { continue }
+                appendGroup(id: item.id, runID: nil, rows: [.message(message)])
+            case let .commandOutput(output):
+                appendGroup(id: item.id, runID: nil, rows: [.commandOutput(output)])
+            case let .notice(notice):
+                appendGroup(id: item.id, runID: nil, rows: [.notice(runID: nil, notice: notice)])
+            case let .toolCall(trace):
+                appendGroup(id: item.id, runID: nil, rows: [.tool(runID: nil, trace: trace)])
+            case let .run(run):
+                var pendingTools: [ConversationToolTrace] = []
+                let boundaryMessage: Message? = {
+                    let nextIndex = items.index(after: itemIndex)
+                    guard items.indices.contains(nextIndex),
+                          case let .message(message) = items[nextIndex]
+                    else { return nil }
+                    return message
+                }()
+                var insertedBoundaryMessage = false
+                func flushTools() {
+                    guard !pendingTools.isEmpty else { return }
+                    appendGroup(
+                        id: "run:\(run.id):tools:\(pendingTools.map(\.id).joined(separator: ","))",
+                        runID: run.id,
+                        status: run.status,
+                        rows: pendingTools.map { .tool(runID: run.id, trace: $0) }
+                    )
+                    pendingTools.removeAll(keepingCapacity: true)
+                }
+                func appendReasoning(_ id: String, _ text: String) {
+                    flushTools()
+                    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    appendGroup(id: id, runID: run.id, status: run.status, rows: [.reasoning(runID: run.id, activityID: id, text: text)])
+                }
+
+                let activities: [ConversationExecutionActivity]
+                if run.activities.isEmpty {
+                    var legacy: [ConversationExecutionActivity] = []
+                    if !run.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        legacy.append(.reasoning(id: "run:\(run.id):reasoning", text: run.reasoning))
+                    }
+                    legacy.append(contentsOf: run.tools.map { .tool(id: $0.id) })
+                    legacy.append(contentsOf: run.notices.map { .notice(id: $0.id) })
+                    activities = legacy
+                } else {
+                    activities = run.activities
+                }
+                for activity in activities {
+                    switch activity {
+                    case let .reasoning(id, text): appendReasoning(id, text)
+                    case let .tool(id):
+                        if let trace = run.tools.first(where: { $0.id == id }) { pendingTools.append(trace) }
+                    case let .notice(id):
+                        flushTools()
+                        if let notice = run.notices.first(where: { $0.id == id }) {
+                            appendGroup(id: "run:\(run.id):notice:\(id)", runID: run.id, status: run.status, rows: [.notice(runID: run.id, notice: notice)])
+                        }
+                    case .textBoundary:
+                        flushTools()
+                        if let boundaryMessage, !insertedBoundaryMessage {
+                            appendGroup(
+                                id: "message:\(boundaryMessage.id.uuidString)",
+                                runID: nil,
+                                rows: [.message(boundaryMessage)]
+                            )
+                            consumedBoundaryMessages.insert(boundaryMessage.id)
+                            insertedBoundaryMessage = true
+                        }
+                    }
+                }
+                flushTools()
+            }
+        }
+        return groups
+    }
+
+    static func timelineRows(_ items: [ConversationRenderItem]) -> [ConversationTimelineRow] {
+        timelineGroups(items).flatMap(\.rows)
+    }
+
     static func sheetQuestion(
         _ questions: [ConversationPendingQuestion]
     ) -> ConversationPendingQuestion? {
         questions.first
+    }
+}
+
+enum ConversationTimelineRow: Identifiable, Equatable {
+    case message(Message)
+    case commandOutput(ConversationCommandOutput)
+    case reasoning(runID: String, activityID: String, text: String)
+    case tool(runID: String?, trace: ConversationToolTrace)
+    case notice(runID: String?, notice: ConversationExecutionNotice)
+
+    var id: String {
+        switch self {
+        case let .message(message): return "message:\(message.id.uuidString)"
+        case let .commandOutput(output): return "command-output:\(output.id)"
+        case let .reasoning(runID, activityID, _): return "run:\(runID):reasoning:\(activityID)"
+        case let .tool(runID, trace): return "\(runID.map { "run:\($0):" } ?? "")tool:\(trace.id)"
+        case let .notice(runID, notice): return "\(runID.map { "run:\($0):" } ?? "")notice:\(notice.id)"
+        }
+    }
+}
+
+struct ConversationTimelineGroup: Identifiable, Equatable {
+    let id: String
+    let runID: String?
+    let status: ConversationExecutionStatus?
+    let rows: [ConversationTimelineRow]
+
+    init(id: String, runID: String?, rows: [ConversationTimelineRow], status: ConversationExecutionStatus? = nil) {
+        self.id = id
+        self.runID = runID
+        self.status = status
+        self.rows = rows
+    }
+
+    var isToolGroup: Bool {
+        !rows.isEmpty && rows.allSatisfy {
+            if case .tool = $0 { return true }
+            return false
+        }
     }
 }
 
@@ -80,6 +214,45 @@ enum ConversationToolVerb: Equatable, Hashable {
     case update, create, read, search, shell, output, kill, fetch, task, todo, skill, generic
 }
 
+/// Semantic icon identity for a tool header. This model-level mirror avoids a
+/// dependency on SwiftUI's `LXIconName` while preserving the engine verb and
+/// the legacy raw-tool fallback in one place.
+enum ConversationToolIcon: Equatable, Hashable {
+    /// Mirrors the Rust `ToolIconDto` variants one-for-one.
+    case read, search, list, edit, terminal, globe, workflow, listChecks, sparkles, plug, output, stop, wrench
+
+    static func resolve(verb: ConversationToolVerb?, tool: String) -> Self {
+        if let verb {
+            switch verb {
+            case .update, .create: return .edit
+            case .read: return .read
+            case .search: return .search
+            case .shell: return .terminal
+            case .output: return .output
+            case .kill: return .stop
+            case .fetch: return .globe
+            case .task: return .workflow
+            case .skill: return .sparkles
+            case .todo: return .listChecks
+            case .generic: break
+            }
+        }
+        let normalized = tool.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.contains("shell") || normalized.contains("bash") || normalized.contains("terminal") { return .terminal }
+        if normalized.contains("fetch") || normalized.contains("web") || normalized.contains("url") || normalized.contains("browser") { return .globe }
+        if normalized.contains("read") || normalized.contains("file") || normalized.contains("grep") { return .read }
+        if normalized.contains("search") || normalized.contains("documentation") || normalized.contains("docs") { return .search }
+        if normalized.contains("write") || normalized.contains("create") || normalized.contains("edit") || normalized.contains("update") { return .edit }
+        if normalized.contains("task") || normalized.contains("agent") || normalized.contains("workflow") { return .workflow }
+        if normalized.contains("skill") { return .sparkles }
+        if normalized.contains("todo") || normalized.contains("plan") { return .listChecks }
+        if normalized.contains("kill") || normalized.contains("stop") || normalized.contains("cancel") { return .stop }
+        if normalized.contains("plugin") || normalized.contains("mcp") { return .plug }
+        if normalized.contains("output") { return .output }
+        return .wrench
+    }
+}
+
 /// A header sub-line with its own glyph, e.g. `("$", "cargo test --all")`.
 /// Mirrors `ToolSubLineDto`. `text` is already collapsed to a single line.
 struct ConversationToolSubLine: Equatable, Hashable {
@@ -91,6 +264,9 @@ struct ConversationToolSubLine: Equatable, Hashable {
 /// `ToolHeaderDto`.
 struct ConversationToolHeader: Equatable, Hashable {
     let verb: ConversationToolVerb
+    /// Optional semantic icon from the current engine. `nil` is expected from
+    /// older engines and falls back to `verb`/raw tool name via `icon(for:)`.
+    let icon: ConversationToolIcon?
     /// English label. Localizing clients compose from `verb` instead — EXCEPT
     /// when the engine set an override the verb cannot express (a subagent
     /// type, `REPL`, `Web Search`, an MCP tool name), which is why the raw
@@ -103,6 +279,30 @@ struct ConversationToolHeader: Equatable, Hashable {
     let subLine: ConversationToolSubLine?
     /// Pre-composed English `label(primary)qualifier`, for non-localizing surfaces.
     let title: String
+
+    init(
+        verb: ConversationToolVerb,
+        icon: ConversationToolIcon? = nil,
+        label: String,
+        primary: String?,
+        qualifier: String?,
+        count: UInt32?,
+        subLine: ConversationToolSubLine?,
+        title: String
+    ) {
+        self.verb = verb
+        self.icon = icon
+        self.label = label
+        self.primary = primary
+        self.qualifier = qualifier
+        self.count = count
+        self.subLine = subLine
+        self.title = title
+    }
+
+    func icon(for tool: String) -> ConversationToolIcon {
+        icon ?? ConversationToolIcon.resolve(verb: verb, tool: tool.isEmpty ? label : tool)
+    }
 }
 
 /// Syntax class of one diff segment. Mirrors `SyntaxClassDto`; `op` is the
@@ -522,6 +722,24 @@ struct ConversationExecutionRun: Identifiable, Equatable {
     var coordinatorTeam: String? = nil
     var activeWorkers: UInt32 = 0
     var workers: [ConversationCoordinatorWorker] = []
+    /// Wire-order activity ledger for compact timeline rendering. Older runs
+    /// may omit it; projections then fall back to the legacy buckets above.
+    var activities: [ConversationExecutionActivity] = []
+}
+
+enum ConversationExecutionActivity: Equatable, Identifiable {
+    case reasoning(id: String, text: String)
+    case tool(id: String)
+    case notice(id: String)
+    /// A narrative assistant text boundary. It is intentionally not rendered
+    /// as a standalone row; it flushes adjacent tool grouping.
+    case textBoundary(id: String)
+
+    var id: String {
+        switch self {
+        case let .reasoning(id, _), let .tool(id), let .notice(id), let .textBoundary(id): return id
+        }
+    }
 }
 
 struct ConversationExecutionNotice: Identifiable, Equatable {

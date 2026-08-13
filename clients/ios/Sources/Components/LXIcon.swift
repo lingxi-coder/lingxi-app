@@ -7,10 +7,10 @@ import SwiftUI
 // use round caps/joins matching the original `strokeLinecap/Linejoin="round"`.
 
 enum LXIconName: String {
-    case menu, edit, search, sparkle, book, workflow, cog, plus, mic, paperclip
+    case menu, edit, pencil, search, sparkle, sparkles, book, bookOpen, listFiles, workflow, cog, wrench, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
-    case chevronR, play, pause, x, skill, plug, dream, link, copy, share
-    case warning, stop, arrowRight, audioWave, terminal, globe
+    case chevronR, play, pause, x, skill, plug, dream, link, copy, share, listChecks
+    case warning, stop, squareStop, arrowRight, audioWave, terminal, globe
 }
 
 struct LXIcon: View {
@@ -64,9 +64,15 @@ extension LXIcon {
         case .edit:
             return [PathSpec { line([(12,20),(21,20)]) },
                     PathSpec { var p = Path(); p.move(to: .init(x:16.5,y:3.5)); p.addCurve(to: .init(x:19.5,y:6.5), control1: .init(x:17.66,y:3.5), control2: .init(x:19.5,y:5.34)); p.addLine(to: .init(x:7,y:19)); p.addLine(to: .init(x:3,y:20)); p.addLine(to: .init(x:4,y:16)); p.closeSubpath(); return p }]
+        case .pencil:
+            // Lucide Pencil from Codex Desktop's app.asar.
+            return [
+                PathSpec { var p = Path(); p.move(to: .init(x:21.174,y:6.812)); p.addCurve(to: .init(x:17.188,y:2.825), control1: .init(x:21.174,y:4.6), control2: .init(x:19.4,y:2.825)); p.addLine(to: .init(x:3.842,y:16.174)); p.addCurve(to: .init(x:3.342,y:17.004), control1: .init(x:3.58,y:16.436), control2: .init(x:3.41,y:16.718)); p.addLine(to: .init(x:2.021,y:21.356)); p.addCurve(to: .init(x:2.644,y:21.978), control1: .init(x:1.921,y:21.687), control2: .init(x:2.313,y:22.079)); p.addLine(to: .init(x:6.997,y:20.658)); p.addCurve(to: .init(x:7.827,y:20.161), control1: .init(x:7.315,y:20.562), control2: .init(x:7.598,y:20.393)); p.addLine(to: .init(x:21.174,y:6.812)); return p },
+                PathSpec { line([(15,5),(19,9)]) },
+            ]
         case .search:
             return [PathSpec { circle(11,11,7) }, PathSpec { line([(21,21),(16.7,16.7)]) }]
-        case .sparkle:
+        case .sparkle, .sparkles:
             return [PathSpec { line([(12,3),(12,6)]) }, PathSpec { line([(12,18),(12,21)]) },
                     PathSpec { line([(3,12),(6,12)]) }, PathSpec { line([(18,12),(21,12)]) },
                     PathSpec { line([(5.6,5.6),(7.7,7.7)]) }, PathSpec { line([(16.3,16.3),(18.4,18.4)]) },
@@ -75,6 +81,21 @@ extension LXIcon {
         case .book:
             return [PathSpec { var p = Path(); p.move(to: .init(x:4,y:19.5)); p.addCurve(to: .init(x:6.5,y:17), control1: .init(x:4,y:18.12), control2: .init(x:5.12,y:17)); p.addLine(to: .init(x:20,y:17)); return p },
                     PathSpec { var p = Path(); p.move(to: .init(x:6.5,y:2)); p.addLine(to: .init(x:20,y:2)); p.addLine(to: .init(x:20,y:22)); p.addLine(to: .init(x:6.5,y:22)); p.addCurve(to: .init(x:4,y:19.5), control1: .init(x:5.12,y:22), control2: .init(x:4,y:20.88)); p.addLine(to: .init(x:4,y:4.5)); p.addCurve(to: .init(x:6.5,y:2), control1: .init(x:4,y:3.12), control2: .init(x:5.12,y:2)); p.closeSubpath(); return p }]
+        case .bookOpen:
+            // Lucide BookOpen from Codex Desktop's app.asar.
+            return [
+                PathSpec { line([(12,7),(12,21)]) },
+                PathSpec { var p = Path(); p.move(to: .init(x:3,y:18)); p.addCurve(to: .init(x:2,y:17), control1: .init(x:2.45,y:18), control2: .init(x:2,y:17.55)); p.addLine(to: .init(x:2,y:4)); p.addCurve(to: .init(x:3,y:3), control1: .init(x:2,y:3.45), control2: .init(x:2.45,y:3)); p.addLine(to: .init(x:8,y:3)); p.addCurve(to: .init(x:12,y:7), control1: .init(x:10.21,y:3), control2: .init(x:12,y:4.79)); p.addCurve(to: .init(x:16,y:3), control1: .init(x:12,y:4.79), control2: .init(x:13.79,y:3)); p.addLine(to: .init(x:21,y:3)); p.addCurve(to: .init(x:22,y:4), control1: .init(x:21.55,y:3), control2: .init(x:22,y:3.45)); p.addLine(to: .init(x:22,y:17)); p.addCurve(to: .init(x:21,y:18), control1: .init(x:22,y:17.55), control2: .init(x:21.55,y:18)); p.addLine(to: .init(x:15,y:18)); p.addCurve(to: .init(x:12,y:21), control1: .init(x:13.34,y:18), control2: .init(x:12,y:19.34)); p.addCurve(to: .init(x:9,y:18), control1: .init(x:12,y:19.34), control2: .init(x:10.66,y:18)); p.closeSubpath(); return p },
+            ]
+        case .listFiles:
+            return [
+                PathSpec { var p = Path(); p.move(to: .init(x:4,y:4)); p.addLine(to: .init(x:7,y:4)); p.addLine(to: .init(x:8.5,y:5.5)); p.addLine(to: .init(x:8.5,y:8.5)); p.addLine(to: .init(x:4,y:8.5)); p.closeSubpath(); return p },
+                PathSpec { line([(11,6.25),(20,6.25)]) },
+                PathSpec { var p = Path(); p.move(to: .init(x:4,y:10)); p.addLine(to: .init(x:7,y:10)); p.addLine(to: .init(x:8.5,y:11.5)); p.addLine(to: .init(x:8.5,y:14.5)); p.addLine(to: .init(x:4,y:14.5)); p.closeSubpath(); return p },
+                PathSpec { line([(11,12.25),(20,12.25)]) },
+                PathSpec { var p = Path(); p.move(to: .init(x:4,y:16)); p.addLine(to: .init(x:7,y:16)); p.addLine(to: .init(x:8.5,y:17.5)); p.addLine(to: .init(x:8.5,y:20)); p.addLine(to: .init(x:4,y:20)); p.closeSubpath(); return p },
+                PathSpec { line([(11,18.25),(20,18.25)]) },
+            ]
         case .workflow:
             return [PathSpec { roundedRect(3,3,6,6,1.5) }, PathSpec { roundedRect(15,3,6,6,1.5) }, PathSpec { roundedRect(9,15,6,6,1.5) },
                     PathSpec { var p = Path(); p.move(to: .init(x:6,y:9)); p.addLine(to: .init(x:6,y:11)); p.addCurve(to: .init(x:8,y:13), control1: .init(x:6,y:12.1), control2: .init(x:6.9,y:13)); p.addLine(to: .init(x:16,y:13)); p.addCurve(to: .init(x:18,y:11), control1: .init(x:17.1,y:13), control2: .init(x:18,y:12.1)); p.addLine(to: .init(x:18,y:9)); return p }]
@@ -94,6 +115,9 @@ extension LXIcon {
                 PathSpec { line([(14,4),(14,20)]) },
                 PathSpec { line([(18,8),(18,16)]) },
             ]
+        case .wrench:
+            // Lucide Wrench from Codex Desktop's app.asar.
+            return [PathSpec { var p = Path(); p.move(to: .init(x:14.7,y:6.3)); p.addCurve(to: .init(x:14.7,y:7.7), control1: .init(x:14.31,y:6.69), control2: .init(x:14.31,y:7.31)); p.addLine(to: .init(x:16.3,y:9.3)); p.addCurve(to: .init(x:17.7,y:9.3), control1: .init(x:16.69,y:9.69), control2: .init(x:17.31,y:9.69)); p.addLine(to: .init(x:21.47,y:5.53)); p.addCurve(to: .init(x:13.53,y:13.47), control1: .init(x:23.02,y:10.08), control2: .init(x:18.08,y:15.02)); p.addLine(to: .init(x:6.62,y:20.38)); p.addCurve(to: .init(x:3.62,y:17.38), control1: .init(x:4.96,y:22.04), control2: .init(x:1.96,y:19.04)); p.addLine(to: .init(x:10.53,y:10.47)); p.addCurve(to: .init(x:18.47,y:2.53), control1: .init(x:8.98,y:5.92), control2: .init(x:13.92,y:0.98)); p.addLine(to: .init(x:14.7,y:6.3)); return p }]
         case .terminal:
             return [
                 PathSpec { roundedRect(3,4,18,16,2) },
@@ -161,12 +185,21 @@ extension LXIcon {
                     PathSpec { circle(18, 19, 3) },
                     PathSpec { line([(8.59, 13.51), (15.42, 17.49)]) },
                     PathSpec { line([(15.41, 6.51), (8.59, 10.49)]) }]
+        case .listChecks:
+            return [
+                // Lucide ListChecks from Codex Desktop's app.asar.
+                PathSpec { line([(3,17),(5,19),(9,15)]) },
+                PathSpec { line([(3,7),(5,9),(9,5)]) },
+                PathSpec { line([(13,6),(21,6)]) },
+                PathSpec { line([(13,12),(21,12)]) },
+                PathSpec { line([(13,18),(21,18)]) },
+            ]
         case .warning:
             // Triangle-exclamation: a rounded warning triangle + the bang stem;
             // the bang dot is drawn as a fill (see fillPaths).
             return [PathSpec { var p = Path(); p.move(to: .init(x:10.29,y:3.86)); p.addLine(to: .init(x:1.82,y:18)); p.addCurve(to: .init(x:3.53,y:21), control1: .init(x:1.45,y:18.64), control2: .init(x:2.78,y:21)); p.addLine(to: .init(x:20.47,y:21)); p.addCurve(to: .init(x:22.18,y:18), control1: .init(x:21.22,y:21), control2: .init(x:22.55,y:18.64)); p.addLine(to: .init(x:13.71,y:3.86)); p.addCurve(to: .init(x:10.29,y:3.86), control1: .init(x:12.93,y:2.6), control2: .init(x:11.07,y:2.6)); p.closeSubpath(); return p },
                     PathSpec { line([(12,9),(12,13)]) }]
-        case .arrowUp, .play, .pause, .stop:
+        case .arrowUp, .play, .pause, .stop, .squareStop:
             return [] // filled icons
         }
     }
@@ -179,7 +212,7 @@ extension LXIcon {
             return [PathSpec { line([(6,4),(20,12),(6,20)]) }]
         case .pause:
             return [PathSpec { roundedRect(6,5,4,14,1) }, PathSpec { roundedRect(14,5,4,14,1) }]
-        case .stop:
+        case .stop, .squareStop:
             // A filled rounded square — the universal "stop the stream" glyph.
             return [PathSpec { roundedRect(6,6,12,12,2.5) }]
         case .warning:

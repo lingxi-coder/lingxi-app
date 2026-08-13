@@ -50,6 +50,27 @@ pub enum ToolVerbDto {
     Generic,
 }
 
+/// Stable semantic icon identity for one tool-call header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolIconDto {
+    Read,
+    Search,
+    List,
+    Edit,
+    Terminal,
+    Globe,
+    Workflow,
+    ListChecks,
+    Sparkles,
+    Plug,
+    Output,
+    Stop,
+    Wrench,
+}
+
 /// A second header line with its own glyph, e.g. `$ cargo test --all`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -63,6 +84,8 @@ pub struct ToolSubLineDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ToolHeaderDto {
     pub verb: ToolVerbDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ToolIconDto>,
     /// English label. Localizing clients key off `verb` instead.
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

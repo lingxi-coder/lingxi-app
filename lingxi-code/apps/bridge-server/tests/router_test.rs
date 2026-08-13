@@ -899,19 +899,19 @@ async fn slash_command_routes_to_registry() {
         .route(
             ClientCommand::RunSlashCommand {
                 raw: "/clear".into(),
+                turn_id: Some(7),
             },
             sink.clone(),
         )
         .await;
 
-    // The dispatcher handled the command — the router surfaces its display as a
-    // TextDelta (the slash reply is LOSSY: display text + optional injected
-    // prompt, per CommandResultDto).
+    // The dispatcher handled the command and preserves the caller's turn id in
+    // a structured local-result event.
     let events = sink.events().await;
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, ClientEvent::TextDelta { text } if !text.is_empty())),
+            .any(|e| matches!(e, ClientEvent::SlashCommandResult { turn_id: Some(7), display, is_error: false } if !display.is_empty())),
         "the slash command must route to the registry and surface a display, got {events:?}"
     );
 }
@@ -1048,6 +1048,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
         .route(
             ClientCommand::RunSlashCommand {
                 raw: "/install".into(),
+                turn_id: Some(9),
             },
             sink.clone(),
         )
@@ -1057,7 +1058,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, ClientEvent::TextDelta { text } if text == "installed")),
+            .any(|event| matches!(event, ClientEvent::SlashCommandResult { turn_id: Some(9), display, is_error: false } if display == "installed")),
         "dispatcher reply must be surfaced, got {events:?}"
     );
     assert!(

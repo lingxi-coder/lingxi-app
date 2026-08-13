@@ -154,12 +154,37 @@ pub struct AgentDto {
     pub tools_allowed: Vec<String>,
 }
 
+/// A session-scoped agent row. Unlike [`AgentDto`], which describes the
+/// static `/agents` catalog, this projection describes one agent instance in
+/// the current session and is therefore suitable for the mobile conversation
+/// picker. All fields are intentionally strings/primitive values so the shape
+/// remains UniFFI-friendly and can be rendered without engine types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SessionAgentSummaryDto {
+    /// Stable agent id (`agent:<uuid>`); the main conversation uses `main`.
+    pub agent_id: String,
+    /// Display name (the spawn name, or a short id fallback).
+    pub name: String,
+    /// Agent type (for example `general-purpose` or `teammate`).
+    pub agent_type: String,
+    /// Lifecycle label (`running`, `idle`, `completed`, `failed`, `killed`,
+    /// or `unknown`).
+    pub status: String,
+    /// Compact, user-facing description of the most recent activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_activity: Option<String>,
+    /// Last transcript update as Unix epoch milliseconds, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
+}
+
 // ── Slash commands ───────────────────────────────────────────────────────────
 
 /// One slash-command catalog entry — the display-relevant fields of
 /// `command_api::model::SlashCommand` (`command-api/src/model.rs:12`). The rich
-/// `SlashCommandKind` dispatch shape stays engine-side; the wire carries `name`,
-/// `description`, and a `source` classification string. Carried by
+/// `SlashCommandKind` dispatch shape stays engine-side; the wire carries the
+/// user-facing palette metadata. Carried by
 /// [`crate::events::ClientEvent::SlashCommandCatalog`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -171,6 +196,24 @@ pub struct SlashCommandDto {
     /// Origin classification string (e.g. `"builtin"`, `"markdown"`,
     /// `"plugin"`, `"mcp"`) — the lowered `CommandSource`.
     pub source: String,
+    /// Alternate names that also resolve to this command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Optional argument hint rendered alongside the command name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    /// Compact menu label; when absent, clients fall back to `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu_description: Option<String>,
+    /// Hidden commands stay resolvable by exact input but should not appear in
+    /// a bare `/` menu.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // ── Memory ───────────────────────────────────────────────────────────────────

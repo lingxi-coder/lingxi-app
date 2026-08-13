@@ -9,6 +9,8 @@
 
 use serde_json::Value;
 
+use crate::collapse::classify::classify;
+
 /// A stable, non-localized identifier for a header verb.
 ///
 /// Clients that ship localized UI look the verb up by this key; the terminal
@@ -41,6 +43,26 @@ pub enum ToolVerb {
     Skill,
     /// Anything without a table entry — the raw tool name is the label.
     Generic,
+}
+
+/// A stable semantic icon identity for a tool-call header. Clients map these
+/// keys to their platform icon set; Rust derives the meaning once so Bash and
+/// MCP calls cannot drift between surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolIcon {
+    Read,
+    Search,
+    List,
+    Edit,
+    Terminal,
+    Globe,
+    Workflow,
+    ListChecks,
+    Sparkles,
+    Plug,
+    Output,
+    Stop,
+    Wrench,
 }
 
 impl ToolVerb {
@@ -101,6 +123,8 @@ pub struct ToolSubLine {
 pub struct ToolHeader {
     /// Stable verb identity.
     pub verb: ToolVerb,
+    /// Stable semantic icon identity.
+    pub icon: ToolIcon,
     /// English label — [`ToolVerb::english`], or the raw tool name for
     /// [`ToolVerb::Generic`]. Never empty.
     pub label: String,
@@ -180,6 +204,45 @@ pub fn mcp_parts<'a>(tool: &'a str, input: &'a Value) -> Option<(&'a str, &'a st
     full_name.strip_prefix("mcp__")?.split_once("__")
 }
 
+/// Derive a semantic icon, reusing the canonical collapse classifier for Bash
+/// and namespaced MCP calls. The classifier already distinguishes `cat`/`rg`/
+/// `ls`; this keeps the header icon and collapsed transcript behavior aligned.
+#[must_use]
+pub fn tool_icon(tool: &str, input: &Value) -> ToolIcon {
+    if tool == "MCP" || tool.starts_with("mcp__") {
+        // MCP identity is more useful than guessing a server-specific verb;
+        // mutating and read-only tools alike are surfaced through the plug.
+        ToolIcon::Plug
+    } else if tool == "Bash" {
+        let classification = classify(tool, input, false);
+        if classification.is_search {
+            ToolIcon::Search
+        } else if classification.is_read {
+            ToolIcon::Read
+        } else if classification.is_list {
+            ToolIcon::List
+        } else {
+            ToolIcon::Terminal
+        }
+    } else {
+        match tool {
+            "Read" | "NotebookRead" => ToolIcon::Read,
+            "Grep" | "Glob" | "Search" => ToolIcon::Search,
+            "List" | "ListFiles" | "ListDir" | "LS" => ToolIcon::List,
+            "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ToolIcon::Edit,
+            "Shell" | "PowerShell" | "REPL" => ToolIcon::Terminal,
+            "WebFetch" | "WebSearch" | "Fetch" => ToolIcon::Globe,
+            "Task" | "Agent" | "Workflow" => ToolIcon::Workflow,
+            "TodoWrite" | "ListChecks" => ToolIcon::ListChecks,
+            "Skill" | "Sparkles" => ToolIcon::Sparkles,
+            "TaskOutput" | "BashOutput" | "BashOutputTool" | "Output" => ToolIcon::Output,
+            "TaskStop" | "KillShell" | "KillBash" | "Stop" => ToolIcon::Stop,
+            "Plug" => ToolIcon::Plug,
+            _ => ToolIcon::Wrench,
+        }
+    }
+}
+
 /// Derive the header for one tool call. PURE — the ONE table.
 ///
 /// KNOWN DIVERGENCE: `tools/agent`'s `user_facing_name_for_input`
@@ -194,6 +257,7 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
     if let Some((server, mcp_tool)) = mcp_parts(tool, input) {
         return ToolHeader {
             verb: ToolVerb::Generic,
+            icon: tool_icon(tool, input),
             label: mcp_tool.to_string(),
             primary: first_str(input, GENERIC_PRIMARY_KEYS).map(one_line),
             qualifier: Some(format!(" ({server} MCP)")),
@@ -204,6 +268,7 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
 
     let mut header = ToolHeader {
         verb: ToolVerb::Generic,
+        icon: tool_icon(tool, input),
         // Resolved below: an arm may set `label_override`, otherwise the verb's
         // English label wins, otherwise the raw tool name.
         label: String::new(),
@@ -578,5 +643,54 @@ mod tests {
         assert_eq!(activity_label("Edit"), "Editing");
         assert_eq!(activity_label("Task"), "Delegating");
         assert_eq!(activity_label("Whatever"), "Running Whatever");
+    }
+
+    #[test]
+    fn icons_follow_bash_classifier_and_mcp_identity() {
+        assert_eq!(
+            tool_icon("Bash", &json!({"command": "cat file"})),
+            ToolIcon::Read
+        );
+        assert_eq!(
+            tool_icon("Bash", &json!({"command": "rg needle src"})),
+            ToolIcon::Search
+        );
+        assert_eq!(
+            tool_icon("Bash", &json!({"command": "ls -la"})),
+            ToolIcon::List
+        );
+        assert_eq!(
+            tool_icon("Bash", &json!({"command": "cargo test"})),
+            ToolIcon::Terminal
+        );
+        assert_eq!(
+            tool_icon("mcp__github__search_code", &json!({})),
+            ToolIcon::Plug
+        );
+        assert_eq!(
+            tool_icon("MCP", &json!({"full_name": "mcp__fs__read_file"})),
+            ToolIcon::Plug
+        );
+    }
+
+    #[test]
+    fn icons_cover_non_bash_tool_families() {
+        let cases = [
+            ("Read", ToolIcon::Read),
+            ("Grep", ToolIcon::Search),
+            ("List", ToolIcon::List),
+            ("Edit", ToolIcon::Edit),
+            ("Shell", ToolIcon::Terminal),
+            ("WebFetch", ToolIcon::Globe),
+            ("Task", ToolIcon::Workflow),
+            ("TodoWrite", ToolIcon::ListChecks),
+            ("Skill", ToolIcon::Sparkles),
+            ("TaskOutput", ToolIcon::Output),
+            ("TaskStop", ToolIcon::Stop),
+            ("Other", ToolIcon::Wrench),
+        ];
+        for (tool, expected) in cases {
+            assert_eq!(tool_icon(tool, &json!({})), expected, "{tool}");
+        }
     }
 }

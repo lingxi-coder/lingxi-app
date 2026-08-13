@@ -114,6 +114,49 @@ impl CommandRegistry {
             .collect()
     }
 
+    /// Commands exposed through the user-facing slash palette. This is a
+    /// distinct projection from [`Self::model_invocable_commands`]: it keeps
+    /// manual-only commands, excludes env-disabled builtins and
+    /// `user_invocable = false`, and preserves hidden commands so callers can
+    /// still match them on exact input.
+    #[must_use]
+    pub fn palette_commands(&self) -> Vec<SlashCommand> {
+        self.commands
+            .values()
+            .filter(|command| command.user_invocable != Some(false))
+            .filter(|command| {
+                !matches!(command.kind, SlashCommandKind::Builtin { .. })
+                    || !crate::builtin_support::names::is_command_env_disabled(&command.name)
+            })
+            .map(|command| {
+                let mut command = command.clone();
+                command.aliases = self.aliases_for(&command.name);
+                command
+            })
+            .collect()
+    }
+
+    /// Every alias that resolves to `target`, including aliases declared on the
+    /// command and aliases registered separately via [`Self::register_alias`].
+    #[must_use]
+    pub fn aliases_for(&self, target: &str) -> Vec<String> {
+        let mut aliases = self
+            .resolve(target)
+            .map_or_else(Vec::new, |command| command.aliases.clone());
+        for alias in crate::builtin_support::names::command_aliases(target) {
+            if !aliases.iter().any(|existing| existing == alias) {
+                aliases.push((*alias).to_string());
+            }
+        }
+        for (alias, canonical) in &self.aliases {
+            if canonical == target && !aliases.iter().any(|existing| existing == alias) {
+                aliases.push(alias.clone());
+            }
+        }
+        aliases.sort();
+        aliases
+    }
+
     /// Remove every command previously registered under `plugin_id`, along with
     /// any aliases that pointed at those commands.
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
@@ -234,6 +277,7 @@ mod tests {
         assert!(c.skill_root.is_none());
         assert!(c.user_invocable.is_none());
         assert!(c.content_length.is_none());
+        assert!(c.menu_description.is_none());
     }
 
     #[test]
@@ -277,5 +321,44 @@ mod tests {
 
         // Canonicalization is a no-op for an unknown, non-alias name.
         assert!(reg.get_handler("nonexistent").is_none());
+    }
+
+    #[test]
+    fn aliases_for_includes_direct_and_registered_aliases() {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(markdown_cmd("resume", vec!["continue".to_string()]));
+        reg.register_alias("unpause".to_string(), "resume".to_string());
+
+        assert_eq!(
+            reg.aliases_for("resume"),
+            vec!["continue".to_string(), "unpause".to_string()]
+        );
+    }
+
+    #[test]
+    fn palette_commands_include_manual_only_but_filter_non_user_and_env_disabled() {
+        let mut reg = CommandRegistry::new();
+
+        let mut manual_only = markdown_cmd("manual-only", vec![]);
+        manual_only.disable_model_invocation = true;
+        reg.register_command(manual_only);
+
+        let mut hidden_from_user = markdown_cmd("internal", vec![]);
+        hidden_from_user.user_invocable = Some(false);
+        reg.register_command(hidden_from_user);
+
+        reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new("login", "Login")));
+
+        std::env::set_var("DISABLE_LOGIN_COMMAND", "1");
+        let palette: Vec<String> = reg
+            .palette_commands()
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+        std::env::remove_var("DISABLE_LOGIN_COMMAND");
+
+        assert!(palette.contains(&"manual-only".to_string()));
+        assert!(!palette.contains(&"internal".to_string()));
+        assert!(!palette.contains(&"login".to_string()));
     }
 }

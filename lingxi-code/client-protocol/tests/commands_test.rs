@@ -216,18 +216,51 @@ fn list_models_round_trips() {
     assert_eq!(back, cmd);
 }
 
-/// `RunSlashCommand` — LOSSY at the dispatcher; the reply is a
-/// [`CommandResultDto`]. The command itself carries only the raw input line.
+#[test]
+fn session_agent_commands_round_trip() {
+    let list = ClientCommand::ListSessionAgents;
+    let json = serde_json::to_value(&list).expect("serialize ListSessionAgents");
+    assert_eq!(json["type"], "list_session_agents");
+    assert_eq!(serde_json::from_value::<ClientCommand>(json).unwrap(), list);
+
+    let load = ClientCommand::LoadSessionAgentTranscript {
+        agent_id: "agent:00000000-0000-0000-0000-000000000001".into(),
+    };
+    let json = serde_json::to_value(&load).expect("serialize LoadSessionAgentTranscript");
+    assert_eq!(json["type"], "load_session_agent_transcript");
+    assert_eq!(
+        json["agent_id"],
+        "agent:00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(serde_json::from_value::<ClientCommand>(json).unwrap(), load);
+}
+
+/// `RunSlashCommand` optionally carries a client-owned `turn_id` so prompt-like
+/// slash commands can reuse the ordinary turn lifecycle.
 #[test]
 fn run_slash_command_round_trips() {
     let cmd = ClientCommand::RunSlashCommand {
         raw: "/model opus".to_string(),
+        turn_id: Some(7),
     };
     let json = serde_json::to_value(&cmd).expect("serialize RunSlashCommand");
     assert_eq!(json["type"], "run_slash_command");
     assert_eq!(json["raw"], "/model opus");
+    assert_eq!(json["turn_id"], 7);
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize RunSlashCommand");
     assert_eq!(back, cmd);
+
+    let without_turn = ClientCommand::RunSlashCommand {
+        raw: "/help".to_string(),
+        turn_id: None,
+    };
+    let json = serde_json::to_value(&without_turn).expect("serialize RunSlashCommand");
+    assert!(
+        json.get("turn_id").is_none(),
+        "None turn_id must be skipped"
+    );
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize RunSlashCommand");
+    assert_eq!(back, without_turn);
 }
 
 /// `CommandResultDto` — the reply for `RunSlashCommand` (display text + an
@@ -686,6 +719,7 @@ fn no_live_command_carries_session_id() {
         ClientCommand::ListModels,
         ClientCommand::RunSlashCommand {
             raw: "/x".to_string(),
+            turn_id: None,
         },
         ClientCommand::RefreshListings {
             which: vec![ListingKindDto::Status],

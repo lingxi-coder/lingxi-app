@@ -27,6 +27,15 @@ pub struct TranscriptEntry {
     /// Terminal failure detail. Kept out of ordinary message entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional display name of the spawned agent. Older transcripts omit
+    /// this field; hosts fall back to the parked task row or agent id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// Resolved agent type (for example `general-purpose`). Persisting this
+    /// beside messages lets a live tail expose metadata before a parked task
+    /// row exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
@@ -37,6 +46,8 @@ pub struct AgentTranscriptWriter {
     pub agent_id: AgentId,
     /// Sandboxed filesystem used to read/write the transcript.
     fs: Arc<dyn FileSystem>,
+    agent_name: Option<String>,
+    agent_type: Option<String>,
 }
 
 impl AgentTranscriptWriter {
@@ -47,7 +58,18 @@ impl AgentTranscriptWriter {
             transcript_path,
             agent_id,
             fs,
+            agent_name: None,
+            agent_type: None,
         }
+    }
+
+    /// Attach display metadata that is copied onto each entry. This remains a
+    /// builder so existing minimal/test callers can keep the old constructor.
+    #[must_use]
+    pub fn with_metadata(mut self, agent_name: Option<String>, agent_type: Option<String>) -> Self {
+        self.agent_name = agent_name;
+        self.agent_type = agent_type;
+        self
     }
 
     /// Append one [`TranscriptEntry`] for `message`.
@@ -58,6 +80,8 @@ impl AgentTranscriptWriter {
             message: message.clone(),
             status: None,
             error: None,
+            agent_name: self.agent_name.clone(),
+            agent_type: self.agent_type.clone(),
         };
         self.append_entry(&entry).await
     }
@@ -81,6 +105,8 @@ impl AgentTranscriptWriter {
             },
             status: Some(status.to_string()),
             error: error.map(str::to_string),
+            agent_name: self.agent_name.clone(),
+            agent_type: self.agent_type.clone(),
         };
         self.append_entry(&entry).await
     }

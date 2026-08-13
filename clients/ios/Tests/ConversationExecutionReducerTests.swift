@@ -83,6 +83,36 @@ import XCTest
             XCTAssertEqual(source.model.statusLine, "Shell 完成")
         }
 
+        func testLiveActivityLedgerPreservesWireOrderAndTextBoundaries() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 8, sessionId: "session-a")
+            source.applyForTesting(.turnStarted(turnId: 8))
+            source.applyForTesting(.thinkingDelta(thinking: "inspect ", signature: nil))
+            source.applyForTesting(.thinkingDelta(thinking: "workspace", signature: nil))
+            source.applyForTesting(.toolUseStarted(
+                id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil))
+            source.applyForTesting(.textDelta(text: "result text"))
+            source.applyForTesting(.systemNotice(message: "waiting", isError: false))
+
+            guard case let .run(run)? = source.model.items.first(where: {
+                if case .run = $0 { return true }
+                return false
+            }) else { return XCTFail("expected active run") }
+            XCTAssertEqual(run.activities.count, 4)
+            guard case let .reasoning(_, reasoning) = run.activities[0],
+                  case .tool(let toolID) = run.activities[1],
+                  case .textBoundary = run.activities[2],
+                  case .notice(let noticeID) = run.activities[3]
+            else { return XCTFail("activity order must follow event order") }
+            XCTAssertEqual(reasoning, "inspect workspace")
+            XCTAssertEqual(toolID, "tool-a")
+            XCTAssertTrue(noticeID.hasPrefix("notice-"))
+
+            let groups = source.model.visibleTimelineGroups
+            XCTAssertEqual(groups.filter(\.isToolGroup).count, 1)
+            XCTAssertEqual(groups.map(\.status), [.running, .running, nil, .running])
+        }
+
         func testSettledDurableTurnRequestsAuthoritativeSessionRefresh() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 31, sessionId: "session-a")
@@ -110,6 +140,7 @@ import XCTest
             let kinds = source.model.items.map { item -> String in
                 switch item {
                 case .message: return "message"
+                case .commandOutput: return "command-output"
                 case .run: return "run"
                 case .notice: return "notice"
                 case .toolCall: return "tool"
@@ -117,7 +148,7 @@ import XCTest
             }
             XCTAssertEqual(
                 kinds,
-                ["message", "run", "notice"],
+                ["run", "message", "notice"],
                 "the terminal result belongs to its assistant message, not the list tail")
         }
 
@@ -640,6 +671,7 @@ import XCTest
         private func sampleHeader() -> ToolHeaderDto {
             ToolHeaderDto(
                 verb: .update,
+                icon: .edit,
                 label: "Update",
                 primary: "src/host.rs",
                 qualifier: " (3 edits)",
@@ -703,6 +735,7 @@ import XCTest
             XCTAssertEqual(header.primary, "src/host.rs")
             XCTAssertEqual(header.qualifier, " (3 edits)")
             XCTAssertEqual(header.title, "Update(src/host.rs) (3 edits)")
+            XCTAssertEqual(header.icon, .some(.edit))
             // The verb is what a localizing client renders — never the English
             // `label` that rides along for non-localizing surfaces.
             XCTAssertEqual(
@@ -797,6 +830,11 @@ import XCTest
                 ToolDisplayText.verbLabel(bash),
                 String(localized: "chat_tool_verb_shell \(1)"))
             XCTAssertNotEqual(ToolDisplayText.verbLabel(bash), bash.label)
+            XCTAssertEqual(bash.icon(for: "bash"), .terminal)
+            let legacy = ConversationToolHeader(
+                verb: .generic, label: "custom", primary: nil, qualifier: nil,
+                count: nil, subLine: nil, title: "custom")
+            XCTAssertEqual(legacy.icon(for: "WebSearch"), .globe)
         }
 
         func testPlanUpdatedReplacesTheWholeListAndAnEmptyListClearsIt() {

@@ -10,6 +10,7 @@
 //! JSON **String** (`input_json`/`result_json`).
 
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
+use client_protocol::listings::SessionAgentSummaryDto;
 use client_protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
     AppCheckpointKindDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeModeDto,
@@ -17,6 +18,68 @@ use client_protocol::local_apps::{
     AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
+use client_protocol::tool_display::{ToolHeaderDto, ToolVerbDto};
+
+#[test]
+fn tool_header_icon_is_optional_for_older_wire_payloads() {
+    let old = serde_json::json!({
+        "verb": "read",
+        "label": "Read",
+        "title": "Read(file.txt)"
+    });
+    let header: ToolHeaderDto = serde_json::from_value(old).expect("old header remains readable");
+    assert_eq!(header.verb, ToolVerbDto::Read);
+    assert_eq!(header.icon, None);
+}
+
+#[test]
+fn session_agent_events_round_trip() {
+    let summary = SessionAgentSummaryDto {
+        agent_id: "agent:00000000-0000-0000-0000-000000000001".into(),
+        name: "researcher".into(),
+        agent_type: "explorer".into(),
+        status: "running".into(),
+        latest_activity: Some("Reading protocol files".into()),
+        updated_at_ms: Some(1_750_000_000_000),
+    };
+    let list = ClientEvent::SessionAgentList {
+        session_id: "00000000-0000-0000-0000-000000000002".into(),
+        agents: vec![summary.clone()],
+    };
+    let json = serde_json::to_value(&list).expect("serialize SessionAgentList");
+    assert_eq!(json["type"], "session_agent_list");
+    assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), list);
+
+    let message = MessageDto {
+        role: "assistant".into(),
+        blocks: vec![MessageBlockDto::Text {
+            text: "done".into(),
+        }],
+    };
+    for event in [
+        ClientEvent::SessionAgentTranscript {
+            session_id: "session".into(),
+            agent_id: summary.agent_id.clone(),
+            messages: vec![message.clone()],
+            next_message_index: 1,
+            revision: 1,
+        },
+        ClientEvent::SessionAgentUpdated {
+            session_id: "session".into(),
+            agent: summary.clone(),
+        },
+        ClientEvent::SessionAgentMessage {
+            session_id: "session".into(),
+            agent_id: summary.agent_id.clone(),
+            message_index: 0,
+            message: message.clone(),
+        },
+    ] {
+        let json = serde_json::to_value(&event).expect("serialize session-agent event");
+        let back: ClientEvent = serde_json::from_value(json).expect("deserialize event");
+        assert_eq!(back, event);
+    }
+}
 
 #[test]
 fn ask_user_question_resolved_round_trips() {
@@ -27,6 +90,37 @@ fn ask_user_question_resolved_round_trips() {
     let back: ClientEvent =
         serde_json::from_value(json).expect("deserialize AskUserQuestionResolved");
     assert_eq!(back, ev);
+}
+
+#[test]
+fn slash_command_result_round_trips() {
+    let ev = ClientEvent::SlashCommandResult {
+        turn_id: Some(9),
+        display: "Switched model to opus".to_string(),
+        is_error: false,
+    };
+    let json = serde_json::to_value(&ev).expect("serialize SlashCommandResult");
+    assert_eq!(json["type"], "slash_command_result");
+    assert_eq!(json["turn_id"], 9);
+    assert_eq!(json["display"], "Switched model to opus");
+    assert!(
+        json.get("is_error").is_none(),
+        "default false is_error must be skipped"
+    );
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize SlashCommandResult");
+    assert_eq!(back, ev);
+
+    let minimal = ClientEvent::SlashCommandResult {
+        turn_id: None,
+        display: "Unknown command".to_string(),
+        is_error: true,
+    };
+    let json = serde_json::to_value(&minimal).expect("serialize minimal SlashCommandResult");
+    assert!(json.get("turn_id").is_none());
+    assert_eq!(json["is_error"], true);
+    let back: ClientEvent =
+        serde_json::from_value(json).expect("deserialize minimal SlashCommandResult");
+    assert_eq!(back, minimal);
 }
 
 /// `TextDelta` — 1:1 `OutputStream::emit_text`. Carries plain assistant text.

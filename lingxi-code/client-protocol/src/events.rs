@@ -18,7 +18,8 @@
 use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    MemoryEntryDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto,
+    TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -226,6 +227,51 @@ pub enum ClientEvent {
         messages: Vec<MessageDto>,
     },
 
+    /// Session-scoped agent roster. The list always includes the parent
+    /// conversation as `agent_id = "main"`; child rows are discovered from
+    /// the session's subagent transcript directory.
+    SessionAgentList {
+        /// Active connection session id.
+        session_id: String,
+        /// Agent rows ordered by most recently updated first.
+        agents: Vec<SessionAgentSummaryDto>,
+    },
+
+    /// Full transcript for one session agent, oldest-first.
+    SessionAgentTranscript {
+        /// Active connection session id.
+        session_id: String,
+        /// Agent instance whose messages are returned.
+        agent_id: String,
+        /// Lowered transcript messages.
+        messages: Vec<MessageDto>,
+        /// Exclusive next visible-message index for this transcript snapshot.
+        next_message_index: u64,
+        /// Monotonic valid-record watermark for stale-snapshot fencing.
+        revision: u64,
+    },
+
+    /// Push update for a session-agent summary. This is emitted by mobile
+    /// hosts when an agent's persisted transcript/status changes.
+    SessionAgentUpdated {
+        /// Active connection session id.
+        session_id: String,
+        /// Updated summary.
+        agent: SessionAgentSummaryDto,
+    },
+
+    /// Push update for one newly persisted agent message.
+    SessionAgentMessage {
+        /// Active connection session id.
+        session_id: String,
+        /// Agent instance that produced the message.
+        agent_id: String,
+        /// Stable per-agent visible-message index (lifecycle records excluded).
+        message_index: u64,
+        /// Newly persisted message.
+        message: MessageDto,
+    },
+
     /// The resumable-session catalog (`/resume` / session picker). Maps
     /// `SessionMetadata`; rows carry `.path` directly (plan line 152).
     SessionList {
@@ -299,11 +345,22 @@ pub enum ClientEvent {
         agents: Vec<AgentDto>,
     },
 
-    /// The slash-command catalog. Maps the `SlashCommand` registry collapsed to
-    /// display fields.
+    /// Slash-command catalog.
     SlashCommandCatalog {
-        /// One entry per registered slash command.
+        /// Registered commands.
         commands: Vec<SlashCommandDto>,
+    },
+
+    /// Result for a locally handled slash command.
+    SlashCommandResult {
+        /// Optional originating turn id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<u64>,
+        /// Display text.
+        display: String,
+        /// Whether the command failed.
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
     },
 
     /// The LINGXI.md memory listing (`/memory`). Maps `protocol::MemoryEntry`.
@@ -368,10 +425,9 @@ pub enum ClientEvent {
         status: TaskStatusDto,
     },
 
-    /// The slash-command catalog changed in-place (for example after a
-    /// `/reload-skills` or plugin refresh path mutated the live registry).
+    /// Slash-command catalog changed in place.
     CommandsChanged {
-        /// The full updated slash-command catalog snapshot.
+        /// Updated command snapshot.
         commands: Vec<SlashCommandDto>,
     },
 
@@ -537,6 +593,11 @@ pub enum ClientEvent {
         /// The complete ordered plan.
         tasks: Vec<crate::tool_display::PlanTaskDto>,
     },
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A user-visible attachment. Internally tagged on `type`, `snake_case`, and

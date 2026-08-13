@@ -719,8 +719,8 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         fail(f"missing iOS iSH runtime build script: {exc}")
     required_ish_build_tokens = {
         "ish-socket-network-policy.patch",
-        'git -C "${ISH_SOURCE}" apply --check "${ISH_NETWORK_POLICY_PATCH}"',
-        'git -C "${ISH_SOURCE}" apply "${ISH_NETWORK_POLICY_PATCH}"',
+        'git -C "${ISH_SOURCE}" apply --unidiff-zero --check "${ISH_NETWORK_POLICY_PATCH}"',
+        'git -C "${ISH_SOURCE}" apply --unidiff-zero "${ISH_NETWORK_POLICY_PATCH}"',
         "restore_ish_policy_source",
     }
     if any(token not in ios_build_text for token in required_ish_build_tokens):

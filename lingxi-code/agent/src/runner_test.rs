@@ -1753,6 +1753,88 @@ async fn persist_mode_processes_second_message_after_idling() {
 }
 
 #[tokio::test]
+async fn persist_mode_transcript_distinguishes_idle_from_true_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = MockSubagentApiClient::new(vec![
+        Ok(text_response("one", Some("end_turn"))),
+        Ok(text_response("two", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api, None, 4);
+    ctx.persistent = true;
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )) as Arc<dyn traits::FileSystem>);
+    let agent_id = ctx.agent_id;
+    let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, mut out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    // The first completed turn parks the persistent runner; its durable state
+    // must be idle, not terminal-completed.
+    while !matches!(
+        out_rx.recv().await.expect("first turn"),
+        SubagentEvent::Completed { .. }
+    ) {}
+    let body = tokio::fs::read_to_string(&path).await.unwrap();
+    let statuses: Vec<String> = body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| {
+            line.get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(statuses.first().map(String::as_str), Some("running"));
+    assert_eq!(statuses.last().map(String::as_str), Some("idle"));
+    assert!(
+        body.contains("\"agent_type\":\"test\""),
+        "resolved agent type metadata is persisted"
+    );
+
+    event_tx
+        .send(engine::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "next".into(),
+        })
+        .await
+        .unwrap();
+    while !matches!(
+        out_rx.recv().await.expect("second turn"),
+        SubagentEvent::Completed { .. }
+    ) {}
+    let body = tokio::fs::read_to_string(&path).await.unwrap();
+    let last_status = body
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|line| {
+            line.get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    assert_eq!(last_status.as_deref(), Some("idle"));
+
+    event_tx.send(engine::Event::UserExit).await.unwrap();
+    handle.await.unwrap();
+    let body = tokio::fs::read_to_string(&path).await.unwrap();
+    let last_status = body
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|line| {
+            line.get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    assert_eq!(last_status.as_deref(), Some("cancelled"));
+}
+
+#[tokio::test]
 async fn persist_mode_terminates_on_channel_close_after_turn_set() {
     // With persistent = true, closing the event channel after the first
     // turn-set completes makes the parked runner return gracefully (no
@@ -2971,6 +3053,10 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
         transcript.contains("Partial answer before the cutoff"),
         "salvaged response must remain inspectable: {transcript}"
     );
+    assert!(
+        transcript.contains("\"status\":\"completed\""),
+        "partial recovery must persist a true terminal marker: {transcript}"
+    );
 }
 
 /// A qualifying error (`RateLimited`) at request-start on the FIRST turn — with
@@ -3067,6 +3153,10 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
         assert!(entry.get("agent_id").is_some(), "stamped with its agent");
         assert!(entry.get("message").is_some(), "carries the message");
     }
+    assert!(
+        body.contains("\"status\":\"completed\""),
+        "terminal completion is persisted for session-agent status discovery"
+    );
     // The SEEDED prompt is on disk, not only the assistant turns — a resume
     // needs the conversation from its start.
     assert!(

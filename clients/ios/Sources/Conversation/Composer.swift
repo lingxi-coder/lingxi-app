@@ -29,6 +29,13 @@ struct Composer: View {
     @Binding var draft: String
     let onSend: (String) -> Void
 
+    /// Engine-owned slash-command catalog. An empty loaded catalog is
+    /// authoritative; `slashCommandsLoaded == false` renders a loading row and
+    /// never substitutes static commands.
+    var slashCommands: [ConversationSlashCommand] = []
+    var slashCommandsLoaded: Bool = false
+    var slashCommandPending: Bool = false
+
     // PR-4 items 1 & 2: while a turn is in flight the send affordance becomes a
     // Stop button (interrupt the turn), and we never start an overlapping turn.
     var streaming: Bool = false
@@ -62,6 +69,7 @@ struct Composer: View {
     @State private var holding = false
     @State private var cancellingHold = false
     @State private var suppressMicTap = false
+    @State private var dismissedSlashDraft: String?
 
     init(
         model: Binding<ModelOption>,
@@ -71,6 +79,9 @@ struct Composer: View {
         recentModels: [String] = [],
         draft: Binding<String>,
         onSend: @escaping (String) -> Void,
+        slashCommands: [ConversationSlashCommand] = [],
+        slashCommandsLoaded: Bool = false,
+        slashCommandPending: Bool = false,
         streaming: Bool = false,
         isCancelling: Bool = false,
         sendEnabled: Bool = true,
@@ -94,6 +105,9 @@ struct Composer: View {
         self.recentModels = recentModels
         self._draft = draft
         self.onSend = onSend
+        self.slashCommands = slashCommands
+        self.slashCommandsLoaded = slashCommandsLoaded
+        self.slashCommandPending = slashCommandPending
         self.streaming = streaming
         self.isCancelling = isCancelling
         self.sendEnabled = sendEnabled
@@ -113,12 +127,32 @@ struct Composer: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if shouldShowSlashPanel {
+                SlashCommandSuggestionPanel(
+                    suggestions: slashSuggestions,
+                    isLoading: !slashCommandsLoaded,
+                    selectedID: slashSuggestions.first?.id,
+                    onSelect: acceptSlashCommand
+                )
+                .padding(.horizontal, 14)
+                .layoutPriority(1)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             VStack(alignment: .leading, spacing: 4) {
                 // Captured-photo attachment chip (the device-vision analog of how
                 // a transcript lands in the draft): a thumbnail + a remove button,
                 // shown only once a camera capture has surfaced an image.
                 if let attachment {
                     AttachmentThumb(attachment: attachment, onRemove: onRemoveAttachment)
+                }
+
+                if let slashArgumentHint {
+                    Text(slashArgumentHint)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(t.text3)
+                        .padding(.horizontal, 4)
+                        .accessibilityLabel("slash_command_argument_hint")
+                        .accessibilityValue(slashArgumentHint)
                 }
 
                 TextField("", text: $draft, prompt: Text("composer_placeholder").foregroundColor(t.text4), axis: .vertical)
@@ -132,6 +166,11 @@ struct Composer: View {
                     }
                     .accessibilityIdentifier("composer.input")
                     .padding(.horizontal, 4).padding(.vertical, 2)
+                    .onChange(of: draft) { _, newValue in
+                        if dismissedSlashDraft != newValue {
+                            dismissedSlashDraft = nil
+                        }
+                    }
 
                 HStack(spacing: 4) {
                     // Attach / camera: drives a real on-device capture through the
@@ -145,11 +184,11 @@ struct Composer: View {
                     .accessibilityLabel("composer_add_attachment")
                     modelChip
                     Spacer()
-                    if isCancelling {
+                    if isCancelling || slashCommandPending {
                         ProgressView()
                             .tint(t.text3)
                             .frame(width: 40, height: 40)
-                            .accessibilityLabel("composer_stopping")
+                            .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
                     } else if streaming {
                         // PR-4 item 2: the Stop button replaces Send while a turn
                         // is in flight — tapping it cancels the in-flight turn.
@@ -230,6 +269,7 @@ struct Composer: View {
                         }
                         .buttonStyle(ComposerActionButtonStyle())
                         .accessibilityLabel("composer_send")
+                        .accessibilityIdentifier("composer.send")
                         .disabled(!sendEnabled)
                         .opacity(sendEnabled ? 1 : 0.45)
                     }
@@ -251,6 +291,7 @@ struct Composer: View {
             .animation(.easeOut(duration: 0.18), value: inputFocused)
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
+        .animation(.easeOut(duration: 0.16), value: shouldShowSlashPanel)
         // A sheet, not a popover anchored to the chip: the picker's search field
         // raises the keyboard over exactly the space a popover above the
         // composer would occupy, and the system sizes a sheet against the
@@ -362,11 +403,41 @@ struct Composer: View {
         .accessibilityIdentifier("composer.model")
     }
 
+    private var slashSuggestions: [SlashCommandSuggestion] {
+        guard slashCommandsLoaded else { return [] }
+        return SlashCommandMatcher.suggestions(for: draft, catalog: slashCommands)
+    }
+
+    private var slashArgumentHint: String? {
+        guard slashCommandsLoaded else { return nil }
+        return SlashCommandMatcher.argumentHint(for: draft, catalog: slashCommands)
+    }
+
+    private var shouldShowSlashPanel: Bool {
+        guard draft.hasPrefix("/"), !draft.dropFirst().contains(where: \.isWhitespace),
+              dismissedSlashDraft != draft
+        else { return false }
+        return !slashCommandsLoaded || !slashSuggestions.isEmpty
+    }
+
+    private func acceptSlashCommand(_ command: ConversationSlashCommand) {
+        let accepted = command.canonicalTrigger
+        draft = accepted
+        dismissedSlashDraft = accepted
+        inputFocused = true
+    }
 
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !streaming, !isCancelling, sendEnabled else { return }
+        guard !trimmed.isEmpty, !streaming, !isCancelling, !slashCommandPending, sendEnabled else { return }
+        if slashCommandsLoaded,
+           SlashCommandMatcher.shouldAcceptSuggestion(for: draft, catalog: slashCommands),
+           let suggestion = slashSuggestions.first {
+            acceptSlashCommand(suggestion.command)
+            return
+        }
         onSend(draft); draft = ""
+        dismissedSlashDraft = nil
     }
 }
 
@@ -413,4 +484,3 @@ private struct AttachmentThumb: View {
         .padding(.horizontal, 4).padding(.vertical, 2)
     }
 }
-

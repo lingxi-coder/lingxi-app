@@ -192,14 +192,134 @@ struct SessionTransitionFailure: Equatable, Identifiable {
     let requestedSessionID: String
 }
 
+/// A compact, session-scoped projection of one orchestrator agent.  The main
+/// agent is represented by the stable `ConversationModel.mainAgentID` id so
+/// the message list can use the same selection path for the root turn and
+/// child-agent transcripts.
+struct ConversationAgentSummary: Identifiable, Equatable, Sendable {
+    let id: String
+    let name: String
+    let agentType: String
+    var status: String
+    var latestActivity: String?
+    var updatedAtMs: UInt64
+
+    init(
+        id: String,
+        name: String,
+        agentType: String,
+        status: String,
+        latestActivity: String? = nil,
+        updatedAtMs: UInt64 = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.agentType = agentType
+        self.status = status
+        self.latestActivity = latestActivity
+        self.updatedAtMs = updatedAtMs
+    }
+
+    static let main = ConversationAgentSummary(
+        id: "main",
+        name: String(localized: "chat_agent_main"),
+        agentType: "main",
+        status: "idle"
+    )
+}
+
+/// Render-ready transcript cached per child agent.  Child messages use the
+/// same renderer as the main transcript; keeping the three projections
+/// together avoids rebuilding structured tool details every time the user
+/// switches the selector.
+struct ConversationAgentTranscript: Equatable {
+    var messages: [Message] = []
+    var items: [ConversationRenderItem] = []
+    var details: [UUID: ConversationMessageDetail] = [:]
+    /// One canonical wire signature per inbound MessageDto. This lets a live
+    /// tail event merge with a full transcript reply occurrence-by-occurrence,
+    /// including repeated messages with identical text.
+    var wireSignatures: [String] = []
+    /// Stable visible-message indices supplied by the agent transcript stream.
+    /// Legacy snapshots/events leave entries nil and use occurrence signatures.
+    var wireIndices: [UInt64?] = []
+    /// Exclusive watermark of the full transcript snapshot.  A live message
+    /// whose index is at or above this value belongs to the pending tail.
+    var nextMessageIndex: UInt64 = 0
+    /// Monotonic raw transcript-record revision from the engine. This fences
+    /// delayed full replies even when visible-message counts are unchanged.
+    var revision: UInt64 = 0
+    var loaded = false
+}
+
+#if canImport(engine_mobileFFI)
+    /// A live tail received while a full transcript request is in flight.
+    /// The request reply is a snapshot, so these entries must be replayed after
+    /// the snapshot rather than merged by text/signature alone.
+    struct ConversationPendingAgentMessage: Equatable {
+        let index: UInt64?
+        let message: MessageDto
+    }
+#endif
+
 @MainActor
 final class ConversationModel: ObservableObject {
+    static let mainAgentID = "main"
+
     /// The full visible transcript (user + assistant turns).
     @Published var messages: [Message]
     /// The chat surface's ordered render list: plain messages plus per-turn
     /// execution traces / shell cards. `messages` remains the compatibility
     /// transcript used by voice/setup surfaces.
     @Published var items: [ConversationRenderItem]
+
+    /// Session-scoped agent roster.  The first row is always the root agent;
+    /// child rows arrive from `SessionAgentList`/`SessionAgentUpdated` or the
+    /// coordinator worker fallback on older engines.
+    @Published private(set) var agentSummaries: [ConversationAgentSummary]
+    /// The currently visible agent.  Selecting a child makes its transcript
+    /// read-only; selecting `main` restores the ordinary composer transcript.
+    @Published var selectedAgentID: String
+    /// Child-agent transcript cache keyed by stable agent id.  Main-agent data
+    /// intentionally remains in `messages/items` for backwards compatibility.
+    @Published private(set) var agentTranscripts: [String: ConversationAgentTranscript]
+    @Published var isAgentTranscriptLoading = false
+    @Published var agentTranscriptError: String?
+    /// Identifies the one transcript request allowed to mutate loading/error
+    /// state. A late task from a previous agent or session is ignored.
+    private var agentTranscriptRequestKey: String?
+    private var agentTranscriptGeneration: UInt64 = 0
+    #if canImport(engine_mobileFFI)
+        private var pendingAgentMessages: [String: [ConversationPendingAgentMessage]] = [:]
+    #endif
+
+    /// The list renderer consumes these projections so it does not need to
+    /// know whether the selected row is the root or a child agent.
+    var selectedAgentMessages: [Message] {
+        guard selectedAgentID != Self.mainAgentID else { return messages }
+        return agentTranscripts[selectedAgentID]?.messages ?? []
+    }
+    var selectedAgentItems: [ConversationRenderItem] {
+        guard selectedAgentID != Self.mainAgentID else { return items }
+        return agentTranscripts[selectedAgentID]?.items ?? []
+    }
+    var selectedAgentMessageDetails: [UUID: ConversationMessageDetail] {
+        guard selectedAgentID != Self.mainAgentID else { return messageDetails }
+        return agentTranscripts[selectedAgentID]?.details ?? [:]
+    }
+    var isSelectedAgentReadOnly: Bool { selectedAgentID != Self.mainAgentID }
+    var selectedAgentSummary: ConversationAgentSummary? {
+        agentSummaries.first { $0.id == selectedAgentID }
+    }
+    /// Ordered activity projection for the currently selected session/agent.
+    /// Run cards never enter this projection; reasoning, tools, notices and
+    /// narrative rows retain their wire order and stable identities.
+    var visibleTimelineGroups: [ConversationTimelineGroup] {
+        ConversationRenderLayout.timelineGroups(selectedAgentItems)
+    }
+    var visibleTimelineRows: [ConversationTimelineRow] {
+        ConversationRenderLayout.timelineRows(selectedAgentItems)
+    }
     /// Structured block payload for assistant bubbles keyed by `Message.id`.
     @Published var messageDetails: [UUID: ConversationMessageDetail] = [:]
     /// True while a turn is in flight (drives the streaming dots row + gates
@@ -279,6 +399,14 @@ final class ConversationModel: ObservableObject {
     /// never invents rows when this catalog is empty.
     @Published var skills: [Skill] = []
     @Published var skillsLoaded = false
+    /// Full command-palette projection from the live engine registry. This is
+    /// separate from `skills` because input matching also needs aliases,
+    /// argument hints, menu descriptions, and hidden state.
+    @Published var slashCommands: [ConversationSlashCommand] = []
+    @Published var slashCommandsLoaded = false
+    /// A `RunSlashCommand` has been submitted but has not yet resolved into a
+    /// local result or a normal streaming turn.
+    @Published var slashCommandPending = false
     /// A transient, dim status line (tool activity / connection state). NOT used
     /// for errors anymore — those go to `error` (the persistent banner).
     @Published var statusLine: String? = nil
@@ -323,7 +451,184 @@ final class ConversationModel: ObservableObject {
         self.messages = messages
         self.items = messages.map(ConversationRenderItem.message)
         self.model = model
+        self.agentSummaries = [.main]
+        self.selectedAgentID = Self.mainAgentID
+        self.agentTranscripts = [:]
     }
+
+    /// Replace the agent roster while retaining the selected row when it is
+    /// still present.  A missing selection safely falls back to the main
+    /// agent, which is also what session transitions use.
+    func replaceAgentSummaries(_ summaries: [ConversationAgentSummary]) {
+        var merged: [ConversationAgentSummary] = [
+            agentSummaries.first(where: { $0.id == Self.mainAgentID }) ?? .main
+        ]
+        for summary in summaries.map(Self.normalizedAgentSummaryForSource) {
+            if let index = merged.firstIndex(where: { $0.id == summary.id }) {
+                merged[index] = summary
+            } else {
+                merged.append(summary)
+            }
+        }
+        agentSummaries = merged
+        if !merged.contains(where: { $0.id == selectedAgentID }) {
+            selectedAgentID = Self.mainAgentID
+            isAgentTranscriptLoading = false
+            agentTranscriptError = nil
+            agentTranscriptRequestKey = nil
+        }
+    }
+
+    static func normalizedAgentSummaryForSource(_ summary: ConversationAgentSummary) -> ConversationAgentSummary {
+        guard summary.id == Self.mainAgentID else { return summary }
+        return ConversationAgentSummary(
+            id: Self.mainAgentID,
+            name: ConversationAgentSummary.main.name,
+            agentType: summary.agentType,
+            status: summary.status,
+            latestActivity: summary.latestActivity,
+            updatedAtMs: summary.updatedAtMs
+        )
+    }
+
+    func upsertAgentSummary(_ summary: ConversationAgentSummary) {
+        var next = agentSummaries
+        if let index = next.firstIndex(where: { $0.id == summary.id }) {
+            next[index] = summary
+        } else {
+            next.append(summary)
+        }
+        replaceAgentSummaries(next)
+    }
+
+    func updateMainAgent(status: String, latestActivity: String? = nil) {
+        let current = agentSummaries.first(where: { $0.id == Self.mainAgentID }) ?? .main
+        upsertAgentSummary(ConversationAgentSummary(
+            id: Self.mainAgentID,
+            name: current.name,
+            agentType: current.agentType,
+            status: status,
+            latestActivity: latestActivity,
+            updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)
+        ))
+    }
+
+    func clearAgentState() {
+        agentSummaries = [.main]
+        selectedAgentID = Self.mainAgentID
+        agentTranscripts = [:]
+        isAgentTranscriptLoading = false
+        agentTranscriptError = nil
+        agentTranscriptRequestKey = nil
+        #if canImport(engine_mobileFFI)
+            pendingAgentMessages = [:]
+        #endif
+    }
+
+    private func agentRequestKey(sessionID: String, agentID: String) -> String {
+        "\(sessionID)\u{0}\(agentID)"
+    }
+
+    private func agentRequestKeyWithGeneration(sessionID: String, agentID: String) -> String {
+        "\(agentRequestKey(sessionID: sessionID, agentID: agentID))\u{0}\(agentTranscriptGeneration)"
+    }
+
+    func setAgentTranscript(
+        _ id: String,
+        transcript: ConversationAgentTranscript,
+        sessionID: String? = nil
+    ) {
+        guard id != Self.mainAgentID else { return }
+        let sessionID = sessionID ?? activeSessionId
+        guard sessionID == activeSessionId else { return }
+        agentTranscripts[id] = transcript
+        if selectedAgentID == id,
+           transcript.loaded,
+           agentTranscriptRequestKey?.hasPrefix(agentRequestKey(sessionID: sessionID, agentID: id) + "\u{0}") == true {
+            isAgentTranscriptLoading = false
+            agentTranscriptError = nil
+            agentTranscriptRequestKey = nil
+        }
+    }
+
+    @discardableResult
+    func markAgentTranscriptLoading(_ id: String, sessionID: String? = nil) -> String? {
+        selectedAgentID = id
+        guard id != Self.mainAgentID else {
+            isAgentTranscriptLoading = false
+            agentTranscriptRequestKey = nil
+            return nil
+        }
+        let sessionID = sessionID ?? activeSessionId
+        agentTranscriptGeneration &+= 1
+        let requestKey = agentRequestKeyWithGeneration(sessionID: sessionID, agentID: id)
+        agentTranscriptRequestKey = requestKey
+        let alreadyLoaded = agentTranscripts[id]?.loaded ?? false
+        isAgentTranscriptLoading = !alreadyLoaded
+        agentTranscriptError = nil
+        #if canImport(engine_mobileFFI)
+            if !alreadyLoaded {
+                let baseKey = agentRequestKey(sessionID: sessionID, agentID: id)
+                if pendingAgentMessages[baseKey] == nil {
+                    pendingAgentMessages[baseKey] = []
+                }
+            }
+        #endif
+        return requestKey
+    }
+
+    func failAgentTranscript(
+        _ id: String,
+        sessionID: String,
+        message: String,
+        requestKey: String? = nil
+    ) {
+        guard sessionID == activeSessionId,
+              selectedAgentID == id,
+              agentTranscriptRequestKey == (requestKey ?? agentTranscriptRequestKey),
+              requestKey == nil || requestKey == agentTranscriptRequestKey
+        else { return }
+        isAgentTranscriptLoading = false
+        agentTranscriptError = message
+    }
+
+    #if canImport(engine_mobileFFI)
+        func shouldAcceptAgentMessage(
+            agentID: String,
+            sessionID: String,
+            index: UInt64?
+        ) -> Bool {
+            guard sessionID == activeSessionId else { return false }
+            guard let index else { return true }
+            if let transcript = agentTranscripts[agentID] {
+                if transcript.wireIndices.contains(where: { $0 == index }) { return false }
+                if transcript.loaded, index < transcript.nextMessageIndex { return false }
+            }
+            if pendingAgentMessages[agentRequestKey(sessionID: sessionID, agentID: agentID)]?
+                .contains(where: { $0.index == index }) == true {
+                return false
+            }
+            return true
+        }
+
+        func enqueuePendingAgentMessage(
+            _ message: MessageDto,
+            index: UInt64?,
+            agentID: String,
+            sessionID: String
+        ) -> Bool {
+            guard sessionID == activeSessionId,
+                  !(agentTranscripts[agentID]?.loaded ?? false)
+            else { return false }
+            pendingAgentMessages[agentRequestKey(sessionID: sessionID, agentID: agentID), default: []]
+                .append(ConversationPendingAgentMessage(index: index, message: message))
+            return true
+        }
+
+        func takePendingAgentMessages(agentID: String, sessionID: String) -> [ConversationPendingAgentMessage] {
+            pendingAgentMessages.removeValue(forKey: agentRequestKey(sessionID: sessionID, agentID: agentID)) ?? []
+        }
+    #endif
 
     /// Whether user-started work still needs iOS's finite background assertion.
     /// A turn can hand work to an engine task before its text stream settles, so
@@ -434,6 +739,14 @@ protocol ConversationSource: AnyObject {
     /// `RefreshListings(.mcp)`). The reply (`McpServers`) lands out-of-band and
     /// populates `model.mcpServers`. A no-op on the mock (keeps the canned list).
     func refreshMcpServers()
+    /// Refresh the current session's agent roster.  The command is out of band
+    /// from the active turn and is safe to call whenever the agent picker opens.
+    func listSessionAgents()
+    /// Select one agent for the message list.  Child agents are read-only on
+    /// iOS; selecting the main agent restores the composer.
+    func selectAgent(_ id: String)
+    /// Load a child agent's durable transcript into the source cache.
+    func loadSessionAgentTranscript(_ id: String)
     #if canImport(engine_mobileFFI)
         /// Resolve a parked permission request (SHIP-BLOCKER #3): submit
         /// `ApprovePermission{requestId, response}` and pop the head of the queue.
@@ -483,6 +796,12 @@ extension ConversationSource {
     }
     func resumeSession(_ uuid: String, emptySessionTitle: String?) {}
     func refreshMcpServers() {}
+    func listSessionAgents() {}
+    func selectAgent(_ id: String) {
+        guard model.agentSummaries.contains(where: { $0.id == id }) else { return }
+        model.markAgentTranscriptLoading(id)
+    }
+    func loadSessionAgentTranscript(_ id: String) {}
 }
 
 #if canImport(engine_mobileFFI)
@@ -559,7 +878,8 @@ enum ConversationSourceFactory {
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
                 return MockConversationSource.uiTestFixture(
-                    cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1"
+                    cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1",
+                    multiAgent: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_MULTI_AGENT"] == "1"
                 )
             }
         #endif
@@ -628,7 +948,7 @@ final class MockConversationSource: ConversationSource {
     private var turnSpeechSequence: UInt64 = 0
 
     #if DEBUG
-        static func uiTestFixture(cancelledRun: Bool = false) -> MockConversationSource {
+        static func uiTestFixture(cancelledRun: Bool = false, multiAgent: Bool = false) -> MockConversationSource {
             let source = MockConversationSource()
             let terminalToolStatus: ConversationToolStatus = cancelledRun ? .cancelled : .completed
             let terminalShellStatus: ConversationShellStatus = cancelledRun ? .cancelled : .completed
@@ -654,17 +974,31 @@ final class MockConversationSource: ConversationSource {
                 outputSummary: cancelledRun ? "Shell 已取消" : "Shell 完成",
                 elapsedMs: 42
             )
-            let toolTraces = cancelledRun ? [
-                ConversationToolTrace(
-                    id: "ui-web-search",
-                    tool: "WebSearch",
-                    status: .cancelled,
-                    inputSummary: "Wuhan weather today",
-                    outputSummary: nil,
-                    elapsedMs: 1_234
-                ),
-                shellTrace,
-            ] : [shellTrace]
+            let webSearchTrace = ConversationToolTrace(
+                id: "ui-web-search",
+                tool: "WebSearch",
+                status: .cancelled,
+                inputSummary: "Wuhan weather today",
+                outputSummary: nil,
+                elapsedMs: 1_234
+            )
+            let readTrace = ConversationToolTrace(
+                id: "ui-read",
+                tool: "Read",
+                status: .completed,
+                inputSummary: "/workspace/ui-test/README.md",
+                outputSummary: "Read completed",
+                elapsedMs: 18
+            )
+            let searchTrace = ConversationToolTrace(
+                id: "ui-search",
+                tool: "Grep",
+                status: .completed,
+                inputSummary: "ConversationTimelineView",
+                outputSummary: "Search completed",
+                elapsedMs: 29
+            )
+            let toolTraces = cancelledRun ? [webSearchTrace, shellTrace] : [shellTrace, readTrace, searchTrace]
             let run = ConversationExecutionRun(
                 id: "ui-run",
                 sessionId: "ui-session",
@@ -678,7 +1012,20 @@ final class MockConversationSource: ConversationSource {
                     outputTokens: 8,
                     cacheReadTokens: 0,
                     cacheCreationTokens: 0
-                )
+                ),
+                activities: cancelledRun
+                    ? [
+                        .reasoning(id: "ui-thought", text: "检查当前项目工作区。"),
+                        .tool(id: webSearchTrace.id),
+                        .tool(id: shellTrace.id),
+                    ]
+                    : [
+                        .reasoning(id: "ui-thought", text: "检查当前项目工作区。"),
+                        .tool(id: shellTrace.id),
+                        .textBoundary(id: "ui-text-boundary"),
+                        .tool(id: readTrace.id),
+                        .tool(id: searchTrace.id),
+                    ]
             )
             let user = Message(role: .user, text: "Hello")
             let assistant = Message(
@@ -689,8 +1036,53 @@ final class MockConversationSource: ConversationSource {
             source.model.items = [.message(user), .run(run), .message(assistant)]
             source.model.messageDetails = [:]
             source.model.isNew = false
+            source.model.activeSessionId = "ui-session"
+            if multiAgent {
+                let childMessage = Message(role: .ai, text: "Child agent completed the requested check.")
+                source.model.replaceAgentSummaries([
+                    .main,
+                    ConversationAgentSummary(
+                        id: "ui-child",
+                        name: "UI Child",
+                        agentType: "worker",
+                        status: "completed",
+                        latestActivity: "Child agent completed",
+                        updatedAtMs: 2
+                    ),
+                ])
+                source.model.setAgentTranscript(
+                    "ui-child",
+                    transcript: ConversationAgentTranscript(
+                        messages: [childMessage],
+                        items: [.message(childMessage)],
+                        loaded: true
+                    ),
+                    sessionID: "ui-session"
+                )
+            }
             source.model.availableModels = uiTestModelCatalog
             source.model.activeModelId = uiTestModelCatalog[0]
+            source.model.slashCommands = [
+                ConversationSlashCommand(
+                    name: "help",
+                    description: "Show available commands",
+                    aliases: ["h"],
+                    argumentHint: "[topic]",
+                    menuDescription: "Help",
+                    source: "builtin",
+                    hidden: false
+                ),
+                ConversationSlashCommand(
+                    name: "review",
+                    description: "Review the current changes",
+                    aliases: ["rv"],
+                    argumentHint: "[instructions]",
+                    menuDescription: "Review changes",
+                    source: "bundled",
+                    hidden: false
+                ),
+            ]
+            source.model.slashCommandsLoaded = true
             return source
         }
 
@@ -727,12 +1119,13 @@ final class MockConversationSource: ConversationSource {
         model.statusLine = nil
         model.error = nil
         model.notice = nil
+        model.clearAgentState()
     }
 
     @discardableResult
     func send(_ text: String) -> ConversationTurnToken? {
         // PR-4 item 1: gate overlapping turns on rapid taps.
-        guard !model.streaming else { return nil }
+        guard !model.streaming, !model.isSelectedAgentReadOnly else { return nil }
         model.isNew = false
         model.notice = nil
         model.turnCompletion = nil
@@ -741,6 +1134,7 @@ final class MockConversationSource: ConversationSource {
         model.messages.append(message)
         model.items.append(.message(message))
         model.streaming = true
+        model.updateMainAgent(status: "working", latestActivity: String(localized: "chat_working"))
         turnToken &+= 1
         let generation = turnToken
         let token = ConversationTurnToken(
@@ -758,6 +1152,7 @@ final class MockConversationSource: ConversationSource {
             self.model.messages.append(reply)
             self.model.items.append(.message(reply))
             self.model.streaming = false
+            self.model.updateMainAgent(status: "idle", latestActivity: String(localized: "chat_completed"))
             self.turnSpeechSequence &+= 1
             self.model.turnSpeechUpdates.send(ConversationTurnSpeechUpdate(
                 token: token,
@@ -779,6 +1174,7 @@ final class MockConversationSource: ConversationSource {
         guard model.streaming else { return }
         turnToken &+= 1
         model.streaming = false
+        model.updateMainAgent(status: "cancelled", latestActivity: TurnNotice.cancelled.text)
         model.notice = .cancelled
         if let activeTurnToken {
             model.turnCompletion = ConversationTurnCompletion(
@@ -822,6 +1218,7 @@ final class MockConversationSource: ConversationSource {
         model.statusLine = nil
         model.error = nil
         model.notice = nil
+        model.clearAgentState()
     }
 
 }
@@ -954,6 +1351,8 @@ final class MockConversationSource: ConversationSource {
         private var activeTurnEpoch: UInt64?
         private var turnSpeechSequence: UInt64 = 0
         private var activeRunItemIndex: Int?
+        /// Original user spelling for a slash command awaiting dispatch.
+        private var pendingSlashRaw: String?
         private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
         private var testEmptySessionResumer: ((String, String) async throws -> Void)?
         private var cancellationOperation: CancellationOperation?
@@ -1217,11 +1616,13 @@ final class MockConversationSource: ConversationSource {
         /// versus a placeholder transcript.
         private func resetTranscriptForSessionSwitch(isNew: Bool) {
             invalidateTurnContext()
+            model.clearAgentState()
             model.messages = []
             model.items = model.messages.map(ConversationRenderItem.message)
             model.messageDetails = [:]
             model.streaming = false
             model.isCancelling = false
+            model.slashCommandPending = false
             model.turnCompletion = nil
             model.isNew = isNew
             model.statusLine = nil
@@ -1247,6 +1648,8 @@ final class MockConversationSource: ConversationSource {
             currentTurnId = nil
             activeTurnEpoch = nil
             activeRunItemIndex = nil
+            pendingSlashRaw = nil
+            model.slashCommandPending = false
         }
 
         private func clearTurnPointers(keepEpoch: Bool = true) {
@@ -1255,6 +1658,8 @@ final class MockConversationSource: ConversationSource {
             currentTurnId = nil
             activeTurnEpoch = keepEpoch ? activeTurnEpoch : nil
             activeRunItemIndex = nil
+            pendingSlashRaw = nil
+            model.slashCommandPending = false
         }
 
         private var activeConversationTurnToken: ConversationTurnToken? {
@@ -1376,6 +1781,49 @@ final class MockConversationSource: ConversationSource {
             return run
         }
 
+        private func appendActivity(_ activity: ConversationExecutionActivity) {
+            updateActiveRun { run in
+                run.activities.append(activity)
+            }
+        }
+
+        private func appendReasoningActivity(_ text: String) {
+            guard !text.isEmpty else { return }
+            updateActiveRun { run in
+                if let index = run.activities.lastIndex(where: {
+                    if case .reasoning = $0 { return true }
+                    return false
+                }), index == run.activities.index(before: run.activities.endIndex),
+                   case let .reasoning(id, current) = run.activities[index] {
+                    run.activities[index] = .reasoning(id: id, text: current + text)
+                } else {
+                    run.activities.append(.reasoning(id: "reasoning-\(UUID().uuidString)", text: text))
+                }
+                run.reasoning += text
+            }
+        }
+
+        private func appendTextBoundaryActivity() {
+            updateActiveRun { run in
+                if case .textBoundary = run.activities.last { return }
+                run.activities.append(.textBoundary(id: "boundary-\(UUID().uuidString)"))
+            }
+        }
+
+        private func appendToolActivity(id: String) {
+            updateActiveRun { run in
+                guard !run.activities.contains(where: {
+                    if case let .tool(existing) = $0 { return existing == id }
+                    return false
+                }) else { return }
+                run.activities.append(.tool(id: id))
+            }
+        }
+
+        private func appendNoticeActivity(id: String) {
+            appendActivity(.notice(id: id))
+        }
+
         private func upsertTool(
             id: String,
             tool: String,
@@ -1449,37 +1897,9 @@ final class MockConversationSource: ConversationSource {
                     run.shellCards[index].status = shellStatus
                 }
             }
-            // The run starts before the assistant message and is pinned while
-            // live. Once terminal, move it after that message so the outcome is
-            // a durable, chronological transcript result instead of a stale
-            // bottom status panel.
-            guard status != .running,
-                  let itemIndex = activeRunItemIndex,
-                  model.items.indices.contains(itemIndex),
-                  case let .run(run) = model.items[itemIndex]
-            else { return }
-            let assistantMessageID: UUID? = streamingItemIndex.flatMap { index in
-                guard model.items.indices.contains(index),
-                      case let .message(message) = model.items[index]
-                else { return nil }
-                return message.id
-            }
-            model.items.remove(at: itemIndex)
-            if let streamingItemIndex, streamingItemIndex > itemIndex {
-                self.streamingItemIndex = streamingItemIndex - 1
-            }
-            if let assistantMessageID,
-               let anchorIndex = model.items.firstIndex(where: { item in
-                   guard case let .message(message) = item else { return false }
-                   return message.id == assistantMessageID
-               }) {
-                let insertionIndex = model.items.index(after: anchorIndex)
-                model.items.insert(.run(run), at: insertionIndex)
-                activeRunItemIndex = insertionIndex
-            } else {
-                model.items.append(.run(run))
-                activeRunItemIndex = model.items.count - 1
-            }
+            // Keep the run at its original wire position. The timeline
+            // projection removes the run card from durable message rows while
+            // preserving the user → activity → assistant ordering.
         }
 
         private func updateCoordinatorStatus(activeWorkers: UInt32, team: String?) {
@@ -1643,6 +2063,7 @@ final class MockConversationSource: ConversationSource {
             model.notice = nil
             model.streaming = true
             model.isCancelling = false
+            model.slashCommandPending = false
             model.turnCompletion = nil
             turnSpeechSequence = 0
             model.statusLine = nil
@@ -1674,6 +2095,33 @@ final class MockConversationSource: ConversationSource {
             return token
         }
 
+        private func startSlashCommand(raw: String, turnId: UInt64) -> ConversationTurnToken {
+            model.notice = nil
+            model.streaming = false
+            model.isCancelling = false
+            model.slashCommandPending = true
+            model.turnCompletion = nil
+            turnSpeechSequence = 0
+            model.statusLine = nil
+            streamingIndex = nil
+            streamingItemIndex = nil
+            currentTurnId = turnId
+            activeTurnEpoch = sessionEpoch
+            pendingSlashRaw = raw
+            let token = ConversationTurnToken(clientTurnId: turnId, sessionEpoch: sessionEpoch)
+
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.submitCommand(.runSlashCommand(raw: raw, turnId: turnId))
+                } catch {
+                    guard self.activeConversationTurnToken == token else { return }
+                    self.fail(.host, "\(error)")
+                }
+            }
+            return token
+        }
+
         private func requestSessionCatalogRefreshAfterSettledTurn() {
             guard
                 !model.streaming,
@@ -1693,7 +2141,9 @@ final class MockConversationSource: ConversationSource {
             guard
                 !model.streaming,
                 !model.isCancelling,
-                !model.sessionTransitionPending
+                !model.slashCommandPending,
+                !model.sessionTransitionPending,
+                !model.isSelectedAgentReadOnly
             else { return nil }
 
             model.isNew = false
@@ -1702,6 +2152,10 @@ final class MockConversationSource: ConversationSource {
 
             let turnId = nextTurnId
             nextTurnId &+= 1
+            if model.slashCommandsLoaded,
+               SlashCommandMatcher.exactCommand(in: text, catalog: model.slashCommands) != nil {
+                return startSlashCommand(raw: text, turnId: turnId)
+            }
             return startPrompt(TurnPrompt(text: text, turnId: turnId))
         }
 
@@ -1941,6 +2395,13 @@ final class MockConversationSource: ConversationSource {
                 try await handle.submit(
                     command: .listSessions(limit: EngineConversationSource.completeSessionListLimit)
                 )
+                // The composer has no static fallback: populate its command
+                // palette from the same dynamic registry used for execution.
+                try await handle.submit(command: .refreshListings(which: [.slashCommands]))
+                // Agent roster is session-scoped and follows the same
+                // out-of-band bootstrap path as models/sessions so the picker
+                // is populated before the first turn.
+                try? await handle.submit(command: .listSessionAgents)
                 // Seed the pinned tasks panel: a re-opened scope may already
                 // have a Workflow build running; its rows arrive as `TaskRow`
                 // events (zero rows ⇒ zero events). Best-effort — unlike the
@@ -2093,7 +2554,424 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        // MARK: session agents
+
+        /// Pull the roster for the currently active session. Agent state is
+        /// deliberately separate from the main turn stream so opening the
+        /// picker never starts or interrupts a turn.
+        func listSessionAgents() {
+            guard !model.activeSessionId.isEmpty else { return }
+            let requestSessionID = model.activeSessionId
+            Task { [weak self] in
+                guard let self else { return }
+                guard self.model.activeSessionId == requestSessionID,
+                      !self.model.sessionTransitionPending else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    guard self.model.activeSessionId == requestSessionID,
+                          !self.model.sessionTransitionPending else { return }
+                    try await handle.submit(command: .listSessionAgents)
+                } catch {
+                    // Listing failures must not overwrite a transcript load
+                    // error (or a newer request). The next picker open retries.
+                }
+            }
+        }
+
+        /// Select a root/child agent. Child selection is read-only; the
+        /// transcript is loaded lazily the first time it is requested.
+        func selectAgent(_ id: String) {
+            guard id == ConversationModel.mainAgentID
+                || model.agentSummaries.contains(where: { $0.id == id })
+            else { return }
+            model.markAgentTranscriptLoading(id, sessionID: model.activeSessionId)
+            guard id != ConversationModel.mainAgentID else { return }
+            if model.agentTranscripts[id]?.loaded == true { return }
+            loadSessionAgentTranscript(id)
+        }
+
+        func loadSessionAgentTranscript(_ id: String) {
+            guard id != ConversationModel.mainAgentID, !id.isEmpty,
+                  !model.activeSessionId.isEmpty
+            else { return }
+            let requestSessionID = model.activeSessionId
+            let requestKey = model.markAgentTranscriptLoading(id, sessionID: requestSessionID)
+            Task { [weak self] in
+                guard let self else { return }
+                guard self.model.activeSessionId == requestSessionID,
+                      self.model.selectedAgentID == id else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    guard self.model.activeSessionId == requestSessionID,
+                          self.model.selectedAgentID == id else { return }
+                    try await handle.submit(command: .loadSessionAgentTranscript(agentId: id))
+                } catch {
+                    self.model.failAgentTranscript(
+                        id,
+                        sessionID: requestSessionID,
+                        message: String(describing: error),
+                        requestKey: requestKey
+                    )
+                }
+            }
+        }
+
         // MARK: inbound-event application (called on the main actor)
+
+        private static func agentSummary(from dto: SessionAgentSummaryDto) -> ConversationAgentSummary {
+            let summary = ConversationAgentSummary(
+                id: dto.agentId,
+                name: dto.agentId == ConversationModel.mainAgentID
+                    ? ConversationAgentSummary.main.name
+                    : dto.name,
+                agentType: dto.agentType,
+                status: dto.status,
+                latestActivity: dto.agentId == ConversationModel.mainAgentID
+                    ? nil
+                    : dto.latestActivity,
+                updatedAtMs: dto.updatedAtMs ?? 0
+            )
+            return ConversationModel.normalizedAgentSummaryForSource(summary)
+        }
+
+        private func applyAgentTranscript(
+            sessionID: String,
+            agentId: String,
+            messages: [MessageDto],
+            nextMessageIndex: UInt64? = nil,
+            revision: UInt64 = 0
+        ) {
+            guard agentId != ConversationModel.mainAgentID else { return }
+            guard sessionID == model.activeSessionId else { return }
+            let watermark = nextMessageIndex ?? UInt64(messages.count)
+            if let current = model.agentTranscripts[agentId],
+               current.loaded,
+               revision <= current.revision || watermark < current.nextMessageIndex {
+                // A reply from an older load request arrived after a newer
+                // snapshot. The engine revision counts raw transcript records,
+                // including hidden/lifecycle entries, so it remains monotonic
+                // even when two snapshots expose the same visible message
+                // count. The visible watermark is a second independent fence:
+                // live indexed rows advance it without advancing the raw
+                // revision, so a delayed full reply must never move it back.
+                // Equality remains allowed for a higher-revision compaction
+                // update whose renderable details changed in place.
+                return
+            }
+            let restored = Self.restoredTranscript(
+                from: messages,
+                sessionID: sessionID,
+                identityPrefix: "\(sessionID)|agent|\(agentId)",
+                occurrenceOffsets: [:],
+                wireIndices: messages.indices.map { Optional(UInt64($0)) }
+            )
+            var transcript = ConversationAgentTranscript(
+                messages: restored.messages,
+                items: restored.items,
+                details: restored.details,
+                wireSignatures: restored.wireSignatures,
+                wireIndices: restored.wireIndices,
+                nextMessageIndex: watermark,
+                revision: revision,
+                loaded: true
+            )
+            let pending = model.takePendingAgentMessages(agentID: agentId, sessionID: sessionID)
+                .sorted { lhs, rhs in
+                    switch (lhs.index, rhs.index) {
+                    case let (left?, right?): return left < right
+                    case (.some, .none): return true
+                    default: return false
+                    }
+                }
+            var seenIndices = Set<UInt64>()
+            for pendingMessage in pending {
+                if let index = pendingMessage.index {
+                    guard index >= watermark, seenIndices.insert(index).inserted else { continue }
+                }
+                let one = Self.restoredTranscript(
+                    from: [pendingMessage.message],
+                    sessionID: sessionID,
+                    identityPrefix: "\(sessionID)|agent|\(agentId)",
+                    occurrenceOffsets: Self.signatureCounts(transcript.wireSignatures),
+                    wireIndices: [pendingMessage.index],
+                    finalizeOrphans: false
+                )
+                transcript = appendTranscript(one, to: transcript)
+                if let index = pendingMessage.index {
+                    transcript.nextMessageIndex = max(transcript.nextMessageIndex, index + 1)
+                }
+            }
+            model.setAgentTranscript(
+                agentId,
+                transcript: transcript,
+                sessionID: sessionID
+            )
+        }
+
+        /// A transcript reply and the live tail reader share one event stream,
+        /// but a reply can still overtake a message that was emitted just before
+        /// it. Merge the two projections instead of replacing the live cache.
+        /// Message ids are deterministic hashes of the canonical wire message
+        /// plus its occurrence, so repeated identical messages remain distinct;
+        /// render item ids and details then retain structured tool rows without
+        /// duplicating them.
+        private func mergeAgentTranscript(
+            _ restored: EngineConversationSource.RestoredTranscript,
+            with current: ConversationAgentTranscript?,
+            loaded: Bool
+        ) -> ConversationAgentTranscript {
+            guard let current, !current.messages.isEmpty || !current.items.isEmpty else {
+                return ConversationAgentTranscript(
+                    messages: restored.messages,
+                    items: restored.items,
+                    details: restored.details,
+                    wireSignatures: restored.wireSignatures,
+                    wireIndices: restored.wireIndices,
+                    nextMessageIndex: restored.wireIndices.compactMap { $0 }.max().map { $0 + 1 }
+                        ?? UInt64(restored.wireSignatures.count),
+                    revision: 0,
+                    loaded: loaded
+                )
+            }
+
+            var restoredIDs = Set(restored.messages.map(\.id))
+            var messages = restored.messages
+            for message in current.messages {
+                if restoredIDs.insert(message.id).inserted {
+                    messages.append(message)
+                }
+            }
+
+            var itemIDs = Set(restored.items.map(\.id))
+            var messageItemIDs = Set(
+                restored.items.compactMap { item -> UUID? in
+                    guard case let .message(message) = item else { return nil }
+                    return message.id
+                }
+            )
+            var items = restored.items
+            for item in current.items {
+                if case let .message(message) = item {
+                    guard messageItemIDs.insert(message.id).inserted else { continue }
+                } else if case let .run(currentRun) = item,
+                          let restoredIndex = items.firstIndex(where: { item in
+                              guard case let .run(restoredRun) = item else { return false }
+                              return restoredRun.tools.contains { restoredTool in
+                                  currentRun.tools.contains { $0.id == restoredTool.id }
+                              }
+                          }),
+                          case let .run(restoredRun) = items[restoredIndex] {
+                    var merged = restoredRun
+                    merged.tools = mergeToolTraces(restoredRun.tools, currentRun.tools)
+                    merged.reasoning = currentRun.reasoning.isEmpty ? restoredRun.reasoning : currentRun.reasoning
+                    merged.activities = mergeActivities(restoredRun.activities, currentRun.activities)
+                    merged.status = merged.tools.contains(where: { $0.status == .running })
+                        ? currentRun.status
+                        : .restored
+                    items[restoredIndex] = .run(merged)
+                    continue
+                } else {
+                    guard itemIDs.insert(item.id).inserted else { continue }
+                }
+                items.append(item)
+            }
+            var details = restored.details
+            details.merge(current.details) { _, new in new }
+            return ConversationAgentTranscript(
+                messages: messages,
+                items: items,
+                details: details,
+                wireSignatures: mergeWireSignatures(
+                    restored.wireSignatures,
+                    current.wireSignatures
+                ),
+                wireIndices: restored.wireIndices + current.wireIndices,
+                nextMessageIndex: max(
+                    restored.wireIndices.compactMap { $0 }.max().map { $0 + 1 }
+                        ?? UInt64(restored.wireSignatures.count),
+                    current.nextMessageIndex
+                ),
+                revision: current.revision,
+                loaded: loaded || current.loaded
+            )
+        }
+
+        private func mergeToolTraces(
+            _ base: [ConversationToolTrace],
+            _ update: [ConversationToolTrace]
+        ) -> [ConversationToolTrace] {
+            var result = base
+            for trace in update {
+                if let index = result.firstIndex(where: { $0.id == trace.id }) {
+                    var merged = result[index]
+                    merged.tool = trace.tool.isEmpty ? merged.tool : trace.tool
+                    merged.status = trace.status
+                    merged.inputSummary = trace.inputSummary ?? merged.inputSummary
+                    merged.outputSummary = trace.outputSummary ?? merged.outputSummary
+                    merged.elapsedMs = trace.elapsedMs ?? merged.elapsedMs
+                    merged.header = trace.header ?? merged.header
+                    merged.display = trace.display ?? merged.display
+                    result[index] = merged
+                } else {
+                    result.append(trace)
+                }
+            }
+            return result
+        }
+
+        private func mergeActivities(
+            _ base: [ConversationExecutionActivity],
+            _ update: [ConversationExecutionActivity]
+        ) -> [ConversationExecutionActivity] {
+            var result = base
+            var ids = Set(base.map(\.id))
+            for activity in update where ids.insert(activity.id).inserted {
+                result.append(activity)
+            }
+            return result
+        }
+
+        private func appendTranscript(
+            _ incoming: EngineConversationSource.RestoredTranscript,
+            to current: ConversationAgentTranscript
+        ) -> ConversationAgentTranscript {
+            var messages = current.messages
+            var messageIDs = Set(messages.map(\.id))
+            for message in incoming.messages where messageIDs.insert(message.id).inserted {
+                messages.append(message)
+            }
+
+            var items = current.items
+            var itemIDs = Set(items.map(\.id))
+            for item in incoming.items {
+                if case let .run(incomingRun) = item,
+                   let index = items.firstIndex(where: { item in
+                       guard case let .run(existingRun) = item else { return false }
+                       return existingRun.tools.contains { existingTool in
+                           incomingRun.tools.contains { $0.id == existingTool.id }
+                       }
+                   }),
+                   case let .run(existingRun) = items[index] {
+                    var merged = existingRun
+                    merged.tools = mergeToolTraces(existingRun.tools, incomingRun.tools)
+                    merged.reasoning = incomingRun.reasoning.isEmpty ? existingRun.reasoning : incomingRun.reasoning
+                    merged.activities = mergeActivities(existingRun.activities, incomingRun.activities)
+                    merged.status = incomingRun.status
+                    items[index] = .run(merged)
+                } else if itemIDs.insert(item.id).inserted {
+                    items.append(item)
+                }
+            }
+            var details = current.details
+            details.merge(incoming.details) { _, new in new }
+            return ConversationAgentTranscript(
+                messages: messages,
+                items: items,
+                details: details,
+                wireSignatures: mergeWireSignatures(
+                    current.wireSignatures,
+                    incoming.wireSignatures
+                ),
+                wireIndices: current.wireIndices + incoming.wireIndices,
+                nextMessageIndex: max(
+                    current.nextMessageIndex,
+                    incoming.wireIndices.compactMap { $0 }.max().map { $0 + 1 }
+                        ?? current.nextMessageIndex
+                ),
+                revision: current.revision,
+                loaded: current.loaded
+            )
+        }
+
+        private func mergeWireSignatures(
+            _ first: [String],
+            _ second: [String]
+        ) -> [String] {
+            let firstCounts = Self.signatureCounts(first)
+            let secondCounts = Self.signatureCounts(second)
+            var result = first
+            var consumed = firstCounts
+            for signature in second {
+                let target = max(
+                    firstCounts[signature, default: 0],
+                    secondCounts[signature, default: 0]
+                )
+                guard consumed[signature, default: 0] < target else { continue }
+                result.append(signature)
+                consumed[signature, default: 0] += 1
+            }
+            return result
+        }
+
+        private func appendAgentMessage(
+            agentId: String,
+            message: MessageDto,
+            messageIndex: UInt64? = nil
+        ) {
+            guard agentId != ConversationModel.mainAgentID else { return }
+            let sessionID = model.activeSessionId
+            guard !sessionID.isEmpty else { return }
+            guard model.shouldAcceptAgentMessage(
+                agentID: agentId,
+                sessionID: sessionID,
+                index: messageIndex
+            ) else { return }
+            let previous = model.agentTranscripts[agentId]
+            _ = model.enqueuePendingAgentMessage(
+                message,
+                index: messageIndex,
+                agentID: agentId,
+                sessionID: sessionID
+            )
+            let one = Self.restoredTranscript(
+                from: [message],
+                sessionID: sessionID,
+                identityPrefix: "\(sessionID)|agent|\(agentId)",
+                occurrenceOffsets: Self.signatureCounts(previous?.wireSignatures ?? []),
+                wireIndices: [messageIndex],
+                finalizeOrphans: false
+            )
+            var current = previous ?? ConversationAgentTranscript()
+            // MessageDto has no wire id. Keep every occurrence here; collapsing
+            // by role/text would lose two legitimate adjacent messages that say
+            // the same thing. Full transcript replies are merged by deterministic
+            // occurrence IDs, while a live event is necessarily treated as one
+            // new occurrence.
+            current = appendTranscript(one, to: current)
+            if let messageIndex {
+                current.nextMessageIndex = max(current.nextMessageIndex, messageIndex + 1)
+            }
+            model.setAgentTranscript(agentId, transcript: current, sessionID: sessionID)
+            let activity = one.messages.last?.text
+                .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+                .first
+                .map(String.init)
+            let summary = model.agentSummaries.first(where: { $0.id == agentId })
+                ?? ConversationAgentSummary(
+                    id: agentId,
+                    name: agentId,
+                    agentType: "unknown",
+                    status: "working"
+                )
+            let terminalStatuses = Set(["completed", "failed", "cancelled", "killed"])
+            let currentStatus = summary.status.lowercased()
+            let status = terminalStatuses.contains(currentStatus) ? summary.status : "working"
+            model.upsertAgentSummary(ConversationAgentSummary(
+                id: summary.id,
+                name: summary.name,
+                agentType: summary.agentType,
+                status: status,
+                latestActivity: activity ?? summary.latestActivity,
+                updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)
+            ))
+        }
+
+        private func refreshSessionAgentsAfterTransition() {
+            guard let handle else { return }
+            Task { [handle] in
+                try? await handle.submit(command: .listSessionAgents)
+            }
+        }
 
         /// Map one inbound `ClientEvent` onto the published state.
         fileprivate func apply(_ event: ClientEvent) {
@@ -2101,7 +2979,10 @@ final class MockConversationSource: ConversationSource {
             switch event {
             case .turnStarted:
                 guard acceptTurnEvent(event) else { return }
+                model.slashCommandPending = false
+                pendingSlashRaw = nil
                 model.streaming = true
+                model.updateMainAgent(status: "working", latestActivity: String(localized: "chat_working"))
                 model.notice = nil
                 streamingIndex = nil
                 streamingItemIndex = nil
@@ -2110,18 +2991,51 @@ final class MockConversationSource: ConversationSource {
                     $0.retry = nil
                 }
 
+            case let .slashCommandResult(turnId, display, isError):
+                guard let token = activeConversationTurnToken,
+                      turnId == nil || turnId == token.clientTurnId
+                else { return }
+                let raw = pendingSlashRaw ?? "/"
+                model.items.append(.commandOutput(ConversationCommandOutput(
+                    id: "slash-\(token.sessionEpoch)-\(token.clientTurnId)",
+                    command: raw,
+                    text: display,
+                    isError: isError
+                )))
+                model.streaming = false
+                model.slashCommandPending = false
+                model.statusLine = nil
+                model.updateMainAgent(
+                    status: isError ? "failed" : "idle",
+                    latestActivity: isError ? display : String(localized: "chat_completed")
+                )
+                publishActiveTurnCompletion(isError ? .failed : .completed)
+                clearTurnPointers(keepEpoch: false)
+                requestSessionCatalogRefreshAfterSettledTurn()
+
             case let .textDelta(text):
                 guard acceptTurnEvent(event) else { return }
+                appendTextBoundaryActivity()
                 appendDelta(text)
+                let activity = text
+                    .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+                    .first
+                    .map(String.init)
+                model.updateMainAgent(status: "working", latestActivity: activity)
                 publishTurnSpeechDelta(text)
 
             case let .thinkingDelta(thinking, signature):
                 guard acceptTurnEvent(event) else { return }
-                updateActiveRun { run in
-                    run.reasoning += thinking
-                    if signature != nil && run.notices.contains(where: { $0.id == "thinking-signature" }) == false {
-                        run.notices.append(.init(id: "thinking-signature", kind: .info, text: String(localized: "chat_thinking_signature")))
+                appendReasoningActivity(thinking)
+                if signature != nil {
+                    var addedSignature = false
+                    updateActiveRun { run in
+                        if run.notices.contains(where: { $0.id == "thinking-signature" }) == false {
+                            run.notices.append(.init(id: "thinking-signature", kind: .info, text: String(localized: "chat_thinking_signature")))
+                            addedSignature = true
+                        }
                     }
+                    if addedSignature { appendNoticeActivity(id: "thinking-signature") }
                 }
 
             case let .systemNotice(message, isError):
@@ -2132,6 +3046,7 @@ final class MockConversationSource: ConversationSource {
                     text: message
                 )
                 updateActiveRun { $0.notices.append(notice) }
+                appendNoticeActivity(id: notice.id)
                 model.statusLine = message
 
             case let .askUserQuestion(request):
@@ -2215,6 +3130,7 @@ final class MockConversationSource: ConversationSource {
                 // client-side summarizer below survives only as the fallback for
                 // an engine too old to send one.
                 let derivedHeader = header.map(Self.toolHeader(from:))
+                appendToolActivity(id: id)
                 if ConversationExecutionParsing.isShellTool(tool) {
                     let started = ConversationExecutionParsing.shellStarted(id: id, inputJson: inputJson)
                     upsertShellCard(id: id, create: {
@@ -2237,6 +3153,7 @@ final class MockConversationSource: ConversationSource {
                         trace.header = derivedHeader
                     }
                     model.statusLine = String(localized: "chat_shell_running")
+                    model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 } else {
                     let summary = ConversationExecutionParsing.summarizeToolInput(inputJson)
                     upsertTool(id: id, tool: tool, fallbackSummary: summary) { trace in
@@ -2246,6 +3163,7 @@ final class MockConversationSource: ConversationSource {
                         trace.header = derivedHeader
                     }
                     model.statusLine = String(localized: "chat_tool_calling \(tool)")
+                    model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 }
 
             case let .toolHeartbeat(id, tool, elapsedMs):
@@ -2271,6 +3189,7 @@ final class MockConversationSource: ConversationSource {
                         trace.elapsedMs = elapsedMs
                     }
                     model.statusLine = String(localized: "chat_shell_running")
+                    model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 } else {
                     upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
                         trace.tool = tool
@@ -2278,6 +3197,7 @@ final class MockConversationSource: ConversationSource {
                         trace.elapsedMs = elapsedMs
                     }
                     model.statusLine = String(localized: "chat_tool_running \(tool)")
+                    model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 }
 
             case let .toolUseResult(id, tool, resultJson, isError, display):
@@ -2322,6 +3242,7 @@ final class MockConversationSource: ConversationSource {
                         trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
                     }
                     model.statusLine = ConversationExecutionParsing.shellStatusLabel(resolvedShellStatus)
+                    model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 } else {
                     upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
                         trace.tool = tool
@@ -2336,6 +3257,7 @@ final class MockConversationSource: ConversationSource {
                     model.statusLine = wasCancelled
                         ? String(localized: "chat_tool_cancelled \(tool)")
                         : (isError ? String(localized: "chat_tool_failed \(tool)") : String(localized: "chat_tool_completed \(tool)"))
+                    model.updateMainAgent(status: "working", latestActivity: model.statusLine)
                 }
 
             case let .usageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
@@ -2383,6 +3305,16 @@ final class MockConversationSource: ConversationSource {
 
             case let .coordinatorWorker(worker):
                 guard acceptTurnEvent(event) else { return }
+                // Older engines expose coordinator workers before the
+                // session-agent listing exists. Keep those rows selectable as
+                // read-only agents so the picker degrades gracefully.
+                model.upsertAgentSummary(ConversationAgentSummary(
+                    id: worker.agentId,
+                    name: worker.name,
+                    agentType: worker.agentType,
+                    status: worker.status,
+                    latestActivity: model.statusLine
+                ))
                 updateActiveRun { run in
                     let viewModel = ConversationCoordinatorWorker(
                         id: worker.agentId,
@@ -2400,6 +3332,7 @@ final class MockConversationSource: ConversationSource {
             case let .messageComplete(_, message):
                 guard acceptTurnEvent(event) else { return }
                 if let message {
+                    appendTextBoundaryActivity()
                     let lowered = Self.message(from: message)
                     replaceStreamingMessage(lowered.message, detail: lowered.detail)
                 }
@@ -2436,6 +3369,10 @@ final class MockConversationSource: ConversationSource {
                     finishActiveRun(.completed)
                     publishActiveTurnCompletion(.failed)
                 }
+                model.updateMainAgent(
+                    status: outcome == .cancelled ? "cancelled" : "idle",
+                    latestActivity: model.notice?.text ?? String(localized: "chat_completed")
+                )
                 clearTurnPointers(keepEpoch: false)
                 requestSessionCatalogRefreshAfterSettledTurn()
 
@@ -2447,6 +3384,7 @@ final class MockConversationSource: ConversationSource {
                 guard accepted else { return }
                 // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
                 finishActiveRun(.failed)
+                model.updateMainAgent(status: "failed", latestActivity: message)
                 fail(Self.kind(from: kind), message)
 
             case let .modelList(models, current):
@@ -2478,6 +3416,38 @@ final class MockConversationSource: ConversationSource {
                 // intermediate empty value.
                 model.engineSessionsLoaded = true
 
+            case let .sessionAgentList(sessionId, agents):
+                // Ignore a delayed listing from a previous session. The agent
+                // picker is strictly scoped to the active session.
+                guard sessionId == model.activeSessionId,
+                      !model.sessionTransitionPending else { return }
+                model.replaceAgentSummaries(agents.map { Self.agentSummary(from: $0) })
+
+            case let .sessionAgentUpdated(sessionId, agent):
+                guard sessionId == model.activeSessionId,
+                      !model.sessionTransitionPending else { return }
+                model.upsertAgentSummary(Self.agentSummary(from: agent))
+
+            case let .sessionAgentTranscript(sessionId, agentId, messages, nextMessageIndex, revision):
+                guard sessionId == model.activeSessionId,
+                      !model.sessionTransitionPending else { return }
+                applyAgentTranscript(
+                    sessionID: sessionId,
+                    agentId: agentId,
+                    messages: messages,
+                    nextMessageIndex: nextMessageIndex,
+                    revision: revision
+                )
+
+            case let .sessionAgentMessage(sessionId, agentId, messageIndex, message):
+                guard sessionId == model.activeSessionId,
+                      !model.sessionTransitionPending else { return }
+                appendAgentMessage(
+                    agentId: agentId,
+                    message: message,
+                    messageIndex: messageIndex
+                )
+
             case let .sessionStarted(sessionId):
                 // A fresh session began on the connection (1:1 with a successful
                 // `NewSession`). Adopt it as active. Reset the transcript ONLY
@@ -2489,6 +3459,7 @@ final class MockConversationSource: ConversationSource {
                 let isSwitch = !sessionId.isEmpty && sessionId != model.activeSessionId
                 let confirmedNewSession = pendingSessionTransition == .new
                 model.activeSessionId = sessionId
+                model.clearAgentState()
                 if case let .resume(targetID) = pendingSessionTransition,
                    targetID != sessionId {
                     // A bootstrap SessionStarted can be delivered after the host
@@ -2504,6 +3475,7 @@ final class MockConversationSource: ConversationSource {
                 if confirmedNewSession {
                     model.sessionRefreshRevision &+= 1
                 }
+                refreshSessionAgentsAfterTransition()
 
             case let .sessionResumed(sessionId, messages):
                 // A prior session was resumed (1:1 with a successful
@@ -2521,6 +3493,7 @@ final class MockConversationSource: ConversationSource {
                           targetID == sessionId else { return }
                 }
                 invalidateTurnContext()
+                model.clearAgentState()
                 model.activeSessionId = sessionId
                 setPendingSessionTransition(nil)
                 // BUG FIX: a restored message is NOT one render row. In the
@@ -2550,11 +3523,13 @@ final class MockConversationSource: ConversationSource {
                 // anchor. Refresh so the full catalog and persisted project index
                 // immediately include that preserved UUID.
                 model.sessionRefreshRevision &+= 1
+                refreshSessionAgentsAfterTransition()
 
             case .sessionEnded:
                 // The current session ended (e.g. cleared). Drop the active id;
                 // the next `SessionStarted`/`SessionResumed` re-establishes one.
                 model.activeSessionId = ""
+                model.clearAgentState()
                 setPendingSessionTransition(nil)
                 invalidateTurnContext()
                 model.turnCompletion = nil
@@ -2585,30 +3560,8 @@ final class MockConversationSource: ConversationSource {
                 }
                 model.mcpServersLoaded = true
 
-            case let .slashCommandCatalog(commands):
-                // The engine registry is the source of truth for skills. Slash
-                // command names are the executable triggers, so keep the
-                // leading slash in the UI while preserving the engine source.
-                model.skills = commands.map { command in
-                    let source = command.source
-                    let author: String
-                    switch source {
-                    case "builtin", "bundled": author = String(localized: "skills_author_official")
-                    case "user": author = String(localized: "skills_author_mine")
-                    default: author = command.source
-                    }
-                    return Skill(
-                        id: "skill:\(command.name)",
-                        name: command.name,
-                        author: author,
-                        desc: command.description,
-                        triggers: ["/\(command.name)"],
-                        enabled: true,
-                        builtin: source == "builtin" || source == "bundled" || source == "managed",
-                        source: source
-                    )
-                }
-                model.skillsLoaded = true
+            case let .slashCommandCatalog(commands), let .commandsChanged(commands):
+                applySlashCommandCatalog(commands)
 
             default:
                 // Cost / message-boundary / other listing events are not rendered
@@ -2625,6 +3578,44 @@ final class MockConversationSource: ConversationSource {
         /// path still goes through `apply` directly.
         func applyForTesting(_ event: ClientEvent) {
             apply(event)
+        }
+
+        private func applySlashCommandCatalog(_ commands: [SlashCommandDto]) {
+            model.slashCommands = commands.map { command in
+                ConversationSlashCommand(
+                    name: command.name,
+                    description: command.description,
+                    aliases: command.aliases,
+                    argumentHint: command.argumentHint,
+                    menuDescription: command.menuDescription,
+                    source: command.source,
+                    hidden: command.hidden
+                )
+            }
+            model.slashCommandsLoaded = true
+
+            // Settings derives its skill rows from the same catalog rather
+            // than maintaining another command list.
+            model.skills = commands.map { command in
+                let source = command.source
+                let author: String
+                switch source {
+                case "builtin", "bundled": author = String(localized: "skills_author_official")
+                case "user": author = String(localized: "skills_author_mine")
+                default: author = command.source
+                }
+                return Skill(
+                    id: "skill:\(command.name)",
+                    name: command.name,
+                    author: author,
+                    desc: command.description,
+                    triggers: ["/\(command.name)"] + command.aliases.map { "/\($0)" },
+                    enabled: true,
+                    builtin: source == "builtin" || source == "bundled" || source == "managed",
+                    source: source
+                )
+            }
+            model.skillsLoaded = true
         }
 
         func beginTurnForTesting(turnId: UInt64 = 1, sessionId: String = "test-session") {
@@ -2711,6 +3702,7 @@ final class MockConversationSource: ConversationSource {
         fileprivate static func toolHeader(from dto: ToolHeaderDto) -> ConversationToolHeader {
             ConversationToolHeader(
                 verb: toolVerb(from: dto.verb),
+                icon: dto.icon.map(toolIcon(from:)),
                 label: dto.label,
                 primary: dto.primary,
                 qualifier: dto.qualifier,
@@ -2740,6 +3732,25 @@ final class MockConversationSource: ConversationSource {
                 // `#[non_exhaustive]`: a verb this build does not know still
                 // renders — as the engine's English label, via `.generic`.
                 return .generic
+            }
+        }
+
+        private static func toolIcon(from dto: ToolIconDto) -> ConversationToolIcon {
+            switch dto {
+            case .read: return .read
+            case .search: return .search
+            case .list: return .list
+            case .edit: return .edit
+            case .terminal: return .terminal
+            case .globe: return .globe
+            case .workflow: return .workflow
+            case .listChecks: return .listChecks
+            case .sparkles: return .sparkles
+            case .plug: return .plug
+            case .output: return .output
+            case .stop: return .stop
+            case .wrench: return .wrench
+            @unknown default: return .wrench
             }
         }
 
@@ -2962,6 +3973,72 @@ final class MockConversationSource: ConversationSource {
             var messages: [Message] = []
             var items: [ConversationRenderItem] = []
             var details: [UUID: ConversationMessageDetail] = [:]
+            var wireSignatures: [String] = []
+            var wireIndices: [UInt64?] = []
+        }
+
+        /// Canonical identity for one wire message. The protocol currently has
+        /// no message id, so all fields that can distinguish a replayed message
+        /// are length-prefixed into a collision-resistant key.
+        fileprivate static func messageSignature(_ dto: MessageDto) -> String {
+            func field(_ value: String) -> String { "\(value.utf8.count):\(value)" }
+            let blocks = dto.blocks.map { block -> String in
+                switch block {
+                case let .text(text): return "text|\(field(text))"
+                case let .thinking(thinking, signature):
+                    return "thinking|\(field(thinking))|\(field(signature ?? ""))"
+                case let .redactedThinking(data): return "redacted|\(field(data))"
+                case let .compactBoundary(before, after, summary):
+                    return "compact|\(before)|\(after)|\(field(summary))"
+                case let .toolUse(id, tool, inputJson, _):
+                    return "tool-use|\(field(id))|\(field(tool))|\(field(inputJson))"
+                case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath, _):
+                    return "tool-result|\(field(id))|\(field(tool))|\(field(resultJson))|\(isError)|\(field(oldString ?? ""))|\(field(newString ?? ""))|\(field(filePath ?? ""))"
+                @unknown default: return "unknown"
+                }
+            }.joined(separator: "|")
+            return "role|\(field(dto.role))|blocks|\(field(blocks))"
+        }
+
+        fileprivate static func signatureCounts(_ signatures: [String]) -> [String: Int] {
+            var counts: [String: Int] = [:]
+            for signature in signatures {
+                counts[signature, default: 0] += 1
+            }
+            return counts
+        }
+
+        /// Stable UUID for a message occurrence. FNV-1a with two independent
+        /// lanes is sufficient here: the result is only a UI identity, not a
+        /// security token, and remains deterministic across process launches.
+        private static func stableUUID(_ key: String) -> UUID {
+            var first: UInt64 = 14_695_981_039_346_656_037
+            var second: UInt64 = 10_995_116_282_111
+            for byte in key.utf8 {
+                first ^= UInt64(byte)
+                first &*= 1_099_511_628_211
+                second ^= UInt64(byte) &+ 0x9d
+                second &*= 1_099_511_628_211
+            }
+            let bytes: uuid_t = (
+                UInt8(truncatingIfNeeded: first >> 56),
+                UInt8(truncatingIfNeeded: first >> 48),
+                UInt8(truncatingIfNeeded: first >> 40),
+                UInt8(truncatingIfNeeded: first >> 32),
+                UInt8(truncatingIfNeeded: first >> 24),
+                UInt8(truncatingIfNeeded: first >> 16),
+                UInt8(truncatingIfNeeded: first >> 8),
+                UInt8(truncatingIfNeeded: first),
+                UInt8(truncatingIfNeeded: second >> 56),
+                UInt8(truncatingIfNeeded: second >> 48),
+                UInt8(truncatingIfNeeded: second >> 40),
+                UInt8(truncatingIfNeeded: second >> 32),
+                UInt8(truncatingIfNeeded: second >> 24),
+                UInt8(truncatingIfNeeded: second >> 16),
+                UInt8(truncatingIfNeeded: second >> 8),
+                UInt8(truncatingIfNeeded: second)
+            )
+            return UUID(uuid: bytes)
         }
 
         /// Rebuild the scrollback from `SessionResumed.messages`.
@@ -2980,22 +4057,35 @@ final class MockConversationSource: ConversationSource {
         /// gets a terminal run of its own.
         fileprivate static func restoredTranscript(
             from dtos: [MessageDto],
-            sessionID: String
+            sessionID: String,
+            identityPrefix: String? = nil,
+            occurrenceOffsets: [String: Int] = [:],
+            wireIndices: [UInt64?] = [],
+            finalizeOrphans: Bool = true
         ) -> RestoredTranscript {
             var out = RestoredTranscript()
+            let identityPrefix = identityPrefix ?? sessionID
+            var occurrenceCounts = occurrenceOffsets
             var pendingRun: ConversationExecutionRun?
             var pendingRunAnchorMessageID: UUID?
             var restoredRunSequence = 0
+            var pendingRunIDHint: String?
 
             func ensurePendingRun() {
                 guard pendingRun == nil else { return }
                 restoredRunSequence += 1
+                let runIdentity = pendingRunIDHint
+                    ?? "\(identityPrefix)|run|\(restoredRunSequence)"
                 pendingRun = ConversationExecutionRun(
-                    id: "restored-\(sessionID)-\(restoredRunSequence)",
+                    id: "restored-\(stableUUID(runIdentity).uuidString)",
                     sessionId: sessionID,
                     turnId: nil,
                     status: .restored
                 )
+            }
+
+            func appendActivity(_ activity: ConversationExecutionActivity) {
+                pendingRun?.activities.append(activity)
             }
 
             func finishPendingRun() {
@@ -3003,7 +4093,7 @@ final class MockConversationSource: ConversationSource {
                 // A resumed session has no live turn owner. A call without a
                 // persisted result is terminally incomplete, never live work in
                 // this process.
-                if run.tools.contains(where: { $0.status == .running }) {
+                if finalizeOrphans && run.tools.contains(where: { $0.status == .running }) {
                     for index in run.tools.indices where run.tools[index].status == .running {
                         run.tools[index].status = .failed
                     }
@@ -3013,14 +4103,20 @@ final class MockConversationSource: ConversationSource {
                 // recover and finish after either. The run is only known to be a
                 // settled history row; individual tool colors retain the facts
                 // that are actually present on the wire.
-                run.status = .restored
+                run.status = finalizeOrphans
+                    ? .restored
+                    : (run.tools.contains(where: { $0.status == .running }) ? .running : .completed)
 
                 if let pendingRunAnchorMessageID,
                    let anchorIndex = out.items.firstIndex(where: { item in
                        guard case let .message(message) = item else { return false }
                        return message.id == pendingRunAnchorMessageID
                    }) {
-                    out.items.insert(.run(run), at: out.items.index(after: anchorIndex))
+                    // The run starts when the assistant turn starts, so keep
+                    // the activity before its narrative message: user → run
+                    // activity → assistant. This avoids moving a completed run
+                    // to the tail and preserves wire order after resume.
+                    out.items.insert(.run(run), at: anchorIndex)
                 } else {
                     out.items.append(.run(run))
                 }
@@ -3028,7 +4124,17 @@ final class MockConversationSource: ConversationSource {
                 pendingRunAnchorMessageID = nil
             }
 
-            for dto in dtos {
+            for (dtoIndex, dto) in dtos.enumerated() {
+                let wireSignature = messageSignature(dto)
+                let occurrence = occurrenceCounts[wireSignature, default: 0]
+                occurrenceCounts[wireSignature] = occurrence + 1
+                out.wireSignatures.append(wireSignature)
+                let wireIndex = wireIndices.indices.contains(dtoIndex) ? wireIndices[dtoIndex] : nil
+                out.wireIndices.append(wireIndex)
+                let messageIdentity = wireIndex.map {
+                    "\(identityPrefix)|message-index|\($0)"
+                } ?? "\(identityPrefix)|message|\(wireSignature)|occurrence|\(occurrence)"
+                pendingRunIDHint = messageIdentity
                 let role: Role = (dto.role == "user") ? .user : .ai
                 let isAssistant = dto.role == "assistant"
                 let containsToolResult = dto.blocks.contains { block in
@@ -3045,11 +4151,17 @@ final class MockConversationSource: ConversationSource {
                     ensurePendingRun()
                 }
                 var narrative: [ConversationMessageBlock] = []
+                var narrativeSequence = 0
 
                 func flushNarrative() {
                     guard !narrative.isEmpty else { return }
                     let detail = ConversationMessageDetail(blocks: narrative)
-                    let message = Message(role: role, text: text(from: narrative))
+                    let message = Message(
+                        id: stableUUID("\(messageIdentity)|narrative|\(narrativeSequence)"),
+                        role: role,
+                        text: text(from: narrative)
+                    )
+                    narrativeSequence += 1
                     out.messages.append(message)
                     out.items.append(.message(message))
                     out.details[message.id] = detail
@@ -3064,6 +4176,7 @@ final class MockConversationSource: ConversationSource {
                     case let .toolUse(id, tool, inputJson, header):
                         flushNarrative()
                         ensurePendingRun()
+                        appendActivity(.tool(id: id))
                         let lowered = header.map(toolHeader(from:))
                         let trace = ConversationToolTrace(
                             id: id,
@@ -3088,6 +4201,12 @@ final class MockConversationSource: ConversationSource {
                     case let .toolResult(id, tool, resultJson, isError, _, _, _, display):
                         flushNarrative()
                         ensurePendingRun()
+                        if pendingRun?.activities.contains(where: {
+                            if case let .tool(existing) = $0 { return existing == id }
+                            return false
+                        }) != true {
+                            appendActivity(.tool(id: id))
+                        }
                         let lowered = display.map(resultDisplay(from:))
                         let status: ConversationToolStatus =
                             ConversationExecutionParsing.isCancellationResult(resultJson)
@@ -3123,7 +4242,20 @@ final class MockConversationSource: ConversationSource {
                             narrative.append(lowered)
                             if isAssistant,
                                case let .thinking(text, _) = lowered {
+                                if let index = pendingRun?.activities.lastIndex(where: {
+                                    if case .reasoning = $0 { return true }
+                                    return false
+                                }),
+                                   case let .reasoning(id, current) = pendingRun?.activities[index] {
+                                    pendingRun?.activities[index] = .reasoning(id: id, text: current + text)
+                                } else {
+                                    appendActivity(.reasoning(id: "reasoning-\(messageIdentity)-\(narrative.count)", text: text))
+                                }
                                 pendingRun?.reasoning += text
+                            } else if isAssistant, case .text = lowered {
+                                appendActivity(.textBoundary(id: "boundary-\(messageIdentity)-\(narrative.count)"))
+                            } else if isAssistant, case .compactBoundary = lowered {
+                                appendActivity(.textBoundary(id: "boundary-\(messageIdentity)-\(narrative.count)"))
                             }
                         }
                     }

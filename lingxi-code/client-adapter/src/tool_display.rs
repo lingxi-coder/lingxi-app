@@ -12,8 +12,8 @@
 
 use client_protocol::tool_display::{
     CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
-    StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto, ToolSubLineDto,
-    ToolVerbDto,
+    StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolIconDto, ToolResultDisplayDto,
+    ToolSubLineDto, ToolVerbDto,
 };
 use tui_core::render::diff::{self, CodeSegment, LineKind, StructuredDiff};
 use tui_core::render::syntax::SyntaxClass;
@@ -51,6 +51,24 @@ fn lower_verb(verb: td::ToolVerb) -> ToolVerbDto {
         td::ToolVerb::Todo => ToolVerbDto::Todo,
         td::ToolVerb::Skill => ToolVerbDto::Skill,
         td::ToolVerb::Generic => ToolVerbDto::Generic,
+    }
+}
+
+fn lower_icon(icon: td::ToolIcon) -> ToolIconDto {
+    match icon {
+        td::ToolIcon::Read => ToolIconDto::Read,
+        td::ToolIcon::Search => ToolIconDto::Search,
+        td::ToolIcon::List => ToolIconDto::List,
+        td::ToolIcon::Edit => ToolIconDto::Edit,
+        td::ToolIcon::Terminal => ToolIconDto::Terminal,
+        td::ToolIcon::Globe => ToolIconDto::Globe,
+        td::ToolIcon::Workflow => ToolIconDto::Workflow,
+        td::ToolIcon::ListChecks => ToolIconDto::ListChecks,
+        td::ToolIcon::Sparkles => ToolIconDto::Sparkles,
+        td::ToolIcon::Plug => ToolIconDto::Plug,
+        td::ToolIcon::Output => ToolIconDto::Output,
+        td::ToolIcon::Stop => ToolIconDto::Stop,
+        td::ToolIcon::Wrench => ToolIconDto::Wrench,
     }
 }
 
@@ -116,6 +134,7 @@ pub fn lower_tool_header(tool: &str, input: &serde_json::Value) -> ToolHeaderDto
     let header = td::tool_header(tool, input);
     ToolHeaderDto {
         verb: lower_verb(header.verb),
+        icon: Some(lower_icon(header.icon)),
         title: header.title(),
         label: header.label,
         primary: header.primary,
@@ -251,6 +270,7 @@ mod tests {
         assert_eq!(header.primary.as_deref(), Some("src/host.rs"));
         assert_eq!(header.title, "Update(src/host.rs)");
         assert!(header.sub_line.is_none());
+        assert_eq!(header.icon, Some(ToolIconDto::Edit));
     }
 
     #[test]
@@ -261,6 +281,7 @@ mod tests {
         let sub = header.sub_line.expect("a sub-line");
         assert_eq!(sub.prefix, "$");
         assert_eq!(sub.text, "cargo test");
+        assert_eq!(header.icon, Some(ToolIconDto::Terminal));
     }
 
     #[test]

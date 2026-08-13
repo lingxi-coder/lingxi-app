@@ -262,18 +262,30 @@ fn slash_command_catalog_round_trips() {
                 name: "model".to_string(),
                 description: "Switch the active model".to_string(),
                 source: "builtin".to_string(),
+                aliases: vec!["m".to_string()],
+                argument_hint: Some("[model]".to_string()),
+                menu_description: Some("Switch model".to_string()),
+                hidden: false,
             },
             SlashCommandDto {
                 name: "review".to_string(),
                 description: "Review a PR".to_string(),
                 source: "markdown".to_string(),
+                aliases: vec![],
+                argument_hint: None,
+                menu_description: None,
+                hidden: true,
             },
         ],
     };
     let json = serde_json::to_value(&ev).expect("serialize SlashCommandCatalog");
     assert_eq!(json["type"], "slash_command_catalog");
     assert_eq!(json["commands"][0]["name"], "model");
+    assert_eq!(json["commands"][0]["aliases"][0], "m");
+    assert_eq!(json["commands"][0]["argument_hint"], "[model]");
+    assert_eq!(json["commands"][0]["menu_description"], "Switch model");
     assert_eq!(json["commands"][1]["source"], "markdown");
+    assert_eq!(json["commands"][1]["hidden"], true);
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SlashCommandCatalog");
     assert_eq!(back, ev);
 }

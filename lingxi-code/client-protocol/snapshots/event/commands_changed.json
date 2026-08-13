@@ -4,7 +4,11 @@
     {
       "name": "compact",
       "description": "Compact the conversation history.",
-      "source": "builtin"
+      "source": "builtin",
+      "aliases": [
+        "cmp"
+      ],
+      "menu_description": "Compact chat"
     }
   ]
 }

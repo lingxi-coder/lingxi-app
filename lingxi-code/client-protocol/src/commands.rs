@@ -229,12 +229,16 @@ pub enum ClientCommand {
     ListModels,
 
     // ── Slash commands ────────────────────────────────────────────────────
-    /// Run a raw slash-command line. **LOSSY at the dispatcher** — the reply is
-    /// a [`CommandResultDto`] (display text + optional injected prompt), not a
-    /// structured result.
+    /// Run a raw slash-command line. Local/display commands reply with
+    /// [`crate::events::ClientEvent::SlashCommandResult`]; prompt-expanding
+    /// commands reuse `turn_id` for the ordinary turn stream.
     RunSlashCommand {
         /// The raw command line (e.g. `"/model opus"`), leading `/` included.
         raw: String,
+        /// Optional client turn id used to correlate prompt-like slash commands
+        /// with the normal streaming turn lifecycle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<u64>,
     },
 
     // ── Listings ──────────────────────────────────────────────────────────
@@ -244,6 +248,19 @@ pub enum ClientCommand {
     RefreshListings {
         /// Which screen listings to (re)pull.
         which: Vec<ListingKindDto>,
+    },
+
+    /// List the agent instances attached to the current session. The reply is
+    /// [`ClientEvent::SessionAgentList`](crate::events::ClientEvent::SessionAgentList)
+    /// and is scoped to the connection's active session.
+    ListSessionAgents,
+
+    /// Load one session-agent transcript. `agent_id` accepts the stable
+    /// `agent:<uuid>` form returned by [`SessionAgentSummaryDto`], or `main`
+    /// for the parent conversation. Invalid ids are rejected by the engine.
+    LoadSessionAgentTranscript {
+        /// Agent instance to load.
+        agent_id: String,
     },
 
     // ── Session lifecycle (decision §0.5) ─────────────────────────────────

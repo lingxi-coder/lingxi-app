@@ -304,10 +304,8 @@ impl RegistrySlashDispatcher {
         }
     }
 
-    /// Return the live command catalog used by the slash palette and the
-    /// model-facing skill surface. Hosts that expose settings must read this
-    /// registry instead of maintaining a second, hard-coded skill list. Commands
-    /// explicitly hidden from model invocation are intentionally excluded.
+    /// Return the model-facing command catalog. Commands explicitly hidden from
+    /// model invocation are intentionally excluded.
     pub async fn list_commands(&self) -> Vec<crate::model::SlashCommand> {
         let registry = self.registry.read().await;
         let mut commands: Vec<_> = registry
@@ -315,6 +313,17 @@ impl RegistrySlashDispatcher {
             .into_iter()
             .cloned()
             .collect();
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands
+    }
+
+    /// Return the live command catalog used by user-facing slash palettes and
+    /// settings surfaces. Unlike [`Self::list_commands`], this keeps manual-only
+    /// commands, merges dynamic aliases, and excludes only commands that users
+    /// cannot invoke in the current environment.
+    pub async fn list_palette_commands(&self) -> Vec<crate::model::SlashCommand> {
+        let registry = self.registry.read().await;
+        let mut commands = registry.palette_commands();
         commands.sort_by(|a, b| a.name.cmp(&b.name));
         commands
     }
@@ -1128,6 +1137,70 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["visible"]
         );
+    }
+
+    #[tokio::test]
+    async fn list_palette_commands_keeps_manual_only_and_aliases() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "review".to_string(),
+            description: "Review".to_string(),
+            disable_model_invocation: true,
+            aliases: vec!["rv".to_string()],
+            argument_hint: Some("[target]".to_string()),
+            ..SlashCommand::default()
+        });
+        registry.register_alias("check".to_string(), "review".to_string());
+
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        let commands = dispatcher.list_palette_commands().await;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "review");
+        assert_eq!(
+            commands[0].aliases,
+            vec!["check".to_string(), "rv".to_string()]
+        );
+        assert_eq!(commands[0].argument_hint.as_deref(), Some("[target]"));
+    }
+
+    #[tokio::test]
+    async fn list_palette_commands_keeps_hidden_entries_for_exact_matching() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "auto-mode-setup".to_string(),
+            description: "Hidden in bare palette".to_string(),
+            ..SlashCommand::default()
+        });
+
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        let commands = dispatcher.list_palette_commands().await;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "auto-mode-setup");
+    }
+
+    #[tokio::test]
+    async fn list_palette_commands_excludes_non_user_and_env_disabled() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "hidden-skill".to_string(),
+            description: "Hidden".to_string(),
+            user_invocable: Some(false),
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "doctor".to_string(),
+            description: "Doctor".to_string(),
+            source: CommandSource::Builtin,
+            ..SlashCommand::default()
+        });
+        std::env::set_var("DISABLE_DOCTOR_COMMAND", "1");
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        let commands = dispatcher.list_palette_commands().await;
+        std::env::remove_var("DISABLE_DOCTOR_COMMAND");
+
+        assert!(commands.is_empty());
     }
 
     // ---- #39 UserPromptExpansion firing (R-O1) ----
